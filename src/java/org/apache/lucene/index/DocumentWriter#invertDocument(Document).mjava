@@ -9,12 +9,19 @@
 
       int length = fieldLengths[fieldNumber];     // length of field
       int position = fieldPositions[fieldNumber]; // position in field
+      int offset = fieldOffsets[fieldNumber];       // offset field
 
       if (field.isIndexed()) {
         if (!field.isTokenized()) {		  // un-tokenized field
-          addPosition(fieldName, field.stringValue(), position++);
+          String stringValue = field.stringValue();
+          if(field.isStoreOffsetWithTermVector())
+            addPosition(fieldName, stringValue, position++, new TermVectorOffsetInfo(offset, offset + stringValue.length()));
+          else
+            addPosition(fieldName, stringValue, position++, null);
+          offset += stringValue.length();
           length++;
-        } else {
+        } else 
+        {
           Reader reader;			  // find or make Reader
           if (field.readerValue() != null)
             reader = field.readerValue();
@@ -27,11 +34,23 @@
           // Tokenize field and add to postingTable
           TokenStream stream = analyzer.tokenStream(fieldName, reader);
           try {
+            Token lastToken = null;
             for (Token t = stream.next(); t != null; t = stream.next()) {
               position += (t.getPositionIncrement() - 1);
-              addPosition(fieldName, t.termText(), position++);
-              if (++length > maxFieldLength) break;
+              
+              if(field.isStoreOffsetWithTermVector())
+                addPosition(fieldName, t.termText(), position++, new TermVectorOffsetInfo(offset + t.startOffset(), offset + t.endOffset()));
+              else
+                addPosition(fieldName, t.termText(), position++, null);
+              
+              lastToken = t;
+              if (++length > maxFieldLength) 
+                break;
             }
+            
+            if(lastToken != null)
+              offset += lastToken.endOffset() + 1;
+            
           } finally {
             stream.close();
           }
@@ -40,6 +59,7 @@
         fieldLengths[fieldNumber] = length;	  // save field length
         fieldPositions[fieldNumber] = position;	  // save field position
         fieldBoosts[fieldNumber] *= field.getBoost();
+        fieldOffsets[fieldNumber] = offset;
       }
     }
   }

@@ -1,0 +1,63 @@
+	/**
+	 * Perform synonym expansion on a query.
+	 *
+	 * @param query
+	 * @param syns
+	 * @param a
+	 * @param field
+	 * @param boost
+	 */ 
+	public static Query expand( String query,
+								Searcher syns,
+								Analyzer a,
+								String field,
+								float boost)
+		throws IOException
+	{
+		Set already = new HashSet(); // avoid dups		
+		List top = new LinkedList(); // needs to be separately listed..
+
+		// [1] Parse query into separate words so that when we expand we can avoid dups
+		TokenStream ts = a.tokenStream( field, new StringReader( query));
+		org.apache.lucene.analysis.Token t;
+		while ( (t = ts.next()) != null)
+		{
+			String word = t.termText();
+			if ( already.add( word))
+				top.add( word);
+		}
+		BooleanQuery tmp = new BooleanQuery();
+		
+		// [2] form query
+		Iterator it = top.iterator();
+		while ( it.hasNext())
+		{
+			// [2a] add to level words in
+			String word = (String) it.next();
+			TermQuery tq = new TermQuery( new Term( field, word));
+			tmp.add( tq, BooleanClause.Occur.SHOULD);
+
+			// [2b] add in unique synonums
+			Hits hits = syns.search( new TermQuery( new Term(Syns2Index.F_WORD, word)));
+			for (int i = 0; i < hits.length(); i++)
+			{
+				Document doc = hits.doc(i);
+				String[] values = doc.getValues( Syns2Index.F_SYN);
+				for ( int j = 0; j < values.length; j++)
+				{
+					String syn = values[ j];
+					if ( already.add( syn))
+					{
+						tq = new TermQuery( new Term( field, syn));
+						if ( boost > 0) // else keep normal 1.0
+							tq.setBoost( boost);
+						tmp.add( tq, BooleanClause.Occur.SHOULD); 
+					}
+				}
+			}
+		}
+
+
+		return tmp;
+	}
+

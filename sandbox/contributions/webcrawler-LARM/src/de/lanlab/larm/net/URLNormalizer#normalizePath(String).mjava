@@ -1,0 +1,235 @@
+    /**
+     * Description of the Method
+     *
+     * @param path             Description of the Parameter
+     * @return                 Description of the Return Value
+     * @exception IOException  Description of the Exception
+     */
+    protected static String normalizePath(String path)
+        throws IOException
+    {
+        // rule 1: if the path is empty, return "/"
+        if (path.length() == 0)
+        {
+            return "/";
+        }
+
+        // Finite State Machine to convert characters to lowercase, remove "//" and "/./"
+        // and make sure that all characters are escaped in a uniform way, i.e.
+        // {" ", "+", "%20"} -> "%20"
+
+        StringBuffer w = new StringBuffer((int) (path.length() * 1.5));
+
+        int status = NP_CHAR;
+
+        int pos = 0;
+        int length = path.length();
+        char savedChar = '?';
+        int hexChar = '?';
+        int pathPos = -1;    // position of last "/"
+        int questionPos = -1; // assert length >0
+        boolean isInQuery = false;  // question mark reached?
+
+        while (pos < length)
+        {
+            char c = path.charAt(pos++);
+            try
+            {
+                switch (status)
+                {
+                    case NP_SLASH:
+                        if (c == '/')
+                        {
+                            // ignore subsequent slashes
+                        }
+                        else if (c == '.')
+                        {
+                            status = NP_POINT;
+                        }
+                        else if (c == '%')
+                        {
+                            status = NP_PERCENT;
+                        }
+                        else
+                        {
+                            pos--;
+                            status = NP_CHAR;
+                        }
+                        break;
+                    case NP_POINT:
+                        if (c == '/')
+                        {
+                            // ignore
+                        }
+                        else if (c == '.')
+                        {
+                            // ignore; this shouldn't happen
+                        }
+                        else
+                        {
+                            w.append('.');
+                            pos--;
+                            status = NP_SLASH;
+                        }
+                        break;
+                    case NP_PERCENT:
+                        if (c >= '0' && c <= '9')
+                        {
+                            hexChar = (c - '0') << 4;
+                        }
+                        else if (c >= 'a' && c <= 'f')
+                        {
+                            hexChar = (c - 'a' + 10) << 4;
+                        }
+                        else if (c >= 'A' && c <= 'F')
+                        {
+                            hexChar = (c - 'A' + 10) << 4;
+                        }
+                        else
+                        {
+                            w.append(charMap['%']);
+                            w.append(charMap[c]);
+                            break;
+                        }
+                        savedChar = c;
+                        status = NP_HEX;
+                        break;
+                    case NP_HEX:
+                        if (c >= '0' && c <= '9')
+                        {
+                            hexChar |= (c - '0');
+                        }
+                        else if (c >= 'a' && c <= 'f')
+                        {
+                            hexChar |= (c - 'a' + 10);
+                        }
+                        else if (c >= 'A' && c <= 'F')
+                        {
+                            hexChar |= (c - 'A' + 10);
+                        }
+                        else
+                        {
+                            w.append(charMap['%']);
+                            w.append(charMap[savedChar]);
+                            w.append(charMap[c]);
+                            break;
+                        }
+                        w.append(charMap[hexChar]);
+                        status = NP_CHAR;
+                        break;
+                    case NP_CHAR:
+                        switch (c)
+                        {
+                            case '%':
+                                status = NP_PERCENT;
+                                break;
+                            case '/':
+                                if(!isInQuery)
+                                {
+                                    w.append(c);
+                                    pathPos = w.length(); // points to the char. after "/"
+                                    status = NP_SLASH;
+                                }
+                                else
+                                {
+                                    w.append(charMap[c]);
+                                }
+                                break;
+                            case '?':
+                                if(!isInQuery)
+                                {
+                                    if(pathPos == -1)
+                                    {
+                                        w.append('/');
+                                        pathPos = w.length();
+                                    }
+                                    questionPos = w.length(); // points to the char at "?"
+                                    isInQuery = true;
+                                }
+                                else
+                                {
+                                    w.append(charMap[c]);
+                                    break;
+                                }
+                            case '&':
+                            case ';':
+                            case '@':
+                            //case ':':
+                            case '=':
+                                w.append(c);
+                                break;
+                            case '+':
+                                w.append("%20");
+                                break;
+                            default:
+                                w.append(charMap[c]);
+                                break;
+                        }
+                }
+
+            }
+            catch (ArrayIndexOutOfBoundsException e)
+            {
+                // we encountered a unicode character >= 0x00ff
+                // write UTF-8 to distinguish it from other characters
+                // note that this does NOT lead to a pure UTF-8 URL since we
+                // write 0x80 <= c <= 0xff as one-byte strings
+                /*
+                 *  if (ch <= 0x007f) {		// other ASCII
+                 *  sbuf.append(hex[ch]);
+                 *  } else
+                 */
+                // note that we ignore the case that we receive "%" + unicode + c
+                // (status = NP_HEX + Exception when writing savedchar); in that case
+                // only the second character is written. we consider this to be very
+                // unlikely
+
+                // see http://www.w3.org/International/O-URL-code.html
+                if (c <= 0x07FF)
+                {
+                    // non-ASCII <= 0x7FF
+                    w.append(charMap[0xc0 | (c >> 6)]);
+                    w.append(charMap[0x80 | (c & 0x3F)]);
+                }
+                else
+                {
+                    // 0x7FF < c <= 0xFFFF
+                    w.append(charMap[0xe0 | (c >> 12)]);
+                    w.append(charMap[0x80 | ((c >> 6) & 0x3F)]);
+                    w.append(charMap[0x80 | (c & 0x3F)]);
+                }
+            }
+        }
+
+        // rule 3: delete index.* or default.*
+
+        if(questionPos == -1) // no query
+        {
+            questionPos = w.length();
+        }
+        else
+        {
+            if(questionPos == w.length()-1)
+            {
+                // empty query. assert questionPos > 0
+                w.deleteCharAt(questionPos);
+            }
+        }
+        if(pathPos == -1) // no query
+        {
+            pathPos = 0;
+        }
+        if(questionPos > pathPos)
+        {
+            String file = w.substring(pathPos, questionPos);
+            {
+                //System.out.println("file: " + file);
+                if(file.startsWith("index.") || file.startsWith("default."))
+                {
+                    w.delete(pathPos, questionPos); // delete default page to avoid ambiguities
+                }
+            }
+        }
+        return w.toString();
+    }
+

@@ -1,0 +1,132 @@
+        /**
+     * Reads the response data received. Does not return until either
+     * Content-Length bytes have been read or EOF is reached.
+     *
+     * @param inp              Description of the Parameter
+     * @exception IOException  if any read on the input stream fails
+     * @inp                    the input stream from which to read the data
+     */
+    private void readResponseData(InputStream inp, int max)
+        throws IOException, ModuleException
+    {
+        boolean readUnlimited = (max == -1);
+
+        if (ContentLength == 0)
+        {
+            return;
+        }
+
+        if (Data == null)
+        {
+            Data = new byte[0];
+        }
+
+        // read response data
+
+        int off = Data.length;
+
+        try
+        {
+            // check Content-length header in case CE-Module removed it
+            if (getHeader("Content-Length") != null)
+            {
+                int rcvd = 0;
+                int total = max > 1 ? Math.min(ContentLength, max) : ContentLength;
+                //System.out.println("Reading with max file size: " + total);
+                Data = new byte[total];
+                do
+                {
+                    off += rcvd;
+                    rcvd = inp.read(Data, off, total - off);
+                } while (rcvd != -1 && off + rcvd < total);
+                // if max < ContentLength (&& max > -1): lose the rest
+                /*if(total < ContentLength)
+                {
+                    inp.skip(ContentLength - total);
+                }*/
+                /*
+                 *  Don't do this!
+                 *  If we do, then getData() won't work after a getInputStream()
+                 *  because we'll never get all the expected data. Instead, let
+                 *  the underlying RespInputStream throw the EOF.
+                 *  if (rcvd == -1)	// premature EOF
+                 *  {
+                 *  throw new EOFException("Encountered premature EOF while " +
+                 *  "reading headers: received " + off +
+                 *  " bytes instead of the expected " +
+                 *  ContentLength + " bytes");
+                 *  }
+                 */
+            }
+            else
+            {
+                //System.out.println("Reading with unknown file size");
+                java.util.LinkedList blocks = new java.util.LinkedList();
+                //System.out.println("new LinkedList()");
+                int total = 0;
+                int secondBlockSize = 10*2000;
+                byte[] secondBlock = new byte[secondBlockSize];
+                //System.out.println("new byte[" + secondBlockSize + "]");
+                int offInSecondBlock = 0;
+                int rcvd = 0;
+                do
+                {
+                    int bytesToRead = secondBlockSize - offInSecondBlock;
+                    if(bytesToRead < 1)
+                    {
+                        // System.out.println("adding block to list...");
+                        blocks.addLast(secondBlock);
+                        secondBlock = new byte[secondBlockSize];
+                        //System.out.println("new byte[" + secondBlockSize + "]");
+                        offInSecondBlock = 0;
+                        bytesToRead = secondBlockSize;
+                    }
+                    rcvd = inp.read(secondBlock, offInSecondBlock, bytesToRead);
+                    //System.out.println("read " + rcvd);
+                    // rcvd is usually << secondBlockSize
+                    if(rcvd != -1)
+                    {
+                        offInSecondBlock += rcvd;
+                        total += rcvd;
+                        max -= rcvd;
+                    }
+                } while(rcvd != -1 && (readUnlimited || max > 0));
+
+                // now we have: 1 x the last block as "secondBlock" + 0...n x blocks in the list
+                Data = new byte[total];  // I can't see how to do it without this second buffer
+                //System.out.println("new byte[" + total + "]");
+
+                int offset = 0;
+                while(blocks.size() > 0)
+                {
+                    byte[] block = (byte[]) blocks.removeFirst();
+                    System.arraycopy(block, 0, Data, offset, block.length);
+                    //System.out.println("System.arraycopy(" + block.length + ")");
+                    offset += block.length;
+                }
+                if(offInSecondBlock > 0)
+                {
+                    //System.out.println("System.arraycopy(" + offInSecondBlock + ")");
+                    System.arraycopy(secondBlock, 0, Data, offset, offInSecondBlock);
+                }
+
+
+            }
+        }
+        catch (IOException ioe)
+        {
+            Data = Util.resizeArray(Data, off);
+            throw ioe;
+        }
+        finally
+        {
+            try
+            {
+                inp.close();
+            }
+            catch (IOException ioe)
+            {
+            }
+        }
+    }
+

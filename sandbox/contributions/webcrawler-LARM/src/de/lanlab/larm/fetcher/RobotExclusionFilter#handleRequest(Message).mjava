@@ -1,0 +1,70 @@
+    /**
+     * method that handles each URL request<p>
+     *
+     * This method will get the robots.txt file the first time a server is
+     * requested. See the description above.
+     *
+     * @param message
+     *      the (URL)Message
+     * @return
+     *      the original message or NULL if this host had a disallow on that URL
+     * @link{http://info.webcrawler.com/mak/projects/robots/norobots.html})
+     */
+
+    public Message handleRequest(Message message)
+    {
+        //log.logThreadSafe("handleRequest: got message: " + message);
+        try
+        {
+            // assert message instanceof URLMessage;
+            URLMessage urlMsg = ((URLMessage) message);
+            URL url = urlMsg.getUrl();
+            //assert url != null;
+            HostInfo h = hostManager.getHostInfo(url.getHost());
+            if (!h.isRobotTxtChecked() && !h.isLoadingRobotsTxt())
+            {
+                log.logThreadSafe("handleRequest: starting to get robots.txt");
+                // probably this results in Race Conditions here
+
+                rePool.doTask(new RobotExclusionTask(h), new Integer(h.id));
+                h.setLoadingRobotsTxt(true);
+            }
+
+            synchronized (h)
+            {
+                // isLoading...() and queuedRequest.insert() must be atomic
+                if (h.isLoadingRobotsTxt())
+                {
+
+                    //log.logThreadSafe("handleRequest: other thread is loading");
+                    // assert h.queuedRequests != null
+                    h.queuedRequests.insert(message);
+                    // not thread safe
+                    log.logThreadSafe("handleRequest: queued file " + url);
+                    return null;
+                }
+            }
+
+            //log.logThreadSafe("handleRequest: no thread is loading; robots.txt loaded");
+            //log.logThreadSafe("handleRequest: checking if allowed");
+            String path = url.getPath();
+            if (path == null || path.equals(""))
+            {
+                path = "/";
+            }
+
+            if (h.isAllowed(path))
+            {
+                // log.logThreadSafe("handleRequest: file " + urlMsg.getURLString() + " ok");
+                return message;
+            }
+            log.logThreadSafe("handleRequest: file " + urlMsg.getURLString() + " filtered");
+            this.filtered++;
+        }
+        catch (Exception e)
+        {
+            e.printStackTrace();
+        }
+        return null;
+    }
+

@@ -1,0 +1,148 @@
+    /**
+     * Processes a Response. This is done by calling the response handler in
+     * each module. When all is done, the various fields of this instance are
+     * intialized from the last Response.
+     *
+     * @return                     true if a new request was generated. This is
+     *      used for internal subrequests only
+     * @exception IOException      if any handler throws an IOException.
+     * @exception ModuleException  if any module encounters an exception.
+     */
+    synchronized boolean handleResponse()
+        throws IOException, ModuleException
+    {
+        if (initialized)
+        {
+            return false;
+        }
+
+        /*
+         *  first get the response if necessary
+         */
+        if (out_stream != null)
+        {
+            response = out_stream.getResponse();
+            response.http_resp = this;
+            out_stream = null;
+        }
+
+        /*
+         *  go through modules and handle them
+         */
+        doModules :
+        while (true)
+        {
+
+            Phase1 :
+            for (int idx = 0; idx < modules.length && !aborted; idx++)
+            {
+                try
+                {
+                    modules[idx].responsePhase1Handler(response, request);
+                }
+                catch (RetryException re)
+                {
+                    if (re.restart)
+                    {
+                        continue doModules;
+                    }
+                    else
+                    {
+                        throw re;
+                    }
+                }
+            }
+
+            Phase2 :
+            for (int idx = 0; idx < modules.length && !aborted; idx++)
+            {
+                int sts = modules[idx].responsePhase2Handler(response, request);
+                switch (sts)
+                {
+                    case RSP_CONTINUE:
+                        // continue processing
+                        break;
+                    case RSP_RESTART:
+                        // restart response processing
+                        idx = -1;
+                        continue doModules;
+                    case RSP_SHORTCIRC:
+                        // stop processing and return
+                        break doModules;
+                    case RSP_REQUEST:
+                    // go to phase 1
+                    case RSP_NEWCON_REQ:
+                        // process the request using a new con
+                        response.getInputStream().close();
+                        if (handle_trailers)
+                        {
+                            invokeTrailerHandlers(true);
+                        }
+                        if (request.internal_subrequest)
+                        {
+                            return true;
+                        }
+                        request.getConnection().
+                                handleRequest(request, this, response, true);
+                        if (initialized)
+                        {
+                            break doModules;
+                        }
+
+                        idx = -1;
+                        continue doModules;
+                    case RSP_SEND:
+                    // send the request immediately
+                    case RSP_NEWCON_SND:
+                        // send the request using a new con
+                        response.getInputStream().close();
+                        if (handle_trailers)
+                        {
+                            invokeTrailerHandlers(true);
+                        }
+                        if (request.internal_subrequest)
+                        {
+                            return true;
+                        }
+                        request.getConnection().
+                                handleRequest(request, this, response, false);
+                        idx = -1;
+                        continue doModules;
+                    default:
+                        // not valid
+                        throw new Error("HTTPClient Internal Error: invalid status" +
+                                " " + sts + " returned by module " +
+                                modules[idx].getClass().getName());
+                }
+            }
+
+            Phase3 :
+            for (int idx = 0; idx < modules.length && !aborted; idx++)
+            {
+                modules[idx].responsePhase3Handler(response, request);
+            }
+
+            break doModules;
+        }
+
+        /*
+         *  force a read on the response in case none of the modules did
+         */
+        response.getStatusCode();
+
+        /*
+         *  all done, so copy data
+         */
+        if (!request.internal_subrequest)
+        {
+            init(response);
+        }
+
+        if (handle_trailers)
+        {
+            invokeTrailerHandlers(false);
+        }
+
+        return false;
+    }
+

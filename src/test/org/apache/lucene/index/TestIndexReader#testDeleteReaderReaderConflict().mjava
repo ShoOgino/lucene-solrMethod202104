@@ -1,75 +1,103 @@
-    public void testDeleteReaderReaderConflict()
+    public void testDeleteReaderReaderConflict() throws IOException
     {
-        Directory dir = new RAMDirectory();
-        IndexWriter writer = null;
-        IndexReader reader1 = null;
-        IndexReader reader2 = null;
-        Searcher searcher = null;
-        Hits hits = null;
+//        Directory dir = new RAMDirectory();
+        Directory dir = FSDirectory.getDirectory("testIndex", true);
+
         Term searchTerm1 = new Term("content", "aaa");
         Term searchTerm2 = new Term("content", "bbb");
+        Term searchTerm3 = new Term("content", "ccc");
 
-        try
+        //  add 100 documents with term : aaa
+        //  add 100 documents with term : bbb
+        //  add 100 documents with term : ccc
+        IndexWriter writer  = new IndexWriter(dir, new WhitespaceAnalyzer(), true);
+        for (int i = 0; i < 100; i++)
         {
-            //  add 100 documents with term : aaa
-            //  add 100 documents with term : bbb
-            //  add 100 documents with term : ccc
-            writer  = new IndexWriter(dir, new WhitespaceAnalyzer(), true);
-            for (int i = 0; i < 100; i++)
-            {
-                addDoc(writer, "aaa");
-                addDoc(writer, "bbb");
-                addDoc(writer, "ccc");
-            }
-            writer.optimize();
-            writer.close();
+            addDoc(writer, searchTerm1.text());
+            addDoc(writer, searchTerm2.text());
+            addDoc(writer, searchTerm3.text());
         }
-        catch (IOException e)
-        {
-            e.printStackTrace();
-        }
+        writer.optimize();
+        writer.close();
 
-        try
-        {
-            reader1 = IndexReader.open(dir);
-            reader2 = IndexReader.open(dir);
+        // OPEN TWO READERS
+        // Both readers get segment info as exists at this time
+        IndexReader reader1 = IndexReader.open(dir);
+        assertEquals("first opened", 100, reader1.docFreq(searchTerm1));
+        assertEquals("first opened", 100, reader1.docFreq(searchTerm2));
+        assertEquals("first opened", 100, reader1.docFreq(searchTerm3));
+        assertTermDocsCount("first opened", reader1, searchTerm1, 100);
+        assertTermDocsCount("first opened", reader1, searchTerm2, 100);
+        assertTermDocsCount("first opened", reader1, searchTerm3, 100);
+        
+        IndexReader reader2 = IndexReader.open(dir);
+        assertEquals("first opened", 100, reader2.docFreq(searchTerm1));
+        assertEquals("first opened", 100, reader2.docFreq(searchTerm2));
+        assertEquals("first opened", 100, reader2.docFreq(searchTerm3));
+        assertTermDocsCount("first opened", reader2, searchTerm1, 100);
+        assertTermDocsCount("first opened", reader2, searchTerm2, 100);
+        assertTermDocsCount("first opened", reader2, searchTerm3, 100);
 
-            // delete documents containing term: aaa
-            reader2.delete(searchTerm1);
-            reader2.close();
+        // DELETE DOCS FROM READER 2 and CLOSE IT
+        // delete documents containing term: aaa
+        // when the reader is closed, the segment info is updated and
+        // the first reader is now stale
+        reader2.delete(searchTerm1);
+        assertEquals("after delete 1", 100, reader2.docFreq(searchTerm1));
+        assertEquals("after delete 1", 100, reader2.docFreq(searchTerm2));
+        assertEquals("after delete 1", 100, reader2.docFreq(searchTerm3));
+        assertTermDocsCount("after delete 1", reader2, searchTerm1, 0);
+        assertTermDocsCount("after delete 1", reader2, searchTerm2, 100);
+        assertTermDocsCount("after delete 1", reader2, searchTerm3, 100);
+        reader2.close();
 
-            // delete documents containing term: bbb
+        // Make sure reader 1 is unchanged since it was open earlier
+        assertEquals("after delete 1", 100, reader1.docFreq(searchTerm1));
+        assertEquals("after delete 1", 100, reader1.docFreq(searchTerm2));
+        assertEquals("after delete 1", 100, reader1.docFreq(searchTerm3));
+        assertTermDocsCount("after delete 1", reader1, searchTerm1, 100);
+        assertTermDocsCount("after delete 1", reader1, searchTerm2, 100);
+        assertTermDocsCount("after delete 1", reader1, searchTerm3, 100);
+        
+        
+        // ATTEMPT TO DELETE FROM STALE READER
+        // delete documents containing term: bbb
+        try {
             reader1.delete(searchTerm2);
-            reader1.close();
+            fail("Delete allowed from a stale index reader");
+        } catch (IOException e) {
+            /* success */
         }
-        catch (IOException e)
-        {
-            try
-            {
-                // if reader throws IOException try once more to delete documents with a new reader
-                reader1.close();
-                reader1 = IndexReader.open(dir);
-                reader1.delete(searchTerm2);
-                reader1.close();
-            }
-            catch (IOException e1)
-            {
-                e1.printStackTrace();
-            }
-        }
+        
+        // RECREATE READER AND TRY AGAIN
+        reader1.close();
+        reader1 = IndexReader.open(dir);
+        assertEquals("reopened", 100, reader1.docFreq(searchTerm1));
+        assertEquals("reopened", 100, reader1.docFreq(searchTerm2));
+        assertEquals("reopened", 100, reader1.docFreq(searchTerm3));
+        assertTermDocsCount("reopened", reader1, searchTerm1, 0);
+        assertTermDocsCount("reopened", reader1, searchTerm2, 100);
+        assertTermDocsCount("reopened", reader1, searchTerm3, 100);
 
-        try
-        {
-            searcher = new IndexSearcher(dir);
-            hits = searcher.search(new TermQuery(searchTerm1));
-            assertEquals(0, hits.length());
-            hits = searcher.search(new TermQuery(searchTerm2));
-            assertEquals(0, hits.length());
-            searcher.close();
-        }
-        catch (IOException e1)
-        {
-            e1.printStackTrace();
-        }
+        reader1.delete(searchTerm2);
+        assertEquals("deleted 2", 100, reader1.docFreq(searchTerm1));
+        assertEquals("deleted 2", 100, reader1.docFreq(searchTerm2));
+        assertEquals("deleted 2", 100, reader1.docFreq(searchTerm3));
+        assertTermDocsCount("deleted 2", reader1, searchTerm1, 0);
+        assertTermDocsCount("deleted 2", reader1, searchTerm2, 0);
+        assertTermDocsCount("deleted 2", reader1, searchTerm3, 100);
+        reader1.close();
+        
+        // Open another reader to confirm that everything is deleted
+        reader2 = IndexReader.open(dir);
+        assertEquals("reopened 2", 100, reader2.docFreq(searchTerm1));
+        assertEquals("reopened 2", 100, reader2.docFreq(searchTerm2));
+        assertEquals("reopened 2", 100, reader2.docFreq(searchTerm3));
+        assertTermDocsCount("reopened 2", reader2, searchTerm1, 0);
+        assertTermDocsCount("reopened 2", reader2, searchTerm2, 0);
+        assertTermDocsCount("reopened 2", reader2, searchTerm3, 100);
+        reader2.close();
+        
+        dir.close();
     }
 

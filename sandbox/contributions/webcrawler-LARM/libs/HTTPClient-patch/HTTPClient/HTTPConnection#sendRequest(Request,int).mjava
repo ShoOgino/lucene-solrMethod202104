@@ -1,0 +1,402 @@
+    /**
+     * sends the request over the line.
+     *
+     * @param req                  the request
+     * @param con_timeout          the timeout to use when establishing a socket
+     *      connection; an InterruptedIOException is thrown if the procedure
+     *      times out.
+     * @return                     Description of the Return Value
+     * @exception IOException      if thrown by the socket
+     * @exception ModuleException  if any module throws it during the SSL-
+     *      tunneling handshake
+     */
+    Response sendRequest(Request req, int con_timeout)
+        throws IOException, ModuleException
+    {
+        ByteArrayOutputStream hdr_buf = new ByteArrayOutputStream(600);
+        Response resp = null;
+        boolean keep_alive;
+
+        // The very first request is special in that we need its response
+        // before any further requests may be made. This is to set things
+        // like the server version.
+
+        if (early_stall != null)
+        {
+            try
+            {
+                Log.write(Log.CONN, "Conn:  Early-stalling Request: " +
+                        req.getMethod() + " " +
+                        req.getRequestURI());
+
+                synchronized (early_stall)
+                {
+                    // wait till the response is received
+                    try
+                    {
+                        early_stall.getVersion();
+                    }
+                    catch (IOException ioe)
+                    {
+                    }
+                    early_stall = null;
+                }
+            }
+            catch (NullPointerException npe)
+            {
+            }
+        }
+
+        String[] con_hdrs = assembleHeaders(req, hdr_buf);
+
+        // determine if the connection should be kept alive after this
+        // request
+
+        try
+        {
+            if (ServerProtocolVersion >= HTTP_1_1 &&
+                    !Util.hasToken(con_hdrs[0], "close")
+                     ||
+                    ServerProtocolVersion == HTTP_1_0 &&
+                    Util.hasToken(con_hdrs[0], "keep-alive")
+                    )
+            {
+                keep_alive = true;
+            }
+            else
+            {
+                keep_alive = false;
+            }
+        }
+        catch (ParseException pe)
+        {
+            throw new IOException(pe.toString());
+        }
+
+        synchronized (this)
+        {
+            // Sometimes we must stall the pipeline until the previous request
+            // has been answered. However, if we are going to open up a new
+            // connection anyway we don't really need to stall.
+
+            if (late_stall != null)
+            {
+                if (input_demux != null || keepAliveUnknown)
+                {
+                    Log.write(Log.CONN, "Conn:  Stalling Request: " +
+                            req.getMethod() + " " + req.getRequestURI());
+
+                    try
+                    {
+                        // wait till the response is received
+
+                        late_stall.getVersion();
+                        if (keepAliveUnknown)
+                        {
+                            determineKeepAlive(late_stall);
+                        }
+                    }
+                    catch (IOException ioe)
+                    {
+                    }
+                }
+
+                late_stall = null;
+            }
+
+            /*
+             *  POSTs must not be pipelined because of problems if the connection
+             *  is aborted. Since it is generally impossible to know what urls
+             *  POST will influence it is impossible to determine if a sequence
+             *  of requests containing a POST is idempotent.
+             *  Also, for retried requests we don't want to pipeline either.
+             */
+            if ((req.getMethod().equals("POST") || req.dont_pipeline) &&
+                    prev_resp != null && input_demux != null)
+            {
+                Log.write(Log.CONN, "Conn:  Stalling Request: " +
+                        req.getMethod() + " " + req.getRequestURI());
+
+                try
+                {
+                    // wait till the response is received
+                    prev_resp.getVersion();
+                }
+                catch (IOException ioe)
+                {
+                }
+            }
+
+            // If the previous request used an output stream, then wait till
+            // all the data has been written
+
+            if (!output_finished)
+            {
+                try
+                {
+                    wait();
+                }
+                catch (InterruptedException ie)
+                {
+                    throw new IOException(ie.toString());
+                }
+            }
+
+            if (req.aborted)
+            {
+                throw new IOException("Request aborted by user");
+            }
+
+            int try_count = 3;
+            /*
+             *  what a hack! This is to handle the case where the server closes
+             *  the connection but we don't realize it until we try to send
+             *  something. The problem is that we only get IOException, but
+             *  we need a finer specification (i.e. whether it's an EPIPE or
+             *  something else); I don't trust relying on the message part
+             *  of IOException (which on SunOS/Solaris gives 'Broken pipe',
+             *  but what on Windoze/Mac?).
+             */
+            while (try_count-- > 0)
+            {
+                try
+                {
+                    // get a client socket
+
+                    Socket sock;
+                    if (input_demux == null ||
+                            (sock = input_demux.getSocket()) == null)
+                    {
+                        sock = getSocket(con_timeout);
+
+                        if (Protocol == HTTPS)
+                        {
+                            if (Proxy_Host != null)
+                            {
+                                Socket[] sarr = {sock};
+                                resp = enableSSLTunneling(sarr, req, con_timeout);
+                                if (resp != null)
+                                {
+                                    resp.final_resp = true;
+                                    return resp;
+                                }
+                                sock = sarr[0];
+                            }
+
+                            sock.setSoTimeout(con_timeout);
+                            //sock = new SSLSocket(sock);
+                        }
+
+                        input_demux = new StreamDemultiplexor(Protocol, sock, this);
+                        DemuxList.addToEnd(input_demux);
+                        keepAliveReqLeft = keepAliveReqMax;
+                    }
+
+                    if (req.aborted)
+                    {
+                        throw new IOException("Request aborted by user");
+                    }
+
+                    Log.write(Log.CONN, "Conn:  Sending Request: ", hdr_buf);
+
+                    // Send headers
+
+                    OutputStream sock_out = sock.getOutputStream();
+                    if (haveMSLargeWritesBug)
+                    {
+                        sock_out = new MSLargeWritesBugStream(sock_out);
+                    }
+
+                    hdr_buf.writeTo(sock_out);
+
+                    // Wait for "100 Continue" status if necessary
+
+                    try
+                    {
+                        if (ServProtVersKnown &&
+                                ServerProtocolVersion >= HTTP_1_1 &&
+                                Util.hasToken(con_hdrs[1], "100-continue"))
+                        {
+                            resp = new Response(req, (Proxy_Host != null && Protocol != HTTPS), input_demux);
+                            resp.timeout = 60;
+                            if (resp.getContinue() != 100)
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    catch (ParseException pe)
+                    {
+                        throw new IOException(pe.toString());
+                    }
+                    catch (InterruptedIOException iioe)
+                    {
+                    }
+                    finally
+                    {
+                        if (resp != null)
+                        {
+                            resp.timeout = 0;
+                        }
+                    }
+
+                    // POST/PUT data
+
+                    if (req.getData() != null && req.getData().length > 0)
+                    {
+                        if (req.delay_entity > 0)
+                        {
+                            // wait for something on the network; check available()
+                            // roughly every 100 ms
+
+                            long num_units = req.delay_entity / 100;
+                            long one_unit = req.delay_entity / num_units;
+
+                            for (int idx = 0; idx < num_units; idx++)
+                            {
+                                if (input_demux.available(null) != 0)
+                                {
+                                    break;
+                                }
+                                try
+                                {
+                                    Thread.sleep(one_unit);
+                                }
+                                catch (InterruptedException ie)
+                                {
+                                }
+                            }
+
+                            if (input_demux.available(null) == 0)
+                            {
+                                sock_out.write(req.getData());
+                            }
+                            // he's still waiting
+                            else
+                            {
+                                keep_alive = false;
+                            }
+                            // Uh oh!
+                        }
+                        else
+                        {
+                            sock_out.write(req.getData());
+                        }
+                    }
+
+                    if (req.getStream() != null)
+                    {
+                        req.getStream().goAhead(req, sock_out, 0);
+                    }
+                    else
+                    {
+                        sock_out.flush();
+                    }
+
+                    // get a new response.
+                    // Note: this does not do a read on the socket.
+
+                    if (resp == null)
+                    {
+                        resp = new Response(req, (Proxy_Host != null &&
+                                Protocol != HTTPS),
+                                input_demux);
+                    }
+                }
+                catch (IOException ioe)
+                {
+                    Log.write(Log.CONN, "Conn:  ", ioe);
+
+                    closeDemux(ioe, true);
+
+                    if (try_count == 0 || ioe instanceof UnknownHostException ||
+                            ioe instanceof ConnectException ||
+                            ioe instanceof NoRouteToHostException ||
+                            ioe instanceof InterruptedIOException || req.aborted)
+                    {
+                        throw ioe;
+                    }
+
+                    Log.write(Log.CONN, "Conn:  Retrying request");
+                    continue;
+                }
+
+                break;
+            }
+
+            prev_resp = resp;
+
+            // close the stream after this response if necessary
+
+            if ((!keepAliveUnknown && !doesKeepAlive) || !keep_alive ||
+                    (keepAliveReqMax != -1 && keepAliveReqLeft-- == 0))
+            {
+                input_demux.markForClose(resp);
+                input_demux = null;
+            }
+            else
+            {
+                input_demux.restartTimer();
+            }
+
+            if (keepAliveReqMax != -1)
+            {
+                Log.write(Log.CONN, "Conn:  Number of requests left: " +
+                        keepAliveReqLeft);
+            }
+
+            /*
+             *  We don't pipeline the first request, as we need some info
+             *  about the server (such as which http version it complies with)
+             */
+            if (!ServProtVersKnown)
+            {
+                early_stall = resp;
+                resp.markAsFirstResponse(req);
+            }
+
+            /*
+             *  Also don't pipeline until we know if the server supports
+             *  keep-alive's or not.
+             *  Note: strictly speaking, HTTP/1.0 keep-alives don't mean we can
+             *  pipeline requests. I seem to remember some (beta?) version
+             *  of Netscape's Enterprise server which barfed if you tried
+             *  push requests down it's throat w/o waiting for the previous
+             *  response first. However, I've not been able to find such a
+             *  server lately, and so I'm taking the risk and assuming we
+             *  can in fact pipeline requests to HTTP/1.0 servers.
+             */
+            if (keepAliveUnknown ||
+            // We don't pipeline POST's ...
+                    !IdempotentSequence.methodIsIdempotent(req.getMethod()) ||
+                    req.dont_pipeline ||
+            // Retries disable pipelining too
+                    neverPipeline)
+            {
+                // Emergency measure: prevent all pipelining
+                late_stall = resp;
+            }
+
+            /*
+             *  If there is an output stream then just tell the other threads to
+             *  wait; the stream will notify() when it's done. If there isn't any
+             *  stream then wake up a waiting thread (if any).
+             */
+            if (req.getStream() != null)
+            {
+                output_finished = false;
+            }
+            else
+            {
+                output_finished = true;
+                notify();
+            }
+
+            // Looks like were finally done
+
+            Log.write(Log.CONN, "Conn:  Request sent");
+        }
+
+        return resp;
+    }
+

@@ -5,54 +5,22 @@
      * (note that we assume new IndexReaders are caught during the
      * constructor), the existing data is used.  If not, all the term values
      * for the given field are fetched.  The value of the term is assumed
-     * to be the sort index for any documents containing the term.  Documents
-     * should only have one term in the given field. Multiple documents
-     * can share the same term if desired (documents with the same term will
-     * be sorted relative to each other by the order they were placed in
-     * the index).
+     * to indicate the sort order for any documents containing the term.  Documents
+     * should only have one term in the given field.  Multiple documents
+     * can share the same term if desired, in which case they will be
+	 * considered equal during the sort.
      * @param reader  The document index.
      * @param field   The field to sort by.
-     * @throws IOException  If the term enumerator fails.
+     * @throws IOException  If createComparator(IndexReader,String) fails - usually caused by the term enumerator failing.
      */
-    protected final void initializeSort (IndexReader reader, String field)
+    protected final ScoreDocComparator initializeSort (IndexReader reader, String field)
     throws IOException {
 
-        fieldOrder = (int[]) fieldCache.get (field);
-        if (fieldOrder == null || fieldOrder.length != reader.maxDoc()) {
-            fieldOrder = new int [reader.maxDoc()];
-
-            TermEnum enumerator = reader.terms (new Term (field, ""));
-            TermDocs termDocs = reader.termDocs();
-            if (enumerator.term() == null) {
-                throw new RuntimeException ("no terms in field "+field);
-            }
-
-            try {
-                Term term = enumerator.term();
-                while (term.field() == field) {
-                    termDocs.seek (term);
-                    if (termDocs.next()) {
-                        fieldOrder[termDocs.doc()] = Integer.parseInt (term.text());
-                    } else {
-                        throw new RuntimeException ("termDocs.next() failed!");
-                    }
-                    if (!enumerator.next()) {
-                        break;
-                    }
-                    term = enumerator.term();
-                }
-            } finally {
-                enumerator.close();
-                termDocs.close();
-            }
-
-            // be careful how the cache is updated so we
-            // don't have synchronization problems.  we do
-            // it this way because we assume updates will be
-            // few compared to the number of reads.
-            HashMap newCache = (HashMap) fieldCache.clone();
-            newCache.put (field, fieldOrder);
-            fieldCache = newCache;
-        }
+		ScoreDocLookupComparator comparer = (ScoreDocLookupComparator) fieldCache.get (field);
+		if (comparer == null || !comparer.sizeMatches(reader.maxDoc())) {
+			comparer = createComparator (reader, field);
+            fieldCache.put (field, comparer);
+		}
+		return comparer;
     }
 

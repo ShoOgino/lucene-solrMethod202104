@@ -1,0 +1,48 @@
+  /**
+   * Returns a Weight that applies the filter to the enclosed query's Weight.
+   * This is accomplished by overriding the Scorer returned by the Weight.
+   */
+  protected Weight createWeight (final Searcher searcher) {
+    final Weight weight = query.createWeight (searcher);
+    return new Weight() {
+
+      // pass these methods through to enclosed query's weight
+      public float getValue() { return weight.getValue(); }
+      public float sumOfSquaredWeights() throws IOException { return weight.sumOfSquaredWeights(); }
+      public void normalize (float v) { weight.normalize(v); }
+      public Explanation explain (IndexReader ir, int i) throws IOException { return weight.explain (ir, i); }
+
+      // return this query
+      public Query getQuery() { return FilteredQuery.this; }
+
+      // return a scorer that overrides the enclosed query's score if
+      // the given hit has been filtered out.
+      public Scorer scorer (IndexReader indexReader) throws IOException {
+        final Scorer scorer = weight.scorer (indexReader);
+        final BitSet bitset = filter.bits (indexReader);
+        return new Scorer (query.getSimilarity (searcher)) {
+
+          // pass these methods through to the enclosed scorer
+          public boolean next() throws IOException { return scorer.next(); }
+          public int doc() { return scorer.doc(); }
+          public boolean skipTo (int i) throws IOException { return scorer.skipTo(i); }
+
+          // if the document has been filtered out, set score to 0.0
+          public float score() throws IOException {
+            return (bitset.get(scorer.doc())) ? scorer.score() : 0.0f;
+          }
+
+          // add an explanation about whether the document was filtered
+          public Explanation explain (int i) throws IOException {
+            Explanation exp = scorer.explain (i);
+            if (bitset.get(i))
+              exp.setDescription ("allowed by filter: "+exp.getDescription());
+            else
+              exp.setDescription ("removed by filter: "+exp.getDescription());
+            return exp;
+          }
+        };
+      }
+    };
+  }
+

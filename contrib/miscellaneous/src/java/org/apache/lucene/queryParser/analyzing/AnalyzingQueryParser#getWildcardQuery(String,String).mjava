@@ -1,0 +1,111 @@
+  /**
+   * Called when parser
+   * parses an input term token that contains one or more wildcard
+   * characters (? and *), but is not a prefix term token (one
+   * that has just a single * character at the end)
+   * <p>
+   * Depending on analyzer and settings, a wildcard term may (most probably will)
+   * be lower-cased automatically. It <b>will</b> go through the default Analyzer.
+   * <p>
+   * Overrides super class, by passing terms through analyzer.
+   *
+   * @param  field   Name of the field query will use.
+   * @param  termStr Term token that contains one or more wild card
+   *                 characters (? or *), but is not simple prefix term
+   *
+   * @return Resulting {@link Query} built for the term
+   * @throws ParseException
+   */
+  protected Query getWildcardQuery(String field, String termStr) throws ParseException {
+    List tlist = new ArrayList();
+    List wlist = new ArrayList();
+    /* somewhat a hack: find/store wildcard chars
+     * in order to put them back after analyzing */
+    boolean isWithinToken = (!termStr.startsWith("?") && !termStr.startsWith("*"));
+    StringBuffer tmpBuffer = new StringBuffer();
+    char[] chars = termStr.toCharArray();
+    for (int i = 0; i < termStr.length(); i++) {
+      if (chars[i] == '?' || chars[i] == '*') {
+        if (isWithinToken) {
+          tlist.add(tmpBuffer.toString());
+          tmpBuffer.setLength(0);
+        }
+        isWithinToken = false;
+      } else {
+        if (!isWithinToken) {
+          wlist.add(tmpBuffer.toString());
+          tmpBuffer.setLength(0);
+        }
+        isWithinToken = true;
+      }
+      tmpBuffer.append(chars[i]);
+    }
+    if (isWithinToken) {
+      tlist.add(tmpBuffer.toString());
+    } else {
+      wlist.add(tmpBuffer.toString());
+    }
+
+    // get Analyzer from superclass and tokenize the term
+    TokenStream source = getAnalyzer().tokenStream(field, new StringReader(termStr));
+    org.apache.lucene.analysis.Token t;
+
+    int countTokens = 0;
+    while (true) {
+      try {
+        t = source.next();
+      } catch (IOException e) {
+        t = null;
+      }
+      if (t == null) {
+        break;
+      }
+      if (!"".equals(t.termText())) {
+        try {
+          tlist.set(countTokens++, t.termText());
+        } catch (IndexOutOfBoundsException ioobe) {
+          countTokens = -1;
+        }
+      }
+    }
+    try {
+      source.close();
+    } catch (IOException e) {
+      // ignore
+    }
+
+    if (countTokens != tlist.size()) {
+      /* this means that the analyzer used either added or consumed 
+       * (common for a stemmer) tokens, and we can't build a WildcardQuery */
+      throw new ParseException("Cannot build WildcardQuery with analyzer "
+          + getAnalyzer().getClass() + " - tokens added or lost");
+    }
+
+    if (tlist.size() == 0) {
+      return null;
+    } else if (tlist.size() == 1) {
+      if (wlist != null && wlist.size() == 1) {
+        /* if wlist contains one wildcard, it must be at the end, because:
+         * 1) wildcards are not allowed in 1st position of a term by QueryParser
+         * 2) if wildcard was *not* in end, there would be *two* or more tokens */
+        return super.getWildcardQuery(field, (String) tlist.get(0)
+            + (((String) wlist.get(0)).toString()));
+      } else {
+        /* we should never get here! if so, this method was called
+         * with a termStr containing no wildcard ... */
+        throw new IllegalArgumentException("getWildcardQuery called without wildcard");
+      }
+    } else {
+      /* the term was tokenized, let's rebuild to one token
+       * with wildcards put back in postion */
+      StringBuffer sb = new StringBuffer();
+      for (int i = 0; i < tlist.size(); i++) {
+        sb.append((String) tlist.get(i));
+        if (wlist != null && wlist.size() > i) {
+          sb.append((String) wlist.get(i));
+        }
+      }
+      return super.getWildcardQuery(field, sb.toString());
+    }
+  }
+

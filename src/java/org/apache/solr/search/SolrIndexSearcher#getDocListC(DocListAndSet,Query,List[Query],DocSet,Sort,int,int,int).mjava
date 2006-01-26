@@ -1,0 +1,87 @@
+  protected void getDocListC(DocListAndSet out, Query query, List<Query> filterList, DocSet filter, Sort lsort, int offset, int len, int flags) throws IOException {
+    QueryResultKey key=null;
+    int maxDoc = offset + len;
+    int supersetMaxDoc=maxDoc;
+    DocList superset;
+
+
+    // we can try and look up the complete query in the cache.
+    // we can't do that if filter!=null though (we don't want to
+    // do hashCode() and equals() for a big DocSet).
+    if (queryResultCache != null && filter==null) {
+        // all of the current flags can be reused during warming,
+        // so set all of them on the cache key.
+        key = new QueryResultKey(query, filterList, lsort, flags);
+        if ((flags & NO_CHECK_QCACHE)==0) {
+          superset = (DocList)queryResultCache.get(key);
+
+          if (superset != null) {
+            // check that the cache entry has scores recorded if we need them
+            if ((flags & GET_SCORES)==0 || superset.hasScores()) {
+              out.docList = superset.subset(offset,len);
+            }
+          }
+          if (out.docList != null) return;
+        }
+
+        // If we are going to generate the result, bump up to the
+        // next resultWindowSize for better caching.
+
+        // handle 0 special case as well as avoid idiv in the common case.
+        if (maxDoc < queryResultWindowSize) {
+          supersetMaxDoc=queryResultWindowSize;
+        } else {
+          supersetMaxDoc = ((maxDoc-1)/queryResultWindowSize + 1)*queryResultWindowSize;
+        }
+    }
+
+
+    // OK, so now we need to generate an answer.
+    // One way to do that would be to check if we have an unordered list
+    // of results for the base query.  If so, we can apply the filters and then
+    // sort by the resulting set.  This can only be used if:
+    // - the sort doesn't contain score
+    // - we don't want score returned.
+
+    // check if we should try and use the filter cache
+    boolean useFilterCache=false;
+    if ((flags & (GET_SCORES|NO_CHECK_FILTERCACHE))==0 && useFilterForSortedQuery && lsort != null && filterCache != null) {
+      useFilterCache=true;
+      SortField[] sfields = lsort.getSort();
+      for (SortField sf : sfields) {
+        if (sf.getType() == SortField.SCORE) {
+          useFilterCache=false;
+          break;
+        }
+      }
+    }
+
+    if (useFilterCache) {
+      // now actually use the filter cache.
+      // for large filters that match few documents, this may be
+      // slower than simply re-executing the query.
+      if (out.docSet == null) {
+        out.docSet = getDocSet(query,filter);
+        DocSet bigFilt = getDocSet(filterList);
+        if (bigFilt != null) out.docSet = out.docSet.intersection(bigFilt);
+      }
+      // todo: there could be a sortDocSet that could take a list of
+      // the filters instead of anding them first...
+      // perhaps there should be a multi-docset-iterator
+      superset = sortDocSet(out.docSet,lsort,supersetMaxDoc);
+      out.docList = superset.subset(offset,len);
+    } else {
+      // do it the normal way...
+      DocSet theFilt = filter!=null ? filter : getDocSet(filterList);
+      superset = getDocListNC(query,theFilt,lsort,0,supersetMaxDoc,flags);
+      // OPT... if getDocListNC can get the set at the same time (later version)
+      // then set it as out.docSet.
+      out.docList = superset.subset(offset,len);
+    }
+
+    // lastly, put the superset in the cache
+    if (key != null) {
+      queryResultCache.put(key, superset);
+    }
+  }
+

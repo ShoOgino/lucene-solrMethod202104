@@ -1,0 +1,65 @@
+  //
+  // do all needed deletions.
+  // call in a synchronized context.
+  //
+  protected void doDeletions() throws IOException {
+
+    if (pset.size() > 0) { // optimization: only open searcher if there is something to delete...
+      log.info("DirectUpdateHandler2 deleting and removing dups for " + pset.size() +" ids");
+      int numDeletes=0;
+
+      closeWriter();
+      openSearcher();
+      IndexReader reader = searcher.getReader();
+      TermDocs tdocs = reader.termDocs();
+      String fieldname = idField.getName();
+
+      for (Map.Entry<String,Integer> entry : pset.entrySet()) {
+        String id = entry.getKey();
+        int saveLast = entry.getValue();  // save the last "saveLast" documents
+
+        //expand our array that keeps track of docs if needed.
+        if (docnums==null || saveLast > docnums.length) {
+          docnums = new int[saveLast];
+        }
+
+        // initialize all docnums in the list to -1 (unused)
+        for (int i=0; i<saveLast; i++) {
+          docnums[i] = -1;
+        }
+
+        tdocs.seek(new Term(fieldname,id));
+
+        //
+        // record the docs for this term in the "docnums" array and wrap around
+        // at size "saveLast".  If we reuse a slot in the array, then we delete
+        // the doc that was there from the index.
+        //
+        int pos=0;
+        while (tdocs.next()) {
+          if (saveLast==0) {
+            // special case - delete all the docs as we see them.
+            reader.delete(tdocs.doc());
+            numDeletes++;
+            continue;
+          }
+
+          int prev=docnums[pos];
+          docnums[pos]=tdocs.doc();
+          if (prev != -1) {
+            reader.delete(prev);
+            numDeletes++;
+          }
+
+          if (++pos >= saveLast) pos=0;
+        }
+      }
+
+      // should we ever shrink it again, or just clear it?
+      pset.clear();
+      log.info("DirectUpdateHandler2 docs deleted=" + numDeletes);
+      numDocsDeleted.addAndGet(numDeletes);
+    }
+
+  }
+

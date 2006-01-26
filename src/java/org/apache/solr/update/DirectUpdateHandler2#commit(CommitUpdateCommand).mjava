@@ -1,0 +1,62 @@
+  public void commit(CommitUpdateCommand cmd) throws IOException {
+
+    if (cmd.optimize) {
+      optimizeCommands.incrementAndGet();
+    } else {
+      commitCommands.incrementAndGet();
+    }
+
+    Future[] waitSearcher = null;
+    if (cmd.waitSearcher) {
+      waitSearcher = new Future[1];
+    }
+
+    boolean error=true;
+    try {
+      synchronized (this) {
+        log.info("start "+cmd);
+        doDeletions();
+
+        if (cmd.optimize) {
+          closeSearcher();
+          openWriter();
+          writer.optimize();
+        }
+
+        closeSearcher();
+        closeWriter();
+
+        callPostCommitCallbacks();
+
+        // open a new searcher in the sync block to avoid opening it
+        // after a deleteByQuery changed the index, or in between deletes
+        // and adds of another commit being done.
+        core.getSearcher(true,false,waitSearcher);
+
+        log.info("end_commit_flush");
+      }  // end synchronized block
+
+      error=false;
+    }
+    finally {
+      addCommands.set(0);
+      deleteByIdCommands.set(0);
+      deleteByQueryCommands.set(0);
+      numErrors.set(error ? 1 : 0);
+    }
+
+    // if we are supposed to wait for the searcher to be registered, then we should do it
+    // outside of the synchronized block so that other update operations can proceed.
+    if (waitSearcher!=null && waitSearcher[0] != null) {
+       try {
+        waitSearcher[0].get();
+      } catch (InterruptedException e) {
+        SolrException.log(log,e);
+      } catch (ExecutionException e) {
+        SolrException.log(log,e);
+      }
+    }
+
+    return;
+  }
+

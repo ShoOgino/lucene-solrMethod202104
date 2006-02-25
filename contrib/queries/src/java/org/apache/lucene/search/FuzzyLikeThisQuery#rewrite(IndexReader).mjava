@@ -1,0 +1,67 @@
+    public Query rewrite(IndexReader reader) throws IOException
+    {
+        if(rewrittenQuery!=null)
+        {
+            return rewrittenQuery;
+        }
+        //load up the list of possible terms
+        for (Iterator iter = fieldVals.iterator(); iter.hasNext();)
+		{
+			FieldVals f = (FieldVals) iter.next();
+			addTerms(reader,f);			
+		}
+        //clear the list of fields
+        fieldVals.clear();
+        
+        BooleanQuery bq=new BooleanQuery();
+        
+        
+        //create BooleanQueries to hold the variants for each token/field pair and ensure it
+        // has no coord factor
+        //Step 1: sort the termqueries by term/field
+        HashMap variantQueries=new HashMap();
+        int size = q.size();
+        for(int i = 0; i < size; i++)
+        {
+          ScoreTerm st = (ScoreTerm) q.pop();
+          ArrayList l=(ArrayList) variantQueries.get(st.fuzziedSourceTerm);
+          if(l==null)
+          {
+              l=new ArrayList();
+              variantQueries.put(st.fuzziedSourceTerm,l);
+          }
+          l.add(st);
+        }
+        //Step 2: Organize the sorted termqueries into zero-coord scoring boolean queries
+        for (Iterator iter = variantQueries.values().iterator(); iter.hasNext();)
+        {
+            ArrayList variants = (ArrayList) iter.next();
+            if(variants.size()==1)
+            {
+                //optimize where only one selected variant
+                ScoreTerm st=(ScoreTerm) variants.get(0);
+                TermQuery tq = new FuzzyTermQuery(st.term,ignoreTF);
+                tq.setBoost(st.score); // set the boost to a mix of IDF and score
+                bq.add(tq, BooleanClause.Occur.SHOULD); 
+            }
+            else
+            {
+                BooleanQuery termVariants=new BooleanQuery(true); //disable coord and IDF for these term variants
+                for (Iterator iterator2 = variants.iterator(); iterator2
+                        .hasNext();)
+                {
+                    ScoreTerm st = (ScoreTerm) iterator2.next();
+                    TermQuery tq = new FuzzyTermQuery(st.term,ignoreTF);      // found a match
+                    tq.setBoost(st.score); // set the boost using the ScoreTerm's score
+                    termVariants.add(tq, BooleanClause.Occur.SHOULD);          // add to query                    
+                }
+                bq.add(termVariants, BooleanClause.Occur.SHOULD);          // add to query
+            }
+        }
+        //TODO possible alternative step 3 - organize above booleans into a new layer of field-based
+        // booleans with a minimum-should-match of NumFields-1?
+        
+        this.rewrittenQuery=bq;
+        return bq;
+    }
+

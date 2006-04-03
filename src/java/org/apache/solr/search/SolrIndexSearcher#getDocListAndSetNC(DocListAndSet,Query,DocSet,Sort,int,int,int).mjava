@@ -1,0 +1,120 @@
+  // the DocSet returned is for the query only, without any filtering... that way it may
+  // be cached if desired.
+  private DocSet getDocListAndSetNC(DocListAndSet out, Query query, DocSet filter, Sort lsort, int offset, int len, int flags) throws IOException {
+    final int lastDocRequested = offset+len;
+    int nDocsReturned;
+    int totalHits;
+    float maxScore;
+    int[] ids;
+    float[] scores;
+    final DocSetHitCollector setHC = new DocSetHitCollector(maxDoc());
+    // TODO: perhaps unify getDocListAndSetNC and getDocListNC without imposing a significant performance hit
+
+    // Comment: gathering the set before the filter is applied allows one to cache
+    // the resulting DocSet under the query.  The drawback is that it requires an
+    // extra intersection with the filter at the end.  This will be a net win
+    // for expensive queries.
+
+    // Q: what if the final intersection results in a small set from two large
+    // sets... it won't be a HashDocSet or other small set.  One way around
+    // this would be to collect the resulting set as we go (the filter is
+    // checked anyway).
+
+    // handle zero case...
+    if (lastDocRequested<=0) {
+      final DocSet filt = filter;
+      final float[] topscore = new float[] { Float.NEGATIVE_INFINITY };
+      final int[] numHits = new int[1];
+
+      searcher.search(query, new HitCollector() {
+        public void collect(int doc, float score) {
+          setHC.collect(doc,score);
+          if (filt!=null && !filt.exists(doc)) return;
+          numHits[0]++;
+          if (score > topscore[0]) topscore[0]=score;
+        }
+      }
+      );
+
+      nDocsReturned=0;
+      ids = new int[nDocsReturned];
+      scores = new float[nDocsReturned];
+      totalHits = numHits[0];
+      maxScore = totalHits>0 ? topscore[0] : 0.0f;
+    } else if (lsort != null) {
+      // can't use TopDocs if there is a sort since it
+      // will do automatic score normalization.
+      // NOTE: this changed late in Lucene 1.9
+
+      final DocSet filt = filter;
+      final int[] numHits = new int[1];
+      final FieldSortedHitQueue hq = new FieldSortedHitQueue(reader, lsort.getSort(), offset+len);
+
+      searcher.search(query, new HitCollector() {
+        public void collect(int doc, float score) {
+          setHC.collect(doc,score);
+          if (filt!=null && !filt.exists(doc)) return;
+          numHits[0]++;
+          hq.insert(new FieldDoc(doc, score));
+        }
+      }
+      );
+
+      totalHits = numHits[0];
+      maxScore = totalHits>0 ? hq.getMaxScore() : 0.0f;
+
+      nDocsReturned = hq.size();
+      ids = new int[nDocsReturned];
+      scores = (flags&GET_SCORES)!=0 ? new float[nDocsReturned] : null;
+      for (int i = nDocsReturned -1; i >= 0; i--) {
+        FieldDoc fieldDoc = (FieldDoc)hq.pop();
+        // fillFields is the point where score normalization happens
+        // hq.fillFields(fieldDoc)
+        ids[i] = fieldDoc.doc;
+        if (scores != null) scores[i] = fieldDoc.score;
+      }
+    } else {
+      // No Sort specified (sort by score descending)
+      // This case could be done with TopDocs, but would currently require
+      // getting a BitSet filter from a DocSet which may be inefficient.
+
+      final DocSet filt = filter;
+      final ScorePriorityQueue hq = new ScorePriorityQueue(lastDocRequested);
+      final int[] numHits = new int[1];
+      searcher.search(query, new HitCollector() {
+        float minScore=Float.NEGATIVE_INFINITY;  // minimum score in the priority queue
+        public void collect(int doc, float score) {
+          setHC.collect(doc,score);
+          if (filt!=null && !filt.exists(doc)) return;
+          if (numHits[0]++ < lastDocRequested || score >= minScore) {
+            // if docs are always delivered in order, we could use "score>minScore"
+            // but might BooleanScorer14 might still be used and deliver docs out-of-order?
+            hq.insert(new ScoreDoc(doc, score));
+            minScore = ((ScoreDoc)hq.top()).score;
+          }
+        }
+      }
+      );
+
+      totalHits = numHits[0];
+      nDocsReturned = hq.size();
+      ids = new int[nDocsReturned];
+      scores = (flags&GET_SCORES)!=0 ? new float[nDocsReturned] : null;
+      ScoreDoc sdoc =null;
+      for (int i = nDocsReturned -1; i >= 0; i--) {
+        sdoc = (ScoreDoc)hq.pop();
+        ids[i] = sdoc.doc;
+        if (scores != null) scores[i] = sdoc.score;
+      }
+      maxScore = sdoc ==null ? 0.0f : sdoc.score;
+    }
+
+
+    int sliceLen = Math.min(lastDocRequested,nDocsReturned) - offset;
+    if (sliceLen < 0) sliceLen=0;
+    out.docList = new DocSlice(offset,sliceLen,ids,scores,totalHits,maxScore);
+    DocSet qDocSet = setHC.getDocSet();
+    out.docSet = filter==null ? qDocSet : qDocSet.intersection(filter);
+    return qDocSet;
+  }
+

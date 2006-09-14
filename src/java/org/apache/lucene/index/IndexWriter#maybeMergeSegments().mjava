@@ -1,23 +1,60 @@
   /** Incremental segment merger.  */
   private final void maybeMergeSegments() throws IOException {
-    long targetMergeDocs = minMergeDocs;
-    while (targetMergeDocs <= maxMergeDocs) {
-      // find segments smaller than current target size
-      int minSegment = segmentInfos.size() - singleDocSegmentsCount; // top 1-doc segments are taken for sure
-      int mergeDocs = singleDocSegmentsCount;
+    long lowerBound = 0;
+    long upperBound = minMergeDocs;
+
+    while (upperBound * mergeFactor <= maxMergeDocs) {
+      int minSegment = segmentInfos.size();
+      int maxSegment = -1;
+
+      // find merge-worthy segments
       while (--minSegment >= 0) {
         SegmentInfo si = segmentInfos.info(minSegment);
-        if (si.docCount >= targetMergeDocs)
+
+        if (maxSegment == -1 && si.docCount > lowerBound && si.docCount <= upperBound) {
+          // start from the rightmost* segment whose doc count is in bounds
+          maxSegment = minSegment;
+        } else if (si.docCount > upperBound) {
+          // until the segment whose doc count exceeds upperBound
           break;
-        mergeDocs += si.docCount;
+        }
       }
 
-      if (mergeDocs >= targetMergeDocs)	 	  // found a merge to do
-        mergeSegments(minSegment+1);
-      else
-        break;
+      minSegment++;
+      maxSegment++;
+      int numSegments = maxSegment - minSegment;
 
-      targetMergeDocs *= mergeFactor;		  // increase target size
+      if (numSegments < mergeFactor) {
+        break;
+      } else {
+        boolean exceedsUpperLimit = false;
+
+        // number of merge-worthy segments may exceed mergeFactor when
+        // mergeFactor and/or maxBufferedDocs change(s)
+        while (numSegments >= mergeFactor) {
+          // merge the leftmost* mergeFactor segments
+          int docCount = mergeSegments(segmentInfos, minSegment, minSegment + mergeFactor);
+          numSegments -= mergeFactor;
+
+          if (docCount > upperBound) {
+            // continue to merge the rest of the worthy segments on this level
+            minSegment++;
+            exceedsUpperLimit = true;
+          } else if (docCount > 0) {
+            // if the merged segment does not exceed upperBound, consider
+            // this segment for further merges on this same level
+            numSegments++;
+          }
+        }
+
+        if (!exceedsUpperLimit) {
+          // if none of the merged segments exceed upperBound, done
+          break;
+        }
+      }
+
+      lowerBound = upperBound;
+      upperBound *= mergeFactor;
     }
   }
 

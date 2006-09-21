@@ -1,55 +1,59 @@
   /**
    * Returns a list of terms in the specified field along with the 
    * corrisponding count of documents in the set that match that constraint.
+   * This method uses the FilterCache to get the intersection count between <code>docs</code>
+   * and the DocSet for each term in the filter.
    *
    * @see SolrParams#FACET_LIMIT
    * @see SolrParams#FACET_ZEROS
+   * @see SolrParams#FACET_MISSING
    */
-  public NamedList getFacetTermEnumCounts(String fieldName) 
+  public NamedList getFacetTermEnumCounts(SolrIndexSearcher searcher, DocSet docs, String field, int limit, boolean zeros, boolean missing)
     throws IOException {
-    
+
     /* :TODO: potential optimization...
-     * cache the Terms with the highest docFreq and try them first
-     * don't enum if we get our max from them
-     */
-     
+    * cache the Terms with the highest docFreq and try them first
+    * don't enum if we get our max from them
+    */
+
     IndexSchema schema = searcher.getSchema();
     IndexReader r = searcher.getReader();
-    FieldType ft = schema.getFieldType(fieldName);
+    FieldType ft = schema.getFieldType(field);
 
-    Set<CountPair<String,Integer>> counts 
+    Set<CountPair<String,Integer>> counts
       = new HashSet<CountPair<String,Integer>>();
 
-    int limit = params.getFieldInt(fieldName, params.FACET_LIMIT, 100);
     if (0 <= limit) {
       counts = new BoundedTreeSet<CountPair<String,Integer>>(limit);
     }
 
-    boolean zeros = params.getFieldBool(fieldName, params.FACET_ZEROS, true);
-      
-    TermEnum te = r.terms(new Term(fieldName,""));
+    TermEnum te = r.terms(new Term(field,""));
     do {
       Term t = te.term();
 
-      if (null == t || ! t.field().equals(fieldName)) 
+      if (null == t || ! t.field().equals(field))
         break;
 
       if (0 < te.docFreq()) { /* all docs may be deleted */
         int count = searcher.numDocs(new TermQuery(t),
                                      docs);
 
-        /* :TODO: is indexedToReadable correct? */ 
-        if (zeros || 0 < count) 
+        if (zeros || 0 < count)
           counts.add(new CountPair<String,Integer>
-                     (ft.indexedToReadable(t.text()), count));
+                     (t.text(), count));
 
       }
     } while (te.next());
 
     NamedList res = new NamedList();
     for (CountPair<String,Integer> p : counts) {
-      res.add(p.key, p.val);
+      res.add(ft.indexedToReadable(p.key), p.val);
     }
+
+    if (missing) {
+      res.add(null, getFieldMissingCount(searcher,docs,field));
+    }
+
     return res;
   }
 

@@ -2,33 +2,56 @@
     addCommands.incrementAndGet();
     addCommandsCumulative.incrementAndGet();
     int rc=-1;
+
+    iwAccess.lock();
     try {
-      if (!cmd.allowDups && !cmd.overwritePending && !cmd.overwriteCommitted) {
-        throw new SolrException(400,"unsupported param combo:" + cmd);
-        // this would need a reader to implement (to be able to check committed
-        // before adding.)
-        // return addNoOverwriteNoDups(cmd);
-      } else if (!cmd.allowDups && !cmd.overwritePending && cmd.overwriteCommitted) {
-        rc = addConditionally(cmd);
-        return rc;
+
+      // We can't using iwCommit to protect internal data here, since it would
+      // block other addDoc calls.  Hence, we synchronize to protect internal
+      // state.  This is safe as all other state-changing operations are
+      // protected with iwCommit (which iwAccess excludes from this block).
+      synchronized (this) {
+        if (!cmd.allowDups && !cmd.overwritePending && !cmd.overwriteCommitted) {
+          throw new SolrException(400,"unsupported param combo:" + cmd);
+          // this would need a reader to implement (to be able to check committed
+          // before adding.)
+          // return addNoOverwriteNoDups(cmd);
+        } else if (!cmd.allowDups && !cmd.overwritePending && cmd.overwriteCommitted) {
+          rc = addConditionally(cmd);
       } else if (!cmd.allowDups && cmd.overwritePending && !cmd.overwriteCommitted) {
-        throw new SolrException(400,"unsupported param combo:" + cmd);
-      } else if (!cmd.allowDups && cmd.overwritePending && cmd.overwriteCommitted) {
-        rc = overwriteBoth(cmd);
-        return rc;
-      } else if (cmd.allowDups && !cmd.overwritePending && !cmd.overwriteCommitted) {
-        rc = allowDups(cmd);
-        return rc;
-      } else if (cmd.allowDups && !cmd.overwritePending && cmd.overwriteCommitted) {
-        throw new SolrException(400,"unsupported param combo:" + cmd);
-      } else if (cmd.allowDups && cmd.overwritePending && !cmd.overwriteCommitted) {
-        throw new SolrException(400,"unsupported param combo:" + cmd);
-      } else if (cmd.allowDups && cmd.overwritePending && cmd.overwriteCommitted) {
-        rc = overwriteBoth(cmd);
-        return rc;
-      }
-      throw new SolrException(400,"unsupported param combo:" + cmd);
+          throw new SolrException(400,"unsupported param combo:" + cmd);
+        } else if (!cmd.allowDups && cmd.overwritePending && cmd.overwriteCommitted) {
+          rc = overwriteBoth(cmd);
+        } else if (cmd.allowDups && !cmd.overwritePending && !cmd.overwriteCommitted) {
+          rc = allowDups(cmd);
+        } else if (cmd.allowDups && !cmd.overwritePending && cmd.overwriteCommitted) {
+          throw new SolrException(400,"unsupported param combo:" + cmd);
+        } else if (cmd.allowDups && cmd.overwritePending && !cmd.overwriteCommitted) {
+          throw new SolrException(400,"unsupported param combo:" + cmd);
+        } else if (cmd.allowDups && cmd.overwritePending && cmd.overwriteCommitted) {
+          rc = overwriteBoth(cmd);
+        }
+        if (rc == -1)
+          throw new SolrException(400,"unsupported param combo:" + cmd);
+        
+        if (rc == 1) {
+          // adding document -- prep writer
+          closeSearcher();
+          openWriter();
+          tracker.increment(1);          
+        } else {
+          // exit prematurely
+          return rc;
+        }
+      } // end synchronized block
+
+      // this is the only unsynchronized code in the iwAccess block, which
+      // should account for most of the time
+      assert(rc == 1);
+      writer.addDocument(cmd.doc);
+      
     } finally {
+      iwAccess.unlock();
       if (rc!=1) {
         numErrors.incrementAndGet();
         numErrorsCumulative.incrementAndGet();
@@ -36,5 +59,9 @@
         numDocsPending.incrementAndGet();
       }
     }
+
+    // might need to commit (wait for searcher if so)
+    checkCommit(true);
+    return rc;
   }
 

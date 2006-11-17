@@ -24,36 +24,26 @@
     int docCount = merger.merge();                // merge 'em
 
     segmentInfos.setSize(0);                      // pop old infos & add new
-    segmentInfos.addElement(new SegmentInfo(mergedName, docCount, directory));
+    SegmentInfo info = new SegmentInfo(mergedName, docCount, directory, false);
+    segmentInfos.addElement(info);
 
     if(sReader != null)
         sReader.close();
 
-    synchronized (directory) {			  // in- & inter-process sync
-      new Lock.With(directory.makeLock(COMMIT_LOCK_NAME), commitLockTimeout) {
-	  public Object doBody() throws IOException {
-	    segmentInfos.write(directory);	  // commit changes
-	    return null;
-	  }
-	}.run();
-    }
+    String segmentsInfosFileName = segmentInfos.getCurrentSegmentFileName();
+    segmentInfos.write(directory);         // commit changes
 
-    deleteSegments(segmentsToDelete);  // delete now-unused segments
+    deleter.deleteFile(segmentsInfosFileName);    // delete old segments_N file
+    deleter.deleteSegments(segmentsToDelete);     // delete now-unused segments
 
     if (useCompoundFile) {
-      final Vector filesToDelete = merger.createCompoundFile(mergedName + ".tmp");
-      synchronized (directory) { // in- & inter-process sync
-        new Lock.With(directory.makeLock(COMMIT_LOCK_NAME), commitLockTimeout) {
-          public Object doBody() throws IOException {
-            // make compound file visible for SegmentReaders
-            directory.renameFile(mergedName + ".tmp", mergedName + ".cfs");
-            return null;
-          }
-        }.run();
-      }
+      Vector filesToDelete = merger.createCompoundFile(mergedName + ".cfs");
+      segmentsInfosFileName = segmentInfos.getCurrentSegmentFileName();
+      info.setUseCompoundFile(true);
+      segmentInfos.write(directory);     // commit again so readers know we've switched this segment to a compound file
 
-      // delete now unused files of segment
-      deleteFiles(filesToDelete);
+      deleter.deleteFile(segmentsInfosFileName);  // delete old segments_N file
+      deleter.deleteFiles(filesToDelete); // delete now unused files of segment 
     }
   }
 

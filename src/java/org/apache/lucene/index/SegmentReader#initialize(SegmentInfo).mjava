@@ -1,31 +1,48 @@
-   private void initialize(SegmentInfo si) throws IOException {
+  private void initialize(SegmentInfo si) throws IOException {
     segment = si.name;
+    this.si = si;
 
-    // Use compound file directory for some files, if it exists
-    Directory cfsDir = directory();
-    if (directory().fileExists(segment + ".cfs")) {
-      cfsReader = new CompoundFileReader(directory(), segment + ".cfs");
-      cfsDir = cfsReader;
-    }
+    boolean success = false;
 
-    // No compound file exists - use the multi-file format
-    fieldInfos = new FieldInfos(cfsDir, segment + ".fnm");
-    fieldsReader = new FieldsReader(cfsDir, segment, fieldInfos);
+    try {
+      // Use compound file directory for some files, if it exists
+      Directory cfsDir = directory();
+      if (si.getUseCompoundFile()) {
+        cfsReader = new CompoundFileReader(directory(), segment + ".cfs");
+        cfsDir = cfsReader;
+      }
 
-    tis = new TermInfosReader(cfsDir, segment, fieldInfos);
+      // No compound file exists - use the multi-file format
+      fieldInfos = new FieldInfos(cfsDir, segment + ".fnm");
+      fieldsReader = new FieldsReader(cfsDir, segment, fieldInfos);
 
-    // NOTE: the bitvector is stored using the regular directory, not cfs
-    if (hasDeletions(si))
-      deletedDocs = new BitVector(directory(), segment + ".del");
+      tis = new TermInfosReader(cfsDir, segment, fieldInfos);
+      
+      // NOTE: the bitvector is stored using the regular directory, not cfs
+      if (hasDeletions(si)) {
+        deletedDocs = new BitVector(directory(), si.getDelFileName());
+      }
 
-    // make sure that all index files have been read or are kept open
-    // so that if an index update removes them we'll still have them
-    freqStream = cfsDir.openInput(segment + ".frq");
-    proxStream = cfsDir.openInput(segment + ".prx");
-    openNorms(cfsDir);
+      // make sure that all index files have been read or are kept open
+      // so that if an index update removes them we'll still have them
+      freqStream = cfsDir.openInput(segment + ".frq");
+      proxStream = cfsDir.openInput(segment + ".prx");
+      openNorms(cfsDir);
 
-    if (fieldInfos.hasVectors()) { // open term vector files only as needed
-      termVectorsReaderOrig = new TermVectorsReader(cfsDir, segment, fieldInfos);
+      if (fieldInfos.hasVectors()) { // open term vector files only as needed
+        termVectorsReaderOrig = new TermVectorsReader(cfsDir, segment, fieldInfos);
+      }
+      success = true;
+    } finally {
+
+      // With lock-less commits, it's entirely possible (and
+      // fine) to hit a FileNotFound exception above.  In
+      // this case, we want to explicitly close any subset
+      // of things that were opened so that we don't have to
+      // wait for a GC to do so.
+      if (!success) {
+        doClose();
+      }
     }
   }
 

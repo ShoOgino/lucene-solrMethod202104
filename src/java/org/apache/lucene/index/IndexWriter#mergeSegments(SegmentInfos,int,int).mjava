@@ -4,10 +4,11 @@
    */
   private final int mergeSegments(SegmentInfos sourceSegments, int minSegment, int end)
     throws IOException {
+
     final String mergedName = newSegmentName();
     if (infoStream != null) infoStream.print("merging segments");
     SegmentMerger merger = new SegmentMerger(this, mergedName);
-
+    
     final Vector segmentsToDelete = new Vector();
     for (int i = minSegment; i < end; i++) {
       SegmentInfo si = sourceSegments.info(i);
@@ -27,7 +28,7 @@
     }
 
     SegmentInfo newSegment = new SegmentInfo(mergedName, mergedDocCount,
-        directory);
+                                             directory, false);
     if (sourceSegments == ramSegmentInfos) {
       sourceSegments.removeAllElements();
       segmentInfos.addElement(newSegment);
@@ -40,31 +41,21 @@
     // close readers before we attempt to delete now-obsolete segments
     merger.closeReaders();
 
-    synchronized (directory) {                 // in- & inter-process sync
-      new Lock.With(directory.makeLock(COMMIT_LOCK_NAME), commitLockTimeout) {
-          public Object doBody() throws IOException {
-            segmentInfos.write(directory);     // commit before deleting
-            return null;
-          }
-        }.run();
-    }
-    
-    deleteSegments(segmentsToDelete);  // delete now-unused segments
+    String segmentsInfosFileName = segmentInfos.getCurrentSegmentFileName();
+    segmentInfos.write(directory);     // commit before deleting
+
+    deleter.deleteFile(segmentsInfosFileName);    // delete old segments_N file
+    deleter.deleteSegments(segmentsToDelete);     // delete now-unused segments
 
     if (useCompoundFile) {
-      final Vector filesToDelete = merger.createCompoundFile(mergedName + ".tmp");
-      synchronized (directory) { // in- & inter-process sync
-        new Lock.With(directory.makeLock(COMMIT_LOCK_NAME), commitLockTimeout) {
-          public Object doBody() throws IOException {
-            // make compound file visible for SegmentReaders
-            directory.renameFile(mergedName + ".tmp", mergedName + ".cfs");
-            return null;
-          }
-        }.run();
-      }
+      Vector filesToDelete = merger.createCompoundFile(mergedName + ".cfs");
 
-      // delete now unused files of segment 
-      deleteFiles(filesToDelete);   
+      segmentsInfosFileName = segmentInfos.getCurrentSegmentFileName();
+      newSegment.setUseCompoundFile(true);
+      segmentInfos.write(directory);     // commit again so readers know we've switched this segment to a compound file
+
+      deleter.deleteFile(segmentsInfosFileName);  // delete old segments_N file
+      deleter.deleteFiles(filesToDelete);  // delete now-unused segments
     }
 
     return mergedDocCount;

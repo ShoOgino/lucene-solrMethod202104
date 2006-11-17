@@ -1,21 +1,37 @@
   private static IndexReader open(final Directory directory, final boolean closeDirectory) throws IOException {
-    synchronized (directory) {			  // in- & inter-process sync
-      return (IndexReader)new Lock.With(
-          directory.makeLock(IndexWriter.COMMIT_LOCK_NAME),
-          IndexWriter.COMMIT_LOCK_TIMEOUT) {
-          public Object doBody() throws IOException {
-            SegmentInfos infos = new SegmentInfos();
-            infos.read(directory);
-            if (infos.size() == 1) {		  // index is optimized
-              return SegmentReader.get(infos, infos.info(0), closeDirectory);
-            }
-            IndexReader[] readers = new IndexReader[infos.size()];
-            for (int i = 0; i < infos.size(); i++)
-              readers[i] = SegmentReader.get(infos.info(i));
-            return new MultiReader(directory, infos, closeDirectory, readers);
 
+    return (IndexReader) new SegmentInfos.FindSegmentsFile(directory) {
+
+      public Object doBody(String segmentFileName) throws IOException {
+
+        SegmentInfos infos = new SegmentInfos();
+        infos.read(directory, segmentFileName);
+
+        if (infos.size() == 1) {		  // index is optimized
+          return SegmentReader.get(infos, infos.info(0), closeDirectory);
+        } else {
+
+          // To reduce the chance of hitting FileNotFound
+          // (and having to retry), we open segments in
+          // reverse because IndexWriter merges & deletes
+          // the newest segments first.
+
+          IndexReader[] readers = new IndexReader[infos.size()];
+          for (int i = infos.size()-1; i >= 0; i--) {
+            try {
+              readers[i] = SegmentReader.get(infos.info(i));
+            } catch (IOException e) {
+              // Close all readers we had opened:
+              for(i++;i<infos.size();i++) {
+                readers[i].close();
+              }
+              throw e;
+            }
           }
-        }.run();
-    }
+
+          return new MultiReader(directory, infos, closeDirectory, readers);
+        }
+      }
+    }.run();
   }
 

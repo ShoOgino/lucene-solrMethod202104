@@ -1,0 +1,98 @@
+  /** Determine index files that are no longer referenced
+   * and therefore should be deleted.  This is called once
+   * (by the writer), and then subsequently we add onto
+   * deletable any files that are no longer needed at the
+   * point that we create the unused file (eg when merging
+   * segments), and we only remove from deletable when a
+   * file is successfully deleted.
+   */
+
+  public void findDeletableFiles() throws IOException {
+
+    // Gather all "current" segments:
+    HashMap current = new HashMap();
+    for(int j=0;j<segmentInfos.size();j++) {
+      SegmentInfo segmentInfo = (SegmentInfo) segmentInfos.elementAt(j);
+      current.put(segmentInfo.name, segmentInfo);
+    }
+
+    // Then go through all files in the Directory that are
+    // Lucene index files, and add to deletable if they are
+    // not referenced by the current segments info:
+
+    String segmentsInfosFileName = segmentInfos.getCurrentSegmentFileName();
+    IndexFileNameFilter filter = IndexFileNameFilter.getFilter();
+
+    String[] files = directory.list();
+
+    for (int i = 0; i < files.length; i++) {
+
+      if (filter.accept(null, files[i]) && !files[i].equals(segmentsInfosFileName) && !files[i].equals(IndexFileNames.SEGMENTS_GEN)) {
+
+        String segmentName;
+        String extension;
+
+        // First remove any extension:
+        int loc = files[i].indexOf('.');
+        if (loc != -1) {
+          extension = files[i].substring(1+loc);
+          segmentName = files[i].substring(0, loc);
+        } else {
+          extension = null;
+          segmentName = files[i];
+        }
+
+        // Then, remove any generation count:
+        loc = segmentName.indexOf('_', 1);
+        if (loc != -1) {
+          segmentName = segmentName.substring(0, loc);
+        }
+
+        // Delete this file if it's not a "current" segment,
+        // or, it is a single index file but there is now a
+        // corresponding compound file:
+        boolean doDelete = false;
+
+        if (!current.containsKey(segmentName)) {
+          // Delete if segment is not referenced:
+          doDelete = true;
+        } else {
+          // OK, segment is referenced, but file may still
+          // be orphan'd:
+          SegmentInfo info = (SegmentInfo) current.get(segmentName);
+
+          if (filter.isCFSFile(files[i]) && info.getUseCompoundFile()) {
+            // This file is in fact stored in a CFS file for
+            // this segment:
+            doDelete = true;
+          } else {
+            
+            if ("del".equals(extension)) {
+              // This is a _segmentName_N.del file:
+              if (!files[i].equals(info.getDelFileName())) {
+                // If this is a seperate .del file, but it
+                // doesn't match the current del filename for
+                // this segment, then delete it:
+                doDelete = true;
+              }
+            } else if (extension != null && extension.startsWith("s") && extension.matches("s\\d+")) {
+              int field = Integer.parseInt(extension.substring(1));
+              // This is a _segmentName_N.sX file:
+              if (!files[i].equals(info.getNormFileName(field))) {
+                // This is an orphan'd separate norms file:
+                doDelete = true;
+              }
+            }
+          }
+        }
+
+        if (doDelete) {
+          addDeletableFile(files[i]);
+          if (infoStream != null) {
+            infoStream.println("IndexFileDeleter: file \"" + files[i] + "\" is unreferenced in index and will be deleted on next commit");
+          }
+        }
+      }
+    }
+  }
+

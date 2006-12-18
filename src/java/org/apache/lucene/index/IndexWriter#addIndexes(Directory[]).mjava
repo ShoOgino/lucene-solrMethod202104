@@ -6,27 +6,68 @@
    * complete index can then be created by merging sub-collection indexes
    * with this method.
    *
-   * <p>After this completes, the index is optimized. */
+   * <p>After this completes, the index is optimized.
+   *
+   * <p>This method is transactional in how Exceptions are
+   * handled: it does not commit a new segments_N file until
+   * all indexes are added.  This means if an Exception
+   * occurs (eg disk full), then either no indexes will have
+   * been added or they all will have been.</p>
+   *
+   * <p>If an Exception is hit, it's still possible that all
+   * indexes were successfully added.  This happens when the
+   * Exception is hit when trying to build a CFS file.  In
+   * this case, one segment in the index will be in non-CFS
+   * format, even when using compound file format.</p>
+   *
+   * <p>Also note that on an Exception, the index may still
+   * have been partially or fully optimized even though none
+   * of the input indexes were added. </p>
+   *
+   * <p>Note that this requires temporary free space in the
+   * Directory up to 2X the sum of all input indexes
+   * (including the starting index).  Exact usage could be
+   * less but will depend on many factors.</p>
+   *
+   * <p>See <a target="_top"
+   * href="http://issues.apache.org/jira/browse/LUCENE-702">LUCENE-702</a>
+   * for details.</p>
+   */
   public synchronized void addIndexes(Directory[] dirs)
-      throws IOException {
+    throws IOException {
+
     optimize();					  // start with zero or 1 seg
 
     int start = segmentInfos.size();
 
-    for (int i = 0; i < dirs.length; i++) {
-      SegmentInfos sis = new SegmentInfos();	  // read infos from dir
-      sis.read(dirs[i]);
-      for (int j = 0; j < sis.size(); j++) {
-        segmentInfos.addElement(sis.info(j));	  // add each info
-      }
-    }
+    boolean success = false;
 
-    // merge newly added segments in log(n) passes
-    while (segmentInfos.size() > start+mergeFactor) {
-      for (int base = start; base < segmentInfos.size(); base++) {
-        int end = Math.min(segmentInfos.size(), base+mergeFactor);
-        if (end-base > 1)
-          mergeSegments(segmentInfos, base, end);
+    startTransaction();
+
+    try {
+      for (int i = 0; i < dirs.length; i++) {
+        SegmentInfos sis = new SegmentInfos();	  // read infos from dir
+        sis.read(dirs[i]);
+        for (int j = 0; j < sis.size(); j++) {
+          segmentInfos.addElement(sis.info(j));	  // add each info
+        }
+      }
+
+      // merge newly added segments in log(n) passes
+      while (segmentInfos.size() > start+mergeFactor) {
+        for (int base = start; base < segmentInfos.size(); base++) {
+          int end = Math.min(segmentInfos.size(), base+mergeFactor);
+          if (end-base > 1) {
+            mergeSegments(segmentInfos, base, end);
+          }
+        }
+      }
+      success = true;
+    } finally {
+      if (success) {
+        commitTransaction();
+      } else {
+        rollbackTransaction();
       }
     }
 

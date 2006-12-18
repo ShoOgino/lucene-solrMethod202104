@@ -7,6 +7,11 @@
    * <p>
    * This requires this index not be among those to be added, and the
    * upper bound* of those segment doc counts not exceed maxMergeDocs.
+   *
+   * <p>See {@link #addIndexes(Directory[])} for
+   * details on transactional semantics, temporary free
+   * space required in the Directory, and non-CFS segments
+   * on an Exception.</p>
    */
   public synchronized void addIndexesNoOptimize(Directory[] dirs)
       throws IOException {
@@ -35,90 +40,103 @@
     // and target may use compound file or not. So we use mergeSegments() to
     // copy a segment, which may cause doc count to change because deleted
     // docs are garbage collected.
-    //
-    // In current addIndexes(Directory[]), segment infos in S are added to
-    // T's "segmentInfos" upfront. Then segments in S are merged to T several
-    // at a time. Every merge is committed with T's "segmentInfos". So if
-    // a reader is opened on T while addIndexes() is going on, it could see
-    // an inconsistent index. AddIndexesNoOptimize() has a similar behaviour.
 
     // 1 flush ram segments
+
     flushRamSegments();
 
     // 2 copy segment infos and find the highest level from dirs
     int start = segmentInfos.size();
     int startUpperBound = minMergeDocs;
 
+    boolean success = false;
+
+    startTransaction();
+
     try {
-      for (int i = 0; i < dirs.length; i++) {
-        if (directory == dirs[i]) {
-          // cannot add this index: segments may be deleted in merge before added
-          throw new IllegalArgumentException("Cannot add this index to itself");
-        }
 
-        SegmentInfos sis = new SegmentInfos(); // read infos from dir
-        sis.read(dirs[i]);
-        for (int j = 0; j < sis.size(); j++) {
-          SegmentInfo info = sis.info(j);
-          segmentInfos.addElement(info); // add each info
+      try {
+        for (int i = 0; i < dirs.length; i++) {
+          if (directory == dirs[i]) {
+            // cannot add this index: segments may be deleted in merge before added
+            throw new IllegalArgumentException("Cannot add this index to itself");
+          }
 
-          while (startUpperBound < info.docCount) {
-            startUpperBound *= mergeFactor; // find the highest level from dirs
-            if (startUpperBound > maxMergeDocs) {
-              // upper bound cannot exceed maxMergeDocs
-              throw new IllegalArgumentException("Upper bound cannot exceed maxMergeDocs");
+          SegmentInfos sis = new SegmentInfos(); // read infos from dir
+          sis.read(dirs[i]);
+          for (int j = 0; j < sis.size(); j++) {
+            SegmentInfo info = sis.info(j);
+            segmentInfos.addElement(info); // add each info
+
+            while (startUpperBound < info.docCount) {
+              startUpperBound *= mergeFactor; // find the highest level from dirs
+              if (startUpperBound > maxMergeDocs) {
+                // upper bound cannot exceed maxMergeDocs
+                throw new IllegalArgumentException("Upper bound cannot exceed maxMergeDocs");
+              }
             }
           }
         }
+      } catch (IllegalArgumentException e) {
+        for (int i = segmentInfos.size() - 1; i >= start; i--) {
+          segmentInfos.remove(i);
+        }
+        throw e;
       }
-    } catch (IllegalArgumentException e) {
-      for (int i = segmentInfos.size() - 1; i >= start; i--) {
-        segmentInfos.remove(i);
+
+      // 3 maybe merge segments starting from the highest level from dirs
+      maybeMergeSegments(startUpperBound);
+
+      // get the tail segments whose levels <= h
+      int segmentCount = segmentInfos.size();
+      int numTailSegments = 0;
+      while (numTailSegments < segmentCount
+             && startUpperBound >= segmentInfos.info(segmentCount - 1 - numTailSegments).docCount) {
+        numTailSegments++;
       }
-      throw e;
-    }
-
-    // 3 maybe merge segments starting from the highest level from dirs
-    maybeMergeSegments(startUpperBound);
-
-    // get the tail segments whose levels <= h
-    int segmentCount = segmentInfos.size();
-    int numTailSegments = 0;
-    while (numTailSegments < segmentCount
-        && startUpperBound >= segmentInfos.info(segmentCount - 1 - numTailSegments).docCount) {
-      numTailSegments++;
-    }
-    if (numTailSegments == 0) {
-      return;
-    }
-
-    // 4 make sure invariants hold for the tail segments whose levels <= h
-    if (checkNonDecreasingLevels(segmentCount - numTailSegments)) {
-      // identify the segments from S to be copied (not merged in 3)
-      int numSegmentsToCopy = 0;
-      while (numSegmentsToCopy < segmentCount
-          && directory != segmentInfos.info(segmentCount - 1 - numSegmentsToCopy).dir) {
-        numSegmentsToCopy++;
-      }
-      if (numSegmentsToCopy == 0) {
+      if (numTailSegments == 0) {
+        success = true;
         return;
       }
 
-      // copy those segments from S
-      for (int i = segmentCount - numSegmentsToCopy; i < segmentCount; i++) {
-        mergeSegments(segmentInfos, i, i + 1);
-      }
-      if (checkNonDecreasingLevels(segmentCount - numSegmentsToCopy)) {
-        return;
-      }
-    }
+      // 4 make sure invariants hold for the tail segments whose levels <= h
+      if (checkNonDecreasingLevels(segmentCount - numTailSegments)) {
+        // identify the segments from S to be copied (not merged in 3)
+        int numSegmentsToCopy = 0;
+        while (numSegmentsToCopy < segmentCount
+               && directory != segmentInfos.info(segmentCount - 1 - numSegmentsToCopy).dir) {
+          numSegmentsToCopy++;
+        }
+        if (numSegmentsToCopy == 0) {
+          success = true;
+          return;
+        }
 
-    // invariants do not hold, simply merge those segments
-    mergeSegments(segmentInfos, segmentCount - numTailSegments, segmentCount);
+        // copy those segments from S
+        for (int i = segmentCount - numSegmentsToCopy; i < segmentCount; i++) {
+          mergeSegments(segmentInfos, i, i + 1);
+        }
+        if (checkNonDecreasingLevels(segmentCount - numSegmentsToCopy)) {
+          success = true;
+          return;
+        }
+      }
 
-    // maybe merge segments again if necessary
-    if (segmentInfos.info(segmentInfos.size() - 1).docCount > startUpperBound) {
-      maybeMergeSegments(startUpperBound * mergeFactor);
+      // invariants do not hold, simply merge those segments
+      mergeSegments(segmentInfos, segmentCount - numTailSegments, segmentCount);
+
+      // maybe merge segments again if necessary
+      if (segmentInfos.info(segmentInfos.size() - 1).docCount > startUpperBound) {
+        maybeMergeSegments(startUpperBound * mergeFactor);
+      }
+
+      success = true;
+    } finally {
+      if (success) {
+        commitTransaction();
+      } else {
+        rollbackTransaction();
+      }
     }
   }
 

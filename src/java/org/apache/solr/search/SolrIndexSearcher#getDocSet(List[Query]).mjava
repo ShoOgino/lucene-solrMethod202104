@@ -1,17 +1,46 @@
-  // TODO: do a more efficient version that starts with the
-  // smallest DocSet and drives the intersection off that
-  // or implement an intersection() function that takes multiple
-  // DocSets (prob the better way)
   protected DocSet getDocSet(List<Query> queries) throws IOException {
-    DocSet answer=null;
     if (queries==null) return null;
-    for (Query q : queries) {
-      if (answer==null) {
-        answer = getDocSet(q);
+    if (queries.size()==1) return getDocSet(queries.get(0));
+    DocSet answer=null;
+
+    boolean[] neg = new boolean[queries.size()];
+    DocSet[] sets = new DocSet[queries.size()];
+
+    int smallestIndex = -1;
+    int smallestCount = Integer.MAX_VALUE;
+    for (int i=0; i<sets.length; i++) {
+      Query q = queries.get(i);
+      Query posQuery = QueryUtils.getAbs(q);
+      sets[i] = getPositiveDocSet(posQuery);
+      // Negative query if absolute value different from original
+      if (q==posQuery) {
+        neg[i] = false;
+        // keep track of the smallest positive set.
+        // This optimization is only worth it if size() is cached, which it would
+        // be if we don't do any set operations.
+        int sz = sets[i].size();
+        if (sz<smallestCount) {
+          smallestCount=sz;
+          smallestIndex=i;
+          answer = sets[i];
+        }
       } else {
-        answer = answer.intersection(getDocSet(q));
+        neg[i] = true;
       }
     }
+
+    // if no positive queries, start off with all docs
+    if (answer==null) answer = getPositiveDocSet(matchAllDocsQuery);
+
+    // do negative queries first to shrink set size
+    for (int i=0; i<sets.length; i++) {
+      if (neg[i]) answer = answer.andNot(sets[i]);
+    }
+
+    for (int i=0; i<sets.length; i++) {
+      if (!neg[i] && i!=smallestIndex) answer = answer.intersection(sets[i]);
+    }
+
     return answer;
   }
 

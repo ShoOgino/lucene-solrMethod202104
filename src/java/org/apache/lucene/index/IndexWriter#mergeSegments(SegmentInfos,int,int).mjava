@@ -5,7 +5,9 @@
   private final int mergeSegments(SegmentInfos sourceSegments, int minSegment, int end)
     throws IOException {
 
-    boolean mergeFlag = end > 0;
+    // We may be called solely because there are deletes
+    // pending, in which case doMerge is false:
+    boolean doMerge = end > 0;
     final String mergedName = newSegmentName();
     SegmentMerger merger = null;
 
@@ -21,21 +23,21 @@
     // This is try/finally to make sure merger's readers are closed:
     try {
 
-     if (mergeFlag) {
-      if (infoStream != null) infoStream.print("merging segments");
-      merger = new SegmentMerger(this, mergedName);
+      if (doMerge) {
+        if (infoStream != null) infoStream.print("merging segments");
+        merger = new SegmentMerger(this, mergedName);
 
-      for (int i = minSegment; i < end; i++) {
-        SegmentInfo si = sourceSegments.info(i);
-        if (infoStream != null)
-          infoStream.print(" " + si.name + " (" + si.docCount + " docs)");
-        IndexReader reader = SegmentReader.get(si); // no need to set deleter (yet)
-        merger.add(reader);
-        if ((reader.directory() == this.directory) || // if we own the directory
-            (reader.directory() == this.ramDirectory))
-          segmentsToDelete.addElement(reader);   // queue segment for deletion
+        for (int i = minSegment; i < end; i++) {
+          SegmentInfo si = sourceSegments.info(i);
+          if (infoStream != null)
+            infoStream.print(" " + si.name + " (" + si.docCount + " docs)");
+          IndexReader reader = SegmentReader.get(si); // no need to set deleter (yet)
+          merger.add(reader);
+          if ((reader.directory() == this.directory) || // if we own the directory
+              (reader.directory() == this.ramDirectory))
+            segmentsToDelete.addElement(reader);   // queue segment for deletion
+        }
       }
-     }
 
       SegmentInfos rollback = null;
       boolean success = false;
@@ -44,40 +46,41 @@
       // if we hit exception when doing the merge:
       try {
 
-       if (mergeFlag) {
-        mergedDocCount = merger.merge();
+        if (doMerge) {
+          mergedDocCount = merger.merge();
 
-        if (infoStream != null) {
-          infoStream.println(" into "+mergedName+" ("+mergedDocCount+" docs)");
+          if (infoStream != null) {
+            infoStream.println(" into "+mergedName+" ("+mergedDocCount+" docs)");
+          }
+
+          newSegment = new SegmentInfo(mergedName, mergedDocCount,
+                                       directory, false, true);
         }
 
-        newSegment = new SegmentInfo(mergedName, mergedDocCount,
-                                     directory, false, true);
-       }
-
         if (!inTransaction
-            && (sourceSegments != ramSegmentInfos || !onlyRamDocsToFlush())) {
+            && (sourceSegments != ramSegmentInfos || bufferedDeleteTerms.size() > 0)) {
           // Now save the SegmentInfo instances that
           // we are replacing:
           rollback = (SegmentInfos) segmentInfos.clone();
         }
 
-       if (mergeFlag) {
-        if (sourceSegments == ramSegmentInfos) {
-          segmentInfos.addElement(newSegment);
-        } else {
-          for (int i = end-1; i > minSegment; i--)     // remove old infos & add new
-            sourceSegments.remove(i);
+        if (doMerge) {
+          if (sourceSegments == ramSegmentInfos) {
+            segmentInfos.addElement(newSegment);
+          } else {
+            for (int i = end-1; i > minSegment; i--)     // remove old infos & add new
+              sourceSegments.remove(i);
 
-          segmentInfos.set(minSegment, newSegment);
+            segmentInfos.set(minSegment, newSegment);
+          }
         }
-       }
 
         if (sourceSegments == ramSegmentInfos) {
           // Should not be necessary: no prior commit should
           // have left pending files, so just defensive:
           deleter.clearPendingFiles();
-          doAfterFlushRamSegments(mergeFlag);
+          maybeApplyDeletes(doMerge);
+          doAfterFlush();
         }
 
         if (!inTransaction) {
@@ -101,7 +104,7 @@
 
           // Must rollback so our state matches index:
 
-          if (sourceSegments == ramSegmentInfos && onlyRamDocsToFlush()) {
+          if (sourceSegments == ramSegmentInfos && 0 == bufferedDeleteTerms.size()) {
             // Simple case: newSegment may or may not have
             // been added to the end of our segment infos,
             // so just check & remove if so:
@@ -131,21 +134,21 @@
       }
     } finally {
       // close readers before we attempt to delete now-obsolete segments
-      if (mergeFlag) merger.closeReaders();
+      if (doMerge) merger.closeReaders();
     }
 
     if (!inTransaction) {
       // Attempt to delete all files we just obsoleted:
       deleter.deleteFile(segmentsInfosFileName);    // delete old segments_N file
       deleter.deleteSegments(segmentsToDelete);     // delete now-unused segments
-      // including the old del files
+      // Includes the old del files
       deleter.commitPendingFiles();
     } else {
       deleter.addPendingFile(segmentsInfosFileName);    // delete old segments_N file
       deleter.deleteSegments(segmentsToDelete, protectedSegments);     // delete now-unused segments
     }
 
-    if (useCompoundFile && mergeFlag) {
+    if (useCompoundFile && doMerge) {
 
       segmentsInfosFileName = nextSegmentsFileName;
       nextSegmentsFileName = segmentInfos.getNextSegmentFileName();

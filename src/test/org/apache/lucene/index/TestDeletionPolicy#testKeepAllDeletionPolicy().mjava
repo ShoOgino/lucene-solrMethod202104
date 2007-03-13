@@ -1,0 +1,61 @@
+  /*
+   * Test a silly deletion policy that keeps all commits around.
+   */
+  public void testKeepAllDeletionPolicy() throws IOException {
+
+    for(int pass=0;pass<4;pass++) {
+
+      boolean autoCommit = pass < 2;
+      boolean useCompoundFile = (pass % 2) > 0;
+
+      KeepAllDeletionPolicy policy = new KeepAllDeletionPolicy();
+
+      Directory dir = new RAMDirectory();
+
+      IndexWriter writer = new IndexWriter(dir, autoCommit, new WhitespaceAnalyzer(), true, policy);
+      writer.setUseCompoundFile(useCompoundFile);
+      for(int i=0;i<107;i++) {
+        addDoc(writer);
+      }
+      writer.close();
+
+      writer = new IndexWriter(dir, autoCommit, new WhitespaceAnalyzer(), false, policy);
+      writer.setUseCompoundFile(useCompoundFile);
+      writer.optimize();
+      writer.close();
+
+      assertEquals(2, policy.numOnInit);
+      if (autoCommit) {
+        assertTrue(policy.numOnCommit > 2);
+      } else {
+        // If we are not auto committing then there should
+        // be exactly 2 commits (one per close above):
+        assertEquals(2, policy.numOnCommit);
+      }
+
+      // Simplistic check: just verify all segments_N's still
+      // exist, and, I can open a reader on each:
+      long gen = SegmentInfos.getCurrentSegmentGeneration(dir);
+      while(gen > 0) {
+        IndexReader reader = IndexReader.open(dir);
+        reader.close();
+        dir.deleteFile(IndexFileNames.fileNameFromGeneration(IndexFileNames.SEGMENTS, "", gen));
+        gen--;
+
+        if (gen > 0) {
+          // Now that we've removed a commit point, which
+          // should have orphan'd at least one index file.
+          // Open & close a writer and assert that it
+          // actually removed something:
+          int preCount = dir.list().length;
+          writer = new IndexWriter(dir, false, new WhitespaceAnalyzer(), false, policy);
+          writer.close();
+          int postCount = dir.list().length;
+          assertTrue(postCount < preCount);
+        }
+      }
+
+      dir.close();
+    }
+  }
+

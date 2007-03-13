@@ -11,14 +11,12 @@
     final String mergedName = newSegmentName();
     SegmentMerger merger = null;
 
-    final Vector segmentsToDelete = new Vector();
-
-    String segmentsInfosFileName = segmentInfos.getCurrentSegmentFileName();
-    String nextSegmentsFileName = segmentInfos.getNextSegmentFileName();
+    final List ramSegmentsToDelete = new ArrayList();
 
     SegmentInfo newSegment = null;
 
     int mergedDocCount = 0;
+    boolean anyDeletes = (bufferedDeleteTerms.size() != 0);
 
     // This is try/finally to make sure merger's readers are closed:
     try {
@@ -33,9 +31,9 @@
             infoStream.print(" " + si.name + " (" + si.docCount + " docs)");
           IndexReader reader = SegmentReader.get(si); // no need to set deleter (yet)
           merger.add(reader);
-          if ((reader.directory() == this.directory) || // if we own the directory
-              (reader.directory() == this.ramDirectory))
-            segmentsToDelete.addElement(reader);   // queue segment for deletion
+          if (reader.directory() == this.ramDirectory) {
+            ramSegmentsToDelete.add(si);
+          }
         }
       }
 
@@ -56,9 +54,8 @@
           newSegment = new SegmentInfo(mergedName, mergedDocCount,
                                        directory, false, true);
         }
-
-        if (!inTransaction
-            && (sourceSegments != ramSegmentInfos || bufferedDeleteTerms.size() > 0)) {
+        
+        if (sourceSegments != ramSegmentInfos || anyDeletes) {
           // Now save the SegmentInfo instances that
           // we are replacing:
           rollback = (SegmentInfos) segmentInfos.clone();
@@ -76,18 +73,11 @@
         }
 
         if (sourceSegments == ramSegmentInfos) {
-          // Should not be necessary: no prior commit should
-          // have left pending files, so just defensive:
-          deleter.clearPendingFiles();
           maybeApplyDeletes(doMerge);
           doAfterFlush();
         }
-
-        if (!inTransaction) {
-          segmentInfos.write(directory);     // commit before deleting
-        } else {
-          commitPending = true;
-        }
+        
+        checkpoint();
 
         success = true;
 
@@ -100,11 +90,10 @@
           if (sourceSegments == ramSegmentInfos) {
             ramSegmentInfos.removeAllElements();
           }
-        } else if (!inTransaction) {  
+        } else {
 
           // Must rollback so our state matches index:
-
-          if (sourceSegments == ramSegmentInfos && 0 == bufferedDeleteTerms.size()) {
+          if (sourceSegments == ramSegmentInfos && !anyDeletes) {
             // Simple case: newSegment may or may not have
             // been added to the end of our segment infos,
             // so just check & remove if so:
@@ -122,14 +111,8 @@
             segmentInfos.addAll(rollback);
           }
 
-          // Erase any pending files that we were going to delete:
-          // i.e. old del files added by SegmentReader.doCommit() 
-          deleter.clearPendingFiles();
-
-          // Delete any partially created files:
-          deleter.deleteFile(nextSegmentsFileName);
-          deleter.findDeletableFiles();
-          deleter.deleteFiles();
+          // Delete any partially created and now unreferenced files:
+          deleter.refresh();
         }
       }
     } finally {
@@ -137,53 +120,33 @@
       if (doMerge) merger.closeReaders();
     }
 
-    if (!inTransaction) {
-      // Attempt to delete all files we just obsoleted:
-      deleter.deleteFile(segmentsInfosFileName);    // delete old segments_N file
-      deleter.deleteSegments(segmentsToDelete);     // delete now-unused segments
-      // Includes the old del files
-      deleter.commitPendingFiles();
-    } else {
-      deleter.addPendingFile(segmentsInfosFileName);    // delete old segments_N file
-      deleter.deleteSegments(segmentsToDelete, protectedSegments);     // delete now-unused segments
-    }
+    // Delete the RAM segments
+    deleter.deleteDirect(ramDirectory, ramSegmentsToDelete);
+
+    // Give deleter a chance to remove files now.
+    deleter.checkpoint(segmentInfos, autoCommit);
 
     if (useCompoundFile && doMerge) {
-
-      segmentsInfosFileName = nextSegmentsFileName;
-      nextSegmentsFileName = segmentInfos.getNextSegmentFileName();
-
-      Vector filesToDelete;
 
       boolean success = false;
 
       try {
 
-        filesToDelete = merger.createCompoundFile(mergedName + ".cfs");
+        merger.createCompoundFile(mergedName + ".cfs");
         newSegment.setUseCompoundFile(true);
-        if (!inTransaction) {
-          segmentInfos.write(directory);     // commit again so readers know we've switched this segment to a compound file
-        }
+        checkpoint();
         success = true;
 
       } finally {
-        if (!success && !inTransaction) {  
+        if (!success) {  
           // Must rollback:
           newSegment.setUseCompoundFile(false);
-          deleter.deleteFile(mergedName + ".cfs");
-          deleter.deleteFile(nextSegmentsFileName);
+          deleter.refresh();
         }
       }
-
-      if (!inTransaction) {
-        deleter.deleteFile(segmentsInfosFileName);  // delete old segments_N file
-      }
-
-      // We can delete these segments whether or not we are
-      // in a transaction because we had just written them
-      // above so they can't need protection by the
-      // transaction:
-      deleter.deleteFiles(filesToDelete);  // delete now-unused segments
+      
+      // Give deleter a chance to remove files now.
+      deleter.checkpoint(segmentInfos, autoCommit);
     }
 
     return mergedDocCount;

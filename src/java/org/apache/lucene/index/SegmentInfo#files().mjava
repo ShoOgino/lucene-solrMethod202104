@@ -1,0 +1,79 @@
+  public List files() throws IOException {
+
+    if (files != null) {
+      // Already cached:
+      return files;
+    }
+    
+    files = new ArrayList();
+    
+    boolean useCompoundFile = getUseCompoundFile();
+
+    if (useCompoundFile) {
+      files.add(name + "." + IndexFileNames.COMPOUND_FILE_EXTENSION);
+    } else {
+      for (int i = 0; i < IndexFileNames.INDEX_EXTENSIONS_IN_COMPOUND_FILE.length; i++) {
+        String ext = IndexFileNames.INDEX_EXTENSIONS_IN_COMPOUND_FILE[i];
+        String fileName = name + "." + ext;
+        if (dir.fileExists(fileName)) {
+          files.add(fileName);
+        }
+      }
+    }
+
+    String delFileName = IndexFileNames.fileNameFromGeneration(name, "." + IndexFileNames.DELETES_EXTENSION, delGen);
+    if (delFileName != null && (delGen > 0 || dir.fileExists(delFileName))) {
+      files.add(delFileName);
+    }
+
+    // Careful logic for norms files:
+    if (normGen != null) {
+      for(int i=0;i<normGen.length;i++) {
+        long gen = normGen[i];
+        if (gen > 0) {
+          // Definitely a separate norm file, with generation:
+          files.add(IndexFileNames.fileNameFromGeneration(name, "." + IndexFileNames.SEPARATE_NORMS_EXTENSION + i, gen));
+        } else if (-1 == gen) {
+          // No separate norms but maybe non-separate norms
+          // in the non compound file case:
+          if (!hasSingleNormFile && !useCompoundFile) {
+            String fileName = name + "." + IndexFileNames.SINGLE_NORMS_EXTENSION + i;
+            if (dir.fileExists(fileName)) {
+              files.add(fileName);
+            }
+          }
+        } else if (0 == gen) {
+          // Pre-2.1: we have to check file existence
+          String fileName = null;
+          if (useCompoundFile) {
+            fileName = name + "." + IndexFileNames.SEPARATE_NORMS_EXTENSION + i;
+          } else if (!hasSingleNormFile) {
+            fileName = name + "." + IndexFileNames.SINGLE_NORMS_EXTENSION + i;
+          }
+          if (fileName != null && dir.fileExists(fileName)) {
+            files.add(fileName);
+          }
+        }
+      }
+    } else if (preLockless || (!hasSingleNormFile && !useCompoundFile)) {
+      // Pre-2.1: we have to scan the dir to find all
+      // matching _X.sN/_X.fN files for our segment:
+      String prefix;
+      if (useCompoundFile)
+        prefix = name + "." + IndexFileNames.SEPARATE_NORMS_EXTENSION;
+      else
+        prefix = name + "." + IndexFileNames.SINGLE_NORMS_EXTENSION;
+      int prefixLength = prefix.length();
+      String[] allFiles = dir.list();
+      if (allFiles == null)
+        throw new IOException("cannot read directory " + dir + ": list() returned null");
+      for(int i=0;i<allFiles.length;i++) {
+        String fileName = allFiles[i];
+        if (fileName.length() > prefixLength && Character.isDigit(fileName.charAt(prefixLength)) && fileName.startsWith(prefix)) {
+          files.add(fileName);
+        }
+      }
+    }
+    return files;
+  }
+

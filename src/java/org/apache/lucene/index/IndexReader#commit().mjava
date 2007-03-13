@@ -9,19 +9,13 @@
    */
   protected final synchronized void commit() throws IOException {
     if(hasChanges){
-      if (deleter == null) {
-        // In the MultiReader case, we share this deleter
-        // across all SegmentReaders:
-        setDeleter(new IndexFileDeleter(segmentInfos, directory));
-      }
       if(directoryOwner){
 
-        // Should not be necessary: no prior commit should
-        // have left pending files, so just defensive:
-        deleter.clearPendingFiles();
-
-        String oldInfoFileName = segmentInfos.getCurrentSegmentFileName();
-        String nextSegmentsFileName = segmentInfos.getNextSegmentFileName();
+        // Default deleter (for backwards compatibility) is
+        // KeepOnlyLastCommitDeleter:
+        IndexFileDeleter deleter =  new IndexFileDeleter(directory,
+                                                         deletionPolicy == null ? new KeepOnlyLastCommitDeletionPolicy() : deletionPolicy,
+                                                         segmentInfos, null);
 
         // Checkpoint the state we are about to change, in
         // case we have to roll back:
@@ -43,24 +37,16 @@
             // actually in the index):
             rollbackCommit();
 
-            // Erase any pending files that we were going to delete:
-            deleter.clearPendingFiles();
-
-            // Remove possibly partially written next
-            // segments file:
-            deleter.deleteFile(nextSegmentsFileName);
-
             // Recompute deletable files & remove them (so
             // partially written .del files, etc, are
             // removed):
-            deleter.findDeletableFiles();
-            deleter.deleteFiles();
+            deleter.refresh();
           }
         }
 
-        // Attempt to delete all files we just obsoleted:
-        deleter.deleteFile(oldInfoFileName);
-        deleter.commitPendingFiles();
+        // Have the deleter remove any now unreferenced
+        // files due to this commit:
+        deleter.checkpoint(segmentInfos, true);
 
         if (writeLock != null) {
           writeLock.release();  // release write lock

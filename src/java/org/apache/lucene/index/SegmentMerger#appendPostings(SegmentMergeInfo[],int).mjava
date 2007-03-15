@@ -13,6 +13,8 @@
     int lastDoc = 0;
     int df = 0;					  // number of docs w/ term
     resetSkip();
+    boolean storePayloads = fieldInfos.fieldInfo(smis[0].term.field).storePayloads;
+    int lastPayloadLength = -1;   // ensures that we write the first length
     for (int i = 0; i < n; i++) {
       SegmentMergeInfo smi = smis[i];
       TermPositions postings = smi.getPositions();
@@ -32,7 +34,7 @@
         df++;
 
         if ((df % skipInterval) == 0) {
-          bufferSkip(lastDoc);
+          bufferSkip(lastDoc, storePayloads, lastPayloadLength);
         }
 
         int docCode = (doc - lastDoc) << 1;	  // use low bit to flag freq=1
@@ -45,11 +47,33 @@
           freqOutput.writeVInt(docCode);	  // write doc
           freqOutput.writeVInt(freq);		  // write frequency in doc
         }
-
+        
+        /** See {@link DocumentWriter#writePostings(Posting[], String) for 
+         *  documentation about the encoding of positions and payloads
+         */
         int lastPosition = 0;			  // write position deltas
         for (int j = 0; j < freq; j++) {
           int position = postings.nextPosition();
-          proxOutput.writeVInt(position - lastPosition);
+          int delta = position - lastPosition;
+          if (storePayloads) {
+            int payloadLength = postings.getPayloadLength();
+            if (payloadLength == lastPayloadLength) {
+              proxOutput.writeVInt(delta * 2);
+            } else {
+              proxOutput.writeVInt(delta * 2 + 1);
+              proxOutput.writeVInt(payloadLength);
+              lastPayloadLength = payloadLength;
+            }
+            if (payloadLength > 0) {
+              if (payloadBuffer == null || payloadBuffer.length < payloadLength) {
+                payloadBuffer = new byte[payloadLength];
+              }
+              postings.getPayload(payloadBuffer, 0);
+              proxOutput.writeBytes(payloadBuffer, 0, payloadLength);
+            }
+          } else {
+            proxOutput.writeVInt(delta);
+          }
           lastPosition = position;
         }
       }

@@ -11,10 +11,31 @@
                                 termIndexInterval);
       TermInfo ti = new TermInfo();
       String currentField = null;
-
+      boolean currentFieldHasPayloads = false;
+      
       for (int i = 0; i < postings.length; i++) {
         Posting posting = postings[i];
 
+        // check to see if we switched to a new field
+        String termField = posting.term.field();
+        if (currentField != termField) {
+          // changing field - see if there is something to save
+          currentField = termField;
+          FieldInfo fi = fieldInfos.fieldInfo(currentField);
+          currentFieldHasPayloads = fi.storePayloads;
+          if (fi.storeTermVector) {
+            if (termVectorWriter == null) {
+              termVectorWriter =
+                new TermVectorsWriter(directory, segment, fieldInfos);
+              termVectorWriter.openDocument();
+            }
+            termVectorWriter.openField(currentField);
+
+          } else if (termVectorWriter != null) {
+            termVectorWriter.closeField();
+          }
+        }
+        
         // add an entry to the dictionary with pointers to prox and freq files
         ti.set(1, freq.getFilePointer(), prox.getFilePointer(), -1);
         tis.add(posting.term, ti);
@@ -30,28 +51,62 @@
 
         int lastPosition = 0;			  // write positions
         int[] positions = posting.positions;
+        Payload[] payloads = posting.payloads;
+        int lastPayloadLength = -1;
+        
+        
+        // The following encoding is being used for positions and payloads:
+        // Case 1: current field does not store payloads
+        //           Positions     -> <PositionDelta>^freq
+        //           PositionDelta -> VInt
+        //         The PositionDelta is the difference between the current
+        //         and the previous position
+        // Case 2: current field stores payloads
+        //           Positions     -> <PositionDelta, Payload>^freq
+        //           Payload       ->  <PayloadLength?, PayloadData>
+        //           PositionDelta -> VInt
+        //           PayloadLength -> VInt
+        //           PayloadData   -> byte^PayloadLength
+        //         In this case PositionDelta/2 is the difference between
+        //         the current and the previous position. If PositionDelta
+        //         is odd, then a PayloadLength encoded as VInt follows,
+        //         if PositionDelta is even, then it is assumed that the
+        //         length of the current Payload equals the length of the
+        //         previous Payload.        
         for (int j = 0; j < postingFreq; j++) {		  // use delta-encoding
           int position = positions[j];
-          prox.writeVInt(position - lastPosition);
-          lastPosition = position;
-        }
-        // check to see if we switched to a new field
-        String termField = posting.term.field();
-        if (currentField != termField) {
-          // changing field - see if there is something to save
-          currentField = termField;
-          FieldInfo fi = fieldInfos.fieldInfo(currentField);
-          if (fi.storeTermVector) {
-            if (termVectorWriter == null) {
-              termVectorWriter =
-                new TermVectorsWriter(directory, segment, fieldInfos);
-              termVectorWriter.openDocument();
+          int delta = position - lastPosition;
+          if (currentFieldHasPayloads) {
+            int payloadLength = 0;
+            Payload payload = null;
+            if (payloads != null) {
+              payload = payloads[j];
+              if (payload != null) {
+                payloadLength = payload.length;
+              }
             }
-            termVectorWriter.openField(currentField);
-
-          } else if (termVectorWriter != null) {
-            termVectorWriter.closeField();
+            if (payloadLength == lastPayloadLength) {
+            	// the length of the current payload equals the length
+            	// of the previous one. So we do not have to store the length
+            	// again and we only shift the position delta by one bit
+              prox.writeVInt(delta * 2);
+            } else {
+            	// the length of the current payload is different from the
+            	// previous one. We shift the position delta, set the lowest
+            	// bit and store the current payload length as VInt.
+              prox.writeVInt(delta * 2 + 1);
+              prox.writeVInt(payloadLength);
+              lastPayloadLength = payloadLength;
+            }
+            if (payloadLength > 0) {
+            	// write current payload
+              prox.writeBytes(payload.data, payload.offset, payload.length);
+            }
+          } else {
+          	// field does not store payloads, just write position delta as VInt
+            prox.writeVInt(delta);
           }
+          lastPosition = position;
         }
         if (termVectorWriter != null && termVectorWriter.isFieldOpen()) {
             termVectorWriter.addTerm(posting.term.text(), postingFreq, posting.positions, posting.offsets);

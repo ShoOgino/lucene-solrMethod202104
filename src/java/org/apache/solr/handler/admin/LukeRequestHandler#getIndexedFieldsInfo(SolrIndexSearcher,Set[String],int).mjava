@@ -6,7 +6,6 @@
     Query matchAllDocs = new MatchAllDocsQuery();
     SolrQueryParser qp = searcher.getSchema().getSolrQueryParser(null);
 
-    int filterCacheSize = SolrConfig.config.getInt( "query/filterCache/@size", -1 );
     IndexReader reader = searcher.getReader();
     IndexSchema schema = searcher.getSchema();
     
@@ -16,7 +15,7 @@
     Collection<String> fieldNames = reader.getFieldNames(IndexReader.FieldOption.ALL);
     for (String fieldName : fieldNames) {
       if( fields != null && !fields.contains( fieldName ) ) {
-        continue; // if a field is specified, only return one
+        continue; // if a field is specified, only them
       }
       
       SimpleOrderedMap<Object> f = new SimpleOrderedMap<Object>();
@@ -29,32 +28,36 @@
       
       Query q = qp.parse( fieldName+":[* TO *]" ); 
       int docCount = searcher.numDocs( q, matchAllDocs );
-// TODO?  Is there a way to get the Fieldable infomation for this field?
-// The following approach works fine for stored fields, but does not work for non-stored fields
-//      if( docCount > 0 ) {
-//        // Find a document with this field
-//        DocList ds = searcher.getDocList( q, (Query)null, (Sort)null, 0, 1 );
-//        try {
-//          Document doc = searcher.doc( ds.iterator().next() );
-//          Fieldable fld = doc.getFieldable( fieldName );
-//          f.add( "index", getFieldFlags( fld ) );
-//        }
-//        catch( Exception ex ) {
-//          log.warning( "error reading field: "+fieldName );
-//        }
-//        // Find one document so we can get the fieldable
-//      }
+      if( docCount > 0 ) {
+        // Find a document with this field
+        DocList ds = searcher.getDocList( q, (Query)null, (Sort)null, 0, 1 );
+        try {
+          Document doc = searcher.doc( ds.iterator().next() );
+          Fieldable fld = doc.getFieldable( fieldName );
+          if( fld != null ) {
+            f.add( "index", getFieldFlags( fld ) );
+          }
+          else {
+            // it is a non-stored field...
+            f.add( "index", "(unstored field)" );
+          }
+        }
+        catch( Exception ex ) {
+          log.warning( "error reading field: "+fieldName );
+        }
+        // Find one document so we can get the fieldable
+      }
       f.add( "docs", docCount );
       
       TopTermQueue topTerms = ttinfo.get( fieldName );
       if( topTerms != null ) {
         f.add( "distinct", topTerms.distinctTerms );
         
-        // TODO? is this the correct logic?
-        f.add( "cacheableFaceting", topTerms.distinctTerms < filterCacheSize );
-        
-        // Only show them if we specify something
+        // Include top terms
         f.add( "topTerms", topTerms.toNamedList( searcher.getSchema() ) );
+
+        // Add a histogram
+        f.add( "histogram", topTerms.histogram.toNamedList() );
       }
       
       // Add the field

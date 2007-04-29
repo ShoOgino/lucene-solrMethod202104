@@ -58,6 +58,8 @@
       }
 
 
+      // Hang on to the fields that say if they are required -- this lets us set a reasonable default for the unique key
+      Map<String,Boolean> explicitRequiredProp = new HashMap<String, Boolean>();
       ArrayList<DynamicField> dFields = new ArrayList<DynamicField>();
       expression = "/schema/fields/field | /schema/fields/dynamicField";
       nodes = (NodeList) xpath.evaluate(expression, document, XPathConstants.NODESET);
@@ -78,6 +80,9 @@
         }
 
         Map<String,String> args = DOMUtil.toMapExcept(attrs, "name", "type");
+        if( args.get( "required" ) != null ) {
+          explicitRequiredProp.put( name, Boolean.valueOf( args.get( "required" ) ) );
+        }
 
         SchemaField f = SchemaField.create(name,ft,args);
 
@@ -86,7 +91,11 @@
           log.fine("field defined: " + f);
           if( f.getDefaultValue() != null ) {
             log.fine(name+" contains default value: " + f.getDefaultValue());
-        	  fieldsWithDefaultValue.add( f );
+            fieldsWithDefaultValue.add( f );
+          }
+          if (f.isRequired()) {
+            log.fine(name+" is required in this schema");
+            requiredFields.add(f);
           }
         } else if (node.getNodeName().equals("dynamicField")) {
           dFields.add(new DynamicField(f));
@@ -96,6 +105,11 @@
           throw new RuntimeException("Unknown field type");
         }
       }
+      
+    //fields with default values are by definition required
+    //add them to required fields, and we only have to loop once
+    // in DocumentBuilder.getDoc()
+    requiredFields.addAll(getFieldsWithDefaultValue());
 
     // OK, now sort the dynamic fields largest to smallest size so we don't get
     // any false matches.  We want to act like a compiler tool and try and match
@@ -143,6 +157,12 @@
       uniqueKeyFieldName=uniqueKeyField.getName();
       uniqueKeyFieldType=uniqueKeyField.getType();
       log.info("unique key field: "+uniqueKeyFieldName);
+      
+      // Unless the uniqueKeyField is marked 'required=false' then make sure it exists
+      if( Boolean.FALSE != explicitRequiredProp.get( uniqueKeyFieldName ) ) {
+        uniqueKeyField.required = true;
+        requiredFields.add(uniqueKeyField);
+      }
     }
 
     /////////////// parse out copyField commands ///////////////

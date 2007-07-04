@@ -1,0 +1,211 @@
+      /** This is the hotspot of indexing: it's called once
+       *  for every term of every document.  Its job is to *
+       *  update the postings byte stream (Postings hash) *
+       *  based on the occurence of a single term. */
+      private void addPosition() {
+
+        final Payload payload = token.getPayload();
+
+        final String tokenString;
+        final int tokenTextLen;
+        final int tokenTextOffset;
+
+        // Get the text of this term.  Term can either
+        // provide a String token or offset into a char[]
+        // array
+        final char[] tokenText = token.termBuffer();
+
+        int code = 0;
+        int code2 = 0;
+
+        if (tokenText == null) {
+
+          // Fallback to String token
+          tokenString = token.termText();
+          tokenTextLen = tokenString.length();
+          tokenTextOffset = 0;
+
+          // Compute hashcode.
+          int downto = tokenTextLen;
+          while (downto > 0)
+            code = (code*31) + tokenString.charAt(--downto);
+          
+          // System.out.println("  addPosition: field=" + fieldInfo.name + " string=" + tokenString + " pos=" + position + " offsetStart=" + (offset+token.startOffset()) + " offsetEnd=" + (offset+token.endOffset()) + " docID=" + docID + " doPos=" + doVectorPositions + " doOffset=" + doVectorOffsets);
+
+        } else {
+          tokenString = null;
+          tokenTextLen = token.termBufferLength();
+          tokenTextOffset = token.termBufferOffset();
+
+          // Compute hashcode
+          int downto = tokenTextLen+tokenTextOffset;
+          while (downto > tokenTextOffset)
+            code = (code*31) + tokenText[--downto];
+
+          // System.out.println("  addPosition: buffer=" + new String(tokenText, tokenTextOffset, tokenTextLen) + " pos=" + position + " offsetStart=" + (offset+token.startOffset()) + " offsetEnd=" + (offset + token.endOffset()) + " docID=" + docID + " doPos=" + doVectorPositions + " doOffset=" + doVectorOffsets);
+        }
+
+        int hashPos = code & postingsHashMask;
+
+        // Locate Posting in hash
+        p = postingsHash[hashPos];
+
+        if (p != null && !postingEquals(tokenString, tokenText, tokenTextLen, tokenTextOffset)) {
+          // Conflict: keep searching different locations in
+          // the hash table.
+          final int inc = code*1347|1;
+          do {
+            code += inc;
+            hashPos = code & postingsHashMask;
+            p = postingsHash[hashPos];
+          } while (p != null && !postingEquals(tokenString, tokenText, tokenTextLen, tokenTextOffset));
+        }
+        
+        final int proxCode;
+
+        if (p != null) {       // term seen since last flush
+
+          if (docID != p.lastDocID) { // term not yet seen in this doc
+            
+            // System.out.println("    seen before (new docID=" + docID + ") freqUpto=" + p.freqUpto +" proxUpto=" + p.proxUpto);
+
+            assert p.docFreq > 0;
+
+            // Now that we know doc freq for previous doc,
+            // write it & lastDocCode
+            freqUpto = p.freqUpto & BYTE_BLOCK_MASK;
+            freq = postingsPool.buffers[p.freqUpto >> BYTE_BLOCK_SHIFT];
+            if (1 == p.docFreq)
+              writeFreqVInt(p.lastDocCode|1);
+            else {
+              writeFreqVInt(p.lastDocCode);
+              writeFreqVInt(p.docFreq);
+            }
+            p.freqUpto = freqUpto + (p.freqUpto & BYTE_BLOCK_NOT_MASK);
+
+            if (doVectors) {
+              vector = addNewVector();
+              if (doVectorOffsets) {
+                offsetStartCode = offsetStart = offset + token.startOffset();
+                offsetEnd = offset + token.endOffset();
+              }
+            }
+
+            proxCode = position;
+
+            p.docFreq = 1;
+
+            // Store code so we can write this after we're
+            // done with this new doc
+            p.lastDocCode = (docID-p.lastDocID) << 1;
+            p.lastDocID = docID;
+
+          } else {                                // term already seen in this doc
+            // System.out.println("    seen before (same docID=" + docID + ") proxUpto=" + p.proxUpto);
+            p.docFreq++;
+
+            proxCode = position-p.lastPosition;
+
+            if (doVectors) {
+              vector = p.vector;
+              if (vector == null)
+                vector = addNewVector();
+              if (doVectorOffsets) {
+                offsetStart = offset + token.startOffset();
+                offsetEnd = offset + token.endOffset();
+                offsetStartCode = offsetStart-vector.lastOffset;
+              }
+            }
+          }
+        } else {					  // term not seen before
+          // System.out.println("    never seen docID=" + docID);
+
+          // Refill?
+          if (0 == postingsFreeCount) {
+            postingsFreeCount = postingsFreeList.length;
+            getPostings(postingsFreeList);
+          }
+
+          // Pull next free Posting from free list
+          p = postingsFreeList[--postingsFreeCount];
+
+          final int textLen1 = 1+tokenTextLen;
+          if (textLen1 + charPool.byteUpto > CHAR_BLOCK_SIZE)
+            charPool.nextBuffer();
+          final char[] text = charPool.buffer;
+          final int textUpto = charPool.byteUpto;
+          p.textStart = textUpto + charPool.byteOffset;
+          charPool.byteUpto += textLen1;
+
+          if (tokenString == null)
+            System.arraycopy(tokenText, tokenTextOffset, text, textUpto, tokenTextLen);
+          else
+            tokenString.getChars(0, tokenTextLen, text, textUpto);
+
+          text[textUpto+tokenTextLen] = 0xffff;
+          
+          assert postingsHash[hashPos] == null;
+
+          postingsHash[hashPos] = p;
+          numPostings++;
+
+          if (numPostings == postingsHashHalfSize)
+            rehashPostings(2*postingsHashSize);
+
+          // Init first slice for freq & prox streams
+          final int firstSize = levelSizeArray[0];
+
+          final int upto1 = postingsPool.newSlice(firstSize);
+          p.freqStart = p.freqUpto = postingsPool.byteOffset + upto1;
+
+          final int upto2 = postingsPool.newSlice(firstSize);
+          p.proxStart = p.proxUpto = postingsPool.byteOffset + upto2;
+
+          p.lastDocCode = docID << 1;
+          p.lastDocID = docID;
+          p.docFreq = 1;
+
+          if (doVectors) {
+            vector = addNewVector();
+            if (doVectorOffsets) {
+              offsetStart = offsetStartCode = offset + token.startOffset();
+              offsetEnd = offset + token.endOffset();
+            }
+          }
+
+          proxCode = position;
+        }
+
+        proxUpto = p.proxUpto & BYTE_BLOCK_MASK;
+        prox = postingsPool.buffers[p.proxUpto >> BYTE_BLOCK_SHIFT];
+        assert prox != null;
+
+        if (payload != null && payload.length > 0) {
+          writeProxVInt((proxCode<<1)|1);
+          writeProxVInt(payload.length);
+          writeProxBytes(payload.data, payload.offset, payload.length);
+          fieldInfo.storePayloads = true;
+        } else
+          writeProxVInt(proxCode<<1);
+
+        p.proxUpto = proxUpto + (p.proxUpto & BYTE_BLOCK_NOT_MASK);
+
+        p.lastPosition = position++;
+
+        if (doVectorPositions) {
+          posUpto = vector.posUpto & BYTE_BLOCK_MASK;
+          pos = vectorsPool.buffers[vector.posUpto >> BYTE_BLOCK_SHIFT];
+          writePosVInt(proxCode);
+          vector.posUpto = posUpto + (vector.posUpto & BYTE_BLOCK_NOT_MASK);
+        }
+
+        if (doVectorOffsets) {
+          offsetUpto = vector.offsetUpto & BYTE_BLOCK_MASK;
+          offsets = vectorsPool.buffers[vector.offsetUpto >> BYTE_BLOCK_SHIFT];
+          writeOffsetVInt(offsetStartCode);
+          writeOffsetVInt(offsetEnd-offsetStart);
+          vector.lastOffset = offsetEnd;
+          vector.offsetUpto = offsetUpto + (vector.offsetUpto & BYTE_BLOCK_NOT_MASK);
+        }
+      }
+

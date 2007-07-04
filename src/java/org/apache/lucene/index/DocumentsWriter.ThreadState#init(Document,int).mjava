@@ -1,0 +1,163 @@
+    /** Initializes shared state for this new document */
+    void init(Document doc, int docID) throws IOException {
+
+      this.docID = docID;
+      docBoost = doc.getBoost();
+      numStoredFields = 0;
+      numFieldData = 0;
+      numVectorFields = 0;
+
+      List docFields = doc.getFields();
+      final int numDocFields = docFields.size();
+      boolean docHasVectors = false;
+
+      // Absorb any new fields first seen in this document.
+      // Also absorb any changes to fields we had already
+      // seen before (eg suddenly turning on norms or
+      // vectors, etc.):
+
+      for(int i=0;i<numDocFields;i++) {
+        Fieldable field = (Fieldable) docFields.get(i);
+
+        FieldInfo fi = fieldInfos.add(field.name(), field.isIndexed(), field.isTermVectorStored(),
+                                      field.isStorePositionWithTermVector(), field.isStoreOffsetWithTermVector(),
+                                      field.getOmitNorms(), false);
+        numStoredFields += field.isStored() ? 1:0;
+        if (fi.isIndexed && !fi.omitNorms) {
+          // Maybe grow our buffered norms
+          if (norms.length <= fi.number) {
+            int newSize = (int) ((1+fi.number)*1.25);
+            BufferedNorms[] newNorms = new BufferedNorms[newSize];
+            System.arraycopy(norms, 0, newNorms, 0, norms.length);
+            norms = newNorms;
+          }
+          
+          if (norms[fi.number] == null)
+            norms[fi.number] = new BufferedNorms();
+
+          hasNorms = true;
+        }
+
+        // Make sure we have a FieldData allocated
+        int hashPos = fi.name.hashCode() & fieldDataHashMask;
+        FieldData fp = fieldDataHash[hashPos];
+        while(fp != null && !fp.fieldInfo.name.equals(fi.name))
+          fp = fp.next;
+
+        if (fp == null) {
+
+          fp = new FieldData(fi);
+          fp.next = fieldDataHash[hashPos];
+          fieldDataHash[hashPos] = fp;
+
+          if (numAllFieldData == allFieldDataArray.length) {
+            int newSize = (int) (allFieldDataArray.length*1.5);
+
+            FieldData newArray[] = new FieldData[newSize];
+            System.arraycopy(allFieldDataArray, 0, newArray, 0, numAllFieldData);
+            allFieldDataArray = newArray;
+
+            // Rehash
+            newSize = fieldDataHash.length*2;
+            newArray = new FieldData[newSize];
+            fieldDataHashMask = newSize-1;
+            for(int j=0;j<fieldDataHash.length;j++) {
+              FieldData fp0 = fieldDataHash[j];
+              while(fp0 != null) {
+                hashPos = fp0.fieldInfo.name.hashCode() & fieldDataHashMask;
+                FieldData nextFP0 = fp0.next;
+                fp0.next = newArray[hashPos];
+                newArray[hashPos] = fp0;
+                fp0 = nextFP0;
+              }
+            }
+            fieldDataHash = newArray;
+          }
+          allFieldDataArray[numAllFieldData++] = fp;
+        } else {
+          assert fp.fieldInfo == fi;
+        }
+
+        if (docID != fp.lastDocID) {
+
+          // First time we're seeing this field for this doc
+          fp.lastDocID = docID;
+          fp.fieldCount = 0;
+          fp.doVectors = fp.doVectorPositions = fp.doVectorOffsets = false;
+          fp.doNorms = fi.isIndexed && !fi.omitNorms;
+
+          if (numFieldData == fieldDataArray.length) {
+            int newSize = fieldDataArray.length*2;
+            FieldData newArray[] = new FieldData[newSize];
+            System.arraycopy(fieldDataArray, 0, newArray, 0, numFieldData);
+            fieldDataArray = newArray;
+
+          }
+          fieldDataArray[numFieldData++] = fp;
+        }
+
+        if (field.isTermVectorStored()) {
+          if (!fp.doVectors) {
+            if (numVectorFields++ == vectorFieldPointers.length) {
+              final int newSize = (int) (numVectorFields*1.5);
+              vectorFieldPointers = new long[newSize];
+              vectorFieldNumbers = new int[newSize];
+            }
+          }
+          fp.doVectors = true;
+          docHasVectors = true;
+
+          fp.doVectorPositions |= field.isStorePositionWithTermVector();
+          fp.doVectorOffsets |= field.isStoreOffsetWithTermVector();
+        }
+
+        if (fp.fieldCount == fp.docFields.length) {
+          Fieldable[] newArray = new Fieldable[fp.docFields.length*2];
+          System.arraycopy(fp.docFields, 0, newArray, 0, fp.docFields.length);
+          fp.docFields = newArray;
+        }
+
+        // Lazily allocate arrays for postings:
+        if (field.isIndexed() && fp.postingsHash == null)
+          fp.initPostingArrays();
+
+        fp.docFields[fp.fieldCount++] = field;
+      }
+
+      final int numFields = fieldInfos.size();
+
+      // Maybe init the local & global fieldsWriter
+      if (localFieldsWriter == null) {
+        if (fieldsWriter == null) {
+          assert docStoreSegment == null;
+          assert segment != null;
+          docStoreSegment = segment;
+          fieldsWriter = new FieldsWriter(directory, docStoreSegment, fieldInfos);
+          files = null;
+        }
+        localFieldsWriter = new FieldsWriter(null, fdtLocal, fieldInfos);
+      }
+
+      // First time we see a doc that has field(s) with
+      // stored vectors, we init our tvx writer
+      if (docHasVectors) {
+        if (tvx == null) {
+          assert docStoreSegment != null;
+          tvx = directory.createOutput(docStoreSegment + TermVectorsWriter.TVX_EXTENSION);
+          tvx.writeInt(TermVectorsWriter.FORMAT_VERSION);
+          tvd = directory.createOutput(docStoreSegment +  TermVectorsWriter.TVD_EXTENSION);
+          tvd.writeInt(TermVectorsWriter.FORMAT_VERSION);
+          tvf = directory.createOutput(docStoreSegment +  TermVectorsWriter.TVF_EXTENSION);
+          tvf.writeInt(TermVectorsWriter.FORMAT_VERSION);
+          files = null;
+
+          // We must "catch up" for all docIDs that had no
+          // vectors before this one
+          for(int i=0;i<docID;i++)
+            tvx.writeLong(0);
+        }
+
+        numVectorFields = 0;
+      }
+    }
+

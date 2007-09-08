@@ -1,0 +1,69 @@
+  /**
+   * Creates a new core and register it in the list of cores.
+   * If a core with the same name already exists, it will be stopped and replaced by this one.
+   *@param name the unique name of the core (null is accepted)
+   *@param dataDir the index directory
+   *@param config a solr config instance
+   *@param schema a solr schema instance
+   */
+  public SolrCore(String name, String dataDir, SolrConfig config, IndexSchema schema) {
+    this.name = checkName(name);
+    this.solrConfig = config;
+    // compatibility code with pre-solr215-patch in case some custom code relies on SolrConfig.config existence.
+    if (this.name == null) SolrConfig.config = config;
+    if (dataDir ==null)
+      dataDir = solrConfig.get("dataDir",solrConfig.getInstanceDir()+"data");
+
+    if (schema==null)
+      this.schema = new IndexSchema(config, "schema.xml");
+    else
+      this.schema = schema;
+    
+      this.dataDir = dataDir;
+    if (name == null)
+      this.index_path = dataDir + "/index";
+    else
+      this.index_path = dataDir  + "/index-" + name;
+
+    log.info("Opening new SolrCore at " + solrConfig.getInstanceDir() + ", dataDir="+dataDir + ", indexPath=" + index_path);
+    
+    booleanQueryMaxClauseCount();
+    this.maxWarmingSearchers = solrConfig.getInt("query/maxWarmingSearchers",Integer.MAX_VALUE);
+
+      parseListeners();
+
+      initIndex();
+      
+      initWriters();
+      
+      // Processors initialized before the handlers
+      updateProcessors = loadUpdateProcessors();
+      reqHandlers = new RequestHandlers(this);
+      reqHandlers.initHandlersFromConfig( solrConfig );
+
+      // TODO? could select the highlighter implementation
+      highlighter = new SolrHighlighter();
+    highlighter.initalize( solrConfig );
+      
+      try {
+        // Open the searcher *before* the handler so we don't end up opening
+        // one in the middle.
+        getSearcher(false,false,null);
+
+        updateHandler = createUpdateHandler(
+              solrConfig.get("updateHandler/@class", DirectUpdateHandler.class.getName())
+        );
+
+      } catch (IOException e) {
+        throw new RuntimeException(e);
+      }
+    // register this core
+    synchronized(cores) {
+      SolrCore previous = cores.get(name);
+      if (previous != null) {
+        previous.close();
+      }
+      cores.put(name, this);
+    }
+  }
+

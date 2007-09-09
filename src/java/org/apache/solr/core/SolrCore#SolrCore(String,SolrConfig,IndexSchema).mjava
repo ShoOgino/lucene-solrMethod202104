@@ -1,5 +1,62 @@
-  /** The single-core mode compatibility constructor; the core is named 'null'. */
+  /**
+   * Creates a new core and register it in the list of cores.
+   * If a core with the same name already exists, it will be stopped and replaced by this one.
+   *@param dataDir the index directory
+   *@param config a solr config instance
+   *@param schema a solr schema instance
+   */
   public SolrCore(String dataDir, SolrConfig config, IndexSchema schema) {
-    this(null, dataDir, config, schema);
+    synchronized (SolrCore.class) {
+      // this is for backward compatibility (and also the reason
+      // the sync block is needed)
+      instance = this;   // set singleton
+    
+      if (dataDir ==null) {
+        dataDir = config.get("dataDir",config.getInstanceDir()+"data");
+      }
+
+      log.info("Opening new SolrCore at " + config.getInstanceDir() + ", dataDir="+dataDir);
+
+      if (schema==null) {
+        schema = new IndexSchema(config, "schema.xml");
+      }
+
+      this.schema = schema;
+      this.dataDir = dataDir;
+      this.index_path = dataDir + "/" + "index";
+      this.solrConfig = config;
+
+      this.maxWarmingSearchers = config.getInt("query/maxWarmingSearchers",Integer.MAX_VALUE);
+
+      booleanQueryMaxClauseCount();
+  
+      parseListeners();
+  
+      initIndex();
+      
+      initWriters();
+      
+      // Processors initialized before the handlers
+      updateProcessors = loadUpdateProcessors();
+      reqHandlers = new RequestHandlers(this);
+      reqHandlers.initHandlersFromConfig( solrConfig );
+  
+      // TODO? could select the highlighter implementation
+      highlighter = new SolrHighlighter();
+      highlighter.initalize( solrConfig );
+      
+      try {
+        // Open the searcher *before* the handler so we don't end up opening
+        // one in the middle.
+        getSearcher(false,false,null);
+  
+        updateHandler = createUpdateHandler(
+          solrConfig.get("updateHandler/@class", DirectUpdateHandler.class.getName())
+        );
+      } 
+      catch (IOException e) {
+        throw new RuntimeException(e);
+      }
+    }
   }
 

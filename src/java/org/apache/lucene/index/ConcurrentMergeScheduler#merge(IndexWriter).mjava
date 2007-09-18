@@ -1,0 +1,72 @@
+  public void merge(IndexWriter writer)
+    throws CorruptIndexException, IOException {
+
+    initMergeThreadPriority();
+
+    dir = writer.getDirectory();
+
+    // First, quickly run through the newly proposed merges
+    // and add any orthogonal merges (ie a merge not
+    // involving segments already pending to be merged) to
+    // the queue.  If we are way behind on merging, many of
+    // these newly proposed merges will likely already be
+    // registered.
+
+    if (VERBOSE) {
+      message("now merge");
+      message("  index: " + writer.segString());
+    }
+
+    // Iterate, pulling from the IndexWriter's queue of
+    // pending merges, until its empty:
+    while(true) {
+
+      // TODO: we could be careful about which merges to do in
+      // the BG (eg maybe the "biggest" ones) vs FG, which
+      // merges to do first (the easiest ones?), etc.
+
+      MergePolicy.OneMerge merge = writer.getNextMerge();
+      if (merge == null) {
+        if (VERBOSE)
+          message("  no more merges pending; now return");
+        return;
+      }
+
+      // We do this w/ the primary thread to keep
+      // deterministic assignment of segment names
+      writer.mergeInit(merge);
+
+      if (VERBOSE)
+        message("  consider merge " + merge.segString(dir));
+      
+      if (merge.isExternal) {
+        if (VERBOSE)
+          message("    merge involves segments from an external directory; now run in foreground");
+      } else {
+        synchronized(this) {
+          if (mergeThreads.size() < maxThreadCount) {
+            // OK to spawn a new merge thread to handle this
+            // merge:
+            MergeThread merger = new MergeThread(writer, merge);
+            mergeThreads.add(merger);
+            if (VERBOSE)
+              message("    launch new thread [" + merger.getName() + "]");
+            try {
+              merger.setPriority(mergeThreadPriority);
+            } catch (NullPointerException npe) {
+              // Strangely, Sun's JDK 1.5 on Linux sometimes
+              // throws NPE out of here...
+            }
+            merger.start();
+            continue;
+          } else if (VERBOSE)
+            message("    too many merge threads running; run merge in foreground");
+        }
+      }
+
+      // Too many merge threads already running, so we do
+      // this in the foreground of the calling thread
+      writer.merge(merge);
+    }
+  }
+

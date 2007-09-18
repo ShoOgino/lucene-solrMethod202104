@@ -1,0 +1,52 @@
+    public void run() {
+      try {
+
+        if (VERBOSE)
+          message("  merge thread: start");
+
+        // First time through the while loop we do the merge
+        // that we were started with:
+        MergePolicy.OneMerge merge = this.merge;
+
+        while(true) {
+          writer.merge(merge);
+
+          // Subsequent times through the loop we do any new
+          // merge that writer says is necessary:
+          merge = writer.getNextMerge();
+          if (merge != null) {
+            writer.mergeInit(merge);
+            if (VERBOSE)
+              message("  merge thread: do another merge " + merge.segString(dir));
+          } else
+            break;
+        }
+
+        if (VERBOSE)
+          message("  merge thread: done");
+
+      } catch (Throwable exc) {
+        // When a merge was aborted & IndexWriter closed,
+        // it's possible to get various IOExceptions,
+        // NullPointerExceptions, AlreadyClosedExceptions:
+        merge.setException(exc);
+        writer.addMergeException(merge);
+
+        if (!merge.isAborted()) {
+          // If the merge was not aborted then the exception
+          // is real
+          exceptions.add(exc);
+          
+          if (!suppressExceptions)
+            // suppressExceptions is normally only set during
+            // testing.
+            throw new MergePolicy.MergeException(exc);
+        }
+      } finally {
+        synchronized(ConcurrentMergeScheduler.this) {
+          mergeThreads.remove(this);
+          ConcurrentMergeScheduler.this.notifyAll();
+        }
+      }
+    }
+

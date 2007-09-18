@@ -17,39 +17,9 @@
    */
   public synchronized void addIndexesNoOptimize(Directory[] dirs)
       throws CorruptIndexException, IOException {
-    // Adding indexes can be viewed as adding a sequence of segments S to
-    // a sequence of segments T. Segments in T follow the invariants but
-    // segments in S may not since they could come from multiple indexes.
-    // Here is the merge algorithm for addIndexesNoOptimize():
-    //
-    // 1 Flush ram.
-    // 2 Consider a combined sequence with segments from T followed
-    //   by segments from S (same as current addIndexes(Directory[])).
-    // 3 Assume the highest level for segments in S is h. Call
-    //   maybeMergeSegments(), but instead of starting w/ lowerBound = -1
-    //   and upperBound = maxBufferedDocs, start w/ lowerBound = -1 and
-    //   upperBound = upperBound of level h. After this, the invariants
-    //   are guaranteed except for the last < M segments whose levels <= h.
-    // 4 If the invariants hold for the last < M segments whose levels <= h,
-    //   if some of those < M segments are from S (not merged in step 3),
-    //   properly copy them over*, otherwise done.
-    //   Otherwise, simply merge those segments. If the merge results in
-    //   a segment of level <= h, done. Otherwise, it's of level h+1 and call
-    //   maybeMergeSegments() starting w/ upperBound = upperBound of level h+1.
-    //
-    // * Ideally, we want to simply copy a segment. However, directory does
-    // not support copy yet. In addition, source may use compound file or not
-    // and target may use compound file or not. So we use mergeSegments() to
-    // copy a segment, which may cause doc count to change because deleted
-    // docs are garbage collected.
-
-    // 1 flush ram
 
     ensureOpen();
     flush();
-
-    // 2 copy segment infos and find the highest level from dirs
-    int startUpperBound = docWriter.getMaxBufferedDocs();
 
     /* new merge policy
     if (startUpperBound == 0)
@@ -73,64 +43,20 @@
         for (int j = 0; j < sis.size(); j++) {
           SegmentInfo info = sis.info(j);
           segmentInfos.addElement(info); // add each info
-          
-          while (startUpperBound < info.docCount) {
-            startUpperBound *= mergeFactor; // find the highest level from dirs
-            if (startUpperBound > maxMergeDocs) {
-              // upper bound cannot exceed maxMergeDocs
-              throw new IllegalArgumentException("Upper bound cannot exceed maxMergeDocs");
-            }
-          }
         }
       }
 
-      // 3 maybe merge segments starting from the highest level from dirs
-      maybeMergeSegments(startUpperBound);
+      maybeMerge();
 
-      // get the tail segments whose levels <= h
-      int segmentCount = segmentInfos.size();
-      int numTailSegments = 0;
-      while (numTailSegments < segmentCount
-             && startUpperBound >= segmentInfos.info(segmentCount - 1 - numTailSegments).docCount) {
-        numTailSegments++;
-      }
-      if (numTailSegments == 0) {
-        success = true;
-        return;
-      }
-
-      // 4 make sure invariants hold for the tail segments whose levels <= h
-      if (checkNonDecreasingLevels(segmentCount - numTailSegments)) {
-        // identify the segments from S to be copied (not merged in 3)
-        int numSegmentsToCopy = 0;
-        while (numSegmentsToCopy < segmentCount
-               && directory != segmentInfos.info(segmentCount - 1 - numSegmentsToCopy).dir) {
-          numSegmentsToCopy++;
-        }
-        if (numSegmentsToCopy == 0) {
-          success = true;
-          return;
-        }
-
-        // copy those segments from S
-        for (int i = segmentCount - numSegmentsToCopy; i < segmentCount; i++) {
-          mergeSegments(i, i + 1);
-        }
-        if (checkNonDecreasingLevels(segmentCount - numSegmentsToCopy)) {
-          success = true;
-          return;
-        }
-      }
-
-      // invariants do not hold, simply merge those segments
-      mergeSegments(segmentCount - numTailSegments, segmentCount);
-
-      // maybe merge segments again if necessary
-      if (segmentInfos.info(segmentInfos.size() - 1).docCount > startUpperBound) {
-        maybeMergeSegments(startUpperBound * mergeFactor);
-      }
+      // If after merging there remain segments in the index
+      // that are in a different directory, just copy these
+      // over into our index.  This is necessary (before
+      // finishing the transaction) to avoid leaving the
+      // index in an unusable (inconsistent) state.
+      copyExternalSegments();
 
       success = true;
+
     } finally {
       if (success) {
         commitTransaction();

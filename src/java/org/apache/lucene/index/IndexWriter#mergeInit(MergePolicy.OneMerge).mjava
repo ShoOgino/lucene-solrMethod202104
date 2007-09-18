@@ -1,0 +1,126 @@
+  /** Does initial setup for a merge, which is fast but holds
+   *  the synchronized lock on IndexWriter instance. */
+  final synchronized void mergeInit(MergePolicy.OneMerge merge) throws IOException {
+
+    // Bind a new segment name here so even with
+    // ConcurrentMergePolicy we keep deterministic segment
+    // names.
+
+    assert merge.registerDone;
+
+    final SegmentInfos sourceSegments = merge.segments;
+    final int end = sourceSegments.size();
+    final int numSegments = segmentInfos.size();
+
+    final int start = ensureContiguousMerge(merge);
+
+    // Check whether this merge will allow us to skip
+    // merging the doc stores (stored field & vectors).
+    // This is a very substantial optimization (saves tons
+    // of IO) that can only be applied with
+    // autoCommit=false.
+
+    Directory lastDir = directory;
+    String lastDocStoreSegment = null;
+    int next = -1;
+
+    boolean mergeDocStores = false;
+    boolean doFlushDocStore = false;
+    final String currentDocStoreSegment = docWriter.getDocStoreSegment();
+
+    // Test each segment to be merged: check if we need to
+    // flush/merge doc stores
+    for (int i = 0; i < end; i++) {
+      SegmentInfo si = sourceSegments.info(i);
+
+      // If it has deletions we must merge the doc stores
+      if (si.hasDeletions())
+        mergeDocStores = true;
+
+      // If it has its own (private) doc stores we must
+      // merge the doc stores
+      if (-1 == si.getDocStoreOffset())
+        mergeDocStores = true;
+
+      // If it has a different doc store segment than
+      // previous segments, we must merge the doc stores
+      String docStoreSegment = si.getDocStoreSegment();
+      if (docStoreSegment == null)
+        mergeDocStores = true;
+      else if (lastDocStoreSegment == null)
+        lastDocStoreSegment = docStoreSegment;
+      else if (!lastDocStoreSegment.equals(docStoreSegment))
+        mergeDocStores = true;
+
+      // Segments' docScoreOffsets must be in-order,
+      // contiguous.  For the default merge policy now
+      // this will always be the case but for an arbitrary
+      // merge policy this may not be the case
+      if (-1 == next)
+        next = si.getDocStoreOffset() + si.docCount;
+      else if (next != si.getDocStoreOffset())
+        mergeDocStores = true;
+      else
+        next = si.getDocStoreOffset() + si.docCount;
+      
+      // If the segment comes from a different directory
+      // we must merge
+      if (lastDir != si.dir)
+        mergeDocStores = true;
+
+      // If the segment is referencing the current "live"
+      // doc store outputs then we must merge
+      if (si.getDocStoreOffset() != -1 && currentDocStoreSegment != null && si.getDocStoreSegment().equals(currentDocStoreSegment))
+        doFlushDocStore = true;
+    }
+
+    final int docStoreOffset;
+    final String docStoreSegment;
+    final boolean docStoreIsCompoundFile;
+
+    if (mergeDocStores) {
+      docStoreOffset = -1;
+      docStoreSegment = null;
+      docStoreIsCompoundFile = false;
+    } else {
+      SegmentInfo si = sourceSegments.info(0);        
+      docStoreOffset = si.getDocStoreOffset();
+      docStoreSegment = si.getDocStoreSegment();
+      docStoreIsCompoundFile = si.getDocStoreIsCompoundFile();
+    }
+
+    if (mergeDocStores && doFlushDocStore) {
+      // SegmentMerger intends to merge the doc stores
+      // (stored fields, vectors), and at least one of the
+      // segments to be merged refers to the currently
+      // live doc stores.
+
+      // TODO: if we know we are about to merge away these
+      // newly flushed doc store files then we should not
+      // make compound file out of them...
+      flush(false, true);
+    }
+
+    // We must take a full copy at this point so that we can
+    // properly merge deletes in commitMerge()
+    merge.segmentsClone = (SegmentInfos) merge.segments.clone();
+
+    for (int i = 0; i < end; i++) {
+      SegmentInfo si = merge.segmentsClone.info(i);
+
+      // IncRef all files for this segment info to make sure
+      // they are not removed while we are trying to merge.
+      if (si.dir == directory)
+        deleter.incRef(si.files());
+    }
+
+    merge.increfDone = true;
+
+    merge.mergeDocStores = mergeDocStores;
+    merge.info = new SegmentInfo(newSegmentName(), 0,
+                                 directory, false, true,
+                                 docStoreOffset,
+                                 docStoreSegment,
+                                 docStoreIsCompoundFile);
+  }
+

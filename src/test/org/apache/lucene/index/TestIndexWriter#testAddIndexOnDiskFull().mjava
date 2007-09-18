@@ -8,7 +8,6 @@
     */
     public void testAddIndexOnDiskFull() throws IOException
     {
-
       int START_COUNT = 57;
       int NUM_DIR = 50;
       int END_COUNT = START_COUNT + NUM_DIR*25;
@@ -74,6 +73,9 @@
 
       for(int iter=0;iter<6;iter++) {
 
+        if (debug)
+          System.out.println("TEST: iter=" + iter);
+
         // Start with 100 bytes more than we are currently using:
         long diskFree = diskUsage+100;
 
@@ -103,7 +105,16 @@
           writer = new IndexWriter(dir, autoCommit, new WhitespaceAnalyzer(), false);
           IOException err = null;
 
+          MergeScheduler ms = writer.getMergeScheduler();
           for(int x=0;x<2;x++) {
+            if (ms instanceof ConcurrentMergeScheduler)
+              // This test intentionally produces exceptions
+              // in the threads that CMS launches; we don't
+              // want to pollute test output with these.
+              if (0 == x)
+                ((ConcurrentMergeScheduler) ms).setSuppressExceptions();
+              else
+                ((ConcurrentMergeScheduler) ms).clearSuppressExceptions();
 
             // Two loops: first time, limit disk space &
             // throw random IOExceptions; second time, no
@@ -175,7 +186,7 @@
               err = e;
               if (debug) {
                 System.out.println("  hit IOException: " + e);
-                // e.printStackTrace(System.out);
+                e.printStackTrace(System.out);
               }
 
               if (1 == x) {
@@ -183,6 +194,10 @@
                 fail(methodName + " hit IOException after disk space was freed up");
               }
             }
+
+            // Make sure all threads from
+            // ConcurrentMergeScheduler are done
+            _TestUtil.syncConcurrentMerges(writer);
 
             if (autoCommit) {
 
@@ -285,6 +300,12 @@
           }
 
           writer.close();
+
+          // Wait for all BG threads to finish else
+          // dir.close() will throw IOException because
+          // there are still open files
+          _TestUtil.syncConcurrentMerges(ms);
+
           dir.close();
 
           // Try again with 2000 more bytes of free space:

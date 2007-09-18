@@ -1,0 +1,146 @@
+  /** Does the actual (time-consuming) work of the merge,
+   *  but without holding synchronized lock on IndexWriter
+   *  instance */
+  final private int mergeMiddle(MergePolicy.OneMerge merge) 
+    throws CorruptIndexException, IOException {
+
+    final String mergedName = merge.info.name;
+    
+    SegmentMerger merger = null;
+
+    int mergedDocCount = 0;
+
+    SegmentInfos sourceSegments = merge.segments;
+    SegmentInfos sourceSegmentsClone = merge.segmentsClone;
+    final int numSegments = sourceSegments.size();
+
+    if (infoStream != null)
+      message("merging " + merge.segString(directory));
+
+    merger = new SegmentMerger(this, mergedName);
+
+    // This is try/finally to make sure merger's readers are
+    // closed:
+
+    boolean success = false;
+
+    try {
+      int totDocCount = 0;
+      for (int i = 0; i < numSegments; i++) {
+        SegmentInfo si = sourceSegmentsClone.info(i);
+        IndexReader reader = SegmentReader.get(si, MERGE_READ_BUFFER_SIZE, merge.mergeDocStores); // no need to set deleter (yet)
+        merger.add(reader);
+        if (infoStream != null)
+          totDocCount += reader.numDocs();
+      }
+      if (infoStream != null) {
+        message("merge: total "+totDocCount+" docs");
+      }
+
+      mergedDocCount = merge.info.docCount = merger.merge(merge.mergeDocStores);
+
+      if (infoStream != null)
+        assert mergedDocCount == totDocCount;
+
+      success = true;
+
+    } finally {
+      // close readers before we attempt to delete
+      // now-obsolete segments
+      if (merger != null) {
+        merger.closeReaders();
+      }
+      if (!success) {
+        if (infoStream != null)
+          message("hit exception during merge; now refresh deleter on segment " + mergedName);
+        synchronized(this) {
+          addMergeException(merge);
+          deleter.refresh(mergedName);
+        }
+      }
+    }
+
+    if (!commitMerge(merge))
+      // commitMerge will return false if this merge was aborted
+      return 0;
+
+    if (merge.useCompoundFile) {
+      
+      success = false;
+      boolean skip = false;
+      final String compoundFileName = mergedName + "." + IndexFileNames.COMPOUND_FILE_EXTENSION;
+
+      try {
+        try {
+          merger.createCompoundFile(compoundFileName);
+          success = true;
+        } catch (IOException ioe) {
+          synchronized(this) {
+            if (segmentInfos.indexOf(merge.info) == -1) {
+              // If another merge kicked in and merged our
+              // new segment away while we were trying to
+              // build the compound file, we can hit a
+              // FileNotFoundException and possibly
+              // IOException over NFS.  We can tell this has
+              // happened because our SegmentInfo is no
+              // longer in the segments; if this has
+              // happened it is safe to ignore the exception
+              // & skip finishing/committing our compound
+              // file creating.
+              if (infoStream != null)
+                message("hit exception creating compound file; ignoring it because our info (segment " + merge.info.name + ") has been merged away");
+              skip = true;
+            } else
+              throw ioe;
+          }
+        }
+      } finally {
+        if (!success) {
+          if (infoStream != null)
+            message("hit exception creating compound file during merge: skip=" + skip);
+
+          synchronized(this) {
+            if (!skip)
+              addMergeException(merge);
+            deleter.deleteFile(compoundFileName);
+          }
+        }
+      }
+
+      if (!skip) {
+
+        synchronized(this) {
+          if (skip || segmentInfos.indexOf(merge.info) == -1 || merge.isAborted()) {
+            // Our segment (committed in non-compound
+            // format) got merged away while we were
+            // building the compound format.
+            deleter.deleteFile(compoundFileName);
+          } else {
+            success = false;
+            try {
+              merge.info.setUseCompoundFile(true);
+              checkpoint();
+              success = true;
+            } finally {
+              if (!success) {  
+                if (infoStream != null)
+                  message("hit exception checkpointing compound file during merge");
+
+                // Must rollback:
+                addMergeException(merge);
+                merge.info.setUseCompoundFile(false);
+                deletePartialSegmentsFile();
+                deleter.deleteFile(compoundFileName);
+              }
+            }
+      
+            // Give deleter a chance to remove files now.
+            deleter.checkpoint(segmentInfos, autoCommit);
+          }
+        }
+      }
+    }
+
+    return mergedDocCount;
+  }
+

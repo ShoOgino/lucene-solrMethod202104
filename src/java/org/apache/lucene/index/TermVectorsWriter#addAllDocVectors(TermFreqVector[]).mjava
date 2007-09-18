@@ -7,47 +7,109 @@
    */
   public final void addAllDocVectors(TermFreqVector[] vectors)
       throws IOException {
-    openDocument();
+
+    tvx.writeLong(tvd.getFilePointer());
 
     if (vectors != null) {
-      for (int i = 0; i < vectors.length; i++) {
-        boolean storePositionWithTermVector = false;
-        boolean storeOffsetWithTermVector = false;
+      final int numFields = vectors.length;
+      tvd.writeVInt(numFields);
 
-        try {
+      long[] fieldPointers = new long[numFields];
 
-          TermPositionVector tpVector = (TermPositionVector) vectors[i];
+      for (int i=0; i<numFields; i++) {
+        fieldPointers[i] = tvf.getFilePointer();
 
-          if (tpVector.size() > 0 && tpVector.getTermPositions(0) != null)
-            storePositionWithTermVector = true;
-          if (tpVector.size() > 0 && tpVector.getOffsets(0) != null)
-            storeOffsetWithTermVector = true;
+        final int fieldNumber = fieldInfos.fieldNumber(vectors[i].getField());
 
-          FieldInfo fieldInfo = fieldInfos.fieldInfo(tpVector.getField());
-          openField(fieldInfo.number, storePositionWithTermVector, storeOffsetWithTermVector);
+        // 1st pass: write field numbers to tvd
+        tvd.writeVInt(fieldNumber);
 
-          for (int j = 0; j < tpVector.size(); j++)
-            addTermInternal(tpVector.getTerms()[j], tpVector.getTermFrequencies()[j], tpVector.getTermPositions(j),
-                tpVector.getOffsets(j));
+        final int numTerms = vectors[i].size();
+        tvf.writeVInt(numTerms);
 
-          closeField();
+        final TermPositionVector tpVector;
+        final TermFreqVector tfVector;
 
-        } catch (ClassCastException ignore) {
+        final byte bits;
+        final boolean storePositions;
+        final boolean storeOffsets;
 
-          TermFreqVector tfVector = vectors[i];
+        if (vectors[i] instanceof TermPositionVector) {
+          // May have positions & offsets
+          tpVector = (TermPositionVector) vectors[i];
+          tfVector = null;
+          storePositions = tpVector.size() > 0 && tpVector.getTermPositions(0) != null;
+          storeOffsets = tpVector.size() > 0 && tpVector.getOffsets(0) != null;
+          bits = (byte) ((storePositions ? TermVectorsReader.STORE_POSITIONS_WITH_TERMVECTOR : 0) +
+                         (storeOffsets ? TermVectorsReader.STORE_OFFSET_WITH_TERMVECTOR : 0));
+        } else {
+          tpVector = null;
+          tfVector = vectors[i];
+          bits = 0;
+          storePositions = false;
+          storeOffsets = false;
+        }
 
-          FieldInfo fieldInfo = fieldInfos.fieldInfo(tfVector.getField());
-          openField(fieldInfo.number, storePositionWithTermVector, storeOffsetWithTermVector);
+        tvf.writeVInt(bits);
 
-          for (int j = 0; j < tfVector.size(); j++)
-            addTermInternal(tfVector.getTerms()[j], tfVector.getTermFrequencies()[j], null, null);
+        final String[] terms = vectors[i].getTerms();
+        final int[] freqs = vectors[i].getTermFrequencies();
 
-          closeField();
+        String lastTermText = "";
+        for (int j=0; j<numTerms; j++) {
+          final String termText = terms[j];
+          int start = StringHelper.stringDifference(lastTermText, termText);
+          int length = termText.length() - start;
+          tvf.writeVInt(start);       // write shared prefix length
+          tvf.writeVInt(length);        // write delta length
+          tvf.writeChars(termText, start, length);  // write delta chars
+          lastTermText = termText;
 
+          final int termFreq = freqs[j];
+
+          tvf.writeVInt(termFreq);
+
+          if (storePositions) {
+            final int[] positions = tpVector.getTermPositions(j);
+            if (positions == null)
+              throw new IllegalStateException("Trying to write positions that are null!");
+            assert positions.length == termFreq;
+
+            // use delta encoding for positions
+            int lastPosition = 0;
+            for(int k=0;k<positions.length;k++) {
+              final int position = positions[k];
+              tvf.writeVInt(position-lastPosition);
+              lastPosition = position;
+            }
+          }
+
+          if (storeOffsets) {
+            final TermVectorOffsetInfo[] offsets = tpVector.getOffsets(j);
+            if (offsets == null)
+              throw new IllegalStateException("Trying to write offsets that are null!");
+            assert offsets.length == termFreq;
+
+            // use delta encoding for offsets
+            int lastEndOffset = 0;
+            for(int k=0;k<offsets.length;k++) {
+              final int startOffset = offsets[k].getStartOffset();
+              final int endOffset = offsets[k].getEndOffset();
+              tvf.writeVInt(startOffset-lastEndOffset);
+              tvf.writeVInt(endOffset-startOffset);
+              lastEndOffset = endOffset;
+            }
+          }
         }
       }
-    }
 
-    closeDocument();
+      // 2nd pass: write field pointers to tvd
+      long lastFieldPointer = 0;
+      for (int i=0; i<numFields; i++) {
+        final long fieldPointer = fieldPointers[i];
+        tvd.writeVLong(fieldPointer-lastFieldPointer);
+        lastFieldPointer = fieldPointer;
+      }
+    }
   }
 

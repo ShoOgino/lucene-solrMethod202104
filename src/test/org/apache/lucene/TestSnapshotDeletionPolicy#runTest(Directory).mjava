@@ -1,0 +1,67 @@
+  private void runTest(Directory dir) throws IOException {
+    // Run for ~7 seconds
+    final long stopTime = System.currentTimeMillis() + 7000;
+
+    SnapshotDeletionPolicy dp = new SnapshotDeletionPolicy(new KeepOnlyLastCommitDeletionPolicy());
+    final IndexWriter writer = new IndexWriter(dir, true, new StandardAnalyzer(), dp);
+
+    // Force frequent commits
+    writer.setMaxBufferedDocs(2);
+
+    final Thread t = new Thread() {
+        public void run() {
+          Document doc = new Document();
+          doc.add(new Field("content", "aaa", Field.Store.YES, Field.Index.TOKENIZED, Field.TermVector.WITH_POSITIONS_OFFSETS));
+          while(System.currentTimeMillis() < stopTime) {
+            for(int i=0;i<27;i++) {
+              try {
+                writer.addDocument(doc);
+              } catch (IOException cie) {
+                RuntimeException re = new RuntimeException("addDocument failed");
+                re.initCause(cie);
+                throw re;
+              }
+            }
+            try {
+              Thread.sleep(1);
+            } catch (InterruptedException ie) {
+              Thread.currentThread().interrupt();
+            }
+          }
+        }
+      };
+
+    t.start();
+
+    // While the above indexing thread is running, take many
+    // backups:
+    while(System.currentTimeMillis() < stopTime) {
+      backupIndex(dir, dp);
+      try {
+        Thread.sleep(20);
+      } catch (InterruptedException ie) {
+        Thread.currentThread().interrupt();
+      }
+      if (!t.isAlive())
+        break;
+    }
+
+    try {
+      t.join();
+    } catch (InterruptedException ie) {
+      Thread.currentThread().interrupt();
+    }
+
+    // Add one more document to force writer to commit a
+    // final segment, so deletion policy has a chance to
+    // delete again:
+    Document doc = new Document();
+    doc.add(new Field("content", "aaa", Field.Store.YES, Field.Index.TOKENIZED, Field.TermVector.WITH_POSITIONS_OFFSETS));
+    writer.addDocument(doc);
+
+    // Make sure we don't have any leftover files in the
+    // directory:
+    writer.close();
+    TestIndexWriter.assertNoUnreferencedFiles(dir, "some files were not deleted but should have been");
+  }
+

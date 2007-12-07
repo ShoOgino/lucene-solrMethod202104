@@ -24,6 +24,32 @@
           path = path.substring( 0, idx );
         }
         
+        // By default use the single core.  If multicore is enabled, look for one.
+        SolrCore core = singlecore;
+        if( core == null ) {
+          // try to get the corename as a request parameter first
+          String corename = request.getParameter("core");
+          if( corename == null && path.startsWith( "/@" ) ) { // multicore
+            idx = path.indexOf( '/', 2 );
+            if( idx < 1 ) {
+              throw new SolrException( SolrException.ErrorCode.BAD_REQUEST, 
+                  "MultiCore path must contain a '/'.  For example: /@corename/handlerpath" );
+            }
+            corename = path.substring( 2, idx );
+            path = path.substring( idx );
+          }
+          if (corename != null) {
+            core = multicore.getCore( corename );
+            if( core == null ) {
+              throw new SolrException( SolrException.ErrorCode.BAD_REQUEST, 
+                "Can not find core: '"+corename+"'" );
+            }
+          }
+          else {
+            core = multicore.getDefaultCore();
+          }
+        }
+        
         SolrRequestHandler handler = null;
         if( path.length() > 1 ) { // don't match "" or "/" as valid path
           handler = core.getRequestHandler( path );
@@ -41,6 +67,12 @@
             }
           }
         }
+
+        // Perhaps this is a muli-core admin page?
+        if( handler == null && path.equals( multicore.getAdminPath() ) ) {
+          handler = multicore.getMultiCoreHandler();
+        } 
+        
         if( handler != null ) {
           if( solrReq == null ) {
             solrReq = parsers.parse( core, path, req );
@@ -58,6 +90,11 @@
           PrintWriter out = response.getWriter();
           responseWriter.write(out, solrReq, solrRsp);
           return;
+        }
+        // otherwise, let's ensure the core is in the SolrCore request attribute so
+        // the servlet can retrieve it
+        else {
+          req.setAttribute("org.apache.solr.SolrCore", core);
         }
       }
       catch( Throwable ex ) {

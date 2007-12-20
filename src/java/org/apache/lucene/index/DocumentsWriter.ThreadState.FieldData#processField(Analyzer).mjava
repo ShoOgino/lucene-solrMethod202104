@@ -19,19 +19,48 @@
             if (field.isIndexed())
               invertField(field, analyzer, maxFieldLength);
 
-            if (field.isStored())
-              localFieldsWriter.writeField(fieldInfo, field);
+            if (field.isStored()) {
+              numStoredFields++;
+              boolean success = false;
+              try {
+                localFieldsWriter.writeField(fieldInfo, field);
+                success = true;
+              } finally {
+                // If we hit an exception inside
+                // localFieldsWriter.writeField, the
+                // contents of fdtLocal can be corrupt, so
+                // we must discard all stored fields for
+                // this document:
+                if (!success) {
+                  numStoredFields = 0;
+                  fdtLocal.reset();
+                }
+              }
+            }
 
             docFieldsFinal[j] = null;
           }
         } finally {
           if (postingsVectorsUpto > 0) {
             // Add term vectors for this field
-            writeVectors(fieldInfo);
-            if (postingsVectorsUpto > maxPostingsVectors)
-              maxPostingsVectors = postingsVectorsUpto;
-            postingsVectorsUpto = 0;
-            vectorsPool.reset();
+            boolean success = false;
+            try {
+              writeVectors(fieldInfo);
+              success = true;
+            } finally {
+              if (!success) {
+                // If we hit an exception inside
+                // writeVectors, the contents of tvfLocal
+                // can be corrupt, so we must discard all
+                // term vectors for this document:
+                numVectorFields = 0;
+                tvfLocal.reset();
+              }
+              if (postingsVectorsUpto > maxPostingsVectors)
+                maxPostingsVectors = postingsVectorsUpto;
+              postingsVectorsUpto = 0;
+              vectorsPool.reset();
+            }
           }
         }
       }

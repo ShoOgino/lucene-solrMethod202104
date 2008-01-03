@@ -1,16 +1,14 @@
-  int updateDocument(Document doc, Analyzer analyzer, Term delTerm)
+  boolean updateDocument(Document doc, Analyzer analyzer, Term delTerm)
     throws CorruptIndexException, IOException {
 
     // This call is synchronized but fast
     final ThreadState state = getThreadState(doc, delTerm);
     boolean success = false;
-    int maxTermHit;
     try {
       try {
         // This call is not synchronized and does all the work
         state.processDocument(analyzer);
       } finally {
-        maxTermHit = state.maxTermHit;
         // This call is synchronized but fast
         finishDocument(state);
       }
@@ -20,15 +18,19 @@
         synchronized(this) {
           state.isIdle = true;
           if (state.abortOnExc)
+            // Abort all buffered docs since last flush
             abort();
+          else
+            // Immediately mark this document as deleted
+            // since likely it was partially added.  This
+            // keeps indexing as "all or none" (atomic) when
+            // adding a document:
+            addDeleteDocID(state.docID);
           notifyAll();
         }
       }
     }
 
-    int status = maxTermHit<<1;
-    if (state.doFlushAfter || timeToFlushDeletes())
-      status += 1;
-    return status;
+    return state.doFlushAfter || timeToFlushDeletes();
   }
 

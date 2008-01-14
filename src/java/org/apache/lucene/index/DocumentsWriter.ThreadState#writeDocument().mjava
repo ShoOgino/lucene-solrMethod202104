@@ -1,51 +1,55 @@
     /** Move all per-document state that was accumulated in
      *  the ThreadState into the "real" stores. */
-    public void writeDocument() throws IOException {
+    public void writeDocument() throws IOException, AbortException {
 
       // If we hit an exception while appending to the
       // stored fields or term vectors files, we have to
       // abort all documents since we last flushed because
       // it means those files are possibly inconsistent.
-      abortOnExc = true;
+      try {
 
-      // Append stored fields to the real FieldsWriter:
-      fieldsWriter.flushDocument(numStoredFields, fdtLocal);
-      fdtLocal.reset();
-      numStoredFields = 0;
+        // Append stored fields to the real FieldsWriter:
+        fieldsWriter.flushDocument(numStoredFields, fdtLocal);
+        fdtLocal.reset();
 
-      // Append term vectors to the real outputs:
-      if (tvx != null) {
-        tvx.writeLong(tvd.getFilePointer());
-        tvd.writeVInt(numVectorFields);
-        if (numVectorFields > 0) {
-          for(int i=0;i<numVectorFields;i++)
-            tvd.writeVInt(vectorFieldNumbers[i]);
-          assert 0 == vectorFieldPointers[0];
-          tvd.writeVLong(tvf.getFilePointer());
-          long lastPos = vectorFieldPointers[0];
-          for(int i=1;i<numVectorFields;i++) {
-            long pos = vectorFieldPointers[i];
-            tvd.writeVLong(pos-lastPos);
-            lastPos = pos;
+        // Append term vectors to the real outputs:
+        if (tvx != null) {
+          tvx.writeLong(tvd.getFilePointer());
+          tvd.writeVInt(numVectorFields);
+          if (numVectorFields > 0) {
+            for(int i=0;i<numVectorFields;i++)
+              tvd.writeVInt(vectorFieldNumbers[i]);
+            assert 0 == vectorFieldPointers[0];
+            tvd.writeVLong(tvf.getFilePointer());
+            long lastPos = vectorFieldPointers[0];
+            for(int i=1;i<numVectorFields;i++) {
+              long pos = vectorFieldPointers[i];
+              tvd.writeVLong(pos-lastPos);
+              lastPos = pos;
+            }
+            tvfLocal.writeTo(tvf);
+            tvfLocal.reset();
           }
-          tvfLocal.writeTo(tvf);
-          tvfLocal.reset();
         }
-      }
 
-      // Append norms for the fields we saw:
-      for(int i=0;i<numFieldData;i++) {
-        FieldData fp = fieldDataArray[i];
-        if (fp.doNorms) {
-          BufferedNorms bn = norms[fp.fieldInfo.number];
-          assert bn != null;
-          assert bn.upto <= docID;
-          bn.fill(docID);
-          float norm = fp.boost * writer.getSimilarity().lengthNorm(fp.fieldInfo.name, fp.length);
-          bn.add(norm);
+        // Append norms for the fields we saw:
+        for(int i=0;i<numFieldData;i++) {
+          FieldData fp = fieldDataArray[i];
+          if (fp.doNorms) {
+            BufferedNorms bn = norms[fp.fieldInfo.number];
+            assert bn != null;
+            assert bn.upto <= docID;
+            bn.fill(docID);
+            float norm = fp.boost * writer.getSimilarity().lengthNorm(fp.fieldInfo.name, fp.length);
+            bn.add(norm);
+          }
         }
+      } catch (Throwable t) {
+        // Forcefully idle this threadstate -- its state will
+        // be reset by abort()
+        isIdle = true;
+        throw new AbortException(t, DocumentsWriter.this);
       }
-      abortOnExc = false;
 
       if (bufferIsFull && !flushPending) {
         flushPending = true;

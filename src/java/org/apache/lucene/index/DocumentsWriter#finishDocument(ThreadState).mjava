@@ -1,50 +1,56 @@
   /** Does the synchronized work to finish/flush the
    * inverted document. */
-  private synchronized void finishDocument(ThreadState state) throws IOException {
+  private synchronized void finishDocument(ThreadState state) throws IOException, AbortException {
+    if (aborting) {
+      // Forcefully idle this threadstate -- its state will
+      // be reset by abort()
+      state.isIdle = true;
+      notifyAll();
+      return;
+    }
 
     // Now write the indexed document to the real files.
-
     if (nextWriteDocID == state.docID) {
       // It's my turn, so write everything now:
-      state.isIdle = true;
       nextWriteDocID++;
       state.writeDocument();
+      state.isIdle = true;
+      notifyAll();
 
       // If any states were waiting on me, sweep through and
       // flush those that are enabled by my write.
       if (numWaiting > 0) {
-        while(true) {
-          int upto = 0;
-          for(int i=0;i<numWaiting;i++) {
-            ThreadState s = waitingThreadStates[i];
+        boolean any = true;
+        while(any) {
+          any = false;
+          for(int i=0;i<numWaiting;) {
+            final ThreadState s = waitingThreadStates[i];
             if (s.docID == nextWriteDocID) {
+              s.writeDocument();
               s.isIdle = true;
               nextWriteDocID++;
-              s.writeDocument();
-            } else
-              // Compact as we go
-              waitingThreadStates[upto++] = waitingThreadStates[i];
+              any = true;
+              if (numWaiting > i+1)
+                // Swap in the last waiting state to fill in
+                // the hole we just created.  It's important
+                // to do this as-we-go and not at the end of
+                // the loop, because if we hit an aborting
+                // exception in one of the s.writeDocument
+                // calls (above), it leaves this array in an
+                // inconsistent state:
+                waitingThreadStates[i] = waitingThreadStates[numWaiting-1];
+              numWaiting--;
+            } else {
+              assert !s.isIdle;
+              i++;
+            }
           }
-          if (upto == numWaiting) 
-            break;
-          numWaiting = upto;
         }
       }
-
-      // Now notify any incoming calls to addDocument
-      // (above) that are waiting on our line to
-      // shrink
-      notifyAll();
-
     } else {
       // Another thread got a docID before me, but, it
       // hasn't finished its processing.  So add myself to
       // the line but don't hold up this thread.
-      if (numWaiting == waitingThreadStates.length) {
-        ThreadState[] newWaiting = new ThreadState[2*waitingThreadStates.length];
-        System.arraycopy(waitingThreadStates, 0, newWaiting, 0, numWaiting);
-        waitingThreadStates = newWaiting;
-      }
       waitingThreadStates[numWaiting++] = state;
     }
   }

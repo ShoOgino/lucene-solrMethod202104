@@ -1,0 +1,122 @@
+  /** Called if we hit an exception when adding docs,
+   *  flushing, etc.  This resets our state, discarding any
+   *  docs added since last flush.  If ae is non-null, it
+   *  contains the root cause exception (which we re-throw
+   *  after we are done aborting). */
+  synchronized void abort(AbortException ae) throws IOException {
+
+    // Anywhere that throws an AbortException must first
+    // mark aborting to make sure while the exception is
+    // unwinding the un-synchronized stack, no thread grabs
+    // the corrupt ThreadState that hit the aborting
+    // exception:
+    assert ae == null || aborting;
+
+    try {
+
+      if (infoStream != null)
+        infoStream.println("docWriter: now abort");
+
+      // Forcefully remove waiting ThreadStates from line
+      for(int i=0;i<numWaiting;i++)
+        waitingThreadStates[i].isIdle = true;
+      numWaiting = 0;
+
+      // Wait for all other threads to finish with DocumentsWriter:
+      pauseAllThreads();
+
+      assert 0 == numWaiting;
+
+      try {
+
+        bufferedDeleteTerms.clear();
+        bufferedDeleteDocIDs.clear();
+        numBufferedDeleteTerms = 0;
+
+        abortedFiles = files();
+
+        // Discard pending norms:
+        final int numField = fieldInfos.size();
+        for (int i=0;i<numField;i++) {
+          FieldInfo fi = fieldInfos.fieldInfo(i);
+          if (fi.isIndexed && !fi.omitNorms) {
+            BufferedNorms n = norms[i];
+            if (n != null) {
+              n.out.reset();
+              n.reset();
+            }
+          }
+        }
+
+        // Reset vectors writer
+        if (tvx != null) {
+          try {
+            tvx.close();
+          } catch (IOException ioe) {
+          }
+          tvx = null;
+        }
+        if (tvd != null) {
+          try {
+            tvd.close();
+          } catch (IOException ioe) {
+          }
+          tvd = null;
+        }
+        if (tvf != null) {
+          try {
+            tvf.close();
+          } catch (IOException ioe) {
+          }
+          tvf = null;
+        }
+
+        // Reset fields writer
+        if (fieldsWriter != null) {
+          try {
+            fieldsWriter.close();
+          } catch (IOException ioe) {
+          }
+          fieldsWriter = null;
+        }
+
+        // Clear vectors & fields from ThreadStates
+        for(int i=0;i<threadStates.length;i++) {
+          ThreadState state = threadStates[i];
+          if (state.localFieldsWriter != null) {
+            state.localFieldsWriter.close();
+            state.localFieldsWriter = null;
+          }
+          state.tvfLocal.reset();
+          state.fdtLocal.reset();
+        }
+
+        // Reset all postings data
+        resetPostingsData();
+
+        docStoreSegment = null;
+        files = null;
+
+      } finally {
+        resumeAllThreads();
+      }
+
+      // If we have a root cause exception, re-throw it now:
+      if (ae != null) {
+        Throwable t = ae.getCause();
+        if (t instanceof IOException)
+          throw (IOException) t;
+        else if (t instanceof RuntimeException)
+          throw (RuntimeException) t;
+        else if (t instanceof Error)
+          throw (Error) t;
+        else
+          // Should not get here
+          assert false: "unknown exception: " + t;
+      }
+    } finally {
+      aborting = false;
+      notifyAll();
+    }
+  }
+

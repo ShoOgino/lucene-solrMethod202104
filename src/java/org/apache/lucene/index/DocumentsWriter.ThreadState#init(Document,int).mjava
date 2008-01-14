@@ -1,7 +1,8 @@
     /** Initializes shared state for this new document */
-    void init(Document doc, int docID) throws IOException {
+    void init(Document doc, int docID) throws IOException, AbortException {
 
-      abortOnExc = false;
+      assert !isIdle;
+
       this.docID = docID;
       docBoost = doc.getBoost();
       numStoredFields = 0;
@@ -10,7 +11,10 @@
       maxTermPrefix = null;
 
       assert 0 == fdtLocal.length();
+      assert 0 == fdtLocal.getFilePointer();
       assert 0 == tvfLocal.length();
+      assert 0 == tvfLocal.getFilePointer();
+      final int thisFieldGen = fieldGen++;
 
       List docFields = doc.getFields();
       final int numDocFields = docFields.size();
@@ -56,36 +60,37 @@
 
           if (numAllFieldData == allFieldDataArray.length) {
             int newSize = (int) (allFieldDataArray.length*1.5);
+            int newHashSize = fieldDataHash.length*2;
 
             FieldData newArray[] = new FieldData[newSize];
+            FieldData newHashArray[] = new FieldData[newHashSize];
             System.arraycopy(allFieldDataArray, 0, newArray, 0, numAllFieldData);
-            allFieldDataArray = newArray;
 
             // Rehash
-            newSize = fieldDataHash.length*2;
-            newArray = new FieldData[newSize];
             fieldDataHashMask = newSize-1;
             for(int j=0;j<fieldDataHash.length;j++) {
               FieldData fp0 = fieldDataHash[j];
               while(fp0 != null) {
                 hashPos = fp0.fieldInfo.name.hashCode() & fieldDataHashMask;
                 FieldData nextFP0 = fp0.next;
-                fp0.next = newArray[hashPos];
-                newArray[hashPos] = fp0;
+                fp0.next = newHashArray[hashPos];
+                newHashArray[hashPos] = fp0;
                 fp0 = nextFP0;
               }
             }
-            fieldDataHash = newArray;
+
+            allFieldDataArray = newArray;
+            fieldDataHash = newHashArray;
           }
           allFieldDataArray[numAllFieldData++] = fp;
         } else {
           assert fp.fieldInfo == fi;
         }
 
-        if (docID != fp.lastDocID) {
+        if (thisFieldGen != fp.lastGen) {
 
           // First time we're seeing this field for this doc
-          fp.lastDocID = docID;
+          fp.lastGen = thisFieldGen;
           fp.fieldCount = 0;
           fp.doVectors = fp.doVectorPositions = fp.doVectorOffsets = false;
           fp.doNorms = fi.isIndexed && !fi.omitNorms;
@@ -132,7 +137,15 @@
           assert docStoreSegment == null;
           assert segment != null;
           docStoreSegment = segment;
-          fieldsWriter = new FieldsWriter(directory, docStoreSegment, fieldInfos);
+          // If we hit an exception while init'ing the
+          // fieldsWriter, we must abort this segment
+          // because those files will be in an unknown
+          // state:
+          try {
+            fieldsWriter = new FieldsWriter(directory, docStoreSegment, fieldInfos);
+          } catch (Throwable t) {
+            throw new AbortException(t, DocumentsWriter.this);
+          }
           files = null;
         }
         localFieldsWriter = new FieldsWriter(null, fdtLocal, fieldInfos);
@@ -143,18 +156,26 @@
       if (docHasVectors) {
         if (tvx == null) {
           assert docStoreSegment != null;
-          tvx = directory.createOutput(docStoreSegment + "." + IndexFileNames.VECTORS_INDEX_EXTENSION);
-          tvx.writeInt(TermVectorsReader.FORMAT_VERSION);
-          tvd = directory.createOutput(docStoreSegment +  "." + IndexFileNames.VECTORS_DOCUMENTS_EXTENSION);
-          tvd.writeInt(TermVectorsReader.FORMAT_VERSION);
-          tvf = directory.createOutput(docStoreSegment +  "." + IndexFileNames.VECTORS_FIELDS_EXTENSION);
-          tvf.writeInt(TermVectorsReader.FORMAT_VERSION);
-          files = null;
+          // If we hit an exception while init'ing the term
+          // vector output files, we must abort this segment
+          // because those files will be in an unknown
+          // state:
+          try {
+            tvx = directory.createOutput(docStoreSegment + "." + IndexFileNames.VECTORS_INDEX_EXTENSION);
+            tvx.writeInt(TermVectorsReader.FORMAT_VERSION);
+            tvd = directory.createOutput(docStoreSegment +  "." + IndexFileNames.VECTORS_DOCUMENTS_EXTENSION);
+            tvd.writeInt(TermVectorsReader.FORMAT_VERSION);
+            tvf = directory.createOutput(docStoreSegment +  "." + IndexFileNames.VECTORS_FIELDS_EXTENSION);
+            tvf.writeInt(TermVectorsReader.FORMAT_VERSION);
 
-          // We must "catch up" for all docIDs that had no
-          // vectors before this one
-          for(int i=0;i<docID;i++)
-            tvx.writeLong(0);
+            // We must "catch up" for all docIDs that had no
+            // vectors before this one
+            for(int i=0;i<docID;i++)
+              tvx.writeLong(0);
+          } catch (Throwable t) {
+            throw new AbortException(t, DocumentsWriter.this);
+          }
+          files = null;
         }
 
         numVectorFields = 0;

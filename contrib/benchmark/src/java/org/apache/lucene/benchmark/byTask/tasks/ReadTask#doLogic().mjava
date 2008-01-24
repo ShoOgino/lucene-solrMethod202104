@@ -1,7 +1,7 @@
   public int doLogic() throws Exception {
     int res = 0;
     boolean closeReader = false;
-    
+
     // open reader or use existing one
     IndexReader ir = getRunData().getIndexReader();
     if (ir == null) {
@@ -10,18 +10,18 @@
       closeReader = true;
       //res++; //this is confusing, comment it out
     }
-    
+
     // optionally warm and add num docs traversed to count
     if (withWarm()) {
       Document doc = null;
       for (int m = 0; m < ir.maxDoc(); m++) {
         if (!ir.isDeleted(m)) {
           doc = ir.document(m);
-          res += (doc==null ? 0 : 1);
+          res += (doc == null ? 0 : 1);
         }
       }
     }
-    
+
     if (withSearch()) {
       res++;
       IndexSearcher searcher = new IndexSearcher(ir);
@@ -29,24 +29,43 @@
       Query q = queryMaker.makeQuery();
       Hits hits = searcher.search(q);
       //System.out.println("searched: "+q);
-      
-      if (withTraverse() && hits!=null) {
+
+      if (withTraverse() && hits != null) {
         int traversalSize = Math.min(hits.length(), traversalSize());
         if (traversalSize > 0) {
           boolean retrieve = withRetrieve();
-          for (int m = 0; m < hits.length(); m++) {
+          int numHighlight = Math.min(numToHighlight(), hits.length());
+          Analyzer analyzer = getRunData().getAnalyzer();
+          Highlighter highlighter = null;
+          int maxFrags = 1;
+          if (numHighlight > 0) {
+            highlighter = getHighlighter(q);
+            maxFrags = maxNumFragments();
+          }
+          boolean merge = isMergeContiguousFragments();
+          for (int m = 0; m < traversalSize; m++) {
             int id = hits.id(m);
             res++;
             if (retrieve) {
-              res += retrieveDoc(ir, id);
+              Document document = retrieveDoc(ir, id);
+              res += document != null ? 1 : 0;
+              if (numHighlight > 0 && m < numHighlight) {
+                Collection/*<String>*/ fieldsToHighlight = getFieldsToHighlight(document);
+                for (Iterator iterator = fieldsToHighlight.iterator(); iterator.hasNext();) {
+                  String field = (String) iterator.next();
+                  String text = document.get(field);
+                  TokenStream ts = TokenSources.getAnyTokenStream(ir, id, field, document, analyzer);
+                  res += doHighlight(ts, text, highlighter, merge, maxFrags);
+                }
+              }
             }
           }
         }
       }
-      
+
       searcher.close();
     }
-    
+
     if (closeReader) {
       ir.close();
     }

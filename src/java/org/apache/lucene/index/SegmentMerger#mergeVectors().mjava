@@ -8,15 +8,45 @@
 
     try {
       for (int r = 0; r < readers.size(); r++) {
+        final SegmentReader matchingSegmentReader = matchingSegmentReaders[r];
+        TermVectorsReader matchingVectorsReader;
+        if (matchingSegmentReader != null) {
+          matchingVectorsReader = matchingSegmentReader.termVectorsReaderOrig;
+
+          // If the TV* files are an older format then they
+          // cannot read raw docs:
+          if (matchingVectorsReader != null && !matchingVectorsReader.canReadRawDocs())
+            matchingVectorsReader = null;
+        } else
+          matchingVectorsReader = null;
         IndexReader reader = (IndexReader) readers.elementAt(r);
         int maxDoc = reader.maxDoc();
-        for (int docNum = 0; docNum < maxDoc; docNum++) {
+        for (int docNum = 0; docNum < maxDoc;) {
           // skip deleted docs
-          if (reader.isDeleted(docNum)) 
-            continue;
-          termVectorsWriter.addAllDocVectors(reader.getTermFreqVectors(docNum));
-          if (checkAbort != null)
-            checkAbort.work(300);
+          if (!reader.isDeleted(docNum)) {
+            if (matchingVectorsReader != null) {
+              // We can optimize this case (doing a bulk
+              // byte copy) since the field numbers are
+              // identical
+              int start = docNum;
+              int numDocs = 0;
+              do {
+                docNum++;
+                numDocs++;
+              } while(docNum < maxDoc && !matchingSegmentReader.isDeleted(docNum) && numDocs < MAX_RAW_MERGE_DOCS);
+
+              matchingVectorsReader.rawDocs(rawDocLengths, rawDocLengths2, start, numDocs);
+              termVectorsWriter.addRawDocuments(matchingVectorsReader, rawDocLengths, rawDocLengths2, numDocs);
+              if (checkAbort != null)
+                checkAbort.work(300*numDocs);
+            } else {
+              termVectorsWriter.addAllDocVectors(reader.getTermFreqVectors(docNum));
+              docNum++;
+              if (checkAbort != null)
+                checkAbort.work(300);
+            }
+          } else
+            docNum++;
         }
       }
     } finally {

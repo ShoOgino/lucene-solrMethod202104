@@ -18,7 +18,7 @@
     message("  index: " + writer.segString());
 
     // Iterate, pulling from the IndexWriter's queue of
-    // pending merges, until its empty:
+    // pending merges, until it's empty:
     while(true) {
 
       // TODO: we could be careful about which merges to do in
@@ -35,27 +35,35 @@
       // deterministic assignment of segment names
       writer.mergeInit(merge);
 
-      message("  consider merge " + merge.segString(dir));
+      synchronized(this) {
+        while (mergeThreadCount() >= maxThreadCount) {
+          message("    too many merge threads running; stalling...");
+          try {
+            wait();
+          } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+          }
+        }
+
+        message("  consider merge " + merge.segString(dir));
       
-      if (merge.isExternal) {
-        message("    merge involves segments from an external directory; now run in foreground");
-      } else {
-        synchronized(this) {
-          if (mergeThreadCount() < maxThreadCount) {
-            // OK to spawn a new merge thread to handle this
-            // merge:
-            final MergeThread merger = getMergeThread(writer, merge);
-            mergeThreads.add(merger);
-            message("    launch new thread [" + merger.getName() + "]");
-            merger.start();
-            continue;
-          } else
-            message("    too many merge threads running; run merge in foreground");
+        if (merge.isExternal) {
+          message("    merge involves segments from an external directory; now run in foreground");
+        } else {
+          assert mergeThreadCount() < maxThreadCount;
+
+          // OK to spawn a new merge thread to handle this
+          // merge:
+          final MergeThread merger = getMergeThread(writer, merge);
+          mergeThreads.add(merger);
+          message("    launch new thread [" + merger.getName() + "]");
+          merger.start();
+          continue;
         }
       }
 
-      // Too many merge threads already running, so we do
-      // this in the foreground of the calling thread
+      // This merge involves segments outside our index
+      // Directory so we must merge in foreground
       doMerge(merge);
     }
   }

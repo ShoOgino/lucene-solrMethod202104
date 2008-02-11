@@ -10,7 +10,7 @@
     // unwinding the un-synchronized stack, no thread grabs
     // the corrupt ThreadState that hit the aborting
     // exception:
-    assert ae == null || aborting;
+    assert ae == null || abortCount>0;
 
     try {
 
@@ -33,18 +33,28 @@
         bufferedDeleteDocIDs.clear();
         numBufferedDeleteTerms = 0;
 
-        abortedFiles = files();
+        try {
+          abortedFiles = files();
+        } catch (Throwable t) {
+          abortedFiles = null;
+        }
 
-        // Discard pending norms:
-        final int numField = fieldInfos.size();
-        for (int i=0;i<numField;i++) {
-          FieldInfo fi = fieldInfos.fieldInfo(i);
-          if (fi.isIndexed && !fi.omitNorms) {
-            BufferedNorms n = norms[i];
-            if (n != null) {
-              n.out.reset();
-              n.reset();
+        docStoreSegment = null;
+        numDocsInStore = 0;
+        docStoreOffset = 0;
+        files = null;
+
+        // Clear vectors & fields from ThreadStates
+        for(int i=0;i<threadStates.length;i++) {
+          ThreadState state = threadStates[i];
+          state.tvfLocal.reset();
+          state.fdtLocal.reset();
+          if (state.localFieldsWriter != null) {
+            try {
+              state.localFieldsWriter.close();
+            } catch (Throwable t) {
             }
+            state.localFieldsWriter = null;
           }
         }
 
@@ -52,21 +62,21 @@
         if (tvx != null) {
           try {
             tvx.close();
-          } catch (IOException ioe) {
+          } catch (Throwable t) {
           }
           tvx = null;
         }
         if (tvd != null) {
           try {
             tvd.close();
-          } catch (IOException ioe) {
+          } catch (Throwable t) {
           }
           tvd = null;
         }
         if (tvf != null) {
           try {
             tvf.close();
-          } catch (IOException ioe) {
+          } catch (Throwable t) {
           }
           tvf = null;
         }
@@ -75,29 +85,27 @@
         if (fieldsWriter != null) {
           try {
             fieldsWriter.close();
-          } catch (IOException ioe) {
+          } catch (Throwable t) {
           }
           fieldsWriter = null;
         }
 
-        // Clear vectors & fields from ThreadStates
-        for(int i=0;i<threadStates.length;i++) {
-          ThreadState state = threadStates[i];
-          if (state.localFieldsWriter != null) {
-            state.localFieldsWriter.close();
-            state.localFieldsWriter = null;
+        // Discard pending norms:
+        final int numField = fieldInfos.size();
+        for (int i=0;i<numField;i++) {
+          FieldInfo fi = fieldInfos.fieldInfo(i);
+          if (fi.isIndexed && !fi.omitNorms) {
+            BufferedNorms n = norms[i];
+            if (n != null)
+              try {
+                n.reset();
+              } catch (Throwable t) {
+              }
           }
-          state.tvfLocal.reset();
-          state.fdtLocal.reset();
         }
 
         // Reset all postings data
         resetPostingsData();
-
-        docStoreSegment = null;
-        numDocsInStore = 0;
-        docStoreOffset = 0;
-        files = null;
 
       } finally {
         resumeAllThreads();
@@ -117,7 +125,7 @@
           assert false: "unknown exception: " + t;
       }
     } finally {
-      aborting = false;
+      abortCount--;
       notifyAll();
     }
   }

@@ -1,6 +1,9 @@
   /* FIXME if we want to support non-contiguous segment merges */
   synchronized private boolean commitMerge(MergePolicy.OneMerge merge) throws IOException {
 
+    if (infoStream != null)
+      message("commitMerge: " + merge.segString(directory));
+
     assert merge.registerDone;
 
     // If merge was explicitly aborted, or, if abort() or
@@ -13,105 +16,13 @@
       if (infoStream != null)
         message("commitMerge: skipping merge " + merge.segString(directory) + ": it was aborted");
 
-      assert merge.increfDone;
-      decrefMergeSegments(merge);
       deleter.refresh(merge.info.name);
       return false;
     }
 
-    boolean success = false;
+    final int start = ensureContiguousMerge(merge);
 
-    int start;
-
-    try {
-      SegmentInfos sourceSegmentsClone = merge.segmentsClone;
-      SegmentInfos sourceSegments = merge.segments;
-
-      start = ensureContiguousMerge(merge);
-      if (infoStream != null)
-        message("commitMerge " + merge.segString(directory));
-
-      // Carefully merge deletes that occurred after we
-      // started merging:
-
-      BitVector deletes = null;
-      int docUpto = 0;
-
-      final int numSegmentsToMerge = sourceSegments.size();
-      for(int i=0;i<numSegmentsToMerge;i++) {
-        final SegmentInfo previousInfo = sourceSegmentsClone.info(i);
-        final SegmentInfo currentInfo = sourceSegments.info(i);
-
-        assert currentInfo.docCount == previousInfo.docCount;
-
-        final int docCount = currentInfo.docCount;
-
-        if (previousInfo.hasDeletions()) {
-
-          // There were deletes on this segment when the merge
-          // started.  The merge has collapsed away those
-          // deletes, but, if new deletes were flushed since
-          // the merge started, we must now carefully keep any
-          // newly flushed deletes but mapping them to the new
-          // docIDs.
-
-          assert currentInfo.hasDeletions();
-
-          // Load deletes present @ start of merge, for this segment:
-          BitVector previousDeletes = new BitVector(previousInfo.dir, previousInfo.getDelFileName());
-
-          if (!currentInfo.getDelFileName().equals(previousInfo.getDelFileName())) {
-            // This means this segment has had new deletes
-            // committed since we started the merge, so we
-            // must merge them:
-            if (deletes == null)
-              deletes = new BitVector(merge.info.docCount);
-
-            BitVector currentDeletes = new BitVector(currentInfo.dir, currentInfo.getDelFileName());
-            for(int j=0;j<docCount;j++) {
-              if (previousDeletes.get(j))
-                assert currentDeletes.get(j);
-              else {
-                if (currentDeletes.get(j))
-                  deletes.set(docUpto);
-                docUpto++;
-              }
-            }
-          } else
-            docUpto += docCount - previousDeletes.count();
-        
-        } else if (currentInfo.hasDeletions()) {
-          // This segment had no deletes before but now it
-          // does:
-          if (deletes == null)
-            deletes = new BitVector(merge.info.docCount);
-          BitVector currentDeletes = new BitVector(directory, currentInfo.getDelFileName());
-
-          for(int j=0;j<docCount;j++) {
-            if (currentDeletes.get(j))
-              deletes.set(docUpto);
-            docUpto++;
-          }
-
-        } else
-          // No deletes before or after
-          docUpto += currentInfo.docCount;
-
-        merge.checkAborted(directory);
-      }
-
-      if (deletes != null) {
-        merge.info.advanceDelGen();
-        deletes.write(directory, merge.info.getDelFileName());
-      }
-      success = true;
-    } finally {
-      if (!success) {
-        if (infoStream != null)
-          message("hit exception creating merged deletes file");
-        deleter.refresh(merge.info.name);
-      }
-    }
+    commitMergedDeletes(merge);
 
     // Simple optimization: if the doc store we are using
     // has been closed and is in now compound format (but
@@ -132,24 +43,10 @@
       }
     }
 
-    success = false;
-    SegmentInfos rollback = null;
-    try {
-      rollback = (SegmentInfos) segmentInfos.clone();
-      segmentInfos.subList(start, start + merge.segments.size()).clear();
-      segmentInfos.add(start, merge.info);
-      checkpoint();
-      success = true;
-    } finally {
-      if (!success && rollback != null) {
-        if (infoStream != null)
-          message("hit exception when checkpointing after merge");
-        segmentInfos.clear();
-        segmentInfos.addAll(rollback);
-        deletePartialSegmentsFile();
-        deleter.refresh(merge.info.name);
-      }
-    }
+    segmentInfos.subList(start, start + merge.segments.size()).clear();
+    segmentInfos.add(start, merge.info);
+    if (lastMergeInfo == null || segmentInfos.indexOf(lastMergeInfo) < start)
+      lastMergeInfo = merge.info;
 
     if (merge.optimize)
       segmentsToOptimize.add(merge.info);
@@ -157,7 +54,7 @@
     // Must checkpoint before decrefing so any newly
     // referenced files in the new merge.info are incref'd
     // first:
-    deleter.checkpoint(segmentInfos, autoCommit);
+    checkpoint();
 
     decrefMergeSegments(merge);
 

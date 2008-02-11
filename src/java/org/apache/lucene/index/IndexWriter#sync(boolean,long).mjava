@@ -1,0 +1,147 @@
+  /** Walk through all files referenced by the current
+   *  segmentInfos, minus flushes, and ask the Directory to
+   *  sync each file, if it wasn't already.  If that
+   *  succeeds, then we write a new segments_N file & sync
+   *  that. */
+  private void sync(boolean includeFlushes, long sizeInBytes) throws IOException {
+
+    message("start sync() includeFlushes=" + includeFlushes);
+
+    if (!includeFlushes)
+      syncPause(sizeInBytes);
+
+    // First, we clone & incref the segmentInfos we intend
+    // to sync, then, without locking, we sync() each file
+    // referenced by toSync, in the background.  Multiple
+    // threads can be doing this at once, if say a large
+    // merge and a small merge finish at the same time:
+
+    SegmentInfos toSync = null;
+    final int mySyncCount;
+    synchronized(this) {
+
+      if (!commitPending) {
+        message("  skip sync(): no commit pending");
+        return;
+      }
+
+      // Create the segmentInfos we want to sync, by copying
+      // the current one and possibly removing flushed
+      // segments:
+      toSync = (SegmentInfos) segmentInfos.clone();
+      final int numSegmentsToSync = toSync.size();
+
+      boolean newCommitPending = false;
+
+      if (!includeFlushes) {
+        // Do not sync flushes:
+        assert lastMergeInfo != null;
+        assert toSync.contains(lastMergeInfo);
+        int downTo = numSegmentsToSync-1;
+        while(!toSync.info(downTo).equals(lastMergeInfo)) {
+          message("  skip segment " + toSync.info(downTo).name);
+          toSync.remove(downTo);
+          downTo--;
+          newCommitPending = true;
+        }
+
+      } else if (numSegmentsToSync > 0)
+        // Force all subsequent syncs to include up through
+        // the final info in the current segments.  This
+        // ensure that a call to commit() will force another
+        // sync (due to merge finishing) to sync all flushed
+        // segments as well:
+        lastMergeInfo = toSync.info(numSegmentsToSync-1);
+
+      mySyncCount = syncCount++;
+      deleter.incRef(toSync, false);
+
+      commitPending = newCommitPending;
+    }
+
+    boolean success0 = false;
+
+    try {
+
+      // Loop until all files toSync references are sync'd:
+      while(true) {
+
+        final Collection pending = new ArrayList();
+
+        for(int i=0;i<toSync.size();i++) {
+          final SegmentInfo info = toSync.info(i);
+          final List files = info.files();
+          for(int j=0;j<files.size();j++) {
+            final String fileName = (String) files.get(j);
+            if (startSync(fileName, pending)) {
+              boolean success = false;
+              try {
+                // Because we incRef'd this commit point, above,
+                // the file had better exist:
+                assert directory.fileExists(fileName);
+                message("now sync " + fileName);
+                directory.sync(fileName);
+                success = true;
+              } finally {
+                finishSync(fileName, success);
+              }
+            }
+          }
+        }
+
+        // All files that I require are either synced or being
+        // synced by other threads.  If they are being synced,
+        // we must at this point block until they are done.
+        // If this returns false, that means an error in
+        // another thread resulted in failing to actually
+        // sync one of our files, so we repeat:
+        if (waitForAllSynced(pending))
+          break;
+      }
+
+      synchronized(this) {
+        // If someone saved a newer version of segments file
+        // since I first started syncing my version, I can
+        // safely skip saving myself since I've been
+        // superseded:
+        if (mySyncCount > syncCountSaved) {
+          
+          if (segmentInfos.getGeneration() > toSync.getGeneration())
+            toSync.updateGeneration(segmentInfos);
+
+          boolean success = false;
+          try {
+            toSync.commit(directory);
+            success = true;
+          } finally {
+            // Have our master segmentInfos record the
+            // generations we just sync'd
+            segmentInfos.updateGeneration(toSync);
+            if (!success) {
+              commitPending = true;
+              message("hit exception committing segments file");
+            }
+          }
+          message("commit complete");
+
+          syncCountSaved = mySyncCount;
+
+          deleter.checkpoint(toSync, true);
+          setRollbackSegmentInfos();
+        } else
+          message("sync superseded by newer infos");
+      }
+
+      message("done all syncs");
+
+      success0 = true;
+
+    } finally {
+      synchronized(this) {
+        deleter.decRef(toSync);
+        if (!success0)
+          commitPending = true;
+      }
+    }
+  }
+

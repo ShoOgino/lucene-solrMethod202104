@@ -1,6 +1,11 @@
+  // TODO: this method should not have to be entirely
+  // synchronized, ie, merges should be allowed to commit
+  // even while a flush is happening
   private synchronized final boolean doFlush(boolean flushDocStores) throws CorruptIndexException, IOException {
 
     // Make sure no threads are actively adding a document
+
+    flushCount++;
 
     // Returns true if docWriter is currently aborting, in
     // which case we skip flushing this segment
@@ -34,18 +39,6 @@
       // apply to more than just the last flushed segment
       boolean flushDeletes = docWriter.hasDeletes();
 
-      if (infoStream != null) {
-        message("  flush: segment=" + docWriter.getSegment() +
-                " docStoreSegment=" + docWriter.getDocStoreSegment() +
-                " docStoreOffset=" + docWriter.getDocStoreOffset() +
-                " flushDocs=" + flushDocs +
-                " flushDeletes=" + flushDeletes +
-                " flushDocStores=" + flushDocStores +
-                " numDocs=" + numDocs +
-                " numBufDelTerms=" + docWriter.getNumBufferedDeleteTerms());
-        message("  index before flush " + segString());
-      }
-
       int docStoreOffset = docWriter.getDocStoreOffset();
 
       // docStoreOffset should only be non-zero when
@@ -53,6 +46,18 @@
       assert !autoCommit || 0 == docStoreOffset;
 
       boolean docStoreIsCompoundFile = false;
+
+      if (infoStream != null) {
+        message("  flush: segment=" + docWriter.getSegment() +
+                " docStoreSegment=" + docWriter.getDocStoreSegment() +
+                " docStoreOffset=" + docStoreOffset +
+                " flushDocs=" + flushDocs +
+                " flushDeletes=" + flushDeletes +
+                " flushDocStores=" + flushDocStores +
+                " numDocs=" + numDocs +
+                " numBufDelTerms=" + docWriter.getNumBufferedDeleteTerms());
+        message("  index before flush " + segString());
+      }
 
       // Check if the doc stores must be separately flushed
       // because other segments, besides the one we are about
@@ -71,60 +76,63 @@
       // If we are flushing docs, segment must not be null:
       assert segment != null || !flushDocs;
 
-      if (flushDocs || flushDeletes) {
-
-        SegmentInfos rollback = null;
-
-        if (flushDeletes)
-          rollback = (SegmentInfos) segmentInfos.clone();
+      if (flushDocs) {
 
         boolean success = false;
+        final int flushedDocCount;
 
         try {
-          if (flushDocs) {
-
-            if (0 == docStoreOffset && flushDocStores) {
-              // This means we are flushing private doc stores
-              // with this segment, so it will not be shared
-              // with other segments
-              assert docStoreSegment != null;
-              assert docStoreSegment.equals(segment);
-              docStoreOffset = -1;
-              docStoreIsCompoundFile = false;
-              docStoreSegment = null;
-            }
-
-            int flushedDocCount = docWriter.flush(flushDocStores);
-          
-            newSegment = new SegmentInfo(segment,
-                                         flushedDocCount,
-                                         directory, false, true,
-                                         docStoreOffset, docStoreSegment,
-                                         docStoreIsCompoundFile);
-            segmentInfos.addElement(newSegment);
-          }
-
-          if (flushDeletes) {
-            // we should be able to change this so we can
-            // buffer deletes longer and then flush them to
-            // multiple flushed segments, when
-            // autoCommit=false
-            applyDeletes(flushDocs);
-            doAfterFlush();
-          }
-
-          checkpoint();
+          flushedDocCount = docWriter.flush(flushDocStores);
           success = true;
         } finally {
           if (!success) {
-
             if (infoStream != null)
               message("hit exception flushing segment " + segment);
-                
-            if (flushDeletes) {
+            docWriter.abort(null);
+            deleter.refresh(segment);
+          }
+        }
+        
+        if (0 == docStoreOffset && flushDocStores) {
+          // This means we are flushing private doc stores
+          // with this segment, so it will not be shared
+          // with other segments
+          assert docStoreSegment != null;
+          assert docStoreSegment.equals(segment);
+          docStoreOffset = -1;
+          docStoreIsCompoundFile = false;
+          docStoreSegment = null;
+        }
 
-              // Carefully check if any partial .del files
-              // should be removed:
+        // Create new SegmentInfo, but do not add to our
+        // segmentInfos until deletes are flushed
+        // successfully.
+        newSegment = new SegmentInfo(segment,
+                                     flushedDocCount,
+                                     directory, false, true,
+                                     docStoreOffset, docStoreSegment,
+                                     docStoreIsCompoundFile);
+      }
+
+      if (flushDeletes) {
+        try {
+          SegmentInfos rollback = (SegmentInfos) segmentInfos.clone();
+
+          boolean success = false;
+          try {
+            // we should be able to change this so we can
+            // buffer deletes longer and then flush them to
+            // multiple flushed segments only when a commit()
+            // finally happens
+            applyDeletes(newSegment);
+            success = true;
+          } finally {
+            if (!success) {
+              if (infoStream != null)
+                message("hit exception flushing deletes");
+                
+              // Carefully remove any partially written .del
+              // files
               final int size = rollback.size();
               for(int i=0;i<size;i++) {
                 final String newDelFileName = segmentInfos.info(i).getDelFileName();
@@ -133,56 +141,50 @@
                   deleter.deleteFile(newDelFileName);
               }
 
+              // Remove just flushed segment
+              deleter.refresh(segment);
+
               // Fully replace the segmentInfos since flushed
               // deletes could have changed any of the
               // SegmentInfo instances:
               segmentInfos.clear();
               segmentInfos.addAll(rollback);
-              
-            } else {
-              // Remove segment we added, if any:
-              if (newSegment != null && 
-                  segmentInfos.size() > 0 && 
-                  segmentInfos.info(segmentInfos.size()-1) == newSegment)
-                segmentInfos.remove(segmentInfos.size()-1);
-            }
-            if (flushDocs)
-              docWriter.abort(null);
-            deletePartialSegmentsFile();
-            deleter.checkpoint(segmentInfos, false);
-
-            if (segment != null)
-              deleter.refresh(segment);
+            }              
           }
+        } finally {
+          // Regardless of success of failure in flushing
+          // deletes, we must clear them from our buffer:
+          docWriter.clearBufferedDeletes();
         }
-
-        deleter.checkpoint(segmentInfos, autoCommit);
-
-        if (flushDocs && mergePolicy.useCompoundFile(segmentInfos,
-                                                     newSegment)) {
-          success = false;
-          try {
-            docWriter.createCompoundFile(segment);
-            newSegment.setUseCompoundFile(true);
-            checkpoint();
-            success = true;
-          } finally {
-            if (!success) {
-              if (infoStream != null)
-                message("hit exception creating compound file for newly flushed segment " + segment);
-              newSegment.setUseCompoundFile(false);
-              deleter.deleteFile(segment + "." + IndexFileNames.COMPOUND_FILE_EXTENSION);
-              deletePartialSegmentsFile();
-            }
-          }
-
-          deleter.checkpoint(segmentInfos, autoCommit);
-        }
-      
-        return true;
-      } else {
-        return false;
       }
+
+      if (flushDocs)
+        segmentInfos.addElement(newSegment);
+
+      if (flushDocs || flushDeletes)
+        checkpoint();
+
+      doAfterFlush();
+
+      if (flushDocs && mergePolicy.useCompoundFile(segmentInfos, newSegment)) {
+        // Now build compound file
+        boolean success = false;
+        try {
+          docWriter.createCompoundFile(segment);
+          success = true;
+        } finally {
+          if (!success) {
+            if (infoStream != null)
+              message("hit exception creating compound file for newly flushed segment " + segment);
+            deleter.deleteFile(segment + "." + IndexFileNames.COMPOUND_FILE_EXTENSION);
+          }
+        }
+
+        newSegment.setUseCompoundFile(true);
+        checkpoint();
+      }
+      
+      return flushDocs || flushDeletes;
 
     } finally {
       docWriter.clearFlushPending();

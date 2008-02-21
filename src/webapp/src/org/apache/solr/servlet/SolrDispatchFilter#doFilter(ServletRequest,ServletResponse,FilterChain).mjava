@@ -8,6 +8,7 @@
     if( request instanceof HttpServletRequest) {
       SolrQueryRequest solrReq = null;
       HttpServletRequest req = (HttpServletRequest)request;
+      HttpServletResponse resp = (HttpServletResponse)response;
       try {
         String path = req.getServletPath();    
         if( req.getPathInfo() != null ) {
@@ -73,7 +74,29 @@
           if( solrReq == null ) {
             solrReq = parsers.parse( core, path, req );
           }
+          
+          final SolrConfig conf = core.getSolrConfig();
+          final Method reqMethod = Method.getMethod(req.getMethod());
+
+          if (Method.POST != reqMethod) {
+            HttpCacheHeaderUtil.setCacheControlHeader(conf, resp);
+          }
+            
+          // unless we have been explicitly told not to, do cache validation
+          if (!conf.getHttpCachingConfig().isNever304()) {
+            // if we've confirmed cache validation, return immediately
+            if (HttpCacheHeaderUtil.doCacheHeaderValidation(solrReq,
+                                                            req,resp)) {
+              return;
+            }
+          }
+          
           SolrQueryResponse solrRsp = new SolrQueryResponse();
+          /* even for HEAD requests, we need to execute the handler to
+           * ensure we don't get an error (and to make sure the correct 
+           * QueryResponseWriter is selectedand we get the correct
+           * Content-Type)
+           */
           this.execute( req, handler, solrReq, solrRsp );
           if( solrRsp.getException() != null ) {
             sendError( (HttpServletResponse)response, solrRsp.getException() );
@@ -83,6 +106,11 @@
           // Now write it out
           QueryResponseWriter responseWriter = core.getQueryResponseWriter(solrReq);
           response.setContentType(responseWriter.getContentType(solrReq, solrRsp));
+          if (Method.HEAD == Method.getMethod(req.getMethod())) {
+            // nothing to write out, waited this long just to get ContentType
+            return; 
+          }
+          
           PrintWriter out = response.getWriter();
           responseWriter.write(out, solrReq, solrRsp);
           return;

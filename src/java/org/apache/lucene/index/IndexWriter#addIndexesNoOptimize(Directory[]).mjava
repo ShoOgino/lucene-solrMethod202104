@@ -26,47 +26,53 @@
       throws CorruptIndexException, IOException {
 
     ensureOpen();
-    if (infoStream != null)
-      message("flush at addIndexesNoOptimize");
-    flush(true, false);
-
-    boolean success = false;
-
-    startTransaction();
 
     try {
+      if (infoStream != null)
+        message("flush at addIndexesNoOptimize");
+      flush(true, false);
 
-      for (int i = 0; i < dirs.length; i++) {
-        if (directory == dirs[i]) {
-          // cannot add this index: segments may be deleted in merge before added
-          throw new IllegalArgumentException("Cannot add this index to itself");
+      boolean success = false;
+
+      startTransaction();
+
+      try {
+
+        for (int i = 0; i < dirs.length; i++) {
+          if (directory == dirs[i]) {
+            // cannot add this index: segments may be deleted in merge before added
+            throw new IllegalArgumentException("Cannot add this index to itself");
+          }
+
+          SegmentInfos sis = new SegmentInfos(); // read infos from dir
+          sis.read(dirs[i]);
+          for (int j = 0; j < sis.size(); j++) {
+            SegmentInfo info = sis.info(j);
+            segmentInfos.addElement(info); // add each info
+          }
         }
 
-        SegmentInfos sis = new SegmentInfos(); // read infos from dir
-        sis.read(dirs[i]);
-        for (int j = 0; j < sis.size(); j++) {
-          SegmentInfo info = sis.info(j);
-          segmentInfos.addElement(info); // add each info
+        maybeMerge();
+
+        // If after merging there remain segments in the index
+        // that are in a different directory, just copy these
+        // over into our index.  This is necessary (before
+        // finishing the transaction) to avoid leaving the
+        // index in an unusable (inconsistent) state.
+        copyExternalSegments();
+
+        success = true;
+
+      } finally {
+        if (success) {
+          commitTransaction();
+        } else {
+          rollbackTransaction();
         }
       }
-
-      maybeMerge();
-
-      // If after merging there remain segments in the index
-      // that are in a different directory, just copy these
-      // over into our index.  This is necessary (before
-      // finishing the transaction) to avoid leaving the
-      // index in an unusable (inconsistent) state.
-      copyExternalSegments();
-
-      success = true;
-
-    } finally {
-      if (success) {
-        commitTransaction();
-      } else {
-        rollbackTransaction();
-      }
+    } catch (OutOfMemoryError oom) {
+      hitOOM = true;
+      throw oom;
     }
   }
 

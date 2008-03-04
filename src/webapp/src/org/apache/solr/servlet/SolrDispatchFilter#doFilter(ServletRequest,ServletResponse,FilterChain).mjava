@@ -29,50 +29,72 @@
         SolrRequestHandler handler = null;
         SolrCore core = singlecore;
         if( core == null ) {
-          // Perhaps this is a muli-core admin page?
+          // Perhaps this is a multi-core admin page?
+          if( path.equals( "/" ) ) {
+            chain.doFilter(request, response);
+            return;  
+          }
           if( path.equals( multicore.getAdminPath() ) ) {
             handler = multicore.getMultiCoreHandler();
+            
+            // pick a core to use for output
+            Collection<SolrCore> cores = multicore.getCores();
+            if( cores != null && cores.size() > 0 ) {
+              core = cores.iterator().next();
+            }
+            if( core == null ) {
+              throw new RuntimeException( "Can not find a valid core for the multicore admin handler" );
+            }
           }
           else {
             idx = path.indexOf( "/", 1 );
-            if( idx > 1 ) {
-              // try to get the corename as a request parameter first
-              String corename = path.substring( 1, idx );
-              path = path.substring( idx );
-              core = multicore.getCore( corename );
-              // invalid core name is ok.  It could fall through to some other request
+            if( idx <= 1 ) {
+              idx = path.length();
+            }
+            
+            // try to get the corename as a request parameter first
+            String corename = path.substring( 1, idx );
+            path = path.substring( idx );
+            core = multicore.getCore( corename );
+            
+            if( path.length() == 0 ) {
+              path = "/";
+            }
+            
+            if( core == null ) {
+              throw new SolrException( SolrException.ErrorCode.BAD_REQUEST, "unknown core: "+corename );
             }
           }
         }
         
-        if( core != null ) {
-          // Only try to parse the handler *if* a valid core exists
-          // when multi-core is enabled, the path can lead to a null core.
-          if( handler == null && path.length() > 1 ) { // don't match "" or "/" as valid path
-            handler = core.getRequestHandler( path );
-          }
-          if( handler == null && handleSelect ) {
-            if( "/select".equals( path ) || "/select/".equals( path ) ) {
-              solrReq = parsers.parse( core, path, req );
-              String qt = solrReq.getParams().get( CommonParams.QT );
-              if( qt != null && qt.startsWith( "/" ) ) {
-                throw new SolrException( SolrException.ErrorCode.BAD_REQUEST, "Invalid query type.  Do not use /select to access: "+qt);
-              }
-              handler = core.getRequestHandler( qt );
-              if( handler == null ) {
-                throw new SolrException( SolrException.ErrorCode.BAD_REQUEST, "unknown handler: "+qt);
-              }
+        SolrRequestParsers parser = parsers.get( core );
+        if( parser == null ) {
+          parser = new SolrRequestParsers( core.getSolrConfig() );
+          parsers.put( core, parser );
+        }
+        
+        // Only try to parse the handler *if* a valid core exists
+        // when multi-core is enabled, the path can lead to a null core.
+        if( handler == null && path.length() > 1 ) { // don't match "" or "/" as valid path
+          handler = core.getRequestHandler( path );
+        }
+        if( handler == null && parser.isHandleSelect() ) {
+          if( "/select".equals( path ) || "/select/".equals( path ) ) {
+            solrReq = parser.parse( core, path, req );
+            String qt = solrReq.getParams().get( CommonParams.QT );
+            if( qt != null && qt.startsWith( "/" ) ) {
+              throw new SolrException( SolrException.ErrorCode.BAD_REQUEST, "Invalid query type.  Do not use /select to access: "+qt);
+            }
+            handler = core.getRequestHandler( qt );
+            if( handler == null ) {
+              throw new SolrException( SolrException.ErrorCode.BAD_REQUEST, "unknown handler: "+qt);
             }
           }
         }
         
-        if( handler != null ) {
-          if( core == null ) {
-            core = multicore.getDefaultCore();
-          }
-          
+        if( handler != null ) {          
           if( solrReq == null ) {
-            solrReq = parsers.parse( core, path, req );
+            solrReq = parser.parse( core, path, req );
           }
           
           final SolrConfig conf = core.getSolrConfig();
@@ -85,8 +107,7 @@
           // unless we have been explicitly told not to, do cache validation
           if (!conf.getHttpCachingConfig().isNever304()) {
             // if we've confirmed cache validation, return immediately
-            if (HttpCacheHeaderUtil.doCacheHeaderValidation(solrReq,
-                                                            req,resp)) {
+            if (HttpCacheHeaderUtil.doCacheHeaderValidation(solrReq, req,resp)) {
               return;
             }
           }
@@ -119,11 +140,11 @@
         // the servlet/jsp can retrieve it
         else {
           req.setAttribute("org.apache.solr.SolrCore", core);
-          
-          // Modify the request so each core gets its own /admin
+
+          // Let each core have its own admin page...
           if( singlecore == null && path.startsWith( "/admin" ) ) {
             req.getRequestDispatcher( path ).forward( request, response );
-            return;
+            return; 
           }
         }
       }

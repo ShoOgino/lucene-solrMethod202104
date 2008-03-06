@@ -11,6 +11,10 @@
    * each input Directory, so it is up to the caller to
    * enforce this.
    *
+   * <p><b>NOTE:</b> while this is running, any attempts to
+   * add or delete documents (with another thread) will be
+   * paused until this method completes.
+   *
    * <p>
    * This requires this index not be among those to be added, and the
    * upper bound* of those segment doc counts not exceed maxMergeDocs.
@@ -22,10 +26,13 @@
    * @throws CorruptIndexException if the index is corrupt
    * @throws IOException if there is a low-level IO error
    */
-  public synchronized void addIndexesNoOptimize(Directory[] dirs)
+  public void addIndexesNoOptimize(Directory[] dirs)
       throws CorruptIndexException, IOException {
 
     ensureOpen();
+
+    // Do not allow add docs or deletes while we are running:
+    docWriter.pauseAllThreads();
 
     try {
       if (infoStream != null)
@@ -39,18 +46,20 @@
       try {
 
         int docCount = 0;
-        for (int i = 0; i < dirs.length; i++) {
-          if (directory == dirs[i]) {
-            // cannot add this index: segments may be deleted in merge before added
-            throw new IllegalArgumentException("Cannot add this index to itself");
-          }
+        synchronized(this) {
+          for (int i = 0; i < dirs.length; i++) {
+            if (directory == dirs[i]) {
+              // cannot add this index: segments may be deleted in merge before added
+              throw new IllegalArgumentException("Cannot add this index to itself");
+            }
 
-          SegmentInfos sis = new SegmentInfos(); // read infos from dir
-          sis.read(dirs[i]);
-          for (int j = 0; j < sis.size(); j++) {
-            SegmentInfo info = sis.info(j);
-            docCount += info.docCount;
-            segmentInfos.addElement(info); // add each info
+            SegmentInfos sis = new SegmentInfos(); // read infos from dir
+            sis.read(dirs[i]);
+            for (int j = 0; j < sis.size(); j++) {
+              SegmentInfo info = sis.info(j);
+              docCount += info.docCount;
+              segmentInfos.addElement(info); // add each info
+            }
           }
         }
 
@@ -78,6 +87,8 @@
     } catch (OutOfMemoryError oom) {
       hitOOM = true;
       throw oom;
+    } finally {
+      docWriter.resumeAllThreads();
     }
   }
 

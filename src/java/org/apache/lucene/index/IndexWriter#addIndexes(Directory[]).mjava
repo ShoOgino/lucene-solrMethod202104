@@ -12,6 +12,10 @@
    * each input Directory, so it is up to the caller to
    * enforce this.
    *
+   * <p><b>NOTE:</b> while this is running, any attempts to
+   * add or delete documents (with another thread) will be
+   * paused until this method completes.
+   *
    * <p>After this completes, the index is optimized.
    *
    * <p>This method is transactional in how Exceptions are
@@ -50,11 +54,16 @@
    * @throws CorruptIndexException if the index is corrupt
    * @throws IOException if there is a low-level IO error
    */
-  public synchronized void addIndexes(Directory[] dirs)
+  public void addIndexes(Directory[] dirs)
     throws CorruptIndexException, IOException {
 
     ensureOpen();
+
+    // Do not allow add docs or deletes while we are running:
+    docWriter.pauseAllThreads();
+
     try {
+
       if (infoStream != null)
         message("flush at addIndexes");
       flush(true, false, true);
@@ -64,14 +73,17 @@
       startTransaction();
 
       try {
+
         int docCount = 0;
-        for (int i = 0; i < dirs.length; i++) {
-          SegmentInfos sis = new SegmentInfos();	  // read infos from dir
-          sis.read(dirs[i]);
-          for (int j = 0; j < sis.size(); j++) {
-            final SegmentInfo info = sis.info(j);
-            docCount += info.docCount;
-            segmentInfos.addElement(info);	  // add each info
+        synchronized(this) {
+          for (int i = 0; i < dirs.length; i++) {
+            SegmentInfos sis = new SegmentInfos();	  // read infos from dir
+            sis.read(dirs[i]);
+            for (int j = 0; j < sis.size(); j++) {
+              final SegmentInfo info = sis.info(j);
+              docCount += info.docCount;
+              segmentInfos.addElement(info);	  // add each info
+            }
           }
         }
 
@@ -91,6 +103,8 @@
     } catch (OutOfMemoryError oom) {
       hitOOM = true;
       throw oom;
+    } finally {
+      docWriter.resumeAllThreads();
     }
   }
 

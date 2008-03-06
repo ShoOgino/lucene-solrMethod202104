@@ -1,11 +1,22 @@
   // TODO: this method should not have to be entirely
   // synchronized, ie, merges should be allowed to commit
   // even while a flush is happening
-  private synchronized final boolean doFlush(boolean flushDocStores) throws CorruptIndexException, IOException {
+  private synchronized final boolean doFlush(boolean flushDocStores, boolean flushDeletes) throws CorruptIndexException, IOException {
 
     // Make sure no threads are actively adding a document
 
+    assert testPoint("startDoFlush");
+
     flushCount++;
+
+    flushDeletes |= docWriter.deletesFull();
+
+    // When autoCommit=true we must always flush deletes
+    // when flushing a segment; otherwise deletes may become
+    // visible before their corresponding added document
+    // from an updateDocument call
+    if (autoCommit)
+      flushDeletes = true;
 
     // Returns true if docWriter is currently aborting, in
     // which case we skip flushing this segment
@@ -29,15 +40,6 @@
       String docStoreSegment = docWriter.getDocStoreSegment();
       if (docStoreSegment == null)
         flushDocStores = false;
-
-      // Always flush deletes if there are any delete terms.
-      // TODO: when autoCommit=false we don't have to flush
-      // deletes with every flushed segment; we can save
-      // CPU/IO by buffering longer & flushing deletes only
-      // when they are full or writer is being closed.  We
-      // have to fix the "applyDeletesSelectively" logic to
-      // apply to more than just the last flushed segment
-      boolean flushDeletes = docWriter.hasDeletes();
 
       int docStoreOffset = docWriter.getDocStoreOffset();
 
@@ -114,54 +116,17 @@
                                      docStoreIsCompoundFile);
       }
 
-      if (flushDeletes) {
-        try {
-          SegmentInfos rollback = (SegmentInfos) segmentInfos.clone();
-
-          boolean success = false;
-          try {
-            // we should be able to change this so we can
-            // buffer deletes longer and then flush them to
-            // multiple flushed segments only when a commit()
-            // finally happens
-            applyDeletes(newSegment);
-            success = true;
-          } finally {
-            if (!success) {
-              if (infoStream != null)
-                message("hit exception flushing deletes");
-                
-              // Carefully remove any partially written .del
-              // files
-              final int size = rollback.size();
-              for(int i=0;i<size;i++) {
-                final String newDelFileName = segmentInfos.info(i).getDelFileName();
-                final String delFileName = rollback.info(i).getDelFileName();
-                if (newDelFileName != null && !newDelFileName.equals(delFileName))
-                  deleter.deleteFile(newDelFileName);
-              }
-
-              // Remove just flushed segment
-              deleter.refresh(segment);
-
-              // Fully replace the segmentInfos since flushed
-              // deletes could have changed any of the
-              // SegmentInfo instances:
-              segmentInfos.clear();
-              segmentInfos.addAll(rollback);
-            }              
-          }
-        } finally {
-          // Regardless of success of failure in flushing
-          // deletes, we must clear them from our buffer:
-          docWriter.clearBufferedDeletes();
-        }
-      }
+      docWriter.pushDeletes();
 
       if (flushDocs)
         segmentInfos.addElement(newSegment);
 
-      if (flushDocs || flushDeletes)
+      if (flushDeletes) {
+        flushDeletesCount++;
+        applyDeletes();
+      }
+      
+      if (flushDocs)
         checkpoint();
 
       doAfterFlush();
@@ -183,8 +148,8 @@
         newSegment.setUseCompoundFile(true);
         checkpoint();
       }
-      
-      return flushDocs || flushDeletes;
+
+      return flushDocs;
 
     } catch (OutOfMemoryError oom) {
       hitOOM = true;

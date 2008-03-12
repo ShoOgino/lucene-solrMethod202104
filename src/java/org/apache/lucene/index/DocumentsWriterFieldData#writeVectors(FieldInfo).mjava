@@ -1,0 +1,86 @@
+  /** Called once per field per document if term vectors
+   *  are enabled, to write the vectors to *
+   *  RAMOutputStream, which is then quickly flushed to
+   *  * the real term vectors files in the Directory. */
+  void writeVectors(FieldInfo fieldInfo) throws IOException {
+
+    assert fieldInfo.storeTermVector;
+    assert threadState.vectorFieldsInOrder(fieldInfo);
+
+    threadState.vectorFieldNumbers[threadState.numVectorFields] = fieldInfo.number;
+    threadState.vectorFieldPointers[threadState.numVectorFields] = threadState.tvfLocal.getFilePointer();
+    threadState.numVectorFields++;
+
+    final int numPostingsVectors = postingsVectorsUpto;
+    final PostingVector[] postingsVectors = threadState.postingsVectors;
+
+    final IndexOutput tvfLocal = threadState.tvfLocal;
+
+    threadState.tvfLocal.writeVInt(numPostingsVectors);
+    byte bits = 0x0;
+    if (doVectorPositions)
+      bits |= TermVectorsReader.STORE_POSITIONS_WITH_TERMVECTOR;
+    if (doVectorOffsets) 
+      bits |= TermVectorsReader.STORE_OFFSET_WITH_TERMVECTOR;
+    threadState.tvfLocal.writeByte(bits);
+
+    threadState.doVectorSort(postingsVectors, numPostingsVectors);
+
+    Posting lastPosting = null;
+
+    final ByteSliceReader reader = vectorSliceReader;
+    final char[][] charBuffers = threadState.charPool.buffers;
+
+    for(int j=0;j<numPostingsVectors;j++) {
+      final PostingVector vector = postingsVectors[j];
+      Posting posting = vector.p;
+      final int freq = posting.docFreq;
+          
+      final int prefix;
+      final char[] text2 = charBuffers[posting.textStart >> DocumentsWriter.CHAR_BLOCK_SHIFT];
+      final int start2 = posting.textStart & DocumentsWriter.CHAR_BLOCK_MASK;
+      int pos2 = start2;
+
+      // Compute common prefix between last term and
+      // this term
+      if (lastPosting == null)
+        prefix = 0;
+      else {
+        final char[] text1 = charBuffers[lastPosting.textStart >> DocumentsWriter.CHAR_BLOCK_SHIFT];
+        final int start1 = lastPosting.textStart & DocumentsWriter.CHAR_BLOCK_MASK;
+        int pos1 = start1;
+        while(true) {
+          final char c1 = text1[pos1];
+          final char c2 = text2[pos2];
+          if (c1 != c2 || c1 == 0xffff) {
+            prefix = pos1-start1;
+            break;
+          }
+          pos1++;
+          pos2++;
+        }
+      }
+      lastPosting = posting;
+
+      // Compute length
+      while(text2[pos2] != 0xffff)
+        pos2++;
+
+      final int suffix = pos2 - start2 - prefix;
+      tvfLocal.writeVInt(prefix);
+      tvfLocal.writeVInt(suffix);
+      tvfLocal.writeChars(text2, start2 + prefix, suffix);
+      tvfLocal.writeVInt(freq);
+
+      if (doVectorPositions) {
+        reader.init(threadState.vectorsPool, vector.posStart, vector.posUpto);
+        reader.writeTo(tvfLocal);
+      }
+
+      if (doVectorOffsets) {
+        reader.init(threadState.vectorsPool, vector.offsetStart, vector.offsetUpto);
+        reader.writeTo(tvfLocal);
+      }
+    }
+  }
+

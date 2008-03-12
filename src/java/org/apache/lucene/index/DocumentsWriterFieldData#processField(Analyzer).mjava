@@ -1,0 +1,75 @@
+  /** Process all occurrences of one field in the document. */
+  public void processField(Analyzer analyzer) throws IOException, AbortException {
+    length = 0;
+    position = 0;
+    offset = 0;
+    boost = threadState.docBoost;
+
+    final int maxFieldLength = threadState.docWriter.writer.getMaxFieldLength();
+
+    final int limit = fieldCount;
+    final Fieldable[] docFieldsFinal = docFields;
+
+    boolean doWriteVectors = true;
+
+    // Walk through all occurrences in this doc for this
+    // field:
+    try {
+      for(int j=0;j<limit;j++) {
+        Fieldable field = docFieldsFinal[j];
+
+        if (field.isIndexed())
+          invertField(field, analyzer, maxFieldLength);
+
+        if (field.isStored()) {
+          threadState.numStoredFields++;
+          boolean success = false;
+          try {
+            threadState.localFieldsWriter.writeField(fieldInfo, field);
+            success = true;
+          } finally {
+            // If we hit an exception inside
+            // localFieldsWriter.writeField, the
+            // contents of fdtLocal can be corrupt, so
+            // we must discard all stored fields for
+            // this document:
+            if (!success)
+              threadState.fdtLocal.reset();
+          }
+        }
+
+        docFieldsFinal[j] = null;
+      }
+    } catch (AbortException ae) {
+      doWriteVectors = false;
+      throw ae;
+    } finally {
+      if (postingsVectorsUpto > 0) {
+        try {
+          if (doWriteVectors) {
+            // Add term vectors for this field
+            boolean success = false;
+            try {
+              writeVectors(fieldInfo);
+              success = true;
+            } finally {
+              if (!success) {
+                // If we hit an exception inside
+                // writeVectors, the contents of tvfLocal
+                // can be corrupt, so we must discard all
+                // term vectors for this document:
+                threadState.numVectorFields = 0;
+                threadState.tvfLocal.reset();
+              }
+            }
+          }
+        } finally {
+          if (postingsVectorsUpto > threadState.maxPostingsVectors)
+            threadState.maxPostingsVectors = postingsVectorsUpto;
+          postingsVectorsUpto = 0;
+          threadState.vectorsPool.reset();
+        }
+      }
+    }
+  }
+

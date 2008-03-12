@@ -1,0 +1,61 @@
+  /** Does the synchronized work to finish/flush the
+   * inverted document. */
+  private synchronized void finishDocument(DocumentsWriterThreadState state) throws IOException, AbortException {
+    if (abortCount > 0) {
+      // Forcefully idle this threadstate -- its state will
+      // be reset by abort()
+      state.isIdle = true;
+      notifyAll();
+      return;
+    }
+
+    if (ramBufferSize != IndexWriter.DISABLE_AUTO_FLUSH
+        && numBytesUsed >= ramBufferSize)
+      balanceRAM();
+
+    // Now write the indexed document to the real files.
+    if (nextWriteDocID == state.docID) {
+      // It's my turn, so write everything now:
+      nextWriteDocID++;
+      state.writeDocument();
+      state.isIdle = true;
+      notifyAll();
+
+      // If any states were waiting on me, sweep through and
+      // flush those that are enabled by my write.
+      if (numWaiting > 0) {
+        boolean any = true;
+        while(any) {
+          any = false;
+          for(int i=0;i<numWaiting;) {
+            final DocumentsWriterThreadState s = waitingThreadStates[i];
+            if (s.docID == nextWriteDocID) {
+              s.writeDocument();
+              s.isIdle = true;
+              nextWriteDocID++;
+              any = true;
+              if (numWaiting > i+1)
+                // Swap in the last waiting state to fill in
+                // the hole we just created.  It's important
+                // to do this as-we-go and not at the end of
+                // the loop, because if we hit an aborting
+                // exception in one of the s.writeDocument
+                // calls (above), it leaves this array in an
+                // inconsistent state:
+                waitingThreadStates[i] = waitingThreadStates[numWaiting-1];
+              numWaiting--;
+            } else {
+              assert !s.isIdle;
+              i++;
+            }
+          }
+        }
+      }
+    } else {
+      // Another thread got a docID before me, but, it
+      // hasn't finished its processing.  So add myself to
+      // the line but don't hold up this thread.
+      waitingThreadStates[numWaiting++] = state;
+    }
+  }
+

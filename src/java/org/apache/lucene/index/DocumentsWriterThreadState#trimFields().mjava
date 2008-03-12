@@ -1,0 +1,73 @@
+  /** If there are fields we've seen but did not see again
+   *  in the last run, then free them up.  Also reduce
+   *  postings hash size. */
+  void trimFields() {
+
+    int upto = 0;
+    for(int i=0;i<numAllFieldData;i++) {
+      DocumentsWriterFieldData fp = allFieldDataArray[i];
+      if (fp.lastGen == -1) {
+        // This field was not seen since the previous
+        // flush, so, free up its resources now
+
+        // Unhash
+        final int hashPos = fp.fieldInfo.name.hashCode() & fieldDataHashMask;
+        DocumentsWriterFieldData last = null;
+        DocumentsWriterFieldData fp0 = fieldDataHash[hashPos];
+        while(fp0 != fp) {
+          last = fp0;
+          fp0 = fp0.next;
+        }
+        assert fp0 != null;
+
+        if (last == null)
+          fieldDataHash[hashPos] = fp.next;
+        else
+          last.next = fp.next;
+
+        if (docWriter.infoStream != null)
+          docWriter.infoStream.println("  remove field=" + fp.fieldInfo.name);
+
+      } else {
+        // Reset
+        fp.lastGen = -1;
+        allFieldDataArray[upto++] = fp;
+          
+        if (fp.numPostings > 0 && ((float) fp.numPostings) / fp.postingsHashSize < 0.2) {
+          int hashSize = fp.postingsHashSize;
+
+          // Reduce hash so it's between 25-50% full
+          while (fp.numPostings < (hashSize>>1) && hashSize >= 2)
+            hashSize >>= 1;
+          hashSize <<= 1;
+
+          if (hashSize != fp.postingsHash.length)
+            fp.rehashPostings(hashSize);
+        }
+      }
+    }
+
+    // If we didn't see any norms for this field since
+    // last flush, free it
+    for(int i=0;i<docWriter.norms.length;i++) {
+      BufferedNorms n = docWriter.norms[i];
+      if (n != null && n.upto == 0)
+        docWriter.norms[i] = null;
+    }
+
+    numAllFieldData = upto;
+
+    // Also pare back PostingsVectors if it's excessively
+    // large
+    if (maxPostingsVectors * 1.5 < postingsVectors.length) {
+      final int newSize;
+      if (0 == maxPostingsVectors)
+        newSize = 1;
+      else
+        newSize = (int) (1.5*maxPostingsVectors);
+      PostingVector[] newArray = new PostingVector[newSize];
+      System.arraycopy(postingsVectors, 0, newArray, 0, newSize);
+      postingsVectors = newArray;
+    }
+  }
+

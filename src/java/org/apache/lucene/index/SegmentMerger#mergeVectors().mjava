@@ -10,21 +10,29 @@
       for (int r = 0; r < readers.size(); r++) {
         final SegmentReader matchingSegmentReader = matchingSegmentReaders[r];
         TermVectorsReader matchingVectorsReader;
+        final boolean hasMatchingReader;
         if (matchingSegmentReader != null) {
           matchingVectorsReader = matchingSegmentReader.termVectorsReaderOrig;
 
           // If the TV* files are an older format then they
           // cannot read raw docs:
-          if (matchingVectorsReader != null && !matchingVectorsReader.canReadRawDocs())
+          if (matchingVectorsReader != null && !matchingVectorsReader.canReadRawDocs()) {
             matchingVectorsReader = null;
-        } else
+            hasMatchingReader = false;
+          } else
+            hasMatchingReader = matchingVectorsReader != null;
+
+        } else {
+          hasMatchingReader = false;
           matchingVectorsReader = null;
+        }
         IndexReader reader = (IndexReader) readers.elementAt(r);
+        final boolean hasDeletions = reader.hasDeletions();
         int maxDoc = reader.maxDoc();
         for (int docNum = 0; docNum < maxDoc;) {
           // skip deleted docs
-          if (!reader.isDeleted(docNum)) {
-            if (matchingVectorsReader != null) {
+          if (!hasDeletions || !reader.isDeleted(docNum)) {
+            if (hasMatchingReader) {
               // We can optimize this case (doing a bulk
               // byte copy) since the field numbers are
               // identical
@@ -33,7 +41,13 @@
               do {
                 docNum++;
                 numDocs++;
-              } while(docNum < maxDoc && !matchingSegmentReader.isDeleted(docNum) && numDocs < MAX_RAW_MERGE_DOCS);
+                if (docNum >= maxDoc)
+                  break;
+                if (hasDeletions && matchingSegmentReader.isDeleted(docNum)) {
+                  docNum++;
+                  break;
+                }
+              } while(numDocs < MAX_RAW_MERGE_DOCS);
 
               matchingVectorsReader.rawDocs(rawDocLengths, rawDocLengths2, start, numDocs);
               termVectorsWriter.addRawDocuments(matchingVectorsReader, rawDocLengths, rawDocLengths2, numDocs);

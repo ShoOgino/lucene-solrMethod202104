@@ -4,9 +4,33 @@
     try {
       fieldInfos = fn;
 
-      cloneableFieldsStream = d.openInput(segment + ".fdt", readBufferSize);
+      cloneableFieldsStream = d.openInput(segment + "." + IndexFileNames.FIELDS_EXTENSION, readBufferSize);
+      indexStream = d.openInput(segment + "." + IndexFileNames.FIELDS_INDEX_EXTENSION, readBufferSize);
+
+      // First version of fdx did not include a format
+      // header, but, the first int will always be 0 in that
+      // case
+      int firstInt = indexStream.readInt();
+      if (firstInt == 0)
+        format = 0;
+      else
+        format = firstInt;
+
+      if (format > FieldsWriter.FORMAT_CURRENT)
+        throw new CorruptIndexException("Incompatible format version: " + format + " expected " 
+                                        + FieldsWriter.FORMAT_CURRENT + " or lower");
+
+      if (format > FieldsWriter.FORMAT)
+        formatSize = 4;
+      else
+        formatSize = 0;
+
+      if (format < FieldsWriter.FORMAT_VERSION_UTF8_LENGTH_IN_BYTES)
+        cloneableFieldsStream.setModifiedUTF8StringsMode();
+
       fieldsStream = (IndexInput) cloneableFieldsStream.clone();
-      indexStream = d.openInput(segment + ".fdx", readBufferSize);
+
+      final long indexSize = indexStream.length()-formatSize;
 
       if (docStoreOffset != -1) {
         // We read only a slice out of this shared fields file
@@ -15,13 +39,13 @@
 
         // Verify the file is long enough to hold all of our
         // docs
-        assert ((int) (indexStream.length() / 8)) >= size + this.docStoreOffset;
+        assert ((int) (indexSize / 8)) >= size + this.docStoreOffset;
       } else {
         this.docStoreOffset = 0;
-        this.size = (int) (indexStream.length() >> 3);
+        this.size = (int) (indexSize >> 3);
       }
 
-      numTotalDocs = (int) (indexStream.length() >> 3);
+      numTotalDocs = (int) (indexSize >> 3);
       success = true;
     } finally {
       // With lock-less commits, it's entirely possible (and

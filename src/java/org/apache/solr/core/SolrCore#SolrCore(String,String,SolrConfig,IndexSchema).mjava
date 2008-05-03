@@ -50,27 +50,40 @@
     		  solrConfig.get("highlighting/@class", DefaultSolrHighlighter.class.getName())
       );
       highlighter.initalize( solrConfig );
-      
+
+      final CountDownLatch latch = new CountDownLatch(1);
+
       try {
-        // Open the searcher *before* the handler so we don't end up opening
+        // cause the executor to stall so firstSearcher events won't fire
+        // until after inform() has been called for all components.
+        // searchExecutor must be single-threaded for this to work
+        searcherExecutor.submit(new Callable() {
+          public Object call() throws Exception {
+            latch.await();
+            return null;
+          }
+        });
+
+        // Open the searcher *before* the update handler so we don't end up opening
         // one in the middle.
+        // With lockless commits in Lucene now, this probably shouldn't be an issue anymore
         getSearcher(false,false,null);
   
         updateHandler = createUpdateHandler(
           solrConfig.get("updateHandler/@class", DirectUpdateHandler.class.getName())
         );
-      } 
-      catch (IOException e) {
-        throw new RuntimeException(e);
-      }
-      
-      // Finally tell anyone who wants to know
-      loader.inform( loader );
-      loader.inform( this );
 
-      // execute firstSearcher event
-      //TODO: It may not always be the case that this is the only time the first searcher event needs to fire.
-      doFirstSearcherEvent(getSearcher().get());
-    }
+
+        // Finally tell anyone who wants to know
+        loader.inform( loader );
+        loader.inform( this );
+
+      } catch (IOException e) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, e);
+      } finally {
+        // allow firstSearcher events to fire
+        latch.countDown();
+      }
+    } // end synchronized
   }
 

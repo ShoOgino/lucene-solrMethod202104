@@ -1,0 +1,69 @@
+  /**
+   * Close the <code>IndexWriter</code> without committing
+   * any of the changes that have occurred since it was
+   * opened. This removes any temporary files that had been
+   * created, after which the state of the index will be the
+   * same as it was when this writer was first opened.  This
+   * can only be called when this IndexWriter was opened
+   * with <code>autoCommit=false</code>.  This also clears a
+   * previous call to {@link #prepareCommit}.
+   * @throws IllegalStateException if this is called when
+   *  the writer was opened with <code>autoCommit=true</code>.
+   * @throws IOException if there is a low-level IO error
+   */
+  public void rollback() throws IOException {
+    ensureOpen();
+    if (autoCommit)
+      throw new IllegalStateException("abort() can only be called when IndexWriter was opened with autoCommit=false");
+
+    boolean doClose;
+    synchronized(this) {
+
+      if (pendingCommit != null) {
+        pendingCommit.rollbackCommit(directory);
+        deleter.decRef(pendingCommit);
+        pendingCommit = null;
+        notifyAll();
+      }
+
+      // Ensure that only one thread actually gets to do the closing:
+      if (!closing) {
+        doClose = true;
+        closing = true;
+      } else
+        doClose = false;
+    }
+
+    if (doClose) {
+
+      finishMerges(false);
+
+      // Must pre-close these two, in case they increment
+      // changeCount so that we can then set it to false
+      // before calling closeInternal
+      mergePolicy.close();
+      mergeScheduler.close();
+
+      synchronized(this) {
+        // Keep the same segmentInfos instance but replace all
+        // of its SegmentInfo instances.  This is so the next
+        // attempt to commit using this instance of IndexWriter
+        // will always write to a new generation ("write
+        // once").
+        segmentInfos.clear();
+        segmentInfos.addAll(rollbackSegmentInfos);
+
+        docWriter.abort(null);
+
+        // Ask deleter to locate unreferenced files & remove
+        // them:
+        deleter.checkpoint(segmentInfos, false);
+        deleter.refresh();
+      }
+
+      lastCommitChangeCount = changeCount;
+      closeInternal(false);
+    } else
+      waitForClose();
+  }
+

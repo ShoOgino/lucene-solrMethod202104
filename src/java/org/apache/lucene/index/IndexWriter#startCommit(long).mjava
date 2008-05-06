@@ -1,11 +1,11 @@
   /** Walk through all files referenced by the current
-   *  segmentInfos, minus flushes, and ask the Directory to
-   *  sync each file, if it wasn't already.  If that
-   *  succeeds, then we write a new segments_N file & sync
-   *  that. */
-  private void commit(boolean skipWait, long sizeInBytes) throws IOException {
+   *  segmentInfos and ask the Directory to sync each file,
+   *  if it wasn't already.  If that succeeds, then we
+   *  prepare a new segments_N file but do not fully commit
+   *  it. */
+  private void startCommit(long sizeInBytes) throws IOException {
 
-    assert testPoint("startCommit");
+    assert testPoint("startStartCommit");
 
     if (hitOOM)
       return;
@@ -13,9 +13,9 @@
     try {
 
       if (infoStream != null)
-        message("start commit() skipWait=" + skipWait + " sizeInBytes=" + sizeInBytes);
+        message("startCommit(): start sizeInBytes=" + sizeInBytes);
 
-      if (!skipWait)
+      if (sizeInBytes > 0)
         syncPause(sizeInBytes);
 
       SegmentInfos toSync = null;
@@ -27,7 +27,7 @@
 
         if (changeCount == lastCommitChangeCount) {
           if (infoStream != null)
-            message("  skip commit(): no changes pending");
+            message("  skip startCommit(): no changes pending");
           return;
         }
 
@@ -37,15 +37,17 @@
         // threads can be doing this at once, if say a large
         // merge and a small merge finish at the same time:
 
+        if (infoStream != null)
+          message("startCommit index=" + segString(segmentInfos) + " changeCount=" + changeCount);
+
         toSync = (SegmentInfos) segmentInfos.clone();
         deleter.incRef(toSync, false);
         myChangeCount = changeCount;
       }
 
-      if (infoStream != null)
-        message("commit index=" + segString(toSync));
+      assert testPoint("midStartCommit");
 
-      assert testPoint("midCommit");
+      boolean setPending = false;
 
       try {
 
@@ -85,53 +87,71 @@
             break;
         }
 
-        assert testPoint("midCommit2");
-      
+        assert testPoint("midStartCommit2");
+
         synchronized(this) {
           // If someone saved a newer version of segments file
           // since I first started syncing my version, I can
           // safely skip saving myself since I've been
           // superseded:
-          if (myChangeCount > lastCommitChangeCount) {
-          
+          if (myChangeCount > lastCommitChangeCount && (pendingCommit == null || myChangeCount > pendingCommitChangeCount)) {
+
+            // Wait now for any current pending commit to complete:
+            while(pendingCommit != null) {
+              message("wait for existing pendingCommit to finish...");
+              try {
+                wait();
+              } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+              }
+            }
+
             if (segmentInfos.getGeneration() > toSync.getGeneration())
               toSync.updateGeneration(segmentInfos);
 
             boolean success = false;
             try {
-              toSync.commit(directory);
+
+              // Exception here means nothing is prepared
+              // (this method unwinds everything it did on
+              // an exception)
+              try {
+                toSync.prepareCommit(directory);
+              } finally {
+                // Have our master segmentInfos record the
+                // generations we just prepared.  We do this
+                // on error or success so we don't
+                // double-write a segments_N file.
+                segmentInfos.updateGeneration(toSync);
+              }
+
+              assert pendingCommit == null;
+              setPending = true;
+              pendingCommit = toSync;
+              pendingCommitChangeCount = myChangeCount;
               success = true;
             } finally {
-              // Have our master segmentInfos record the
-              // generations we just sync'd
-              segmentInfos.updateGeneration(toSync);
               if (!success)
                 message("hit exception committing segments file");
             }
-
-            message("commit complete");
-
-            lastCommitChangeCount = myChangeCount;
-
-            deleter.checkpoint(toSync, true);
-            setRollbackSegmentInfos();
           } else
             message("sync superseded by newer infos");
         }
 
         message("done all syncs");
 
-        assert testPoint("midCommitSuccess");
+        assert testPoint("midStartCommitSuccess");
 
       } finally {
         synchronized(this) {
-          deleter.decRef(toSync);
+          if (!setPending)
+            deleter.decRef(toSync);
         }
       }
     } catch (OutOfMemoryError oom) {
       hitOOM = true;
       throw oom;
     }
-    assert testPoint("finishCommit");
+    assert testPoint("finishStartCommit");
   }
 

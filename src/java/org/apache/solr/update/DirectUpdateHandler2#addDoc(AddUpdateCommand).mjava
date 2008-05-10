@@ -18,45 +18,26 @@
       // state.  This is safe as all other state-changing operations are
       // protected with iwCommit (which iwAccess excludes from this block).
       synchronized (this) {
-        if (!cmd.allowDups && !cmd.overwritePending && !cmd.overwriteCommitted) {
-          throw new SolrException( SolrException.ErrorCode.BAD_REQUEST,"unsupported param combo:" + cmd);
-          // this would need a reader to implement (to be able to check committed
-          // before adding.)
-          // return addNoOverwriteNoDups(cmd);
-        } else if (!cmd.allowDups && !cmd.overwritePending && cmd.overwriteCommitted) {
-          rc = addConditionally(cmd);
-      } else if (!cmd.allowDups && cmd.overwritePending && !cmd.overwriteCommitted) {
-          throw new SolrException( SolrException.ErrorCode.BAD_REQUEST,"unsupported param combo:" + cmd);
-        } else if (!cmd.allowDups && cmd.overwritePending && cmd.overwriteCommitted) {
-          rc = overwriteBoth(cmd);
-        } else if (cmd.allowDups && !cmd.overwritePending && !cmd.overwriteCommitted) {
-          rc = allowDups(cmd);
-        } else if (cmd.allowDups && !cmd.overwritePending && cmd.overwriteCommitted) {
-          throw new SolrException( SolrException.ErrorCode.BAD_REQUEST,"unsupported param combo:" + cmd);
-        } else if (cmd.allowDups && cmd.overwritePending && !cmd.overwriteCommitted) {
-          throw new SolrException( SolrException.ErrorCode.BAD_REQUEST,"unsupported param combo:" + cmd);
-        } else if (cmd.allowDups && cmd.overwritePending && cmd.overwriteCommitted) {
-          rc = overwriteBoth(cmd);
-        }
-        if (rc == -1)
-          throw new SolrException( SolrException.ErrorCode.BAD_REQUEST,"unsupported param combo:" + cmd);
-        
-        if (rc == 1) {
-          // adding document -- prep writer
-          closeSearcher();
-          openWriter();
-          tracker.addedDocument();          
-        } else {
-          // exit prematurely
-          return rc;
-        }
+        // adding document -- prep writer
+        closeSearcher();
+        openWriter();
+        tracker.addedDocument();
       } // end synchronized block
 
       // this is the only unsynchronized code in the iwAccess block, which
       // should account for most of the time
-      assert(rc == 1);
-      writer.addDocument(cmd.doc);
-      
+
+      if (cmd.overwriteCommitted || cmd.overwritePending) {
+        if (cmd.indexedId == null) {
+          cmd.indexedId = getIndexedId(cmd.doc);
+        }
+        writer.updateDocument(idTerm.createTerm(cmd.indexedId), cmd.getLuceneDocument(schema));
+      } else {
+        // allow duplicates
+        writer.addDocument(cmd.getLuceneDocument(schema));
+      }
+
+      rc = 1;
     } finally {
       iwAccess.unlock();
       if (rc!=1) {
@@ -66,17 +47,7 @@
         numDocsPending.incrementAndGet();
       }
     }
-    if (maxPendingDeletes > 0 && pset.size() > maxPendingDeletes) {
-      iwCommit.lock();
-      try {
-        // note: this may be entered multiple times since the synchro is 
-        // inside the if(), but doDeletions() is a cheap no-op if it has
-        // already executed
-        doDeletions();
-      } finally {
-        iwCommit.unlock();
-      }
-    }    
+
     return rc;
   }
 

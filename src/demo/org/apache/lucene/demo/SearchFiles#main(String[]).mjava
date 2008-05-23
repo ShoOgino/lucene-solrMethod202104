@@ -1,7 +1,8 @@
   /** Simple command-line based search demo. */
   public static void main(String[] args) throws Exception {
     String usage =
-      "Usage: java org.apache.lucene.demo.SearchFiles [-index dir] [-field f] [-repeat n] [-queries file] [-raw] [-norms field]";
+      "Usage:\tjava org.apache.lucene.demo.SearchFiles [-index dir] [-field f] [-repeat n] [-queries file] [-raw] [-norms field] [-paging hitsPerPage]";
+    usage += "\n\tSpecify 'false' for hitsPerPage to use streaming instead of paging search.";
     if (args.length > 0 && ("-h".equals(args[0]) || "-help".equals(args[0]))) {
       System.out.println(usage);
       System.exit(0);
@@ -13,6 +14,8 @@
     int repeat = 0;
     boolean raw = false;
     String normsField = null;
+    boolean paging = true;
+    int hitsPerPage = 10;
     
     for (int i = 0; i < args.length; i++) {
       if ("-index".equals(args[i])) {
@@ -31,6 +34,16 @@
         raw = true;
       } else if ("-norms".equals(args[i])) {
         normsField = args[i+1];
+        i++;
+      } else if ("-paging".equals(args[i])) {
+        if (args[i+1].equals("false")) {
+          paging = false;
+        } else {
+          hitsPerPage = Integer.parseInt(args[i+1]);
+          if (hitsPerPage == 0) {
+            paging = false;
+          }
+        }
         i++;
       }
     }
@@ -66,51 +79,20 @@
       Query query = parser.parse(line);
       System.out.println("Searching for: " + query.toString(field));
 
-      Hits hits = searcher.search(query);
-      
+            
       if (repeat > 0) {                           // repeat & time as benchmark
         Date start = new Date();
         for (int i = 0; i < repeat; i++) {
-          hits = searcher.search(query);
+          searcher.search(query, null, 100);
         }
         Date end = new Date();
         System.out.println("Time: "+(end.getTime()-start.getTime())+"ms");
       }
 
-      System.out.println(hits.length() + " total matching documents");
-
-      final int HITS_PER_PAGE = 10;
-      for (int start = 0; start < hits.length(); start += HITS_PER_PAGE) {
-        int end = Math.min(hits.length(), start + HITS_PER_PAGE);
-        for (int i = start; i < end; i++) {
-
-          if (raw) {                              // output raw format
-            System.out.println("doc="+hits.id(i)+" score="+hits.score(i));
-            continue;
-          }
-
-          Document doc = hits.doc(i);
-          String path = doc.get("path");
-          if (path != null) {
-            System.out.println((i+1) + ". " + path);
-            String title = doc.get("title");
-            if (title != null) {
-              System.out.println("   Title: " + doc.get("title"));
-            }
-          } else {
-            System.out.println((i+1) + ". " + "No path for this document");
-          }
-        }
-
-        if (queries != null)                      // non-interactive
-          break;
-        
-        if (hits.length() > end) {
-          System.out.println("more (y/n) ? ");
-          line = in.readLine();
-          if (line.length() == 0 || line.charAt(0) == 'n')
-            break;
-        }
+      if (paging) {
+        doPagingSearch(in, searcher, query, hitsPerPage, raw, queries == null);
+      } else {
+        doStreamingSearch(searcher, query);
       }
     }
     reader.close();

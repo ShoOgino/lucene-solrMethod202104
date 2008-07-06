@@ -1,44 +1,48 @@
-  /** getDocList version that uses+populates query and filter caches.
-   * This should only be called using either filterList or filter, but not both.
+  /**
+   * getDocList version that uses+populates query and filter caches.
+   * In the event of a timeout, the cache is not populated.
    */
-  private void getDocListC(DocListAndSet out, Query query, List<Query> filterList, DocSet filter, Sort lsort, int offset, int len, int flags) throws IOException {
+  private void getDocListC(QueryResult qr, QueryCommand cmd) throws IOException {
+    // old parameters: DocListAndSet out, Query query, List<Query> filterList, DocSet filter, Sort lsort, int offset, int len, int flags, long timeAllowed, NamedList<Object> responseHeader
+    DocListAndSet out = new DocListAndSet();
+    qr.setDocListAndSet(out);
     QueryResultKey key=null;
-    int maxDocRequested = offset + len;
+    int maxDocRequested = cmd.getOffset() + cmd.getLen();
     // check for overflow, and check for # docs in index
     if (maxDocRequested < 0 || maxDocRequested > maxDoc()) maxDocRequested = maxDoc();
     int supersetMaxDoc= maxDocRequested;
     DocList superset;
 
-
     // we can try and look up the complete query in the cache.
     // we can't do that if filter!=null though (we don't want to
     // do hashCode() and equals() for a big DocSet).
-    if (queryResultCache != null && filter==null) {
+    if (queryResultCache != null && cmd.getFilter()==null) {
         // all of the current flags can be reused during warming,
         // so set all of them on the cache key.
-        key = new QueryResultKey(query, filterList, lsort, flags);
-        if ((flags & NO_CHECK_QCACHE)==0) {
+        key = new QueryResultKey(cmd.getQuery(), cmd.getFilterList(), cmd.getSort(), cmd.getFlags());
+        if ((cmd.getFlags() & NO_CHECK_QCACHE)==0) {
           superset = (DocList)queryResultCache.get(key);
 
           if (superset != null) {
             // check that the cache entry has scores recorded if we need them
-            if ((flags & GET_SCORES)==0 || superset.hasScores()) {
+            if ((cmd.getFlags() & GET_SCORES)==0 || superset.hasScores()) {
               // NOTE: subset() returns null if the DocList has fewer docs than
               // requested
-              out.docList = superset.subset(offset,len);
+              out.docList = superset.subset(cmd.getOffset(),cmd.getLen());
             }
           }
           if (out.docList != null) {
             // found the docList in the cache... now check if we need the docset too.
             // OPT: possible future optimization - if the doclist contains all the matches,
             // use it to make the docset instead of rerunning the query.
-            if (out.docSet==null && ((flags & GET_DOCSET)!=0) ) {
-              if (filterList==null) {
-                out.docSet = getDocSet(query);
+            if (out.docSet==null && ((cmd.getFlags() & GET_DOCSET)!=0) ) {
+              if (cmd.getFilterList()==null) {
+                out.docSet = getDocSet(cmd.getQuery());
               } else {
-                List<Query> newList = new ArrayList<Query>(filterList.size()+1);
-                newList.add(query);
-                newList.addAll(filterList);
+                List<Query> newList = new ArrayList<Query>(cmd.getFilterList()
+.size()+1);
+                newList.add(cmd.getQuery());
+                newList.addAll(cmd.getFilterList());
                 out.docSet = getDocSet(newList);
               }
             }
@@ -68,9 +72,9 @@
 
     // check if we should try and use the filter cache
     boolean useFilterCache=false;
-    if ((flags & (GET_SCORES|NO_CHECK_FILTERCACHE))==0 && useFilterForSortedQuery && lsort != null && filterCache != null) {
+    if ((cmd.getFlags() & (GET_SCORES|NO_CHECK_FILTERCACHE))==0 && useFilterForSortedQuery && cmd.getSort() != null && filterCache != null) {
       useFilterCache=true;
-      SortField[] sfields = lsort.getSort();
+      SortField[] sfields = cmd.getSort().getSort();
       for (SortField sf : sfields) {
         if (sf.getType() == SortField.SCORE) {
           useFilterCache=false;
@@ -84,33 +88,33 @@
       // for large filters that match few documents, this may be
       // slower than simply re-executing the query.
       if (out.docSet == null) {
-        out.docSet = getDocSet(query,filter);
-        DocSet bigFilt = getDocSet(filterList);
+        out.docSet = getDocSet(cmd.getQuery(),cmd.getFilter());
+        DocSet bigFilt = getDocSet(cmd.getFilterList());
         if (bigFilt != null) out.docSet = out.docSet.intersection(bigFilt);
       }
       // todo: there could be a sortDocSet that could take a list of
       // the filters instead of anding them first...
       // perhaps there should be a multi-docset-iterator
-      superset = sortDocSet(out.docSet,lsort,supersetMaxDoc);
-      out.docList = superset.subset(offset,len);
+      superset = sortDocSet(out.docSet,cmd.getSort(),supersetMaxDoc);
+      out.docList = superset.subset(cmd.getOffset(),cmd.getLen());
     } else {
       // do it the normal way...
-      DocSet theFilt = filter!=null ? filter : getDocSet(filterList);
-
-      if ((flags & GET_DOCSET)!=0) {
-        DocSet qDocSet = getDocListAndSetNC(out,query,theFilt,lsort,0,supersetMaxDoc,flags);
+      cmd.setSupersetMaxDoc(supersetMaxDoc);
+      if ((cmd.getFlags() & GET_DOCSET)!=0) {
+        DocSet qDocSet = getDocListAndSetNC(qr,cmd);
         // cache the docSet matching the query w/o filtering
-        if (filterCache!=null) filterCache.put(query,qDocSet);
+        if (filterCache!=null && !qr.isPartialResults()) filterCache.put(cmd.getQuery(),qDocSet);
       } else {
-        out.docList = getDocListNC(query,theFilt,lsort,0,supersetMaxDoc,flags);
+        getDocListNC(qr,cmd);
+        //Parameters: cmd.getQuery(),theFilt,cmd.getSort(),0,supersetMaxDoc,cmd.getFlags(),cmd.getTimeAllowed(),responseHeader);
       }
       superset = out.docList;
-      out.docList = superset.subset(offset,len);
+      out.docList = superset.subset(cmd.getOffset(),cmd.getLen());
     }
 
     // lastly, put the superset in the cache if the size is less than or equal
     // to queryResultMaxDocsCached
-    if (key != null && superset.size() <= queryResultMaxDocsCached) {
+    if (key != null && superset.size() <= queryResultMaxDocsCached && !qr.isPartialResults()) {
       queryResultCache.put(key, superset);
     }
   }

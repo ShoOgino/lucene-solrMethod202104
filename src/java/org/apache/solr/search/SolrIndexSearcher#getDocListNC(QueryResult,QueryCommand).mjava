@@ -1,5 +1,10 @@
-  private DocList getDocListNC(Query query, DocSet filter, Sort lsort, int offset, int len, int flags) throws IOException {
-    int last = offset+len;
+  private void getDocListNC(QueryResult qr,QueryCommand cmd) throws IOException {
+    //Parameters: cmd.getQuery(),theFilt,cmd.getSort(),0,supersetMaxDoc,cmd.getFlags(),cmd.getTimeAllowed(),responseHeader);
+    //Query query, DocSet filter, Sort lsort, int offset, int len, int flags, long timeAllowed, NamedList<Object> responseHeader
+    DocSet filter = cmd.getFilter()!=null ? cmd.getFilter() : getDocSet(cmd.getFilterList());
+    final long timeAllowed = cmd.getTimeAllowed();
+    int len = cmd.getSupersetMaxDoc();
+    int last = len;
     if (last < 0 || last > maxDoc()) last=maxDoc();
     final int lastDocRequested = last;
     int nDocsReturned;
@@ -8,7 +13,7 @@
     int[] ids;
     float[] scores;
 
-    query = QueryUtils.makeQueryable(query);
+    Query query = QueryUtils.makeQueryable(cmd.getQuery());
 
     // handle zero case...
     if (lastDocRequested<=0) {
@@ -16,44 +21,62 @@
       final float[] topscore = new float[] { Float.NEGATIVE_INFINITY };
       final int[] numHits = new int[1];
 
-      searcher.search(query, new HitCollector() {
+      HitCollector hc = new HitCollector() {
         public void collect(int doc, float score) {
           if (filt!=null && !filt.exists(doc)) return;
           numHits[0]++;
           if (score > topscore[0]) topscore[0]=score;
         }
+      };
+      if( timeAllowed > 0 ) {
+        hc = new TimeLimitedCollector( hc, timeAllowed );
       }
-      );
+      try {
+        searcher.search(query, hc );
+      }
+      catch( TimeLimitedCollector.TimeExceededException x ) {
+        log.warning( "Query: " + query + "; " + x.getMessage() );
+        qr.setPartialResults(true);
+      }
 
       nDocsReturned=0;
       ids = new int[nDocsReturned];
       scores = new float[nDocsReturned];
       totalHits = numHits[0];
       maxScore = totalHits>0 ? topscore[0] : 0.0f;
-    } else if (lsort != null) {
+    } else if (cmd.getSort() != null) {
       // can't use TopDocs if there is a sort since it
       // will do automatic score normalization.
       // NOTE: this changed late in Lucene 1.9
 
       final DocSet filt = filter;
       final int[] numHits = new int[1];
-      final FieldSortedHitQueue hq = new FieldSortedHitQueue(reader, lsort.getSort(), offset+len);
+      final FieldSortedHitQueue hq = new FieldSortedHitQueue(reader, cmd.getSort().getSort(), len);
 
-      searcher.search(query, new HitCollector() {
+      HitCollector hc = new HitCollector() {
         public void collect(int doc, float score) {
           if (filt!=null && !filt.exists(doc)) return;
           numHits[0]++;
           hq.insert(new FieldDoc(doc, score));
         }
+      };
+      if( timeAllowed > 0 ) {
+        hc = new TimeLimitedCollector( hc, timeAllowed );
       }
-      );
+      try {
+        searcher.search(query, hc );
+      }
+      catch( TimeLimitedCollector.TimeExceededException x ) {
+        log.warning( "Query: " + query + "; " + x.getMessage() );
+        qr.setPartialResults(true);
+      }
 
       totalHits = numHits[0];
       maxScore = totalHits>0 ? hq.getMaxScore() : 0.0f;
 
       nDocsReturned = hq.size();
       ids = new int[nDocsReturned];
-      scores = (flags&GET_SCORES)!=0 ? new float[nDocsReturned] : null;
+      scores = (cmd.getFlags()&GET_SCORES)!=0 ? new float[nDocsReturned] : null;
       for (int i = nDocsReturned -1; i >= 0; i--) {
         FieldDoc fieldDoc = (FieldDoc)hq.pop();
         // fillFields is the point where score normalization happens
@@ -69,7 +92,7 @@
       final DocSet filt = filter;
       final ScorePriorityQueue hq = new ScorePriorityQueue(lastDocRequested);
       final int[] numHits = new int[1];
-      searcher.search(query, new HitCollector() {
+      HitCollector hc = new HitCollector() {
         float minScore=Float.NEGATIVE_INFINITY;  // minimum score in the priority queue
         public void collect(int doc, float score) {
           if (filt!=null && !filt.exists(doc)) return;
@@ -82,13 +105,22 @@
             minScore = ((ScoreDoc)hq.top()).score;
           }
         }
+      };
+      if( timeAllowed > 0 ) {
+        hc = new TimeLimitedCollector( hc, timeAllowed );
       }
-      );
+      try {
+        searcher.search(query, hc );
+      }
+      catch( TimeLimitedCollector.TimeExceededException x ) {
+        log.warning( "Query: " + query + "; " + x.getMessage() );
+        qr.setPartialResults(true);
+      }
 
       totalHits = numHits[0];
       nDocsReturned = hq.size();
       ids = new int[nDocsReturned];
-      scores = (flags&GET_SCORES)!=0 ? new float[nDocsReturned] : null;
+      scores = (cmd.getFlags()&GET_SCORES)!=0 ? new float[nDocsReturned] : null;
       ScoreDoc sdoc =null;
       for (int i = nDocsReturned -1; i >= 0; i--) {
         sdoc = (ScoreDoc)hq.pop();
@@ -99,9 +131,9 @@
     }
 
 
-    int sliceLen = Math.min(lastDocRequested,nDocsReturned) - offset;
+    int sliceLen = Math.min(lastDocRequested,nDocsReturned);
     if (sliceLen < 0) sliceLen=0;
-    return new DocSlice(offset,sliceLen,ids,scores,totalHits,maxScore);
+    qr.setDocList(new DocSlice(0,sliceLen,ids,scores,totalHits,maxScore));
 
 
 

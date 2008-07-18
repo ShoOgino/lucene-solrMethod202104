@@ -1,0 +1,124 @@
+  public void processFields(final Fieldable[] fields,
+                            final int count) throws IOException {
+
+    fieldState.reset(docState.doc.getBoost());
+
+    final int maxFieldLength = docState.maxFieldLength;
+
+    final boolean doInvert = consumer.start(fields, count);
+
+    for(int i=0;i<count;i++) {
+
+      final Fieldable field = fields[i];
+
+      // TODO FI: this should be "genericized" to querying
+      // consumer if it wants to see this particular field
+      // tokenized.
+      if (field.isIndexed() && doInvert) {
+
+        if (fieldState.length > 0)
+          fieldState.position += docState.analyzer.getPositionIncrementGap(fieldInfo.name);
+
+        if (!field.isTokenized()) {		  // un-tokenized field
+          String stringValue = field.stringValue();
+          final int valueLength = stringValue.length();
+          Token token = perThread.localToken;
+          token.clear();
+          char[] termBuffer = token.termBuffer();
+          if (termBuffer.length < valueLength)
+            termBuffer = token.resizeTermBuffer(valueLength);
+          stringValue.getChars(0, valueLength, termBuffer, 0);
+          token.setTermLength(valueLength);
+          token.setStartOffset(fieldState.offset);
+          token.setEndOffset(fieldState.offset + stringValue.length());
+          boolean success = false;
+          try {
+            consumer.add(token);
+            success = true;
+          } finally {
+            if (!success)
+              docState.docWriter.setAborting();
+          }
+          fieldState.offset += stringValue.length();
+          fieldState.length++;
+          fieldState.position++;
+        } else {                                  // tokenized field
+          final TokenStream stream;
+          final TokenStream streamValue = field.tokenStreamValue();
+
+          if (streamValue != null) 
+            stream = streamValue;
+          else {
+            // the field does not have a TokenStream,
+            // so we have to obtain one from the analyzer
+            final Reader reader;			  // find or make Reader
+            final Reader readerValue = field.readerValue();
+
+            if (readerValue != null)
+              reader = readerValue;
+            else {
+              String stringValue = field.stringValue();
+              if (stringValue == null)
+                throw new IllegalArgumentException("field must have either TokenStream, String or Reader value");
+              perThread.stringReader.init(stringValue);
+              reader = perThread.stringReader;
+            }
+          
+            // Tokenize field and add to postingTable
+            stream = docState.analyzer.reusableTokenStream(fieldInfo.name, reader);
+          }
+
+          // reset the TokenStream to the first token
+          stream.reset();
+
+          try {
+            int offsetEnd = fieldState.offset-1;
+            final Token localToken = perThread.localToken;
+            for(;;) {
+
+              // If we hit an exception in stream.next below
+              // (which is fairly common, eg if analyzer
+              // chokes on a given document), then it's
+              // non-aborting and (above) this one document
+              // will be marked as deleted, but still
+              // consume a docID
+              Token token = stream.next(localToken);
+
+              if (token == null) break;
+              fieldState.position += (token.getPositionIncrement() - 1);
+              boolean success = false;
+              try {
+                // If we hit an exception in here, we abort
+                // all buffered documents since the last
+                // flush, on the likelihood that the
+                // internal state of the consumer is now
+                // corrupt and should not be flushed to a
+                // new segment:
+                consumer.add(token);
+                success = true;
+              } finally {
+                if (!success)
+                  docState.docWriter.setAborting();
+              }
+              fieldState.position++;
+              offsetEnd = fieldState.offset + token.endOffset();
+              if (++fieldState.length >= maxFieldLength) {
+                if (docState.infoStream != null)
+                  docState.infoStream.println("maxFieldLength " +maxFieldLength+ " reached for field " + fieldInfo.name + ", ignoring following tokens");
+                break;
+              }
+            }
+            fieldState.offset = offsetEnd+1;
+          } finally {
+            stream.close();
+          }
+        }
+
+        fieldState.boost *= field.getBoost();
+      }
+    }
+
+    consumer.finish();
+    endConsumer.finish();
+  }
+

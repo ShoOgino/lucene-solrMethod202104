@@ -3,25 +3,45 @@
 
     // This call is synchronized but fast
     final DocumentsWriterThreadState state = getThreadState(doc, delTerm);
+
+    final DocState docState = state.docState;
+    docState.doc = doc;
+    docState.analyzer = analyzer;
+
+    boolean success = false;
     try {
-      boolean success = false;
-      try {
-        try {
-          // This call is not synchronized and does all the work
-          state.processDocument(analyzer);
-        } finally {
-          // Note that we must call finishDocument even on
-          // exception, because for a non-aborting
-          // exception, a portion of the document has been
-          // indexed (and its ID is marked for deletion), so
-          // all index files must be updated to record this
-          // document.  This call is synchronized but fast.
-          finishDocument(state);
-        }
-        success = true;
-      } finally {
-        if (!success) {
-          synchronized(this) {
+      // This call is not synchronized and does all the
+      // work
+      final DocWriter perDoc = state.consumer.processDocument();
+        
+      // This call is synchronized but fast
+      finishDocument(state, perDoc);
+      success = true;
+    } finally {
+      if (!success) {
+        synchronized(this) {
+
+          if (aborting) {
+            state.isIdle = true;
+            notifyAll();
+            abort();
+          } else {
+            skipDocWriter.docID = docState.docID;
+            boolean success2 = false;
+            try {
+              waitQueue.add(skipDocWriter);
+              success2 = true;
+            } finally {
+              if (!success2) {
+                state.isIdle = true;
+                notifyAll();
+                abort();
+                return false;
+              }
+            }
+
+            state.isIdle = true;
+            notifyAll();
 
             // If this thread state had decided to flush, we
             // must clear it so another thread can flush
@@ -35,12 +55,10 @@
             // since likely it was partially added.  This
             // keeps indexing as "all or none" (atomic) when
             // adding a document:
-            addDeleteDocID(state.docID);
+            addDeleteDocID(state.docState.docID);
           }
         }
       }
-    } catch (AbortException ae) {
-      abort(ae);
     }
 
     return state.doFlushAfter || timeToFlushDeletes();

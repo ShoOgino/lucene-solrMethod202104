@@ -1,7 +1,38 @@
   DocumentsWriter(Directory directory, IndexWriter writer) throws IOException {
     this.directory = directory;
     this.writer = writer;
-    flushedDocCount = writer.docCount();
-    postingsFreeList = new Posting[0];
+    this.similarity = writer.getSimilarity();
+    flushedDocCount = writer.maxDoc();
+
+    /*
+      This is the current indexing chain:
+
+      DocConsumer / DocConsumerPerThread
+        --> code: DocFieldProcessor / DocFieldProcessorPerThread
+          --> DocFieldConsumer / DocFieldConsumerPerThread / DocFieldConsumerPerField
+            --> code: DocFieldConsumers / DocFieldConsumersPerThread / DocFieldConsumersPerField
+              --> code: DocInverter / DocInverterPerThread / DocInverterPerField
+                --> InvertedDocConsumer / InvertedDocConsumerPerThread / InvertedDocConsumerPerField
+                  --> code: TermsHash / TermsHashPerThread / TermsHashPerField
+                    --> TermsHashConsumer / TermsHashConsumerPerThread / TermsHashConsumerPerField
+                      --> code: FreqProxTermsWriter / FreqProxTermsWriterPerThread / FreqProxTermsWriterPerField
+                      --> code: TermVectorsTermsWriter / TermVectorsTermsWriterPerThread / TermVectorsTermsWriterPerField
+                --> InvertedDocEndConsumer / InvertedDocConsumerPerThread / InvertedDocConsumerPerField
+                  --> code: NormsWriter / NormsWriterPerThread / NormsWriterPerField
+              --> code: StoredFieldsWriter / StoredFieldsWriterPerThread / StoredFieldsWriterPerField
+    */
+
+    // TODO FI: this should be something the user can pass in
+    // Build up indexing chain:
+    final TermsHashConsumer termVectorsWriter = new TermVectorsTermsWriter(this);
+    final TermsHashConsumer freqProxWriter = new FreqProxTermsWriter();
+
+    final InvertedDocConsumer  termsHash = new TermsHash(this, true, freqProxWriter,
+                                                         new TermsHash(this, false, termVectorsWriter, null));
+    final NormsWriter normsWriter = new NormsWriter();
+    final DocInverter docInverter = new DocInverter(termsHash, normsWriter);
+    final StoredFieldsWriter fieldsWriter = new StoredFieldsWriter(this);
+    final DocFieldConsumers docFieldConsumers = new DocFieldConsumers(docInverter, fieldsWriter);
+    consumer = new DocFieldProcessor(this, docFieldConsumers);
   }
 

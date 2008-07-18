@@ -10,14 +10,16 @@
     // again.
     DocumentsWriterThreadState state = (DocumentsWriterThreadState) threadBindings.get(Thread.currentThread());
     if (state == null) {
-      // First time this thread has called us since last flush
+
+      // First time this thread has called us since last
+      // flush.  Find the least loaded thread state:
       DocumentsWriterThreadState minThreadState = null;
       for(int i=0;i<threadStates.length;i++) {
         DocumentsWriterThreadState ts = threadStates[i];
         if (minThreadState == null || ts.numThreads < minThreadState.numThreads)
           minThreadState = ts;
       }
-      if (minThreadState != null && (minThreadState.numThreads == 0 || threadStates.length == MAX_THREAD_STATE)) {
+      if (minThreadState != null && (minThreadState.numThreads == 0 || threadStates.length >= MAX_THREAD_STATE)) {
         state = minThreadState;
         state.numThreads++;
       } else {
@@ -36,46 +38,49 @@
     // not be paused nor a flush pending:
     waitReady(state);
 
-    if (segment == null)
-      segment = writer.newSegmentName();
+    // Allocate segment name if this is the first doc since
+    // last flush:
+    initSegmentName(false);
 
     state.isIdle = false;
 
+    boolean success = false;
     try {
-      boolean success = false;
-      try {
-        state.init(doc, nextDocID);
-        if (delTerm != null) {
-          addDeleteTerm(delTerm, state.docID);
-          state.doFlushAfter = timeToFlushDeletes();
-        }
-        // Only increment nextDocID & numDocsInRAM on successful init
-        nextDocID++;
-        numDocsInRAM++;
+      state.docState.docID = nextDocID;
 
-        // We must at this point commit to flushing to ensure we
-        // always get N docs when we flush by doc count, even if
-        // > 1 thread is adding documents:
-        if (!flushPending && maxBufferedDocs != IndexWriter.DISABLE_AUTO_FLUSH
-            && numDocsInRAM >= maxBufferedDocs) {
-          flushPending = true;
-          state.doFlushAfter = true;
-        }
+      assert writer.testPoint("DocumentsWriter.ThreadState.init start");
 
-        success = true;
-      } finally {
-        if (!success) {
-          // Forcefully idle this ThreadState:
-          state.isIdle = true;
-          notifyAll();
-          if (state.doFlushAfter) {
-            state.doFlushAfter = false;
-            flushPending = false;
-          }
+      if (delTerm != null) {
+        addDeleteTerm(delTerm, state.docState.docID);
+        state.doFlushAfter = timeToFlushDeletes();
+      }
+
+      assert writer.testPoint("DocumentsWriter.ThreadState.init after delTerm");
+
+      nextDocID++;
+      numDocsInRAM++;
+
+      // We must at this point commit to flushing to ensure we
+      // always get N docs when we flush by doc count, even if
+      // > 1 thread is adding documents:
+      if (!flushPending &&
+          maxBufferedDocs != IndexWriter.DISABLE_AUTO_FLUSH
+          && numDocsInRAM >= maxBufferedDocs) {
+        flushPending = true;
+        state.doFlushAfter = true;
+      }
+
+      success = true;
+    } finally {
+      if (!success) {
+        // Forcefully idle this ThreadState:
+        state.isIdle = true;
+        notifyAll();
+        if (state.doFlushAfter) {
+          state.doFlushAfter = false;
+          flushPending = false;
         }
       }
-    } catch (AbortException ae) {
-      abort(ae);
     }
 
     return state;

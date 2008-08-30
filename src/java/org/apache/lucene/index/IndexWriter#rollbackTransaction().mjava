@@ -11,6 +11,12 @@
     autoCommit = localAutoCommit;
     docWriter.setFlushedDocCount(localFlushedDocCount);
 
+    // Must finish merges before rolling back segmentInfos
+    // so merges don't hit exceptions on trying to commit
+    // themselves, don't get files deleted out from under
+    // them, etc:
+    finishMerges(false);
+
     // Keep the same segmentInfos instance but replace all
     // of its SegmentInfo instances.  This is so the next
     // attempt to commit using this instance of IndexWriter
@@ -18,6 +24,11 @@
     segmentInfos.clear();
     segmentInfos.addAll(localRollbackSegmentInfos);
     localRollbackSegmentInfos = null;
+
+    // This must come after we rollback segmentInfos, so
+    // that if a commit() kicks off it does not see the
+    // segmentInfos with external segments
+    finishAddIndexes();
 
     // Ask deleter to locate unreferenced files we had
     // created & remove them:
@@ -27,8 +38,15 @@
       // Remove the incRef we did in startTransaction:
       deleter.decRef(segmentInfos);
 
+    // Also ask deleter to remove any newly created files
+    // that were never incref'd; this "garbage" is created
+    // when a merge kicks off but aborts part way through
+    // before it had a chance to incRef the files it had
+    // partially created
     deleter.refresh();
-    finishMerges(false);
-    stopMerges = false;
+    
+    notifyAll();
+
+    assert !hasExternalSegments();
   }
 

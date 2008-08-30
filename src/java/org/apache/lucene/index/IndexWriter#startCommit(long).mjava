@@ -23,26 +23,38 @@
 
       synchronized(this) {
 
-        assert lastCommitChangeCount <= changeCount;
+        // Wait for any running addIndexes to complete
+        // first, then block any from running until we've
+        // copied the segmentInfos we intend to sync:
+        blockAddIndexes(false);
 
-        if (changeCount == lastCommitChangeCount) {
+        assert !hasExternalSegments();
+
+        try {
+
+          assert lastCommitChangeCount <= changeCount;
+
+          if (changeCount == lastCommitChangeCount) {
+            if (infoStream != null)
+              message("  skip startCommit(): no changes pending");
+            return;
+          }
+
+          // First, we clone & incref the segmentInfos we intend
+          // to sync, then, without locking, we sync() each file
+          // referenced by toSync, in the background.  Multiple
+          // threads can be doing this at once, if say a large
+          // merge and a small merge finish at the same time:
+
           if (infoStream != null)
-            message("  skip startCommit(): no changes pending");
-          return;
+            message("startCommit index=" + segString(segmentInfos) + " changeCount=" + changeCount);
+
+          toSync = (SegmentInfos) segmentInfos.clone();
+          deleter.incRef(toSync, false);
+          myChangeCount = changeCount;
+        } finally {
+          resumeAddIndexes();
         }
-
-        // First, we clone & incref the segmentInfos we intend
-        // to sync, then, without locking, we sync() each file
-        // referenced by toSync, in the background.  Multiple
-        // threads can be doing this at once, if say a large
-        // merge and a small merge finish at the same time:
-
-        if (infoStream != null)
-          message("startCommit index=" + segString(segmentInfos) + " changeCount=" + changeCount);
-
-        toSync = (SegmentInfos) segmentInfos.clone();
-        deleter.incRef(toSync, false);
-        myChangeCount = changeCount;
       }
 
       assert testPoint("midStartCommit");
@@ -66,7 +78,7 @@
                 try {
                   // Because we incRef'd this commit point, above,
                   // the file had better exist:
-                  assert directory.fileExists(fileName);
+                  assert directory.fileExists(fileName): "file '" + fileName + "' does not exist dir=" + directory;
                   message("now sync " + fileName);
                   directory.sync(fileName);
                   success = true;
@@ -99,11 +111,7 @@
             // Wait now for any current pending commit to complete:
             while(pendingCommit != null) {
               message("wait for existing pendingCommit to finish...");
-              try {
-                wait();
-              } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-              }
+              doWait();
             }
 
             if (segmentInfos.getGeneration() > toSync.getGeneration())

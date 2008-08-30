@@ -27,31 +27,54 @@
     // Do not allow add docs or deletes while we are running:
     docWriter.pauseAllThreads();
 
+    // We must pre-acquire the write lock here (and not in
+    // startTransaction below) so that no other addIndexes
+    // is allowed to start up after we have flushed &
+    // optimized but before we then start our transaction.
+    // This is because the merging below requires that only
+    // one segment is present in the index:
+    acquireWrite();
+
     try {
-      optimize();					  // start with zero or 1 seg
 
-      final String mergedName = newSegmentName();
-      SegmentMerger merger = new SegmentMerger(this, mergedName, null);
+      boolean success = false;
+      SegmentInfo info = null;
+      String mergedName = null;
+      SegmentMerger merger = null;
 
-      SegmentInfo info;
-
-      IndexReader sReader = null;
       try {
+        flush(true, false, true);
+        optimize();					  // start with zero or 1 seg
+        success = true;
+      } finally {
+        // Take care to release the write lock if we hit an
+        // exception before starting the transaction
+        if (!success)
+          releaseWrite();
+      }
+
+      // true means we already have write lock; if this call
+      // hits an exception it will release the write lock:
+      startTransaction(true);
+
+      try {
+        mergedName = newSegmentName();
+        merger = new SegmentMerger(this, mergedName, null);
+
+        IndexReader sReader = null;
         synchronized(this) {
-          if (segmentInfos.size() == 1){ // add existing index, if any
+          if (segmentInfos.size() == 1) { // add existing index, if any
             sReader = SegmentReader.get(true, segmentInfos.info(0));
-            merger.add(sReader);
           }
         }
 
-        for (int i = 0; i < readers.length; i++)      // add new indexes
-          merger.add(readers[i]);
-
-        boolean success = false;
-
-        startTransaction();
-
         try {
+          if (sReader != null)
+            merger.add(sReader);
+
+          for (int i = 0; i < readers.length; i++)      // add new indexes
+            merger.add(readers[i]);
+
           int docCount = merger.merge();                // merge 'em
 
           if(sReader != null) {
@@ -72,43 +95,61 @@
           success = true;
 
         } finally {
-          if (!success) {
-            if (infoStream != null)
-              message("hit exception in addIndexes during merge");
-
-            rollbackTransaction();
-          } else {
-            commitTransaction();
+          if (sReader != null) {
+            sReader.close();
           }
         }
       } finally {
-        if (sReader != null) {
-          sReader.close();
+        if (!success) {
+          if (infoStream != null)
+            message("hit exception in addIndexes during merge");
+          rollbackTransaction();
+        } else {
+          commitTransaction();
         }
       }
     
       if (mergePolicy instanceof LogMergePolicy && getUseCompoundFile()) {
 
-        boolean success = false;
+        List files = null;
 
-        startTransaction();
-
-        try {
-          merger.createCompoundFile(mergedName + ".cfs");
-          synchronized(this) {
-            info.setUseCompoundFile(true);
+        synchronized(this) {
+          // Must incRef our files so that if another thread
+          // is running merge/optimize, it doesn't delete our
+          // segment's files before we have a change to
+          // finish making the compound file.
+          if (segmentInfos.contains(info)) {
+            files = info.files();
+            deleter.incRef(files);
           }
-          
-          success = true;
-          
-        } finally {
-          if (!success) {
-            if (infoStream != null)
-              message("hit exception building compound file in addIndexes during merge");
+        }
 
-            rollbackTransaction();
-          } else {
-            commitTransaction();
+        if (files != null) {
+
+          success = false;
+
+          startTransaction(false);
+
+          try {
+            merger.createCompoundFile(mergedName + ".cfs");
+            synchronized(this) {
+              info.setUseCompoundFile(true);
+            }
+          
+            success = true;
+          
+          } finally {
+
+            deleter.decRef(files);
+
+            if (!success) {
+              if (infoStream != null)
+                message("hit exception building compound file in addIndexes during merge");
+
+              rollbackTransaction();
+            } else {
+              commitTransaction();
+            }
           }
         }
       }

@@ -10,14 +10,14 @@
         i++;
       } else if (args[i].equals("-segment")) {
         if (i == args.length-1) {
-          out.println("ERROR: missing name for -segment option");
+          msg("ERROR: missing name for -segment option");
           System.exit(1);
         }
         onlySegments.add(args[i+1]);
         i += 2;
       } else {
         if (indexPath != null) {
-          out.println("ERROR: unexpected extra argument '" + args[i] + "'");
+          msg("ERROR: unexpected extra argument '" + args[i] + "'");
           System.exit(1);
         }
         indexPath = args[i];
@@ -26,8 +26,8 @@
     }
 
     if (indexPath == null) {
-      out.println("\nERROR: index path not specified");
-      out.println("\nUsage: java org.apache.lucene.index.CheckIndex pathToIndex [-fix] [-segment X] [-segment Y]\n" +
+      msg("\nERROR: index path not specified");
+      msg("\nUsage: java org.apache.lucene.index.CheckIndex pathToIndex [-fix] [-segment X] [-segment Y]\n" +
                          "\n" +
                          "  -fix: actually write a new segments_N file, removing any problematic segments\n" +
                          "  -segment X: only check the specified segments.  This can be specified multiple\n" + 
@@ -53,31 +53,55 @@
     if (onlySegments.size() == 0)
       onlySegments = null;
     else if (doFix) {
-      out.println("ERROR: cannot specify both -fix and -segment");
+      msg("ERROR: cannot specify both -fix and -segment");
       System.exit(1);
     }
 
     assert testAsserts();
     if (!assertsOn)
-      out.println("\nNOTE: testing will be more thorough if you run java with '-ea:org.apache.lucene', so assertions are enabled");
+      msg("\nNOTE: testing will be more thorough if you run java with '-ea:org.apache.lucene', so assertions are enabled");
 
-    out.println("\nOpening index @ " + indexPath + "\n");
+    msg("\nOpening index @ " + indexPath + "\n");
     Directory dir = null;
     try {
       dir = FSDirectory.getDirectory(indexPath);
     } catch (Throwable t) {
-      out.println("ERROR: could not open directory \"" + indexPath + "\"; exiting");
+      msg("ERROR: could not open directory \"" + indexPath + "\"; exiting");
       t.printStackTrace(out);
       System.exit(1);
     }
 
-    boolean isClean = check(dir, doFix, onlySegments);
+    CheckIndexStatus result = check(dir, doFix, onlySegments);
+
+    if (!result.clean) {
+      if (!doFix){
+        msg("WARNING: would write new segments file, and " + result.totLoseDocCount + " documents would be lost, if -fix were specified\n");
+      } else {
+        msg("WARNING: " + result.totLoseDocCount + " documents will be lost\n");
+        msg("NOTE: will write new segments file in 5 seconds; this will remove " + result.totLoseDocCount + " docs from the index. THIS IS YOUR LAST CHANCE TO CTRL+C!");
+        for(int s=0;s<5;s++) {
+          try {
+            Thread.sleep(1000);
+          } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            s--;
+            continue;
+          }
+          msg("  " + (5-i) + "...");
+        }
+        msg("Writing...");
+        CheckIndex.fix(result);
+      }
+      msg("OK");
+      msg("Wrote new segments file \"" + result.newSegments.getCurrentSegmentFileName() + "\"");
+    }
+    msg("");
 
     final int exitCode;
-    if (isClean)
+    if (result != null && result.clean == true)
       exitCode = 0;
     else
       exitCode = 1;
     System.exit(exitCode);
-  }    
+  }
 

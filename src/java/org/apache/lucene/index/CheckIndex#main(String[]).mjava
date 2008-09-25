@@ -1,4 +1,36 @@
-  public static void main(String[] args) throws Throwable {
+  /** Command-line interface to check and fix an index.
+
+    <p>
+    Run it like this:
+    <pre>
+    java -ea:org.apache.lucene... org.apache.lucene.index.CheckIndex pathToIndex [-fix] [-segment X] [-segment Y]
+    </pre>
+    <ul>
+    <li><code>-fix</code>: actually write a new segments_N file, removing any problematic segments
+
+    <li><code>-segment X</code>: only check the specified
+    segment(s).  This can be specified multiple times,
+    to check more than one segment, eg <code>-segment _2
+    -segment _a</code>.  You can't use this with the -fix
+    option.
+    </ul>
+
+    <p><b>WARNING</b>: <code>-fix</code> should only be used on an emergency basis as it will cause
+                       documents (perhaps many) to be permanently removed from the index.  Always make
+                       a backup copy of your index before running this!  Do not run this tool on an index
+                       that is actively being written to.  You have been warned!
+
+    <p>                Run without -fix, this tool will open the index, report version information
+                       and report any exceptions it hits and what action it would take if -fix were
+                       specified.  With -fix, this tool will remove any segments that have issues and
+                       write a new segments_N file.  This means all documents contained in the affected
+                       segments will be removed.
+
+    <p>
+                       This tool exits with exit code 1 if the index cannot be opened or has any
+                       corruption, else 0.
+   */
+  public static void main(String[] args) throws IOException {
 
     boolean doFix = false;
     List onlySegments = new ArrayList();
@@ -10,14 +42,14 @@
         i++;
       } else if (args[i].equals("-segment")) {
         if (i == args.length-1) {
-          msg("ERROR: missing name for -segment option");
+          System.out.println("ERROR: missing name for -segment option");
           System.exit(1);
         }
         onlySegments.add(args[i+1]);
         i += 2;
       } else {
         if (indexPath != null) {
-          msg("ERROR: unexpected extra argument '" + args[i] + "'");
+          System.out.println("ERROR: unexpected extra argument '" + args[i] + "'");
           System.exit(1);
         }
         indexPath = args[i];
@@ -26,8 +58,8 @@
     }
 
     if (indexPath == null) {
-      msg("\nERROR: index path not specified");
-      msg("\nUsage: java org.apache.lucene.index.CheckIndex pathToIndex [-fix] [-segment X] [-segment Y]\n" +
+      System.out.println("\nERROR: index path not specified");
+      System.out.println("\nUsage: java org.apache.lucene.index.CheckIndex pathToIndex [-fix] [-segment X] [-segment Y]\n" +
                          "\n" +
                          "  -fix: actually write a new segments_N file, removing any problematic segments\n" +
                          "  -segment X: only check the specified segments.  This can be specified multiple\n" + 
@@ -45,40 +77,42 @@
                          "write a new segments_N file.  This means all documents contained in the affected\n" +
                          "segments will be removed.\n" +
                          "\n" +
-                         "This tool exits with exit code 1 if the index cannot be opened or has has any\n" +
+                         "This tool exits with exit code 1 if the index cannot be opened or has any\n" +
                          "corruption, else 0.\n");
       System.exit(1);
     }
 
+    if (!assertsOn())
+      System.out.println("\nNOTE: testing will be more thorough if you run java with '-ea:org.apache.lucene...', so assertions are enabled");
+
     if (onlySegments.size() == 0)
       onlySegments = null;
     else if (doFix) {
-      msg("ERROR: cannot specify both -fix and -segment");
+      System.out.println("ERROR: cannot specify both -fix and -segment");
       System.exit(1);
     }
 
-    assert testAsserts();
-    if (!assertsOn)
-      msg("\nNOTE: testing will be more thorough if you run java with '-ea:org.apache.lucene', so assertions are enabled");
-
-    msg("\nOpening index @ " + indexPath + "\n");
+    System.out.println("\nOpening index @ " + indexPath + "\n");
     Directory dir = null;
     try {
       dir = FSDirectory.getDirectory(indexPath);
     } catch (Throwable t) {
-      msg("ERROR: could not open directory \"" + indexPath + "\"; exiting");
-      t.printStackTrace(out);
+      System.out.println("ERROR: could not open directory \"" + indexPath + "\"; exiting");
+      t.printStackTrace(System.out);
       System.exit(1);
     }
 
-    CheckIndexStatus result = check(dir, doFix, onlySegments);
+    CheckIndex checker = new CheckIndex(dir);
+    checker.setInfoStream(System.out);
+
+    Status result = checker.checkIndex(onlySegments);
 
     if (!result.clean) {
-      if (!doFix){
-        msg("WARNING: would write new segments file, and " + result.totLoseDocCount + " documents would be lost, if -fix were specified\n");
+      if (!doFix) {
+        System.out.println("WARNING: would write new segments file, and " + result.totLoseDocCount + " documents would be lost, if -fix were specified\n");
       } else {
-        msg("WARNING: " + result.totLoseDocCount + " documents will be lost\n");
-        msg("NOTE: will write new segments file in 5 seconds; this will remove " + result.totLoseDocCount + " docs from the index. THIS IS YOUR LAST CHANCE TO CTRL+C!");
+        System.out.println("WARNING: " + result.totLoseDocCount + " documents will be lost\n");
+        System.out.println("NOTE: will write new segments file in 5 seconds; this will remove " + result.totLoseDocCount + " docs from the index. THIS IS YOUR LAST CHANCE TO CTRL+C!");
         for(int s=0;s<5;s++) {
           try {
             Thread.sleep(1000);
@@ -87,15 +121,15 @@
             s--;
             continue;
           }
-          msg("  " + (5-i) + "...");
+          System.out.println("  " + (5-s) + "...");
         }
-        msg("Writing...");
-        CheckIndex.fix(result);
+        System.out.println("Writing...");
+        checker.fixIndex(result);
+        System.out.println("OK");
+        System.out.println("Wrote new segments file \"" + result.newSegments.getCurrentSegmentFileName() + "\"");
       }
-      msg("OK");
-      msg("Wrote new segments file \"" + result.newSegments.getCurrentSegmentFileName() + "\"");
     }
-    msg("");
+    System.out.println("");
 
     final int exitCode;
     if (result != null && result.clean == true)

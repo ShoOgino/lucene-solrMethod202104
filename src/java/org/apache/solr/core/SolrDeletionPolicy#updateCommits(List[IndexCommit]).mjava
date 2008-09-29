@@ -1,0 +1,46 @@
+  private void updateCommits(List<IndexCommit> commits) {
+    // to be safe, we should only call delete on a commit point passed to us
+    // in this specific call (may be across diff IndexWriter instances).
+    // this will happen rarely, so just synchronize everything
+    // for safety and to avoid race conditions
+    DateMathParser dmp = new DateMathParser(DateField.UTC, Locale.US);
+
+    synchronized (this) {
+      IndexCommit last = commits.get(commits.size() - 1);
+      log.info("last commit = " + last.getVersion());
+
+      int numCommitsToDelete = commits.size() - maxCommitsToKeep;
+      int i = 0;
+      for (IndexCommit commit : commits) {
+        // don't delete the last commit point
+        if (commit == last) {
+          continue;
+        }
+
+        if (i < numCommitsToDelete) {
+          commit.delete();
+          i++;
+          continue;
+        }
+
+        try {
+          //TODO: replace LHS of if condition with commit.getTimestamp()
+          if (maxCommitAge != null)
+            if (commit.getDirectory().fileModified(commit.getSegmentsFileName()) < dmp.parseMath(maxCommitAge).getTime()) {
+              commit.delete();
+              continue;
+            }
+        } catch (Exception e) {
+          log.warn("Exception while checking commit point's age for deletion", e);
+        }
+
+        if (keepOptimizedOnly) {
+          if (!commit.isOptimized()) {
+            commit.delete();
+            log.info("Marking unoptimized index " + getId(commit) + " for deletion.");
+          }
+        }
+      }
+    } // end synchronized
+  }
+

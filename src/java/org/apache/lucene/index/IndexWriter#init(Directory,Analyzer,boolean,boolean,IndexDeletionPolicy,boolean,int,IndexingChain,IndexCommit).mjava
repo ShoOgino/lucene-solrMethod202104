@@ -1,12 +1,15 @@
   private void init(Directory d, Analyzer a, final boolean create, boolean closeDir, 
-      IndexDeletionPolicy deletionPolicy, boolean autoCommit, int maxFieldLength,
-      IndexingChain indexingChain)
+                    IndexDeletionPolicy deletionPolicy, boolean autoCommit, int maxFieldLength,
+                    IndexingChain indexingChain, IndexCommit commit)
     throws CorruptIndexException, LockObtainFailedException, IOException {
     this.closeDir = closeDir;
     directory = d;
     analyzer = a;
     setMessageID(defaultInfoStream);
     this.maxFieldLength = maxFieldLength;
+
+    if (indexingChain == null)
+      indexingChain = DocumentsWriter.DefaultIndexingChain;
 
     if (create) {
       // Clear the write lock in case it's leftover:
@@ -33,6 +36,21 @@
         segmentInfos.commit(directory);
       } else {
         segmentInfos.read(directory);
+
+        if (commit != null) {
+          // Swap out all segments, but, keep metadata in
+          // SegmentInfos, like version & generation, to
+          // preserve write-once.  This is important if
+          // readers are open against the future commit
+          // points.
+          if (commit.getDirectory() != directory)
+            throw new IllegalArgumentException("IndexCommit's directory doesn't match my directory");
+          SegmentInfos oldInfos = new SegmentInfos();
+          oldInfos.read(directory, commit.getSegmentsFileName());
+          segmentInfos.replace(oldInfos);
+          changeCount++;
+          message("init: loaded commit \"" + commit.getSegmentsFileName() + "\"");
+        }
 
         // We assume that this segments_N was previously
         // properly sync'd:

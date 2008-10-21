@@ -1,0 +1,50 @@
+  public void testIndexAndConfigReplication() throws Exception {
+
+    //add 500 docs to master
+    for (int i = 0; i < 500; i++)
+      index(masterClient, "id", i, "name", "name = " + String.valueOf(i));
+
+    masterClient.commit();
+
+    NamedList masterQueryRsp = query("*:*", masterClient);
+    SolrDocumentList masterQueryResult = (SolrDocumentList) masterQueryRsp.get("response");
+    assertEquals(500, masterQueryResult.getNumFound());
+
+    //sleep for pollinterval time, 4s for letting slave to pull data.
+    Thread.sleep(4000);
+    //get docs from slave and check equal to master
+    NamedList slaveQueryRsp = query("*:*", slaveClient);
+    SolrDocumentList slaveQueryResult = (SolrDocumentList) slaveQueryRsp.get("response");
+    assertEquals(500, slaveQueryResult.getNumFound());
+
+    //compare results
+    String cmp = TestDistributedSearch.compare(masterQueryResult, slaveQueryResult, 0, null);
+    assertEquals(null, cmp);
+
+    //start config files replication test
+    masterClient.deleteByQuery("*:*");
+    masterClient.commit();
+
+    copyFile(new File("." + System.getProperty("file.separator") +
+            "solr" + System.getProperty("file.separator") +
+            "conf" + System.getProperty("file.separator") + "schema-replication2.xml"),
+            new File(master.getConfDir(), "schema.xml"));
+
+    masterJetty.stop();
+
+    masterJetty = createJetty(master, 9999);
+    masterClient = createNewSolrServer(masterJetty.getLocalPort());
+
+    //add a doc with new field and commit on master to trigger snappull from slave.
+    index(masterClient, "id", "2000", "name", "name = " + String.valueOf(2000), "newname", "newname = " + String.valueOf(2000));
+    masterClient.commit();
+
+    //sleep for 4s for replication to happen.
+    Thread.sleep(4000);
+
+    slaveQueryRsp = query("*:*", slaveClient);
+    SolrDocument d = ((SolrDocumentList) slaveQueryRsp.get("response")).get(0);
+    assertEquals("newname = 2000", (String) d.getFieldValue("newname"));
+
+  }
+

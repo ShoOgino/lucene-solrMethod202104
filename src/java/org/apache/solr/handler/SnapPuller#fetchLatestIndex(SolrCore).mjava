@@ -1,6 +1,7 @@
   /**
    * This command downloads all the necessary files from master to install a
-   * snapshot. Only changed files are downloaded.
+   * snapshot. Only changed files are downloaded. it also downloads the
+   * conf files (if they are modified)
    *
    * @param core the SolrCore
    * @return true on success, false if slave is already in sync
@@ -12,11 +13,15 @@
     replicationStartTime = System.currentTimeMillis();
     try {
       client = new HttpClient();
+      // The closing is done in a different thread. So use multiThreaded conn manager
+      // else it prints out a warning
       client.setHttpConnectionManager(new MultiThreadedHttpConnectionManager());
+      //get the current 'replicateable' index version in the master
       NamedList response = getLatestVersion(client);
       long latestVersion = (Long) response.get(CMD_INDEX_VERSION);
       long latestGeneration = (Long) response.get(GENERATION);
       if (latestVersion == 0L) {
+        //there is nothing to be replicated
         return false;
       }
       IndexCommit commit;
@@ -29,16 +34,21 @@
           searcherRefCounted.decref();
       }
       if (commit.getVersion() == latestVersion && commit.getGeneration() == latestGeneration) {
+        //master and slave are alsready in sync just return
         LOG.info("Slave in sync with master.");
         return false;
       }
       LOG.info("Master's version: " + latestVersion + ", generation: " + latestGeneration);
       LOG.info("Slave's version: " + commit.getVersion() + ", generation: " + commit.getGeneration());
       LOG.info("Starting replication process");
+      // get the list of files first
       fetchFileList(latestVersion, client);
       LOG.info("Number of files in latest snapshot in master: " + filesToDownload.size());
 
+      // use a synchronized list because the list is read by other threads (to show details)
       filesDownloaded = Collections.synchronizedList(new ArrayList<Map<String, Object>>());
+      // if the generateion of master is older than that of the slave , it means they are not compatible to be copied
+      // then a new index direcory to be created and all the files need to be copied
       boolean isSnapNeeded = commit.getGeneration() >= latestGeneration;
       File tmpIndexDir = createTempindexDir(core);
       if (isIndexStale())

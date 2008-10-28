@@ -1,0 +1,53 @@
+  private void markAndSweep() {
+    if (!markAndSweepLock.tryLock()) return;
+    try {
+      int size = stats.size.get();
+      long currentLatestAccessed = stats.accessCounter.get();
+      int itemsToBeRemoved = size - lowerWaterMark;
+      int itemsRemoved = 0;
+      if (itemsToBeRemoved < 1) return;
+      // currentLatestAccessed is the counter value of the item accessed most recently
+      // therefore remove all items whose last accessed counter is less than (currentLatestAccessed - lowerWaterMark)
+      long removeOlderThan = currentLatestAccessed - lowerWaterMark;
+      for (Map.Entry<Object, CacheEntry> entry : map.entrySet()) {
+        if (entry.getValue().lastAccessed <= removeOlderThan && itemsRemoved < itemsToBeRemoved) {
+          evictEntry(entry.getKey());
+        }
+      }
+
+      // Since the removal of items in the above loop depends on the value of the lastAccessed variable,
+      // between the time we recorded the number of items to be removed and the actual removal process,
+      // some items may graduate above the removeOlderThan value and escape eviction.
+      // Therefore, we again check if the size less than acceptableWaterMark, if not we remove items forcefully
+      // using a method which does not depend on the value of lastAccessed but can be more costly to run
+
+      size = stats.size.get();
+      // In the first attempt, try to use a simple algorithm to remove old entries
+      // If the size of the cache is <= acceptableWatermark then return
+      if (size <= acceptableWaterMark) return;
+      // Remove items until size becomes lower than acceptableWaterMark
+      itemsToBeRemoved = size - acceptableWaterMark;
+      TreeSet<CacheEntry> tree = new TreeSet<CacheEntry>();
+      // This loop may remove a few newer items because we try to forcefully fill a
+      // bucket of fixed size and remove them even if they have become newer in the meantime
+      // The caveat is that this may lead to more cache misses because we may have removed
+      // an item which was used very recently (against the philosophy of LRU)
+      for (Map.Entry<Object, CacheEntry> entry : map.entrySet()) {
+        CacheEntry v = entry.getValue();
+        v.lastAccessedCopy = v.lastAccessed;
+        if (tree.size() < itemsToBeRemoved) {
+          tree.add(v);
+        } else {
+          if (v.lastAccessedCopy < tree.first().lastAccessedCopy) {
+            tree.remove(tree.first());
+            tree.add(v);
+          }
+        }
+      }
+      for (CacheEntry sortCacheEntry : tree)
+        evictEntry(sortCacheEntry.key);
+    } finally {
+      markAndSweepLock.unlock();
+    }
+  }
+

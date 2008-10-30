@@ -2,21 +2,29 @@
     if (val == null) return null;
     CacheEntry e = new CacheEntry(key, val, stats.accessCounter.incrementAndGet());
     CacheEntry oldCacheEntry = map.put(key, e);
-    stats.size.incrementAndGet();
+    if (oldCacheEntry != null) {
+      stats.size.incrementAndGet();
+    }
     if (islive) {
       stats.putCounter.incrementAndGet();
     } else {
       stats.nonLivePutCounter.incrementAndGet();
     }
-    if (stats.size.get() > upperWaterMark) {
+
+    // Check if we need to clear out old entries from the cache.
+    // isCleaning variable is checked instead of markAndSweepLock.isLocked()
+    // for performance because every put invokation will check until
+    // the size is back to an acceptable level.
+    //
+    // There is a race between the check and the call to markAndSweep, but
+    // it's unimportant because markAndSweep actually aquires the lock or returns if it can't.
+    if (stats.size.get() > upperWaterMark && !isCleaning) {
       if (newThreadForCleanup) {
-        if (!markAndSweepLock.isLocked()) {
-          new Thread() {
-            public void run() {
-              markAndSweep();
-            }
-          }.start();
-        }
+        new Thread() {
+          public void run() {
+            markAndSweep();
+          }
+        }.start();
       } else {
         markAndSweep();
       }

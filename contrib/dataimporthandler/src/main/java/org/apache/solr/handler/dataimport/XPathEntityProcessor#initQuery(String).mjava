@@ -1,36 +1,69 @@
   private void initQuery(String s) {
-      Reader data = null;
+    Reader data = null;
+    try {
+      final List<Map<String, Object>> rows = new ArrayList<Map<String, Object>>();
       try {
-        final List<Map<String, Object>> rows = new ArrayList<Map<String, Object>>();
         data = dataSource.getData(s);
-        if (xslTransformer != null) {
-          try {
-            SimpleCharArrayReader caw = new SimpleCharArrayReader();
-            xslTransformer.transform(new StreamSource(data),
-                new StreamResult(caw));
-            data = caw.getReader();
-          } catch (TransformerException e) {
-            throw new DataImportHandlerException(
-                DataImportHandlerException.SEVERE,
-                "Exception in applying XSL Transformeation", e);
+      } catch (Exception e) {
+        if (ABORT.equals(onError)) {
+          wrapAndThrow(SEVERE, e);
+        } else if (SKIP.equals(onError)) {
+          wrapAndThrow(DataImportHandlerException.SKIP, e);
+        } else {
+          LOG.warn("Failed for url : " + s, e);
+          rowIterator = Collections.EMPTY_LIST.iterator();
+          return;
+        }
+      }
+      if (xslTransformer != null) {
+        try {
+          SimpleCharArrayReader caw = new SimpleCharArrayReader();
+          xslTransformer.transform(new StreamSource(data),
+                  new StreamResult(caw));
+          data = caw.getReader();
+        } catch (TransformerException e) {
+          if (ABORT.equals(onError)) {
+            wrapAndThrow(SEVERE, e, "Exception in applying XSL Transformeation");
+          } else if (SKIP.equals(onError)) {
+            wrapAndThrow(DataImportHandlerException.SKIP, e);
+          } else {
+            LOG.warn("Failed for url : " + s, e);
+            rowIterator = Collections.EMPTY_LIST.iterator();
+            return;
           }
         }
-        if(streamRows ){
-          rowIterator = getRowIterator(data);
-        } else {
+      }
+      if (streamRows) {
+        rowIterator = getRowIterator(data, s);
+      } else {
+        try {
           xpathReader.streamRecords(data, new XPathRecordReader.Handler() {
             @SuppressWarnings("unchecked")
             public void handle(Map<String, Object> record, String xpath) {
               rows.add(readRow(record, xpath));
             }
           });
-          rowIterator = rows.iterator();
+        } catch (Exception e) {
+          String msg = "Parsing failed for xml, url:" + s + "rows processed :" + rows.size();
+          if (rows.size() > 0) msg += "last row : " + rows.get(rows.size() - 1);
+          if (ABORT.equals(onError)) {
+            wrapAndThrow(SEVERE, e, msg);
+          } else if (SKIP.equals(onError)) {
+            LOG.warn(msg, e);
+            Map<String, Object> map = new HashMap<String, Object>();
+            map.put(SKIP_DOC, Boolean.TRUE);
+            rows.add(map);
+          } else if (CONTINUE.equals(onError)) {
+            LOG.warn(msg, e);
+          }
         }
-      } finally {
-        if (!streamRows) {
-          closeIt(data);
-        }
-
+        rowIterator = rows.iterator();
       }
+    } finally {
+      if (!streamRows) {
+        closeIt(data);
+      }
+
     }
+  }
 

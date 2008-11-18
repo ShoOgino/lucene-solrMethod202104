@@ -1,0 +1,75 @@
+  // Secondary entry point (for 2nd & subsequent TermsHash),
+  // because token text has already been "interned" into
+  // textStart, so we hash by textStart
+  public void add(int textStart) throws IOException {
+
+    int code = textStart;
+
+    int hashPos = code & postingsHashMask;
+
+    assert !postingsCompacted;
+
+    // Locate RawPostingList in hash
+    p = postingsHash[hashPos];
+
+    if (p != null && p.textStart != textStart) {
+      // Conflict: keep searching different locations in
+      // the hash table.
+      final int inc = ((code>>8)+code)|1;
+      do {
+        code += inc;
+        hashPos = code & postingsHashMask;
+        p = postingsHash[hashPos];
+      } while (p != null && p.textStart != textStart);
+    }
+
+    if (p == null) {
+
+      // First time we are seeing this token since we last
+      // flushed the hash.
+
+      // Refill?
+      if (0 == perThread.freePostingsCount)
+        perThread.morePostings();
+
+      // Pull next free RawPostingList from free list
+      p = perThread.freePostings[--perThread.freePostingsCount];
+      assert p != null;
+
+      p.textStart = textStart;
+          
+      assert postingsHash[hashPos] == null;
+      postingsHash[hashPos] = p;
+      numPostings++;
+
+      if (numPostings == postingsHashHalfSize)
+        rehashPostings(2*postingsHashSize);
+
+      // Init stream slices
+      if (numPostingInt + intPool.intUpto > DocumentsWriter.INT_BLOCK_SIZE)
+        intPool.nextBuffer();
+
+      if (DocumentsWriter.BYTE_BLOCK_SIZE - bytePool.byteUpto < numPostingInt*ByteBlockPool.FIRST_LEVEL_SIZE)
+        bytePool.nextBuffer();
+
+      intUptos = intPool.buffer;
+      intUptoStart = intPool.intUpto;
+      intPool.intUpto += streamCount;
+
+      p.intStart = intUptoStart + intPool.intOffset;
+
+      for(int i=0;i<streamCount;i++) {
+        final int upto = bytePool.newSlice(ByteBlockPool.FIRST_LEVEL_SIZE);
+        intUptos[intUptoStart+i] = upto + bytePool.byteOffset;
+      }
+      p.byteStart = intUptos[intUptoStart];
+
+      consumer.newTerm(p);
+
+    } else {
+      intUptos = intPool.buffers[p.intStart >> DocumentsWriter.INT_BLOCK_SHIFT];
+      intUptoStart = p.intStart & DocumentsWriter.INT_BLOCK_MASK;
+      consumer.addTerm(p);
+    }
+  }
+

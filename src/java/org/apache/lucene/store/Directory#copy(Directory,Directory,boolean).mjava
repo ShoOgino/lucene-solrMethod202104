@@ -8,47 +8,54 @@
    * are undefined and you could easily hit a
    * FileNotFoundException.
    *
+   * <p><b>NOTE:</b> this method only copies files that look
+   * like index files (ie, have extensions matching the
+   * known extensions of index files).
+   *
    * @param src source directory
    * @param dest destination directory
    * @param closeDirSrc if <code>true</code>, call {@link #close()} method on source directory
    * @throws IOException
    */
   public static void copy(Directory src, Directory dest, boolean closeDirSrc) throws IOException {
-      final String[] files = src.list();
+    final String[] files = src.listAll();
 
-      if (files == null)
-        throw new IOException("cannot read directory " + src + ": list() returned null");
+    IndexFileNameFilter filter = IndexFileNameFilter.getFilter();
 
-      byte[] buf = new byte[BufferedIndexOutput.BUFFER_SIZE];
-      for (int i = 0; i < files.length; i++) {
-        IndexOutput os = null;
-        IndexInput is = null;
+    byte[] buf = new byte[BufferedIndexOutput.BUFFER_SIZE];
+    for (int i = 0; i < files.length; i++) {
+
+      if (!filter.accept(null, files[i]))
+        continue;
+
+      IndexOutput os = null;
+      IndexInput is = null;
+      try {
+        // create file in dest directory
+        os = dest.createOutput(files[i]);
+        // read current file
+        is = src.openInput(files[i]);
+        // and copy to dest directory
+        long len = is.length();
+        long readCount = 0;
+        while (readCount < len) {
+          int toRead = readCount + BufferedIndexOutput.BUFFER_SIZE > len ? (int)(len - readCount) : BufferedIndexOutput.BUFFER_SIZE;
+          is.readBytes(buf, 0, toRead);
+          os.writeBytes(buf, toRead);
+          readCount += toRead;
+        }
+      } finally {
+        // graceful cleanup
         try {
-          // create file in dest directory
-          os = dest.createOutput(files[i]);
-          // read current file
-          is = src.openInput(files[i]);
-          // and copy to dest directory
-          long len = is.length();
-          long readCount = 0;
-          while (readCount < len) {
-            int toRead = readCount + BufferedIndexOutput.BUFFER_SIZE > len ? (int)(len - readCount) : BufferedIndexOutput.BUFFER_SIZE;
-            is.readBytes(buf, 0, toRead);
-            os.writeBytes(buf, toRead);
-            readCount += toRead;
-          }
+          if (os != null)
+            os.close();
         } finally {
-          // graceful cleanup
-          try {
-            if (os != null)
-              os.close();
-          } finally {
-            if (is != null)
-              is.close();
-          }
+          if (is != null)
+            is.close();
         }
       }
-      if(closeDirSrc)
-        src.close();
+    }
+    if(closeDirSrc)
+      src.close();
   }
 

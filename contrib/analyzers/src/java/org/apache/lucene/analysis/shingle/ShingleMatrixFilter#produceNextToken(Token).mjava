@@ -1,0 +1,138 @@
+  /**
+   * This method exists in order to avoid reursive calls to the method
+   * as the complexity of a fairlt small matrix then easily would require
+   * a gigabyte sized stack per thread.
+   *
+   * @param reusableToken
+   * @return null if exhausted, instance request_next_token if one more call is required for an answer, or instance parameter resuableToken.
+   * @throws IOException
+   */
+  private Token produceNextToken(final Token reusableToken) throws IOException {
+
+    if (currentPermuationTokens != null) {
+      currentShingleLength++;
+
+      if (currentShingleLength + currentPermutationTokensStartOffset <= currentPermuationTokens.size()
+          && currentShingleLength <= maximumShingleSize) {
+
+        // it is possible to create at least one more shingle of the current matrix permutation
+
+        if (ignoringSinglePrefixOrSuffixShingle
+            && currentShingleLength == 1
+            && (((Matrix.Column.Row) currentPermutationRows.get(currentPermutationTokensStartOffset)).getColumn().isFirst() || ((Matrix.Column.Row) currentPermutationRows.get(currentPermutationTokensStartOffset)).getColumn().isLast())) {
+          return next(reusableToken);
+        }
+
+        int termLength = 0;
+
+        List shingle = new ArrayList();
+
+        for (int i = 0; i < currentShingleLength; i++) {
+          Token shingleToken = (Token) currentPermuationTokens.get(i + currentPermutationTokensStartOffset);
+          termLength += shingleToken.termLength();
+          shingle.add(shingleToken);
+        }
+        if (spacerCharacter != null) {
+          termLength += currentShingleLength - 1;
+        }
+
+        // only produce shingles that not already has been created
+        if (!shinglesSeen.add(shingle)) {
+          return request_next_token;
+        }
+
+        // shingle token factory
+        StringBuffer sb = new StringBuffer(termLength + 10); // paranormal ability to foresee the future.
+        for (Iterator iterator = shingle.iterator(); iterator.hasNext();) {
+          Token shingleToken = (Token) iterator.next();
+          if (spacerCharacter != null && sb.length() > 0) {
+            sb.append(spacerCharacter);
+          }
+          sb.append(shingleToken.termBuffer(), 0, shingleToken.termLength());
+        }
+        reusableToken.setTermBuffer(sb.toString());
+        updateToken(reusableToken, shingle, currentPermutationTokensStartOffset, currentPermutationRows, currentPermuationTokens);
+
+        return reusableToken;
+
+      } else {
+
+        // it is NOT possible to create one more shingles of the current matrix permutation
+
+        if (currentPermutationTokensStartOffset < currentPermuationTokens.size() - 1) {
+          // reset shingle size and move one step to the right in the current tokens permutation
+          currentPermutationTokensStartOffset++;
+          currentShingleLength = minimumShingleSize - 1;
+          return request_next_token;
+        }
+
+
+        if (permutations == null) {
+          // todo does this ever occur?
+          return null;
+        }
+
+
+        if (!permutations.hasNext()) {
+
+          // load more data (if available) to the matrix
+
+          if (input != null && readColumn()) {
+            // don't really care, we just read it.
+          }
+
+          // get rith of resources
+
+          // delete the first column in the matrix
+          Matrix.Column deletedColumn = (Matrix.Column) matrix.columns.remove(0);
+
+          // remove all shingles seen that include any of the tokens from the deleted column.
+          List deletedColumnTokens = new ArrayList();
+          for (Iterator iterator = deletedColumn.getRows().iterator(); iterator.hasNext();) {
+            Matrix.Column.Row row = (Matrix.Column.Row) iterator.next();
+            for (Iterator rowIter = row.getTokens().iterator(); rowIter.hasNext();) {
+              Object o = rowIter.next();//Token
+              deletedColumnTokens.add(o);
+            }
+
+          }
+          for (Iterator shinglesSeenIterator = shinglesSeen.iterator(); shinglesSeenIterator.hasNext();) {
+            List shingle = (List) shinglesSeenIterator.next();
+            for (Iterator deletedIter = deletedColumnTokens.iterator(); deletedIter.hasNext();) {
+              Token deletedColumnToken = (Token) deletedIter.next();
+              if (shingle.contains(deletedColumnToken)) {
+                shinglesSeenIterator.remove();
+                break;
+              }
+            }
+          }
+
+
+          if (matrix.columns.size() < minimumShingleSize) {
+            // exhausted
+            return null;
+          }
+
+          // create permutations of the matrix it now looks
+          permutations = matrix.permutationIterator();
+        }
+
+        nextTokensPermutation();
+        return request_next_token;
+
+      }
+    }
+
+    if (permutations == null) {
+      permutations = matrix.permutationIterator();
+    }
+
+    if (!permutations.hasNext()) {
+      return null;
+    }
+
+    nextTokensPermutation();
+
+    return request_next_token;
+  }
+

@@ -1,0 +1,45 @@
+  /** 
+   * Just like {@link #search(Weight, Filter, int, Sort)},
+   * but you choose whether or not the fields in the
+   * returned {@link FieldDoc} instances should be set by
+   * specifying fillFields.
+   */
+  public TopFieldDocs search(Weight weight, Filter filter, final int nDocs,
+                             Sort sort, boolean fillFields)
+      throws IOException {
+    
+    SortField[] fields = sort.fields;
+    boolean legacy = false;
+    for(int i = 0; i < fields.length; i++) {
+      SortField field = fields[i];
+      String fieldname = field.getField();
+      int type = field.getType();
+      // Resolve AUTO into its true type
+      if (type == SortField.AUTO) {
+        int autotype = FieldValueHitQueue.detectFieldType(reader, fieldname);
+        if (autotype == SortField.STRING) {
+          fields[i] = new SortField (fieldname, field.getLocale(), field.getReverse());
+        } else {
+          fields[i] = new SortField (fieldname, autotype, field.getReverse());
+        }
+      }
+
+      if (field.getUseLegacySearch()) {
+        legacy = true;
+      }
+    }
+    
+    if (legacy) {
+      // Search the single top-level reader
+      TopScoreDocCollector collector = new TopFieldDocCollector(reader, sort, nDocs);
+      collector.setNextReader(reader, 0);
+      doSearch(reader, weight, filter, collector);
+      return (TopFieldDocs) collector.topDocs();
+    } else {
+      // Search each sub-reader
+      TopFieldCollector collector = new TopFieldCollector(sort, nDocs, sortedSubReaders, fillFields);
+      search(weight, filter, collector);
+      return (TopFieldDocs) collector.topDocs();
+    }
+  }
+

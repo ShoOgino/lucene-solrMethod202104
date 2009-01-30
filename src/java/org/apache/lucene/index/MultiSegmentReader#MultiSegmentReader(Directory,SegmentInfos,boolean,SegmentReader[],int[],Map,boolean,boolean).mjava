@@ -1,5 +1,6 @@
   /** This contructor is only used for {@link #reopen()} */
-  MultiSegmentReader(Directory directory, SegmentInfos infos, boolean closeDirectory, SegmentReader[] oldReaders, int[] oldStarts, Map oldNormsCache, boolean readOnly) throws IOException {
+  MultiSegmentReader(Directory directory, SegmentInfos infos, boolean closeDirectory, SegmentReader[] oldReaders, int[] oldStarts,
+                     Map oldNormsCache, boolean readOnly, boolean doClone) throws IOException {
     super(directory, infos, closeDirectory, readOnly);
 
     // we put the old SegmentReaders in a map, that allows us
@@ -37,7 +38,20 @@
           // this is a new reader; in case we hit an exception we can close it safely
           newReader = SegmentReader.get(readOnly, infos.info(i));
         } else {
-          newReader = (SegmentReader) newReaders[i].reopenSegment(infos.info(i));
+          newReader = (SegmentReader) newReaders[i].reopenSegment(infos.info(i), doClone, readOnly);
+          if (newReader == newReaders[i] && newReaders[i].hasSegmentInfos()) {
+            // Special case when a single-segment reader was
+            // reopened to a multi-segment reader -- we must
+            // get a private clone, to clear its
+            // SegmentInfos, so it does not attempt to
+            // obtain the write lock
+            newReader = (SegmentReader) newReaders[i].clone(readOnly);
+            newReader.init(directory, null, false, readOnly);
+          } 
+
+          // Make sure reopenSegment did not carry over a
+          // segmentInfos instance
+          assert !newReader.hasSegmentInfos();
         }
         if (newReader == newReaders[i]) {
           // this reader will be shared between the old and the new one,

@@ -1,0 +1,74 @@
+  // If there are no changes to the index, simply return
+  // ourself.  If there are changes, load the latest
+  // SegmentInfos and reopen based on that
+  protected final synchronized IndexReader doReopen(final boolean openReadOnly) throws CorruptIndexException, IOException {
+    ensureOpen();
+
+    if (hasChanges) {
+      // We have changes, which means we are not readOnly:
+      assert readOnly == false;
+      // and we hold the write lock:
+      assert writeLock != null;
+      // so no other writer holds the write lock, which
+      // means no changes could have been done to the index:
+      assert isCurrent();
+
+      if (openReadOnly) {
+        return (IndexReader) clone(openReadOnly);
+      } else {
+        return this;
+      }
+    } else if (isCurrent()) {
+      if (openReadOnly != readOnly) {
+        // Just fallback to clone
+        return (IndexReader) clone(openReadOnly);
+      } else {
+        return this;
+      }
+    }
+
+    final SegmentInfos.FindSegmentsFile finder = new SegmentInfos.FindSegmentsFile(directory) {
+
+      protected Object doBody(String segmentFileName) throws CorruptIndexException, IOException {
+        SegmentInfos infos = new SegmentInfos();
+        infos.read(directory, segmentFileName);
+        DirectoryIndexReader newReader = doReopen(infos, false, openReadOnly);
+        
+        if (DirectoryIndexReader.this != newReader) {
+          newReader.init(directory, infos, closeDirectory, openReadOnly);
+          newReader.deletionPolicy = deletionPolicy;
+        }
+
+        return newReader;
+      }
+    };
+
+    DirectoryIndexReader reader = null;
+
+    // While trying to reopen, we temporarily mark our
+    // closeDirectory as false.  This way any exceptions hit
+    // partway while opening the reader, which is expected
+    // eg if writer is committing, won't close our
+    // directory.  We restore this value below:
+    final boolean myCloseDirectory = closeDirectory;
+    closeDirectory = false;
+
+    try {
+      reader = (DirectoryIndexReader) finder.run();
+    } finally {
+      if (myCloseDirectory) {
+        assert directory instanceof FSDirectory;
+        // Restore my closeDirectory
+        closeDirectory = true;
+        if (reader != null && reader != this) {
+          // Success, and a new reader was actually opened
+          reader.closeDirectory = true;
+          // Clone the directory
+          reader.directory = FSDirectory.getDirectory(((FSDirectory) directory).getFile());
+        }
+      }
+    }
+
+    return reader;
+  }
+

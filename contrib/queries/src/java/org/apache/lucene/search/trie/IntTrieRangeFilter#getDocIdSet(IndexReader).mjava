@@ -1,0 +1,49 @@
+  /**
+   * Returns a DocIdSet that provides the documents which should be permitted or prohibited in search results.
+   */
+  //@Override
+  public DocIdSet getDocIdSet(final IndexReader reader) throws IOException {
+    // calculate the upper and lower bounds respecting the inclusive and null values.
+    int minBound=(this.min==null) ? Integer.MIN_VALUE : (
+      minInclusive ? this.min.intValue() : (this.min.intValue()+1)
+    );
+    int maxBound=(this.max==null) ? Integer.MAX_VALUE : (
+      maxInclusive ? this.max.intValue() : (this.max.intValue()-1)
+    );
+    
+    resetLastNumberOfTerms();
+    if (minBound > maxBound) {
+      // shortcut, no docs will match this
+      return DocIdSet.EMPTY_DOCIDSET;
+    } else {
+      final OpenBitSet bits = new OpenBitSet(reader.maxDoc());
+      final TermDocs termDocs = reader.termDocs();
+      try {
+        TrieUtils.splitIntRange(new TrieUtils.IntRangeBuilder() {
+        
+          //@Override
+          public final void addRange(String minPrefixCoded, String maxPrefixCoded, int level) {
+            try {
+              fillBits(
+                reader, bits, termDocs,
+                fields[Math.min(fields.length-1, level)],
+                minPrefixCoded, maxPrefixCoded
+              );
+            } catch (IOException ioe) {
+              // IntRangeBuilder is not allowed to throw checked exceptions:
+              // wrap as RuntimeException
+              throw new RuntimeException(ioe);
+            }
+          }
+        
+        }, precisionStep, minBound, maxBound);
+      } catch (RuntimeException e) {
+        if (e.getCause() instanceof IOException) throw (IOException)e.getCause();
+        throw e;
+      } finally {
+        termDocs.close();
+      }
+      return bits;
+    }
+  }
+

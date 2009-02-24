@@ -118,45 +118,50 @@
           // since I first started syncing my version, I can
           // safely skip saving myself since I've been
           // superseded:
-          if (myChangeCount > lastCommitChangeCount && (pendingCommit == null || myChangeCount > pendingCommitChangeCount)) {
 
-            // Wait now for any current pending commit to complete:
-            while(pendingCommit != null) {
-              if (infoStream != null)
-                message("wait for existing pendingCommit to finish...");
+          while(true) {
+            if (myChangeCount <= lastCommitChangeCount) {
+              if (infoStream != null) {
+                message("sync superseded by newer infos");
+              }
+              break;
+            } else if (pendingCommit == null) {
+              // My turn to commit
+
+              if (segmentInfos.getGeneration() > toSync.getGeneration())
+                toSync.updateGeneration(segmentInfos);
+
+              boolean success = false;
+              try {
+
+                // Exception here means nothing is prepared
+                // (this method unwinds everything it did on
+                // an exception)
+                try {
+                  toSync.prepareCommit(directory);
+                } finally {
+                  // Have our master segmentInfos record the
+                  // generations we just prepared.  We do this
+                  // on error or success so we don't
+                  // double-write a segments_N file.
+                  segmentInfos.updateGeneration(toSync);
+                }
+
+                assert pendingCommit == null;
+                setPending = true;
+                pendingCommit = toSync;
+                pendingCommitChangeCount = myChangeCount;
+                success = true;
+              } finally {
+                if (!success && infoStream != null)
+                  message("hit exception committing segments file");
+              }
+              break;
+            } else {
+              // Must wait for other commit to complete
               doWait();
             }
-
-            if (segmentInfos.getGeneration() > toSync.getGeneration())
-              toSync.updateGeneration(segmentInfos);
-
-            boolean success = false;
-            try {
-
-              // Exception here means nothing is prepared
-              // (this method unwinds everything it did on
-              // an exception)
-              try {
-                toSync.prepareCommit(directory);
-              } finally {
-                // Have our master segmentInfos record the
-                // generations we just prepared.  We do this
-                // on error or success so we don't
-                // double-write a segments_N file.
-                segmentInfos.updateGeneration(toSync);
-              }
-
-              assert pendingCommit == null;
-              setPending = true;
-              pendingCommit = toSync;
-              pendingCommitChangeCount = myChangeCount;
-              success = true;
-            } finally {
-              if (!success && infoStream != null)
-                message("hit exception committing segments file");
-            }
-          } else if (infoStream != null)
-            message("sync superseded by newer infos");
+          }
         }
 
         if (infoStream != null)

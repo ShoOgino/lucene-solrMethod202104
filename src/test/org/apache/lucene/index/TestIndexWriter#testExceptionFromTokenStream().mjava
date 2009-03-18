@@ -1,0 +1,61 @@
+  // LUCENE-1072
+  public void testExceptionFromTokenStream() throws IOException {
+    RAMDirectory dir = new MockRAMDirectory();
+    IndexWriter writer = new IndexWriter(dir, new Analyzer() {
+
+      public TokenStream tokenStream(String fieldName, Reader reader) {
+        return new TokenFilter(new StandardTokenizer(reader)) {
+          private int count = 0;
+
+          public boolean incrementToken() throws IOException {
+            if (count++ == 5) {
+              throw new IOException();
+            }
+            return input.incrementToken();
+          }
+        };
+      }
+
+    }, true, IndexWriter.MaxFieldLength.LIMITED);
+
+    Document doc = new Document();
+    String contents = "aa bb cc dd ee ff gg hh ii jj kk";
+    doc.add(new Field("content", contents, Field.Store.NO,
+        Field.Index.ANALYZED));
+    try {
+      writer.addDocument(doc);
+      fail("did not hit expected exception");
+    } catch (Exception e) {
+    }
+
+    // Make sure we can add another normal document
+    doc = new Document();
+    doc.add(new Field("content", "aa bb cc dd", Field.Store.NO,
+        Field.Index.ANALYZED));
+    writer.addDocument(doc);
+
+    // Make sure we can add another normal document
+    doc = new Document();
+    doc.add(new Field("content", "aa bb cc dd", Field.Store.NO,
+        Field.Index.ANALYZED));
+    writer.addDocument(doc);
+
+    writer.close();
+    IndexReader reader = IndexReader.open(dir);
+    final Term t = new Term("content", "aa");
+    assertEquals(reader.docFreq(t), 3);
+
+    // Make sure the doc that hit the exception was marked
+    // as deleted:
+    TermDocs tdocs = reader.termDocs(t);
+    int count = 0;
+    while(tdocs.next()) {
+      count++;
+    }
+    assertEquals(2, count);
+
+    assertEquals(reader.docFreq(new Term("content", "gg")), 0);
+    reader.close();
+    dir.close();
+  }
+

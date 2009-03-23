@@ -1,0 +1,70 @@
+  public void testRandomRangeQueries() throws Exception {
+    String handler="";
+    final String[] fields = {"foo_s","foo_i","foo_l","foo_f","foo_d"  // SortableIntField, etc
+            ,"foo_pi","foo_pl","foo_pf","foo_pd"                      // plain int  IntField, etc
+            ,"foo_ti","foo_tl","foo_tf","foo_td"                      // trie numer fields
+    };
+    final int l=5;
+    final int u=25;
+
+
+    createIndex(15, new DocProcessor() {
+      public void process(SolrInputDocument doc) {
+        addInt(doc, l,u, fields);
+      }
+    });
+    assertU(commit());
+    
+    // fields that a normal range query will work correctly on
+    String[] norm_fields = {
+            "foo_i","foo_l","foo_f","foo_d"
+            ,"foo_ti","foo_tl","foo_tf","foo_td"
+
+    };
+    
+    // fields that a value source range query should work on
+    String[] frange_fields = {"foo_i","foo_l","foo_f","foo_d",
+            "foo_pi","foo_pl","foo_pf","foo_pd"};
+
+    for (int i=0; i<1000; i++) {
+      int lower = l + r.nextInt(u-l+10)-5;
+      int upper = lower + r.nextInt(u+5-lower);
+      boolean lowerMissing = r.nextInt(10)==1;
+      boolean upperMissing = r.nextInt(10)==1;
+      boolean inclusive = lowerMissing || upperMissing || r.nextBoolean();
+
+      // lower=2; upper=2; inclusive=true;      
+      // inclusive=true; lowerMissing=true; upperMissing=true;    
+
+      List<String> qs = new ArrayList<String>();
+      for (String field : norm_fields) {
+        String q = field + ':' + (inclusive?'[':'{')
+                + (lowerMissing?"*":lower)
+                + " TO "
+                + (upperMissing?"*":upper)
+                + (inclusive?']':'}');
+        qs.add(q);
+      }
+      for (String field : frange_fields) {
+        String q = "{!frange v="+field
+                + (lowerMissing?"":(" l="+lower))
+                + (upperMissing?"":(" u="+upper))
+                + (inclusive?"":" incl=false")
+                + (inclusive?"":" incu=false")
+                + "}";
+        qs.add(q);
+      }
+
+      SolrQueryResponse last=null;
+      for (String q : qs) {
+        // System.out.println("QUERY="+q);
+        SolrQueryResponse qr = h.queryAndResponse(handler, req("q",q,"rows","1000"));
+        if (last != null) {
+          // we only test if the same docs matched since some queries will include factors like idf, etc.
+          sameDocs((DocSet)qr.getValues().get("response"), (DocSet)last.getValues().get("response"));
+        }
+        last = qr;
+      }
+    }
+  }
+

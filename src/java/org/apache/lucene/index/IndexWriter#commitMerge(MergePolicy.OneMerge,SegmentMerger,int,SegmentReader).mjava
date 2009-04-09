@@ -1,5 +1,5 @@
   /* FIXME if we want to support non-contiguous segment merges */
-  synchronized private boolean commitMerge(MergePolicy.OneMerge merge, SegmentMerger merger, int mergedDocCount) throws IOException {
+  synchronized private boolean commitMerge(MergePolicy.OneMerge merge, SegmentMerger merger, int mergedDocCount, SegmentReader mergedReader) throws IOException {
 
     assert testPoint("startCommitMerge");
 
@@ -27,8 +27,7 @@
 
     final int start = ensureContiguousMerge(merge);
 
-    commitMergedDeletes(merge);
-
+    commitMergedDeletes(merge, mergedReader);
     docWriter.remapDeletes(segmentInfos, merger.getDocMaps(), merger.getDelCounts(), merge, mergedDocCount);
       
     // Simple optimization: if the doc store we are using
@@ -56,12 +55,10 @@
     assert !segmentInfos.contains(merge.info);
     segmentInfos.add(start, merge.info);
 
-    // Must checkpoint before decrefing so any newly
-    // referenced files in the new merge.info are incref'd
-    // first:
-    checkpoint();
-
-    decrefMergeSegments(merge);
+    // If the merged segments had pending changes, clear
+    // them so that they don't bother writing them to
+    // disk, updating SegmentInfo, etc.:
+    readerPool.clear(merge.segments);
 
     if (merge.optimize)
       segmentsToOptimize.add(merge.info);

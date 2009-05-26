@@ -13,6 +13,8 @@
     int[] ids;
     float[] scores;
 
+    boolean needScores = (cmd.getFlags() & GET_SCORES) != 0;
+
     Query query = QueryUtils.makeQueryable(cmd.getQuery());
 
     final Filter luceneFilter = filter==null ? null : filter.getTopFilter();
@@ -22,19 +24,41 @@
       final float[] topscore = new float[] { Float.NEGATIVE_INFINITY };
       final int[] numHits = new int[1];
 
-      HitCollector hc = new HitCollector() {
-        public void collect(int doc, float score) {
-          numHits[0]++;
-          if (score > topscore[0]) topscore[0]=score;
-        }
-      };
+      Collector collector;
+
+      if (!needScores) {
+        collector = new Collector () {
+          public void setScorer(Scorer scorer) throws IOException {
+          }
+          public void collect(int doc) throws IOException {
+            numHits[0]++;
+          }
+          public void setNextReader(IndexReader reader, int docBase) throws IOException {
+          }
+        };
+      } else {
+        collector = new Collector() {
+          Scorer scorer;
+          public void setScorer(Scorer scorer) throws IOException {
+            this.scorer = scorer;
+          }
+          public void collect(int doc) throws IOException {
+            numHits[0]++;
+            float score = scorer.score();
+            if (score > topscore[0]) topscore[0]=score;            
+          }
+          public void setNextReader(IndexReader reader, int docBase) throws IOException {
+          }
+        };
+      }
+      
       if( timeAllowed > 0 ) {
-        hc = new TimeLimitedCollector( hc, timeAllowed );
+        collector = new TimeLimitingCollector(collector, timeAllowed);
       }
       try {
-        searcher.search(query, luceneFilter,  hc );
+        super.search(query, luceneFilter, collector);
       }
-      catch( TimeLimitedCollector.TimeExceededException x ) {
+      catch( TimeLimitingCollector.TimeExceededException x ) {
         log.warn( "Query: " + query + "; " + x.getMessage() );
         qr.setPartialResults(true);
       }
@@ -44,156 +68,42 @@
       scores = new float[nDocsReturned];
       totalHits = numHits[0];
       maxScore = totalHits>0 ? topscore[0] : 0.0f;
-    } else if (cmd.getSort() != null) {
-      // can't use TopDocs if there is a sort since it
-      // will do automatic score normalization.
-      // NOTE: this changed late in Lucene 1.9
-      final int[] numHits = new int[1];
-      final FieldSortedHitQueue hq = new FieldSortedHitQueue(reader, cmd.getSort().getSort(), len);
-
-      HitCollector hc = new HitCollector() {
-        private FieldDoc reusableFD;
-        public void collect(int doc, float score) {
-          numHits[0]++;
-          if (reusableFD == null)
-            reusableFD = new FieldDoc(doc, score);
-          else {
-            reusableFD.score = score;
-            reusableFD.doc = doc;
-          }
-          reusableFD = (FieldDoc) hq.insertWithOverflow(reusableFD);
-        }
-      };
-      if( timeAllowed > 0 ) {
-        hc = new TimeLimitedCollector( hc, timeAllowed );
-      }
-      try {
-        searcher.search(query, luceneFilter, hc );
-      }
-      catch( TimeLimitedCollector.TimeExceededException x ) {
-        log.warn( "Query: " + query + "; " + x.getMessage() );
-        qr.setPartialResults(true);
-      }
-
-      totalHits = numHits[0];
-      maxScore = totalHits>0 ? hq.getMaxScore() : 0.0f;
-
-      nDocsReturned = hq.size();
-      ids = new int[nDocsReturned];
-      scores = (cmd.getFlags()&GET_SCORES)!=0 ? new float[nDocsReturned] : null;
-      for (int i = nDocsReturned -1; i >= 0; i--) {
-        FieldDoc fieldDoc = (FieldDoc)hq.pop();
-        // fillFields is the point where score normalization happens
-        // hq.fillFields(fieldDoc)
-        ids[i] = fieldDoc.doc;
-        if (scores != null) scores[i] = fieldDoc.score;
-      }
     } else {
-      // No Sort specified (sort by score descending)
-      // This case could be done with TopDocs, but would currently require
-      // getting a BitSet filter from a DocSet which may be inefficient.
-      final ScorePriorityQueue hq = new ScorePriorityQueue(lastDocRequested);
-      final int[] numHits = new int[1];
-      HitCollector hc = new HitCollector() {
-        private ScoreDoc reusableSD;
-        public void collect(int doc, float score) {
-            // TODO: if docs are always delivered in order, we could use "score>minScore"
-            // instead of "score>=minScore" and avoid tiebreaking scores
-            // in the priority queue.
-            // but might BooleanScorer14 might still be used and deliver docs out-of-order?
-            int nhits = numHits[0]++;
-            if (reusableSD == null) {
-              reusableSD = new ScoreDoc(doc, score);
-            } else if (nhits < lastDocRequested || score >= reusableSD.score) {
-              // reusableSD holds the last "rejected" entry, so, if
-              // this new score is not better than that, there's no
-              // need to try inserting it
-              reusableSD.doc = doc;
-              reusableSD.score = score;
-            } else {
-              return;
-            }
-            reusableSD = (ScoreDoc) hq.insertWithOverflow(reusableSD);
-        }
-      };
+      TopDocsCollector topCollector;
+      if (cmd.getSort() == null) {
+        topCollector = TopScoreDocCollector.create(len, true);
+      } else {
+        topCollector = TopFieldCollector.create(cmd.getSort(), len, false, needScores, needScores, true);
+      }
+      Collector collector = topCollector;
       if( timeAllowed > 0 ) {
-        hc = new TimeLimitedCollector( hc, timeAllowed );
+        collector = new TimeLimitingCollector(collector, timeAllowed);
       }
       try {
-        searcher.search(query, luceneFilter, hc );
+        super.search(query, luceneFilter, collector);
       }
-      catch( TimeLimitedCollector.TimeExceededException x ) {
+      catch( TimeLimitingCollector.TimeExceededException x ) {
         log.warn( "Query: " + query + "; " + x.getMessage() );
         qr.setPartialResults(true);
       }
 
-      totalHits = numHits[0];
-      nDocsReturned = hq.size();
+      totalHits = topCollector.getTotalHits();
+      TopDocs topDocs = topCollector.topDocs(0, len);
+      maxScore = totalHits>0 ? topDocs.getMaxScore() : 0.0f;
+      nDocsReturned = topDocs.scoreDocs.length;
+
       ids = new int[nDocsReturned];
       scores = (cmd.getFlags()&GET_SCORES)!=0 ? new float[nDocsReturned] : null;
-      ScoreDoc sdoc =null;
-      for (int i = nDocsReturned -1; i >= 0; i--) {
-        sdoc = (ScoreDoc)hq.pop();
-        ids[i] = sdoc.doc;
-        if (scores != null) scores[i] = sdoc.score;
+      for (int i=0; i<nDocsReturned; i++) {
+        ScoreDoc scoreDoc = topDocs.scoreDocs[i];
+        ids[i] = scoreDoc.doc;
+        if (scores != null) scores[i] = scoreDoc.score;
       }
-      maxScore = sdoc ==null ? 0.0f : sdoc.score;
     }
 
 
     int sliceLen = Math.min(lastDocRequested,nDocsReturned);
     if (sliceLen < 0) sliceLen=0;
     qr.setDocList(new DocSlice(0,sliceLen,ids,scores,totalHits,maxScore));
-
-
-
-    /**************** older implementation using TopDocs *******************
-
-
-      Filter lfilter=null;
-      if (filter != null) {
-        final BitSet bits = filter.getBits();   // avoid if possible
-        lfilter = new Filter() {
-          public BitSet bits(IndexReader reader)  {
-            return bits;
-          }
-        };
-      }
-
-      int lastDocRequested=offset+len;
-
-      // lucene doesn't allow 0 to be passed for nDocs
-      if (lastDocRequested==0) lastDocRequested=1;
-
-      // TopFieldDocs sortedDocs;  // use TopDocs so both versions can use it
-      TopDocs sortedDocs;
-      if (lsort!=null) {
-         sortedDocs = searcher.search(query, lfilter, lastDocRequested, lsort);
-      } else {
-         sortedDocs = searcher.search(query, lfilter, lastDocRequested);
-      }
-
-      int nDocsReturned = sortedDocs.scoreDocs.length;
-      int[] docs = new int[nDocsReturned];
-      for (int i=0; i<nDocsReturned; i++) {
-        docs[i] = sortedDocs.scoreDocs[i].doc;
-      }
-      float[] scores=null;
-      float maxScore=0.0f;
-      if ((flags & GET_SCORES) != 0) {
-        scores = new float[nDocsReturned];
-        for (int i=0; i<nDocsReturned; i++) {
-          scores[i] = sortedDocs.scoreDocs[i].score;
-        }
-        if (nDocsReturned>0) {
-          maxScore=sortedDocs.scoreDocs[0].score;
-        }
-      }
-      int sliceLen = Math.min(offset+len,nDocsReturned) - offset;
-      if (sliceLen < 0) sliceLen=0;
-      return new DocSlice(offset,sliceLen,docs,scores,sortedDocs.totalHits, maxScore);
-
-    **********************************************************************************/
-
   }
 

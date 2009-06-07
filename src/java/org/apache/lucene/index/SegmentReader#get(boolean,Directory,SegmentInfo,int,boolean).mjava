@@ -1,0 +1,73 @@
+  /**
+   * @throws CorruptIndexException if the index is corrupt
+   * @throws IOException if there is a low-level IO error
+   */
+  public static SegmentReader get(boolean readOnly,
+                                  Directory dir,
+                                  SegmentInfo si,
+                                  int readBufferSize,
+                                  boolean doOpenStores)
+    throws CorruptIndexException, IOException {
+    SegmentReader instance;
+    try {
+      if (readOnly)
+        instance = (SegmentReader)READONLY_IMPL.newInstance();
+      else
+        instance = (SegmentReader)IMPL.newInstance();
+    } catch (Exception e) {
+      throw new RuntimeException("cannot load SegmentReader class: " + e, e);
+    }
+    instance.directory = dir;
+    instance.readOnly = readOnly;
+    instance.segment = si.name;
+    instance.si = si;
+    instance.readBufferSize = readBufferSize;
+
+    boolean success = false;
+
+    try {
+      // Use compound file directory for some files, if it exists
+      Directory cfsDir = instance.directory();
+      if (si.getUseCompoundFile()) {
+        instance.cfsReader = new CompoundFileReader(instance.directory(), instance.segment + "." + IndexFileNames.COMPOUND_FILE_EXTENSION, readBufferSize);
+        cfsDir = instance.cfsReader;
+      }
+
+      instance.fieldInfos = new FieldInfos(cfsDir, instance.segment + ".fnm");
+
+      if (doOpenStores) {
+        instance.openDocStores();
+      }
+
+      boolean anyProx = false;
+      final int numFields = instance.fieldInfos.size();
+      for(int i=0;!anyProx && i<numFields;i++)
+        if (!instance.fieldInfos.fieldInfo(i).omitTermFreqAndPositions)
+          anyProx = true;
+
+      instance.tis = new TermInfosReader(cfsDir, instance.segment, instance.fieldInfos, readBufferSize);
+
+      instance.loadDeletedDocs();
+
+      // make sure that all index files have been read or are kept open
+      // so that if an index update removes them we'll still have them
+      instance.freqStream = cfsDir.openInput(instance.segment + ".frq", readBufferSize);
+      if (anyProx)
+        instance.proxStream = cfsDir.openInput(instance.segment + ".prx", readBufferSize);
+      instance.openNorms(cfsDir, readBufferSize);
+
+      success = true;
+    } finally {
+
+      // With lock-less commits, it's entirely possible (and
+      // fine) to hit a FileNotFound exception above.  In
+      // this case, we want to explicitly close any subset
+      // of things that were opened so that we don't have to
+      // wait for a GC to do so.
+      if (!success) {
+        instance.doClose();
+      }
+    }
+    return instance;
+  }
+

@@ -1,0 +1,216 @@
+    public Object run(IndexCommit commit) throws CorruptIndexException, IOException {
+      if (commit != null) {
+        if (directory != commit.getDirectory())
+          throw new IOException("the specified commit does not match the specified Directory");
+        return doBody(commit.getSegmentsFileName());
+      }
+
+      String segmentFileName = null;
+      long lastGen = -1;
+      long gen = 0;
+      int genLookaheadCount = 0;
+      IOException exc = null;
+      boolean retry = false;
+
+      int method = 0;
+
+      // Loop until we succeed in calling doBody() without
+      // hitting an IOException.  An IOException most likely
+      // means a commit was in process and has finished, in
+      // the time it took us to load the now-old infos files
+      // (and segments files).  It's also possible it's a
+      // true error (corrupt index).  To distinguish these,
+      // on each retry we must see "forward progress" on
+      // which generation we are trying to load.  If we
+      // don't, then the original error is real and we throw
+      // it.
+      
+      // We have three methods for determining the current
+      // generation.  We try the first two in parallel, and
+      // fall back to the third when necessary.
+
+      while(true) {
+
+        if (0 == method) {
+
+          // Method 1: list the directory and use the highest
+          // segments_N file.  This method works well as long
+          // as there is no stale caching on the directory
+          // contents (NOTE: NFS clients often have such stale
+          // caching):
+          String[] files = null;
+
+          long genA = -1;
+
+          if (directory != null)
+            files = directory.listAll();
+          else
+            files = FSDirectory.listAll(fileDirectory);
+          
+          if (files != null)
+            genA = getCurrentSegmentGeneration(files);
+
+          message("directory listing genA=" + genA);
+
+          // Method 2: open segments.gen and read its
+          // contents.  Then we take the larger of the two
+          // gen's.  This way, if either approach is hitting
+          // a stale cache (NFS) we have a better chance of
+          // getting the right generation.
+          long genB = -1;
+          if (directory != null) {
+            for(int i=0;i<defaultGenFileRetryCount;i++) {
+              IndexInput genInput = null;
+              try {
+                genInput = directory.openInput(IndexFileNames.SEGMENTS_GEN);
+              } catch (FileNotFoundException e) {
+                message("segments.gen open: FileNotFoundException " + e);
+                break;
+              } catch (IOException e) {
+                message("segments.gen open: IOException " + e);
+              }
+
+              if (genInput != null) {
+                try {
+                  int version = genInput.readInt();
+                  if (version == FORMAT_LOCKLESS) {
+                    long gen0 = genInput.readLong();
+                    long gen1 = genInput.readLong();
+                    message("fallback check: " + gen0 + "; " + gen1);
+                    if (gen0 == gen1) {
+                      // The file is consistent.
+                      genB = gen0;
+                      break;
+                    }
+                  }
+                } catch (IOException err2) {
+                  // will retry
+                } finally {
+                  genInput.close();
+                }
+              }
+              try {
+                Thread.sleep(defaultGenFileRetryPauseMsec);
+              } catch (InterruptedException ie) {
+                // In 3.0 we will change this to throw
+                // InterruptedException instead
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(ie);
+              }
+            }
+          }
+
+          message(IndexFileNames.SEGMENTS_GEN + " check: genB=" + genB);
+
+          // Pick the larger of the two gen's:
+          if (genA > genB)
+            gen = genA;
+          else
+            gen = genB;
+          
+          if (gen == -1) {
+            // Neither approach found a generation
+            String s;
+            if (files != null) {
+              s = "";
+              for(int i=0;i<files.length;i++)
+                s += " " + files[i];
+            } else
+              s = " null";
+            throw new FileNotFoundException("no segments* file found in " + directory + ": files:" + s);
+          }
+        }
+
+        // Third method (fallback if first & second methods
+        // are not reliable): since both directory cache and
+        // file contents cache seem to be stale, just
+        // advance the generation.
+        if (1 == method || (0 == method && lastGen == gen && retry)) {
+
+          method = 1;
+
+          if (genLookaheadCount < defaultGenLookaheadCount) {
+            gen++;
+            genLookaheadCount++;
+            message("look ahead increment gen to " + gen);
+          }
+        }
+
+        if (lastGen == gen) {
+
+          // This means we're about to try the same
+          // segments_N last tried.  This is allowed,
+          // exactly once, because writer could have been in
+          // the process of writing segments_N last time.
+
+          if (retry) {
+            // OK, we've tried the same segments_N file
+            // twice in a row, so this must be a real
+            // error.  We throw the original exception we
+            // got.
+            throw exc;
+          } else {
+            retry = true;
+          }
+
+        } else if (0 == method) {
+          // Segment file has advanced since our last loop, so
+          // reset retry:
+          retry = false;
+        }
+
+        lastGen = gen;
+
+        segmentFileName = IndexFileNames.fileNameFromGeneration(IndexFileNames.SEGMENTS,
+                                                                "",
+                                                                gen);
+
+        try {
+          Object v = doBody(segmentFileName);
+          if (exc != null) {
+            message("success on " + segmentFileName);
+          }
+          return v;
+        } catch (IOException err) {
+
+          // Save the original root cause:
+          if (exc == null) {
+            exc = err;
+          }
+
+          message("primary Exception on '" + segmentFileName + "': " + err + "'; will retry: retry=" + retry + "; gen = " + gen);
+
+          if (!retry && gen > 1) {
+
+            // This is our first time trying this segments
+            // file (because retry is false), and, there is
+            // possibly a segments_(N-1) (because gen > 1).
+            // So, check if the segments_(N-1) exists and
+            // try it if so:
+            String prevSegmentFileName = IndexFileNames.fileNameFromGeneration(IndexFileNames.SEGMENTS,
+                                                                               "",
+                                                                               gen-1);
+
+            final boolean prevExists;
+            if (directory != null)
+              prevExists = directory.fileExists(prevSegmentFileName);
+            else
+              prevExists = new File(fileDirectory, prevSegmentFileName).exists();
+
+            if (prevExists) {
+              message("fallback to prior segment file '" + prevSegmentFileName + "'");
+              try {
+                Object v = doBody(prevSegmentFileName);
+                if (exc != null) {
+                  message("success on fallback " + prevSegmentFileName);
+                }
+                return v;
+              } catch (IOException err2) {
+                message("secondary Exception on '" + prevSegmentFileName + "': " + err2 + "'; will retry");
+              }
+            }
+          }
+        }
+      }
+    }
+

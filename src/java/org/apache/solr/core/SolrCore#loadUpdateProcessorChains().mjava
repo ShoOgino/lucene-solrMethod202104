@@ -1,74 +1,45 @@
   /**
-   * Load the request processors configured in solrconfig.xml
+   * Load the request processors
    */
-  private Map<String,UpdateRequestProcessorChain> loadUpdateProcessorChains() {
-    final Map<String,UpdateRequestProcessorChain> map = new HashMap<String, UpdateRequestProcessorChain>();
-    
-    final String parsingErrorText = "Parsing Update Request Processor Chain";
+   private Map<String,UpdateRequestProcessorChain> loadUpdateProcessorChains() {
+    final Map<String, UpdateRequestProcessorChain> map = new HashMap<String, UpdateRequestProcessorChain>();
     UpdateRequestProcessorChain def = null;
-    
-    // This is kinda ugly, but at least it keeps the xpath logic in one place
-    // away from the Processors themselves.  
-    XPath xpath = solrConfig.getXPath();
-    NodeList nodes = (NodeList)solrConfig.evaluate("updateRequestProcessorChain", XPathConstants.NODESET);
-    boolean requireName = nodes.getLength() > 1;
-    if (nodes !=null ) {
-      for (int i=0; i<nodes.getLength(); i++) {
-        Node node = nodes.item(i);
-        String name       = DOMUtil.getAttr(node,"name", requireName?parsingErrorText:null);
-        boolean isDefault = "true".equals( DOMUtil.getAttr(node,"default", null ) );
-        
-        NodeList links = null;
-        try {
-          links = (NodeList)xpath.evaluate("processor", node, XPathConstants.NODESET);
-        } 
-        catch (XPathExpressionException e) {
-          throw new SolrException( SolrException.ErrorCode.SERVER_ERROR,"Error reading processors",e,false);
+    Map<String, List<SolrConfig.PluginInfo>> infos = solrConfig.getUpdateProcessorChainInfo();
+    System.out.println(infos);
+    if (!infos.isEmpty()) {
+      boolean defaultProcessed = false;
+      List<SolrConfig.PluginInfo> defProcessorChainInfo = infos.get(null);// this is the default one
+      for (Map.Entry<String, List<SolrConfig.PluginInfo>> e : solrConfig.getUpdateProcessorChainInfo().entrySet()) {
+        List<SolrConfig.PluginInfo> processorsInfo = e.getValue();
+        if (processorsInfo == defProcessorChainInfo && defaultProcessed) {
+          map.put(e.getKey(), def);
+          continue;
         }
-        if( links == null || links.getLength() < 1 ) {
-          throw new RuntimeException( "updateRequestProcessorChain require at least one processor");
+        UpdateRequestProcessorFactory[] chain = new UpdateRequestProcessorFactory[processorsInfo.size()];
+        for (int i = 0; i < processorsInfo.size(); i++) {
+          SolrConfig.PluginInfo info = processorsInfo.get(i);
+          chain[i] = createInstance(info.className, UpdateRequestProcessorFactory.class, null);
+          chain[i].init(info.initArgs);
         }
-        
-        // keep a list of the factories...
-        final ArrayList<UpdateRequestProcessorFactory> factories = new ArrayList<UpdateRequestProcessorFactory>(links.getLength());
-        // Load and initialize the plugin chain
-        AbstractPluginLoader<UpdateRequestProcessorFactory> loader 
-            = new AbstractPluginLoader<UpdateRequestProcessorFactory>( "processor chain", false, false ) {
-          @Override
-          protected void init(UpdateRequestProcessorFactory plugin, Node node) throws Exception {
-            plugin.init( (node==null)?null:DOMUtil.childNodesToNamedList(node) );
-          }
-    
-          @Override
-          protected UpdateRequestProcessorFactory register(String name, UpdateRequestProcessorFactory plugin) throws Exception {
-            factories.add( plugin );
-            return null;
-          }
-        };
-        loader.load( solrConfig.getResourceLoader(), links );
-        
-        
-        UpdateRequestProcessorChain chain = new UpdateRequestProcessorChain( 
-            factories.toArray( new UpdateRequestProcessorFactory[factories.size()] ) );
-        if( isDefault || nodes.getLength()==1 ) {
-          def = chain;
-        }
-        if( name != null ) {
-          map.put(name, chain);
+        UpdateRequestProcessorChain processorChain = new UpdateRequestProcessorChain(chain);
+        map.put(e.getKey(), processorChain);
+        if (e.getKey() == null || processorsInfo == defProcessorChainInfo) { //this is the default one
+          defaultProcessed = true;
+          def = processorChain;
         }
       }
     }
-    
-    if( def == null ) {
+
+    if (def == null) {
       // construct the default chain
-      UpdateRequestProcessorFactory[] factories = new UpdateRequestProcessorFactory[] {
-        new RunUpdateProcessorFactory(),
-        new LogUpdateProcessorFactory()
+      UpdateRequestProcessorFactory[] factories = new UpdateRequestProcessorFactory[]{
+              new RunUpdateProcessorFactory(),
+              new LogUpdateProcessorFactory()
       };
-      def = new UpdateRequestProcessorChain( factories );
+      def = new UpdateRequestProcessorChain(factories);
     }
-    map.put( null, def );
-    map.put( "", def );
+    map.put(null, def);
+    map.put("", def);
     return map;
   }
 

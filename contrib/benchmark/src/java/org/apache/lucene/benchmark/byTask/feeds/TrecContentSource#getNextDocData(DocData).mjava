@@ -1,0 +1,74 @@
+  public DocData getNextDocData(DocData docData) throws NoMoreDataException, IOException {
+    String dateStr = null, name = null;
+    Reader r = null;
+    // protect reading from the TREC files by multiple threads. The rest of the
+    // method, i.e., parsing the content and returning the DocData can run
+    // unprotected.
+    synchronized (lock) {
+      if (reader == null) {
+        openNextFile();
+      }
+
+      StringBuffer docBuf = getDocBuffer();
+      
+      // 1. skip until doc start
+      docBuf.setLength(0);
+      read(docBuf, DOC, false, false, null);
+
+      // 2. name
+      docBuf.setLength(0);
+      read(docBuf, DOCNO, true, false, null);
+      name = docBuf.substring(DOCNO.length(), docBuf.indexOf(TERMINATING_DOCNO,
+          DOCNO.length()));
+      name = name + "_" + iteration;
+
+      // 3. skip until doc header
+      docBuf.setLength(0);
+      read(docBuf, DOCHDR, false, false, null);
+
+      boolean findTerminatingDocHdr = false;
+
+      // 4. date - look for the date only until /DOCHDR
+      docBuf.setLength(0);
+      read(docBuf, DATE, true, false, TERMINATING_DOCHDR);
+      if (docBuf.length() != 0) {
+        // Date found.
+        dateStr = docBuf.substring(DATE.length());
+        findTerminatingDocHdr = true;
+      }
+
+      // 5. skip until end of doc header
+      if (findTerminatingDocHdr) {
+        docBuf.setLength(0);
+        read(docBuf, TERMINATING_DOCHDR, false, false, null);
+      }
+
+      // 6. collect until end of doc
+      docBuf.setLength(0);
+      read(docBuf, TERMINATING_DOC, false, true, null);
+      
+      // 7. Set up a Reader over the read content
+      r = getTrecDocReader(docBuf);
+      // Resetting the thread's reader means it will reuse the instance
+      // allocated as well as re-read from docBuf.
+      r.reset();
+      
+      // count char length of parsed html text (larger than the plain doc body text).
+      addBytes(docBuf.length()); 
+    }
+
+    // This code segment relies on HtmlParser being thread safe. When we get 
+    // here, everything else is already private to that thread, so we're safe.
+    Date date = dateStr != null ? parseDate(dateStr) : null;
+    try {
+      docData = htmlParser.parse(docData, name, date, r, null);
+      addDoc();
+    } catch (InterruptedException e) {
+      IOException ex = new IOException(e.getMessage());
+      ex.initCause(e);
+      throw ex;
+    }
+
+    return docData;
+  }
+

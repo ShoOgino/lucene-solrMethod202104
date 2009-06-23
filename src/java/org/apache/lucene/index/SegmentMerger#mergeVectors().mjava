@@ -7,65 +7,24 @@
       new TermVectorsWriter(directory, segment, fieldInfos);
 
     try {
-      for (int r = 0; r < readers.size(); r++) {
-        final SegmentReader matchingSegmentReader = matchingSegmentReaders[r];
-        TermVectorsReader matchingVectorsReader;
-        final boolean hasMatchingReader;
+      int idx = 0;
+      for (Iterator iter = readers.iterator(); iter.hasNext();) {
+        final SegmentReader matchingSegmentReader = matchingSegmentReaders[idx++];
+        TermVectorsReader matchingVectorsReader = null;
         if (matchingSegmentReader != null) {
-          matchingVectorsReader = matchingSegmentReader.termVectorsReaderOrig;
+          TermVectorsReader vectorsReader = matchingSegmentReader.termVectorsReaderOrig;
 
-          // If the TV* files are an older format then they
-          // cannot read raw docs:
-          if (matchingVectorsReader != null && !matchingVectorsReader.canReadRawDocs()) {
-            matchingVectorsReader = null;
-            hasMatchingReader = false;
-          } else
-            hasMatchingReader = matchingVectorsReader != null;
-
-        } else {
-          hasMatchingReader = false;
-          matchingVectorsReader = null;
+          // If the TV* files are an older format then they cannot read raw docs:
+          if (vectorsReader != null && vectorsReader.canReadRawDocs()) {
+            matchingVectorsReader = vectorsReader;
+          }
         }
-        IndexReader reader = (IndexReader) readers.get(r);
-        final boolean hasDeletions = reader.hasDeletions();
-        int maxDoc = reader.maxDoc();
-        for (int docNum = 0; docNum < maxDoc;) {
-          // skip deleted docs
-          if (!hasDeletions || !reader.isDeleted(docNum)) {
-            if (hasMatchingReader) {
-              // We can optimize this case (doing a bulk
-              // byte copy) since the field numbers are
-              // identical
-              int start = docNum;
-              int numDocs = 0;
-              do {
-                docNum++;
-                numDocs++;
-                if (docNum >= maxDoc)
-                  break;
-                if (hasDeletions && matchingSegmentReader.isDeleted(docNum)) {
-                  docNum++;
-                  break;
-                }
-              } while(numDocs < MAX_RAW_MERGE_DOCS);
-
-              matchingVectorsReader.rawDocs(rawDocLengths, rawDocLengths2, start, numDocs);
-              termVectorsWriter.addRawDocuments(matchingVectorsReader, rawDocLengths, rawDocLengths2, numDocs);
-              if (checkAbort != null)
-                checkAbort.work(300*numDocs);
-            } else {
-              // NOTE: it's very important to first assign
-              // to vectors then pass it to
-              // termVectorsWriter.addAllDocVectors; see
-              // LUCENE-1282
-              TermFreqVector[] vectors = reader.getTermFreqVectors(docNum);
-              termVectorsWriter.addAllDocVectors(vectors);
-              docNum++;
-              if (checkAbort != null)
-                checkAbort.work(300);
-            }
-          } else
-            docNum++;
+        final IndexReader reader = (IndexReader) iter.next();
+        if (reader.hasDeletions()) {
+          copyVectorsWithDeletions(termVectorsWriter, matchingVectorsReader, reader);
+        } else {
+          copyVectorsNoDeletions(termVectorsWriter, matchingVectorsReader, reader);
+          
         }
       }
     } finally {

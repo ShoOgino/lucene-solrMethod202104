@@ -1,0 +1,86 @@
+    public Query rewrite(IndexReader reader) throws IOException {
+      // ArrayList spanClauses = new ArrayList();
+      if (contents instanceof TermQuery) {
+        return contents;
+      }
+      // Build a sequence of Span clauses arranged in a SpanNear - child
+      // clauses can be complex
+      // Booleans e.g. nots and ors etc
+      int numNegatives = 0;
+      if (!(contents instanceof BooleanQuery)) {
+        throw new IllegalArgumentException("Unknown query type \""
+            + contents.getClass().getName()
+            + "\" found in phrase query string \"" + phrasedQueryStringContents
+            + "\"");
+      }
+      BooleanQuery bq = (BooleanQuery) contents;
+      BooleanClause[] bclauses = bq.getClauses();
+      SpanQuery[] allSpanClauses = new SpanQuery[bclauses.length];
+      // For all clauses e.g. one* two~
+      for (int i = 0; i < bclauses.length; i++) {
+        // HashSet bclauseterms=new HashSet();
+        Query qc = bclauses[i].getQuery();
+        // Rewrite this clause e.g one* becomes (one OR onerous)
+        qc = qc.rewrite(reader);
+        if (bclauses[i].getOccur().equals(BooleanClause.Occur.MUST_NOT)) {
+          numNegatives++;
+        }
+
+        if (qc instanceof BooleanQuery) {
+          ArrayList sc = new ArrayList();
+          addComplexPhraseClause(sc, (BooleanQuery) qc);
+          if (sc.size() > 0) {
+            allSpanClauses[i] = (SpanQuery) sc.get(0);
+          } else {
+            // Insert fake term e.g. phrase query was for "Fred Smithe*" and
+            // there were no "Smithe*" terms - need to
+            // prevent match on just "Fred".
+            allSpanClauses[i] = new SpanTermQuery(new Term(field,
+                "Dummy clause because no terms found - must match nothing"));
+          }
+        } else {
+          if (qc instanceof TermQuery) {
+            TermQuery tq = (TermQuery) qc;
+            allSpanClauses[i] = new SpanTermQuery(tq.getTerm());
+          } else {
+            throw new IllegalArgumentException("Unknown query type \""
+                + qc.getClass().getName()
+                + "\" found in phrase query string \""
+                + phrasedQueryStringContents + "\"");
+          }
+
+        }
+      }
+      if (numNegatives == 0) {
+        // The simple case - no negative elements in phrase
+        return new SpanNearQuery(allSpanClauses, slopFactor, true);
+      }
+      // Complex case - we have mixed positives and negatives in the
+      // sequence.
+      // Need to return a SpanNotQuery
+      ArrayList positiveClauses = new ArrayList();
+      for (int j = 0; j < allSpanClauses.length; j++) {
+        if (!bclauses[j].getOccur().equals(BooleanClause.Occur.MUST_NOT)) {
+          positiveClauses.add(allSpanClauses[j]);
+        }
+      }
+
+      SpanQuery[] includeClauses = (SpanQuery[]) positiveClauses
+          .toArray(new SpanQuery[positiveClauses.size()]);
+
+      SpanQuery include = null;
+      if (includeClauses.length == 1) {
+        include = includeClauses[0]; // only one positive clause
+      } else {
+        // need to increase slop factor based on gaps introduced by
+        // negatives
+        include = new SpanNearQuery(includeClauses, slopFactor + numNegatives,
+            true);
+      }
+      // Use sequence of positive and negative values as the exclude.
+      SpanNearQuery exclude = new SpanNearQuery(allSpanClauses, slopFactor,
+          true);
+      SpanNotQuery snot = new SpanNotQuery(include, exclude);
+      return snot;
+    }
+

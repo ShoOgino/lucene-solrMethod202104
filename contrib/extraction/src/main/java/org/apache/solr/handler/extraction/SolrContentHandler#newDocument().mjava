@@ -10,73 +10,27 @@
     //handle the metadata extracted from the document
     for (String name : metadata.names()) {
       String[] vals = metadata.getValues(name);
-      name = findMappedMetadataName(name);
-      SchemaField schFld = schema.getFieldOrNull(name);
-      if (schFld != null) {
-        boost = getBoost(name);
-        if (schFld.multiValued()) {
-          for (int i = 0; i < vals.length; i++) {
-            String val = vals[i];
-            document.addField(name, transformValue(val, schFld), boost);
-          }
-        } else {
-          StringBuilder builder = new StringBuilder();
-          for (int i = 0; i < vals.length; i++) {
-            builder.append(vals[i]).append(' ');
-          }
-          document.addField(name, transformValue(builder.toString().trim(), schFld), boost);
-        }
-      } else {
-        //TODO: error or log?
-        if (ignoreUndeclaredFields == false) {
-          // Arguably we should handle this as a special case. Why? Because unlike basically
-          // all the other fields in metadata, this one was probably set not by Tika by in
-          // ExtractingDocumentLoader.load(). You shouldn't have to define a mapping for this
-          // field just because you specified a resource.name parameter to the handler, should
-          // you?
-          if (name != Metadata.RESOURCE_NAME_KEY) {
-            throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Invalid field: " + name);
-          }
-        }
-      }
+      addField(name, null, vals);
     }
+
     //handle the literals from the params
     Iterator<String> paramNames = params.getParameterNamesIterator();
     while (paramNames.hasNext()) {
-      String name = paramNames.next();
-      if (name.startsWith(LITERALS_PREFIX)) {
-        String fieldName = name.substring(LITERALS_PREFIX.length());
-        //no need to map names here, since they are literals from the user
-        SchemaField schFld = schema.getFieldOrNull(fieldName);
-        if (schFld != null) {
-          String[] values = params.getParams(name);
-          if (schFld.multiValued() == false && values.length > 1) {
-            throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "The Field " + fieldName + " is not multivalued");
-          }
-          boost = getBoost(fieldName);
-          for (int i = 0; i < values.length; i++) {
-            //no need to transform here, b/c we can assume the user sent it in correctly
-            document.addField(fieldName, values[i], boost);
+      String pname = paramNames.next();
+      if (!pname.startsWith(LITERALS_PREFIX)) continue;
 
-          }
-        } else {
-          handleUndeclaredField(fieldName);
-        }
-      }
+      String name = pname.substring(LITERALS_PREFIX.length());
+      addField(name, null, params.getParams(pname));
     }
+
+
     //add in the content
-    document.addField(defaultFieldName, catchAllBuilder.toString(), getBoost(defaultFieldName));
+    addField(contentFieldName, catchAllBuilder.toString(), null);
 
     //add in the captured content
     for (Map.Entry<String, StringBuilder> entry : fieldBuilders.entrySet()) {
       if (entry.getValue().length() > 0) {
-        String fieldName = findMappedName(entry.getKey());
-        SchemaField schFld = schema.getFieldOrNull(fieldName);
-        if (schFld != null) {
-          document.addField(fieldName, transformValue(entry.getValue().toString(), schFld), getBoost(fieldName));
-        } else {
-          handleUndeclaredField(fieldName);
-        }
+        addField(entry.getKey(), entry.getValue().toString(), null);
       }
     }
     if (log.isDebugEnabled()) {

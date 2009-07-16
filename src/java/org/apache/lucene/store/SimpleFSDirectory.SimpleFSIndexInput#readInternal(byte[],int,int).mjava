@@ -8,13 +8,33 @@
           file.position = position;
         }
         int total = 0;
-        do {
-          int i = file.read(b, offset+total, len-total);
-          if (i == -1)
-            throw new IOException("read past EOF");
-          file.position += i;
-          total += i;
-        } while (total < len);
+
+        try {
+          do {
+            final int readLength;
+            if (total + chunkSize > len) {
+              readLength = len - total;
+            } else {
+              // LUCENE-1566 - work around JVM Bug by breaking very large reads into chunks
+              readLength = chunkSize;
+            }
+            final int i = file.read(b, offset + total, readLength);
+            if (i == -1) {
+              throw new IOException("read past EOF");
+            }
+            file.position += i;
+            total += i;
+          } while (total < len);
+        } catch (OutOfMemoryError e) {
+          // propagate OOM up and add a hint for 32bit VM Users hitting the bug
+          // with a large chunk size in the fast path.
+          final OutOfMemoryError outOfMemoryError = new OutOfMemoryError(
+              "OutOfMemoryError likely caused by the Sun VM Bug described in "
+              + "https://issues.apache.org/jira/browse/LUCENE-1566; try calling FSDirectory.setReadChunkSize "
+              + "with a a value smaller than the current chunks size (" + chunkSize + ")");
+          outOfMemoryError.initCause(e);
+          throw outOfMemoryError;
+        }
       }
     }
 

@@ -67,7 +67,6 @@
     if(fsv){
       Sort sort = rb.getSortSpec().getSort();
       SortField[] sortFields = sort==null ? new SortField[]{SortField.FIELD_SCORE} : sort.getSort();
-      ScoreDoc sd = new ScoreDoc(0,1.0f); // won't work for comparators that look at the score
       NamedList sortVals = new NamedList(); // order is important for the sort fields
       Field field = new Field("dummy", "", Field.Store.YES, Field.Index.NO); // a dummy Field
 
@@ -85,8 +84,8 @@
         int type = sortField.getType();
         if (type==SortField.SCORE || type==SortField.DOC) continue;
 
-        ScoreDocComparator comparator = null;
-        ScoreDocComparator comparators[] = (readers==null) ? null : new ScoreDocComparator[readers.length];
+        FieldComparator comparator = null;
+        FieldComparator comparators[] = (readers==null) ? null : new FieldComparator[readers.length];
 
         String fieldname = sortField.getField();
         FieldType ft = fieldname==null ? null : req.getSchema().getFieldTypeNoEx(fieldname);
@@ -99,23 +98,25 @@
         int idx = 0;
 
         while(it.hasNext()) {
-          sd.doc = it.nextDoc();
+          int doc = it.nextDoc();
           if (readers != null) {
-            idx = SolrIndexReader.readerIndex(sd.doc, offsets);
+            idx = SolrIndexReader.readerIndex(doc, offsets);
             subReader = readers[idx];
             offset = offsets[idx];
             comparator = comparators[idx];
           }
 
           if (comparator == null) {
-            comparator = getComparator(subReader, sortField);
+            comparator = sortField.getComparator(1,0,sortField.getReverse());
+            comparator.setNextReader(subReader, offset, 0);
             if (comparators != null)
               comparators[idx] = comparator;
           }
 
-          sd.doc -= offset;  // adjust for what segment this is in
-          Object val = comparator.sortValue(sd);
-          
+          doc -= offset;  // adjust for what segment this is in
+          comparator.copy(0, doc);
+          Object val = comparator.value(0);
+
           // Sortable float, double, int, long types all just use a string
           // comparator. For these, we need to put the type into a readable
           // format.  One reason for this is that XML can't represent all
@@ -126,6 +127,7 @@
             field.setValue((String)val);
             val = ft.toObject(field);
           }
+
           vals.add(val);
         }
 

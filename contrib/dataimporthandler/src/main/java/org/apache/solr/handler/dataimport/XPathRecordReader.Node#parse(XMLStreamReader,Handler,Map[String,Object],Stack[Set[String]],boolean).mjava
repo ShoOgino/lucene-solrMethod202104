@@ -1,20 +1,29 @@
-    /**This is the method where all the parsing happens. For each tag/subtag this gets called recursively.
+    /**
+     * This is the method where all the XML parsing happens. For each 
+     * tag/subtag read from the source, this method is called recursively.
+     *
      */
     private void parse(XMLStreamReader parser, Handler handler,
                        Map<String, Object> values, Stack<Set<String>> stack,
                        boolean recordStarted) throws IOException, XMLStreamException {
       Set<String> valuesAddedinThisFrame = null;
       if (isRecord) {
+        // This Node is a match for an XPATH from a forEach attribute, 
+        // prepare to emit a new record when its END_ELEMENT is matched 
         recordStarted = true;
         valuesAddedinThisFrame = new HashSet<String>();
         stack.push(valuesAddedinThisFrame);
       } else if (recordStarted) {
+        // This node is a child of some parent which matched against forEach 
+        // attribute. Continue to add values to an existing record.
         valuesAddedinThisFrame = stack.peek();
       } else {
+        //if this tag has an attribute or text which is a brank/leaf just push an item up the stack
         if (attributes != null || hasText)
           valuesAddedinThisFrame = new HashSet<String>();
         stack.push(valuesAddedinThisFrame);
       }
+
       try {
         if (attributes != null) {
           for (Node node : attributes) {
@@ -25,13 +34,15 @@
             }
           }
         }
+
         Set<Node> childrenFound = new HashSet<Node>();
-        // for any normal event , parser.next() should be called in each iteration.
-        // But for CDATA | CHARACTERS | SPACE it should not do so because handling of
-        // CDATA itself would have consumed the next event. CDATA may throw multiple events
-        // so all the events are slurped till a  START_ELEMENT is encountered.
+        // Internally we have to gobble CDATA | CHARACTERS | SPACE events as we
+        // store text, the gobbling continues till we have fetched some other 
+        // event. We use "isNextEventFetched" to indcate that the gobbling has
+        // already fetched the next event.
         boolean isNextEventFetched = false;
         int event = -1;
+
         while (true) {
           if (!isNextEventFetched) {
             event = parser.next();
@@ -55,6 +66,8 @@
           if ((event == CDATA || event == CHARACTERS || event == SPACE)
                   && hasText) {
             valuesAddedinThisFrame.add(fieldName);
+            // becuase we are fetching events here we need to ensure the outer
+            // loop does not end up doing an extra parser.next()
             isNextEventFetched = true;
             String text = parser.getText();
             event = parser.next();
@@ -77,6 +90,8 @@
                     }
                   }
                 } else {
+                  // We are not flatten-ing, so look to see if any of the child
+                  // elements are wanted, and recurse if any are found.
                   handleStartElement(parser, childrenFound, handler, values, stack, recordStarted);
                 }
               } else {
@@ -84,6 +99,7 @@
               }
               event = parser.next();
             }
+            // save the text we have read against the fieldName in the Map values
             putText(values, text, fieldName, multiValued);
           } else if (event == START_ELEMENT) {
             handleStartElement(parser, childrenFound, handler, values, stack, recordStarted);

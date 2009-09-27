@@ -3,43 +3,49 @@
     // in this specific call (may be across diff IndexWriter instances).
     // this will happen rarely, so just synchronize everything
     // for safety and to avoid race conditions
-    DateMathParser dmp = new DateMathParser(DateField.UTC, Locale.US);
 
     synchronized (this) {
-      IndexCommit last = commits.get(commits.size() - 1);
-      log.info("last commit = " + last.getVersion());
+      long maxCommitAgeTimeStamp = -1L;
+      IndexCommit newest = commits.get(commits.size() - 1);
+      log.info("newest commit = " + newest.getVersion());
 
-      int numCommitsToDelete = commits.size() - maxCommitsToKeep;
-      int i = 0;
-      for (IndexCommit commit : commits) {
-        // don't delete the last commit point
-        if (commit == last) {
-          continue;
-        }
+      int optimizedKept = newest.isOptimized() ? 1 : 0;
+      int totalKept = 1;
 
-        if (i < numCommitsToDelete) {
-          commit.delete();
-          i++;
-          continue;
-        }
+      // work our way from newest to oldest, skipping the first since we always want to keep it.
+      for (int i=commits.size()-2; i>=0; i--) {
+        IndexCommit commit = commits.get(i);
 
+        // delete anything too old, regardless of other policies
         try {
-          if (maxCommitAge != null)
-            if (commit.getTimestamp() < dmp.parseMath(maxCommitAge).getTime()) {
+          if (maxCommitAge != null) {
+            if (maxCommitAgeTimeStamp==-1) {
+              DateMathParser dmp = new DateMathParser(DateField.UTC, Locale.US);
+              maxCommitAgeTimeStamp = dmp.parseMath(maxCommitAge).getTime();
+            }
+            if (commit.getTimestamp() < maxCommitAgeTimeStamp) {
               commit.delete();
               continue;
             }
+          }
         } catch (Exception e) {
           log.warn("Exception while checking commit point's age for deletion", e);
         }
 
-        if (keepOptimizedOnly) {
-          if (!commit.isOptimized()) {
-            commit.delete();
-            log.info("Marking unoptimized index " + getId(commit) + " for deletion.");
-          }
+        if (optimizedKept < maxOptimizedCommitsToKeep && commit.isOptimized()) {
+          totalKept++;
+          optimizedKept++;
+          continue;
         }
+
+        if (totalKept < maxCommitsToKeep) {
+          totalKept++;
+          continue;
+        }
+                                                  
+        commit.delete();
       }
+
     } // end synchronized
   }
 

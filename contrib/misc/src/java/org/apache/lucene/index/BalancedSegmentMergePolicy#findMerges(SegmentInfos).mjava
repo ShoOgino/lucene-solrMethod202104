@@ -1,0 +1,65 @@
+  @Override
+  public MergeSpecification findMerges(SegmentInfos infos) throws IOException {
+    final int numSegs = infos.size();
+    final int numLargeSegs = _numLargeSegments;
+    
+    if (numSegs <= numLargeSegs) {
+      return null;
+    }
+    
+    long totalLargeSegSize = 0;
+    long totalSmallSegSize = 0;
+    SegmentInfo info;
+    
+    // compute the total size of large segments
+    for(int i = 0; i < numLargeSegs; i++) {
+      info = infos.info(i);
+      totalLargeSegSize += size(info);
+    }
+    // compute the total size of small segments
+    for(int i = numLargeSegs; i < numSegs; i++) {
+      info = infos.info(i);
+      totalSmallSegSize += size(info);
+    }
+    
+    long targetSegSize = (totalLargeSegSize / (numLargeSegs - 1));
+    if(targetSegSize <= totalSmallSegSize) {
+      // the total size of small segments is big enough,
+      // promote the small segments to a large segment and do balanced merge,
+      
+      if(totalSmallSegSize < targetSegSize * 2) {
+        MergeSpecification spec = findBalancedMerges(infos, numLargeSegs, (numLargeSegs - 1), _partialExpunge);
+        if(spec == null) spec = new MergeSpecification(); // should not happen
+        spec.add(new OneMerge(infos.range(numLargeSegs, numSegs), getUseCompoundFile()));
+        return spec;
+      } else {
+        return findBalancedMerges(infos, numSegs, numLargeSegs, _partialExpunge);
+      }      
+    } else if (_maxSegments < numSegs) {
+      // we have more than _maxSegments, merge small segments smaller than targetSegSize/4
+      MergeSpecification spec = new MergeSpecification();
+      int startSeg = numLargeSegs;
+      long sizeThreshold = (targetSegSize / 4);
+      while(startSeg < numSegs) {
+        info = infos.info(startSeg);
+        if(size(info) < sizeThreshold) break;
+        startSeg++;
+      }
+      spec.add(new OneMerge(infos.range(startSeg, numSegs), getUseCompoundFile()));
+      return spec;
+    } else {
+      // apply the log merge policy to small segments.
+      SegmentInfos smallSegments = infos.range(numLargeSegs, numSegs);
+      MergeSpecification spec = super.findMerges(smallSegments);
+      
+      if(_partialExpunge) {
+        OneMerge expunge  = findOneSegmentToExpunge(infos, numLargeSegs);
+        if(expunge != null) {
+          if(spec == null) spec = new MergeSpecification();
+          spec.add(expunge);
+        }
+      }
+      return spec;
+    }      
+  }
+

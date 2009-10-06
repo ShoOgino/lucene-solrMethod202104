@@ -3,13 +3,17 @@
      * tag/subtag read from the source, this method is called recursively.
      *
      */
-    private void parse(XMLStreamReader parser, Handler handler,
-                       Map<String, Object> values, Stack<Set<String>> stack,
-                       boolean recordStarted) throws IOException, XMLStreamException {
+    private void parse(XMLStreamReader parser, 
+                       Handler handler,
+                       Map<String, Object> values, 
+                       Stack<Set<String>> stack, // lists of values to purge
+                       boolean recordStarted
+                       ) throws IOException, XMLStreamException {
       Set<String> valuesAddedinThisFrame = null;
       if (isRecord) {
         // This Node is a match for an XPATH from a forEach attribute, 
-        // prepare to emit a new record when its END_ELEMENT is matched 
+        // prepare for the clean up that will occurr when the record
+        // is emitted after its END_ELEMENT is matched 
         recordStarted = true;
         valuesAddedinThisFrame = new HashSet<String>();
         stack.push(valuesAddedinThisFrame);
@@ -17,15 +21,16 @@
         // This node is a child of some parent which matched against forEach 
         // attribute. Continue to add values to an existing record.
         valuesAddedinThisFrame = stack.peek();
-      } else {
-        //if this tag has an attribute or text which is a brank/leaf just push an item up the stack
-        if (attributes != null || hasText)
-          valuesAddedinThisFrame = new HashSet<String>();
-        stack.push(valuesAddedinThisFrame);
       }
 
       try {
+        /* The input stream has deposited us at this Node in our tree of 
+         * intresting nodes. Depending on how this node is of interest,
+         * process further tokens from the input stream and decide what
+         * we do next
+         */
         if (attributes != null) {
+          // we interested in storing attributes from the input stream
           for (Node node : attributes) {
             String value = parser.getAttributeValue(null, node.name);
             if (value != null || (recordStarted && !isRecord)) {
@@ -36,87 +41,51 @@
         }
 
         Set<Node> childrenFound = new HashSet<Node>();
-        // Internally we have to gobble CDATA | CHARACTERS | SPACE events as we
-        // store text, the gobbling continues till we have fetched some other 
-        // event. We use "isNextEventFetched" to indcate that the gobbling has
-        // already fetched the next event.
-        boolean isNextEventFetched = false;
         int event = -1;
+        int flattenedStarts=0; // our tag depth when flattening elements
+        StringBuilder text = new StringBuilder();
 
-        while (true) {
-          if (!isNextEventFetched) {
-            event = parser.next();
-            isNextEventFetched = false;
-          }
-          if (event == END_DOCUMENT) {
-            return;
-          }
+        while (true) {  
+          event = parser.next();
+   
           if (event == END_ELEMENT) {
-            if (isRecord)
-              handler.handle(getDeepCopy(values), forEachPath);
-            if (recordStarted && !isRecord
-                    && !childrenFound.containsAll(childNodes)) {
-              for (Node n : childNodes) {
-                if (!childrenFound.contains(n))
-                  n.putNulls(values);
+            if (flattenedStarts > 0) flattenedStarts--;
+            else {
+              if (text.length() > 0 && valuesAddedinThisFrame != null) {
+                valuesAddedinThisFrame.add(fieldName);
+                putText(values, text.toString(), fieldName, multiValued);
               }
-            }
-            return;
-          }
-          if ((event == CDATA || event == CHARACTERS || event == SPACE)
-                  && hasText) {
-            valuesAddedinThisFrame.add(fieldName);
-            // becuase we are fetching events here we need to ensure the outer
-            // loop does not end up doing an extra parser.next()
-            isNextEventFetched = true;
-            StringBuilder text = new StringBuilder(parser.getText());
-            event = parser.next();
-
-            while (true) {
-              if(event == CDATA || event == CHARACTERS || event == SPACE) {
-                text.append(parser.getText());
-              } else if(event == START_ELEMENT) {
-                if (flatten) {
-                  int starts = 1;
-                  while (true) {
-                    event = parser.next();
-                    if (event == CDATA || event == CHARACTERS || event == SPACE) {
-                      text.append(parser.getText());
-                    } else if (event == START_ELEMENT) {
-                      starts++;
-                    } else if (event == END_ELEMENT) {
-                      starts--;
-                      if (starts == 0) break;
-                    }
-                  }
-                } else {
-                  // We are not flatten-ing, so look to see if any of the child
-                  // elements are wanted, and recurse if any are found.
-                  handleStartElement(parser, childrenFound, handler, values, stack, recordStarted);
+              if (isRecord) handler.handle(getDeepCopy(values), forEachPath);
+              if (childNodes != null && recordStarted && !isRecord && !childrenFound.containsAll(childNodes)) {
+                // nonReccord nodes where we have not collected text for ALL
+                // the child nodes.
+                for (Node n : childNodes) {
+                  // For the multivalue child nodes where we could have, but
+                  // didnt, collect text. Push a null string into values.
+                  if (!childrenFound.contains(n)) n.putNulls(values);
                 }
-              } else {
-                break;
               }
-              event = parser.next();
+              return;
             }
-            // save the text we have read against the fieldName in the Map values
-            putText(values, text.toString(), fieldName, multiValued);
-          } else if (event == START_ELEMENT) {
-            handleStartElement(parser, childrenFound, handler, values, stack, recordStarted);
           }
-        }
-      } finally {
-        /*If a record has ended  (tag closed) then clearup all the fields found
-        in this record after this tag started */
-        Set<String> cleanThis = null;
-        if (isRecord || !recordStarted) {
-          cleanThis = stack.pop();
-        } else {
-          return;
-        }
-        if (cleanThis != null) {
-          for (String fld : cleanThis) {
-            values.remove(fld);
+          else if (hasText && (event==CDATA || event==CHARACTERS || event==SPACE)) {
+            text.append(parser.getText());
+          } 
+          else if (event == START_ELEMENT) {
+            if ( flatten ) 
+               flattenedStarts++;
+            else 
+               handleStartElement(parser, childrenFound, handler, values, stack, recordStarted);
+          }
+          // END_DOCUMENT is least likely to appear and should be 
+          // last in if-then-else skip chain
+          else if (event == END_DOCUMENT) return;
+          }
+        }finally {
+        if ((isRecord || !recordStarted) && !stack.empty()) {
+          Set<String> cleanThis = stack.pop();
+          if (cleanThis != null) {
+            for (String fld : cleanThis) values.remove(fld);
           }
         }
       }

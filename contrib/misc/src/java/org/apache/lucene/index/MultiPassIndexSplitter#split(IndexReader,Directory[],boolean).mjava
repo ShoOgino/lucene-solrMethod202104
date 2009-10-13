@@ -1,0 +1,57 @@
+  /**
+   * Split source index into multiple parts.
+   * @param input source index, can be read-only, can have deletions, can have
+   * multiple segments (or multiple readers).
+   * @param outputs list of directories where the output parts will be stored.
+   * @param seq if true, then the source index will be split into equal
+   * increasing ranges of document id-s. If false, source document id-s will be
+   * assigned in a deterministic round-robin fashion to one of the output splits.
+   * @throws IOException
+   */
+  public void split(IndexReader input, Directory[] outputs, boolean seq) throws IOException {
+    if (outputs == null || outputs.length < 2) {
+      throw new IOException("Invalid number of outputs.");
+    }
+    if (input == null || input.numDocs() < 2) {
+      throw new IOException("Not enough documents for splitting");
+    }
+    int numParts = outputs.length;
+    // wrap a potentially read-only input
+    // this way we don't have to preserve original deletions because neither
+    // deleteDocument(int) or undeleteAll() is applied to the wrapped input index.
+    input = new FakeDeleteIndexReader(input);
+    int maxDoc = input.maxDoc();
+    int partLen = maxDoc / numParts;
+    for (int i = 0; i < numParts; i++) {
+      input.undeleteAll();
+      if (seq) { // sequential range
+        int lo = partLen * i;
+        int hi = lo + partLen;
+        // below range
+        for (int j = 0; j < lo; j++) {
+          input.deleteDocument(j);
+        }
+        // above range - last part collects all id-s that remained due to
+        // integer rounding errors
+        if (i < numParts - 1) {
+          for (int j = hi; j < maxDoc; j++) {
+            input.deleteDocument(j);
+          }
+        }
+      } else {
+        // round-robin
+        for (int j = 0; j < maxDoc; j++) {
+          if ((j + numParts - i) % numParts != 0) {
+            input.deleteDocument(j);
+          }
+        }
+      }
+      IndexWriter w = new IndexWriter(outputs[i], new WhitespaceAnalyzer(),
+              true, MaxFieldLength.UNLIMITED);
+      System.err.println("Writing part " + (i + 1) + " ...");
+      w.addIndexes(new IndexReader[]{input});
+      w.close();
+    }
+    System.err.println("Done.");
+  }
+

@@ -1,20 +1,14 @@
   /** Returns the TermInfo for a Term in the set, or null. */
-  private TermInfo get(Term term, boolean useCache) throws IOException {
+  private TermInfo get(Term term, boolean mustSeekEnum) throws IOException {
     if (size == 0) return null;
 
     ensureIndexIsRead();
 
-    TermInfo ti;
+    TermInfoAndOrd tiOrd = termsCache.get(term);
     ThreadResources resources = getThreadResources();
-    Cache<Term,TermInfo> cache = null;
     
-    if (useCache) {
-      cache = resources.termInfoCache;
-      // check the cache first if the term was recently looked up
-      ti = cache.get(term);
-      if (ti != null) {
-        return ti;
-      }
+    if (!mustSeekEnum && tiOrd != null) {
+      return tiOrd;
     }
     
     // optimize sequential access: first try scanning cached enum w/o seeking
@@ -27,16 +21,23 @@
     || term.compareTo(indexTerms[enumOffset]) < 0) {
        // no need to seek
 
+        final TermInfo ti;
+
         int numScans = enumerator.scanTo(term);
         if (enumerator.term() != null && term.compareTo(enumerator.term()) == 0) {
           ti = enumerator.termInfo();
-          if (cache != null && numScans > 1) {
+          if (numScans > 1) {
             // we only  want to put this TermInfo into the cache if
             // scanEnum skipped more than one dictionary entry.
             // This prevents RangeQueries or WildcardQueries to 
             // wipe out the cache when they iterate over a large numbers
             // of terms in order
-            cache.put(term, ti);
+            if (tiOrd == null) {
+              termsCache.put(term, new TermInfoAndOrd(ti, (int) enumerator.position));
+            } else {
+              assert ti.equals(tiOrd);
+              assert (int) enumerator.position == tiOrd.termOrd;
+            }
           }
         } else {
           ti = null;
@@ -47,12 +48,24 @@
     }
 
     // random-access: must seek
-    seekEnum(enumerator, getIndexOffset(term));
+    final int indexPos;
+    if (tiOrd != null) {
+      indexPos = tiOrd.termOrd / totalIndexInterval;
+    } else {
+      // Must do binary search:
+      indexPos = getIndexOffset(term);
+    }
+
+    seekEnum(enumerator, indexPos);
     enumerator.scanTo(term);
+    final TermInfo ti;
     if (enumerator.term() != null && term.compareTo(enumerator.term()) == 0) {
       ti = enumerator.termInfo();
-      if (cache != null) {
-        cache.put(term, ti);
+      if (tiOrd == null) {
+        termsCache.put(term, new TermInfoAndOrd(ti, (int) enumerator.position));
+      } else {
+        assert ti.equals(tiOrd);
+        assert (int) enumerator.position == tiOrd.termOrd;
       }
     } else {
       ti = null;

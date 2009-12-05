@@ -1,0 +1,52 @@
+  /*
+   * tests if the internally shared indexsearcher is correctly closed 
+   * when the spellchecker is concurrently accessed and closed.
+   */
+  public void testConcurrentAccess() throws IOException, InterruptedException {
+    assertEquals(1, searchers.size());
+    final IndexReader r = IndexReader.open(userindex, true);
+    spellChecker.clearIndex();
+    assertEquals(2, searchers.size());
+    addwords(r, "field1");
+    assertEquals(3, searchers.size());
+    int num_field1 = this.numdoc();
+    addwords(r, "field2");
+    assertEquals(4, searchers.size());
+    int num_field2 = this.numdoc();
+    assertEquals(num_field2, num_field1 + 1);
+    int numThreads = 5 + this.random.nextInt(5);
+    ExecutorService executor = Executors.newFixedThreadPool(numThreads);
+    SpellCheckWorker[] workers = new SpellCheckWorker[numThreads];
+    for (int i = 0; i < numThreads; i++) {
+      SpellCheckWorker spellCheckWorker = new SpellCheckWorker(r);
+      executor.execute(spellCheckWorker);
+      workers[i] = spellCheckWorker;
+      
+    }
+    int iterations = 5 + random.nextInt(5);
+    for (int i = 0; i < iterations; i++) {
+      Thread.sleep(100);
+      // concurrently reset the spell index
+      spellChecker.setSpellIndex(this.spellindex);
+      // for debug - prints the internal open searchers 
+      // showSearchersOpen();
+    }
+    
+    spellChecker.close();
+    executor.shutdown();
+    executor.awaitTermination(5, TimeUnit.SECONDS);
+    
+    
+    for (int i = 0; i < workers.length; i++) {
+      assertFalse(workers[i].failed);
+      assertTrue(workers[i].terminated);
+    }
+    // 4 searchers more than iterations
+    // 1. at creation
+    // 2. clearIndex()
+    // 2. and 3. during addwords
+    assertEquals(iterations + 4, searchers.size());
+    assertSearchersClosed();
+    
+  }
+

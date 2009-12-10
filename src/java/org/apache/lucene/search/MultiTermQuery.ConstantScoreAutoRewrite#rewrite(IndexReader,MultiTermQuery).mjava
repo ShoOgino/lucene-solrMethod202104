@@ -1,50 +1,34 @@
     @Override
-    public Query rewrite(IndexReader reader, MultiTermQuery query) throws IOException {
+    public Query rewrite(final IndexReader reader, final MultiTermQuery query) throws IOException {
+
       // Get the enum and start visiting terms.  If we
       // exhaust the enum before hitting either of the
       // cutoffs, we use ConstantBooleanQueryRewrite; else,
       // ConstantFilterRewrite:
-      final Collection<Term> pendingTerms = new ArrayList<Term>();
       final int docCountCutoff = (int) ((docCountPercent / 100.) * reader.maxDoc());
       final int termCountLimit = Math.min(BooleanQuery.getMaxClauseCount(), termCountCutoff);
-      int docVisitCount = 0;
 
-      FilteredTermEnum enumerator = query.getEnum(reader);
-      try {
-        while(true) {
-          Term t = enumerator.term();
-          if (t != null) {
-            pendingTerms.add(t);
-            // Loading the TermInfo from the terms dict here
-            // should not be costly, because 1) the
-            // query/filter will load the TermInfo when it
-            // runs, and 2) the terms dict has a cache:
-            docVisitCount += reader.docFreq(t);
+      final CutOffTermCollector col = new CutOffTermCollector(reader, docCountCutoff, termCountLimit);
+      collectTerms(reader, query, col);
+      
+      if (col.hasCutOff) {
+        return CONSTANT_SCORE_FILTER_REWRITE.rewrite(reader, query);
+      } else {
+        final Query result;
+        if (col.pendingTerms.isEmpty()) {
+          result = new BooleanQuery(true);
+        } else {
+          BooleanQuery bq = new BooleanQuery(true);
+          for(Term term : col.pendingTerms) {
+            TermQuery tq = new TermQuery(term);
+            bq.add(tq, BooleanClause.Occur.SHOULD);
           }
-
-          if (pendingTerms.size() >= termCountLimit || docVisitCount >= docCountCutoff) {
-            // Too many terms -- make a filter.
-            Query result = new ConstantScoreQuery(new MultiTermQueryWrapperFilter<MultiTermQuery>(query));
-            result.setBoost(query.getBoost());
-            return result;
-          } else  if (!enumerator.next()) {
-            // Enumeration is done, and we hit a small
-            // enough number of terms & docs -- just make a
-            // BooleanQuery, now
-            BooleanQuery bq = new BooleanQuery(true);
-            for (final Term term: pendingTerms) {
-              TermQuery tq = new TermQuery(term);
-              bq.add(tq, BooleanClause.Occur.SHOULD);
-            }
-            // Strip scores
-            Query result = new ConstantScoreQuery(new QueryWrapperFilter(bq));
-            result.setBoost(query.getBoost());
-            query.incTotalNumberOfTerms(pendingTerms.size());
-            return result;
-          }
+          // Strip scores
+          result = new ConstantScoreQuery(new QueryWrapperFilter(bq));
+          result.setBoost(query.getBoost());
         }
-      } finally {
-        enumerator.close();
+        query.incTotalNumberOfTerms(col.pendingTerms.size());
+        return result;
       }
     }
 

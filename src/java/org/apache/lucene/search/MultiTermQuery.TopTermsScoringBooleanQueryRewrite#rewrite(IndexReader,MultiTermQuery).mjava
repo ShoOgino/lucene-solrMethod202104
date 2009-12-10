@@ -1,0 +1,32 @@
+    @Override
+    public Query rewrite(IndexReader reader, MultiTermQuery query) throws IOException {
+      final int maxSize = BooleanQuery.getMaxClauseCount();
+      final PriorityQueue<ScoreTerm> stQueue = new PriorityQueue<ScoreTerm>();
+      collectTerms(reader, query, new TermCollector() {
+        public boolean collect(Term t, float boost) {
+          // ignore uncompetetive hits
+          if (stQueue.size() >= maxSize && boost <= stQueue.peek().boost)
+            return true;
+          // add new entry in PQ
+          st.term = t;
+          st.boost = boost;
+          stQueue.offer(st);
+          // possibly drop entries from queue
+          st = (stQueue.size() > maxSize) ? stQueue.poll() : new ScoreTerm();
+          return true;
+        }
+        
+        // reusable instance
+        private ScoreTerm st = new ScoreTerm();
+      });
+      
+      final BooleanQuery bq = new BooleanQuery(true);
+      for (final ScoreTerm st : stQueue) {
+        TermQuery tq = new TermQuery(st.term);    // found a match
+        tq.setBoost(query.getBoost() * st.boost); // set the boost
+        bq.add(tq, BooleanClause.Occur.SHOULD);   // add to query
+      }
+      query.incTotalNumberOfTerms(bq.clauses().size());
+      return bq;
+    }
+

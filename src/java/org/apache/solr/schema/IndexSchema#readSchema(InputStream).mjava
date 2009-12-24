@@ -7,7 +7,7 @@
       Config schemaConf = new Config(loader, "schema", is, "/schema/");
       Document document = schemaConf.getDocument();
       final XPath xpath = schemaConf.getXPath();
-
+      final List<SchemaAware> schemaAware = new ArrayList<SchemaAware>();
       Node nd = (Node) xpath.evaluate("/schema/@name", document, XPathConstants.NODE);
       if (nd==null) {
         log.warn("schema has no name!");
@@ -41,6 +41,9 @@
           if (analyzer!=null) {
             ft.setAnalyzer(analyzer);
             ft.setQueryAnalyzer(queryAnalyzer);
+          }
+          if (ft instanceof SchemaAware){
+            schemaAware.add((SchemaAware) ft);
           }
           return ft;
         }
@@ -102,7 +105,6 @@
             SolrException.logOnce(log,null,t);
             SolrConfig.severeErrors.add( t );
           }
-          
           log.debug("field defined: " + f);
           if( f.getDefaultValue() != null ) {
             log.debug(name+" contains default value: " + f.getDefaultValue());
@@ -114,23 +116,7 @@
           }
         } else if (node.getNodeName().equals("dynamicField")) {
           // make sure nothing else has the same path
-          boolean dup = false;
-          for( DynamicField df : dFields ) {
-            if( df.regex.equals( f.name ) ) {
-              String msg = "[schema.xml] Duplicate DynamicField definition for '"
-                + f.getName() + "' ignoring: "+f.toString();
-              
-              Throwable t = new SolrException( SolrException.ErrorCode.SERVER_ERROR, msg );
-              SolrException.logOnce(log,null,t);
-              SolrConfig.severeErrors.add( t );
-              dup = true;
-              break;
-            }
-          }
-          if( !dup ) {
-            dFields.add(new DynamicField(f));
-            log.debug("dynamic field defined: " + f);
-          }
+          addDynamicField(dFields, f);
         } else {
           // we should never get here
           throw new RuntimeException("Unknown field type");
@@ -141,6 +127,7 @@
     //add them to required fields, and we only have to loop once
     // in DocumentBuilder.getDoc()
     requiredFields.addAll(getFieldsWithDefaultValue());
+
 
     // OK, now sort the dynamic fields largest to smallest size so we don't get
     // any false matches.  We want to act like a compiler tool and try and match
@@ -175,6 +162,9 @@
             return (Similarity) obj;
           }
         };
+      }
+      if (similarityFactory instanceof SchemaAware){
+        schemaAware.add((SchemaAware) similarityFactory);
       }
       log.debug("using similarity factory" + similarityFactory.getClass().getName());
     }
@@ -260,7 +250,10 @@
                       entry.getValue()+")");
         }
       }
-
+      //Run the callbacks on SchemaAware now that everything else is done
+      for (SchemaAware aware : schemaAware) {
+        aware.inform(this);
+      }
     } catch (SolrException e) {
       SolrConfig.severeErrors.add( e );
       throw e;
@@ -272,5 +265,6 @@
 
     // create the field analyzers
     refreshAnalyzers();
+
   }
 

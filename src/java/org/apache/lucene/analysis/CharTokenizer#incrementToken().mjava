@@ -1,38 +1,36 @@
   @Override
   public final boolean incrementToken() throws IOException {
     clearAttributes();
+    if(useOldAPI) // TODO remove this in LUCENE 4.0
+      return incrementTokenOld();
     int length = 0;
     int start = bufferIndex;
     char[] buffer = termAtt.termBuffer();
     while (true) {
-
       if (bufferIndex >= dataLen) {
         offset += dataLen;
-        dataLen = input.read(ioBuffer);
-        if (dataLen == -1) {
-          dataLen = 0;                            // so next offset += dataLen won't decrement offset
+        if(!charUtils.fill(ioBuffer, input)) { // read supplementary char aware with CharacterUtils
+          dataLen = 0; // so next offset += dataLen won't decrement offset
           if (length > 0)
             break;
           else
             return false;
         }
+        dataLen = ioBuffer.getLength();
         bufferIndex = 0;
       }
-
-      final char c = ioBuffer[bufferIndex++];
+      // use CharacterUtils here to support < 3.1 UTF-16 code unit behavior if the char based methods are gone
+      final int c = charUtils.codePointAt(ioBuffer.getBuffer(), bufferIndex);
+      bufferIndex += Character.charCount(c);
 
       if (isTokenChar(c)) {               // if it's a token char
-
         if (length == 0)                 // start of token
           start = offset + bufferIndex - 1;
-        else if (length == buffer.length)
-          buffer = termAtt.resizeTermBuffer(1+length);
-
-        buffer[length++] = normalize(c); // buffer it, normalized
-
-        if (length == MAX_WORD_LEN)      // buffer overflow!
+        else if (length >= buffer.length-1) // check if a supplementary could run out of bounds
+          buffer = termAtt.resizeTermBuffer(2+length); // make sure a supplementary fits in the buffer
+        length += Character.toChars(normalize(c), buffer, length); // buffer it, normalized
+        if (length >= MAX_WORD_LEN) // buffer overflow! make sure to check for >= surrogate pair could break == test
           break;
-
       } else if (length > 0)             // at non-Letter w/ chars
         break;                           // return 'em
     }
@@ -40,5 +38,6 @@
     termAtt.setTermLength(length);
     offsetAtt.setOffset(correctOffset(start), correctOffset(start+length));
     return true;
+    
   }
 

@@ -1,25 +1,62 @@
-  private void init(Directory d, Analyzer a, final boolean create,  
-                    IndexDeletionPolicy deletionPolicy, int maxFieldLength,
-                    IndexingChain indexingChain, IndexCommit commit)
-    throws CorruptIndexException, LockObtainFailedException, IOException {
-
+  /**
+   * Constructs a new IndexWriter per the settings given in <code>conf</code>.
+   * Note that the passed in {@link IndexWriterConfig} is cloned and thus making
+   * changes to it after IndexWriter has been instantiated will not affect
+   * IndexWriter. Additionally, calling {@link #getConfig()} and changing the
+   * parameters does not affect that IndexWriter instance.
+   * <p>
+   * <b>NOTE:</b> by default, {@link IndexWriterConfig#getMaxFieldLength()}
+   * returns {@link IndexWriterConfig#UNLIMITED_FIELD_LENGTH}. Pay attention to
+   * whether this setting fits your application.
+   * 
+   * @param d
+   *          the index directory. The index is either created or appended
+   *          according <code>conf.getOpenMode()</code>.
+   * @param conf
+   *          the configuration settings according to which IndexWriter should
+   *          be initalized.
+   * @throws CorruptIndexException
+   *           if the index is corrupt
+   * @throws LockObtainFailedException
+   *           if another writer has this index open (<code>write.lock</code>
+   *           could not be obtained)
+   * @throws IOException
+   *           if the directory cannot be read/written to, or if it does not
+   *           exist and <code>conf.getOpenMode()</code> is
+   *           <code>OpenMode.APPEND</code> or if there is any other low-level
+   *           IO error
+   */
+  public IndexWriter(Directory d, IndexWriterConfig conf)
+      throws CorruptIndexException, LockObtainFailedException, IOException {
+    config = (IndexWriterConfig) conf.clone();
     directory = d;
-    analyzer = a;
+    analyzer = conf.getAnalyzer();
     setMessageID(defaultInfoStream);
-    this.maxFieldLength = maxFieldLength;
+    maxFieldLength = conf.getMaxFieldLength();
+    termIndexInterval = conf.getTermIndexInterval();
+    writeLockTimeout = conf.getWriteLockTimeout();
+    similarity = conf.getSimilarity();
+    mergeScheduler = conf.getMergeScheduler();
 
-    if (indexingChain == null)
-      indexingChain = DocumentsWriter.DefaultIndexingChain;
+    OpenMode mode = conf.getOpenMode();
+    boolean create;
+    if (mode == OpenMode.CREATE) {
+      create = true;
+    } else if (mode == OpenMode.APPEND) {
+      create = false;
+    } else {
+      // CREATE_OR_APPEND - create only if an index does not exist
+      create = !IndexReader.indexExists(directory);
+    }
 
     if (create) {
       // Clear the write lock in case it's leftover:
       directory.clearLock(WRITE_LOCK_NAME);
     }
 
-    Lock writeLock = directory.makeLock(WRITE_LOCK_NAME);
+    writeLock = directory.makeLock(WRITE_LOCK_NAME);
     if (!writeLock.obtain(writeLockTimeout)) // obtain write lock
       throw new LockObtainFailedException("Index locked for write: " + writeLock);
-    this.writeLock = writeLock;                   // save it
 
     try {
       if (create) {
@@ -50,6 +87,7 @@
       } else {
         segmentInfos.read(directory);
 
+        IndexCommit commit = conf.getIndexCommit();
         if (commit != null) {
           // Swap out all segments, but, keep metadata in
           // SegmentInfos, like version & generation, to
@@ -73,14 +111,14 @@
 
       setRollbackSegmentInfos(segmentInfos);
 
-      docWriter = new DocumentsWriter(directory, this, indexingChain);
+      docWriter = new DocumentsWriter(directory, this, conf.getIndexingChain());
       docWriter.setInfoStream(infoStream);
       docWriter.setMaxFieldLength(maxFieldLength);
 
       // Default deleter (for backwards compatibility) is
       // KeepOnlyLastCommitDeleter:
       deleter = new IndexFileDeleter(directory,
-                                     deletionPolicy == null ? new KeepOnlyLastCommitDeletionPolicy() : deletionPolicy,
+                                     conf.getIndexDeletionPolicy(),
                                      segmentInfos, infoStream, docWriter);
 
       if (deleter.startingCommitDeleted)
@@ -90,16 +128,18 @@
         // segments_N file.
         changeCount++;
 
+      docWriter.setMaxBufferedDeleteTerms(conf.getMaxBufferedDeleteTerms());
+      docWriter.setRAMBufferSizeMB(conf.getRAMBufferSizeMB());
+      docWriter.setMaxBufferedDocs(conf.getMaxBufferedDocs());
       pushMaxBufferedDocs();
 
       if (infoStream != null) {
-        message("init: create=" + create);
         messageState();
       }
 
     } catch (IOException e) {
-      this.writeLock.release();
-      this.writeLock = null;
+      writeLock.release();
+      writeLock = null;
       throw e;
     }
   }

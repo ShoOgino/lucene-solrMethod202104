@@ -1,0 +1,40 @@
+  @Override
+  public int distributedProcess(ResponseBuilder rb) throws IOException {
+    int result = ResponseBuilder.STAGE_DONE;
+    if (rb.stage == ResponseBuilder.STAGE_GET_FIELDS) {
+      //Go ask each shard for it's vectors
+      // for each shard, collect the documents for that shard.
+      HashMap<String, Collection<ShardDoc>> shardMap = new HashMap<String, Collection<ShardDoc>>();
+      for (ShardDoc sdoc : rb.resultIds.values()) {
+        Collection<ShardDoc> shardDocs = shardMap.get(sdoc.shard);
+        if (shardDocs == null) {
+          shardDocs = new ArrayList<ShardDoc>();
+          shardMap.put(sdoc.shard, shardDocs);
+        }
+        shardDocs.add(sdoc);
+      }
+      // Now create a request for each shard to retrieve the stored fields
+      for (Collection<ShardDoc> shardDocs : shardMap.values()) {
+        ShardRequest sreq = new ShardRequest();
+        sreq.purpose = ShardRequest.PURPOSE_GET_FIELDS;
+
+        sreq.shards = new String[]{shardDocs.iterator().next().shard};
+
+        sreq.params = new ModifiableSolrParams();
+
+        // add original params
+        sreq.params.add(rb.req.getParams());
+        sreq.params.remove(CommonParams.Q);//remove the query
+        ArrayList<String> ids = new ArrayList<String>(shardDocs.size());
+        for (ShardDoc shardDoc : shardDocs) {
+          ids.add(shardDoc.id.toString());
+        }
+        sreq.params.add(TermVectorParams.DOC_IDS, StrUtils.join(ids, ','));
+
+        rb.addRequest(this, sreq);
+      }
+      result = ResponseBuilder.STAGE_DONE;
+    }
+    return result;
+  }
+

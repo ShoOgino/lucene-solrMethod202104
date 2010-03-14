@@ -1,0 +1,54 @@
+  public NamedList getTermCounts(String field) throws IOException {
+    int offset = params.getFieldInt(field, FacetParams.FACET_OFFSET, 0);
+    int limit = params.getFieldInt(field, FacetParams.FACET_LIMIT, 100);
+    if (limit == 0) return new NamedList();
+    Integer mincount = params.getFieldInt(field, FacetParams.FACET_MINCOUNT);
+    if (mincount==null) {
+      Boolean zeros = params.getFieldBool(field, FacetParams.FACET_ZEROS);
+      // mincount = (zeros!=null && zeros) ? 0 : 1;
+      mincount = (zeros!=null && !zeros) ? 1 : 0;
+      // current default is to include zeros.
+    }
+    boolean missing = params.getFieldBool(field, FacetParams.FACET_MISSING, false);
+    // default to sorting if there is a limit.
+    String sort = params.getFieldParam(field, FacetParams.FACET_SORT, limit>0 ? FacetParams.FACET_SORT_COUNT : FacetParams.FACET_SORT_INDEX);
+    String prefix = params.getFieldParam(field,FacetParams.FACET_PREFIX);
+
+
+    NamedList counts;
+    SchemaField sf = searcher.getSchema().getField(field);
+    FieldType ft = sf.getType();
+
+    // determine what type of faceting method to use
+    String method = params.getFieldParam(field, FacetParams.FACET_METHOD);
+    boolean enumMethod = FacetParams.FACET_METHOD_enum.equals(method);
+    if (method == null && ft instanceof BoolField) {
+      // Always use filters for booleans... we know the number of values is very small.
+      enumMethod = true;
+    }
+    boolean multiToken = sf.multiValued() || ft.multiValuedFieldCache();
+
+    if (TrieField.getMainValuePrefix(ft) != null) {
+      // A TrieField with multiple parts indexed per value... currently only
+      // UnInvertedField can handle this case, so force it's use.
+      enumMethod = false;
+      multiToken = true;
+    }
+
+    // unless the enum method is explicitly specified, use a counting method.
+    if (enumMethod) {
+      counts = getFacetTermEnumCounts(searcher, base, field, offset, limit, mincount,missing,sort,prefix);
+    } else {
+      if (multiToken) {
+        UnInvertedField uif = UnInvertedField.getUnInvertedField(field, searcher);
+        counts = uif.getCounts(searcher, base, offset, limit, mincount,missing,sort,prefix);
+      } else {
+        // TODO: future logic could use filters instead of the fieldcache if
+        // the number of terms in the field is small enough.
+        counts = getFieldCacheCounts(searcher, base, field, offset,limit, mincount, missing, sort, prefix);
+      }
+    }
+
+    return counts;
+  }
+

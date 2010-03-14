@@ -1,0 +1,49 @@
+  /**
+   * Tries to query a live server. If no live servers are found it throws a SolrServerException. If the request failed
+   * due to IOException then the live server is moved to dead pool and the request is retried on another live server if
+   * available. If all live servers are exhausted then a SolrServerException is thrown.
+   *
+   * @param request the SolrRequest.
+   *
+   * @return response
+   *
+   * @throws SolrServerException
+   * @throws IOException
+   */
+  public NamedList<Object> request(final SolrRequest request)
+          throws SolrServerException, IOException {
+    int count = counter.incrementAndGet();
+    int attempts = 0;
+    Exception ex;
+    int startSize = aliveServers.size();
+    while (true) {
+      int size = aliveServers.size();
+      if (size < 1) throw new SolrServerException("No live SolrServers available to handle this request");
+      ServerWrapper solrServer;
+      try {
+        solrServer = aliveServers.get(count % size);
+      } catch (IndexOutOfBoundsException e) {
+        //this list changes dynamically. so it is expected to get IndexOutOfBoundsException
+        continue;
+      }
+      try {
+        return solrServer.solrServer.request(request);
+      } catch (SolrException e) {
+        // Server is alive but the request was malformed or invalid
+        throw e;
+      } catch (SolrServerException e) {
+        if (e.getRootCause() instanceof IOException) {
+          ex = e;
+          moveAliveToDead(solrServer);
+        } else {
+          throw e;
+        }
+      } catch (Exception e) {
+        throw new SolrServerException(e);
+      }
+      attempts++;
+      if (attempts >= startSize)
+        throw new SolrServerException("No live SolrServers available to handle this request", ex);
+    }
+  }
+

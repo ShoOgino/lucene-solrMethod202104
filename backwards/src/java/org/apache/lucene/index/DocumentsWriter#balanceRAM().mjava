@@ -1,0 +1,102 @@
+  /* We have three pools of RAM: Postings, byte blocks
+   * (holds freq/prox posting data) and char blocks (holds
+   * characters in the term).  Different docs require
+   * varying amount of storage from these three classes.
+   * For example, docs with many unique single-occurrence
+   * short terms will use up the Postings RAM and hardly any
+   * of the other two.  Whereas docs with very large terms
+   * will use alot of char blocks RAM and relatively less of
+   * the other two.  This method just frees allocations from
+   * the pools once we are over-budget, which balances the
+   * pools to match the current docs. */
+  void balanceRAM() {
+
+    // We flush when we've used our target usage
+    final long flushTrigger = ramBufferSize;
+
+    final long deletesRAMUsed = deletesInRAM.bytesUsed+deletesFlushed.bytesUsed;
+
+    if (numBytesAlloc+deletesRAMUsed > freeTrigger) {
+
+      if (infoStream != null)
+        message("  RAM: now balance allocations: usedMB=" + toMB(numBytesUsed) +
+                " vs trigger=" + toMB(flushTrigger) +
+                " allocMB=" + toMB(numBytesAlloc) +
+                " deletesMB=" + toMB(deletesRAMUsed) +
+                " vs trigger=" + toMB(freeTrigger) +
+                " byteBlockFree=" + toMB(byteBlockAllocator.freeByteBlocks.size()*BYTE_BLOCK_SIZE) +
+                " charBlockFree=" + toMB(freeCharBlocks.size()*CHAR_BLOCK_SIZE*CHAR_NUM_BYTE));
+
+      final long startBytesAlloc = numBytesAlloc + deletesRAMUsed;
+
+      int iter = 0;
+
+      // We free equally from each pool in 32 KB
+      // chunks until we are below our threshold
+      // (freeLevel)
+
+      boolean any = true;
+
+      while(numBytesAlloc+deletesRAMUsed > freeLevel) {
+      
+        synchronized(this) {
+          if (0 == byteBlockAllocator.freeByteBlocks.size() && 0 == freeCharBlocks.size() && 0 == freeIntBlocks.size() && !any) {
+            // Nothing else to free -- must flush now.
+            bufferIsFull = numBytesUsed+deletesRAMUsed > flushTrigger;
+            if (infoStream != null) {
+              if (numBytesUsed > flushTrigger)
+                message("    nothing to free; now set bufferIsFull");
+              else
+                message("    nothing to free");
+            }
+            assert numBytesUsed <= numBytesAlloc;
+            break;
+          }
+
+          if ((0 == iter % 4) && byteBlockAllocator.freeByteBlocks.size() > 0) {
+            byteBlockAllocator.freeByteBlocks.remove(byteBlockAllocator.freeByteBlocks.size()-1);
+            numBytesAlloc -= BYTE_BLOCK_SIZE;
+          }
+
+          if ((1 == iter % 4) && freeCharBlocks.size() > 0) {
+            freeCharBlocks.remove(freeCharBlocks.size()-1);
+            numBytesAlloc -= CHAR_BLOCK_SIZE * CHAR_NUM_BYTE;
+          }
+
+          if ((2 == iter % 4) && freeIntBlocks.size() > 0) {
+            freeIntBlocks.remove(freeIntBlocks.size()-1);
+            numBytesAlloc -= INT_BLOCK_SIZE * INT_NUM_BYTE;
+          }
+        }
+
+        if ((3 == iter % 4) && any)
+          // Ask consumer to free any recycled state
+          any = consumer.freeRAM();
+
+        iter++;
+      }
+
+      if (infoStream != null)
+        message("    after free: freedMB=" + nf.format((startBytesAlloc-numBytesAlloc-deletesRAMUsed)/1024./1024.) + " usedMB=" + nf.format((numBytesUsed+deletesRAMUsed)/1024./1024.) + " allocMB=" + nf.format(numBytesAlloc/1024./1024.));
+      
+    } else {
+      // If we have not crossed the 100% mark, but have
+      // crossed the 95% mark of RAM we are actually
+      // using, go ahead and flush.  This prevents
+      // over-allocating and then freeing, with every
+      // flush.
+      synchronized(this) {
+
+        if (numBytesUsed+deletesRAMUsed > flushTrigger) {
+          if (infoStream != null)
+            message("  RAM: now flush @ usedMB=" + nf.format(numBytesUsed/1024./1024.) +
+                    " allocMB=" + nf.format(numBytesAlloc/1024./1024.) +
+                    " deletesMB=" + nf.format(deletesRAMUsed/1024./1024.) +
+                    " triggerMB=" + nf.format(flushTrigger/1024./1024.));
+
+          bufferIsFull = true;
+        }
+      }
+    }
+  }
+

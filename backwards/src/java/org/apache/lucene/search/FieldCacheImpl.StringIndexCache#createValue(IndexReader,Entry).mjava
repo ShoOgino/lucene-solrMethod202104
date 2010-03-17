@@ -1,0 +1,56 @@
+    @Override
+    protected Object createValue(IndexReader reader, Entry entryKey)
+        throws IOException {
+      String field = StringHelper.intern(entryKey.field);
+      final int[] retArray = new int[reader.maxDoc()];
+      String[] mterms = new String[reader.maxDoc()+1];
+      TermDocs termDocs = reader.termDocs();
+      TermEnum termEnum = reader.terms (new Term (field));
+      int t = 0;  // current term number
+
+      // an entry for documents that have no terms in this field
+      // should a document with no terms be at top or bottom?
+      // this puts them at the top - if it is changed, FieldDocSortedHitQueue
+      // needs to change as well.
+      mterms[t++] = null;
+
+      try {
+        do {
+          Term term = termEnum.term();
+          if (term==null || term.field() != field) break;
+
+          // store term text
+          // we expect that there is at most one term per document
+          if (t >= mterms.length) throw new RuntimeException ("there are more terms than " +
+                  "documents in field \"" + field + "\", but it's impossible to sort on " +
+                  "tokenized fields");
+          mterms[t] = term.text();
+
+          termDocs.seek (termEnum);
+          while (termDocs.next()) {
+            retArray[termDocs.doc()] = t;
+          }
+
+          t++;
+        } while (termEnum.next());
+      } finally {
+        termDocs.close();
+        termEnum.close();
+      }
+
+      if (t == 0) {
+        // if there are no terms, make the term array
+        // have a single null entry
+        mterms = new String[1];
+      } else if (t < mterms.length) {
+        // if there are less terms than documents,
+        // trim off the dead array space
+        String[] terms = new String[t];
+        System.arraycopy (mterms, 0, terms, 0, t);
+        mterms = terms;
+      }
+
+      StringIndex value = new StringIndex (retArray, mterms);
+      return value;
+    }
+

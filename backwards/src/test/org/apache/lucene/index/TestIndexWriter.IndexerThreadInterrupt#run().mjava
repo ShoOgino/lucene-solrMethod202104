@@ -1,0 +1,91 @@
+    @Override
+    public void run() {
+      RAMDirectory dir = new RAMDirectory();
+      IndexWriter w = null;
+      boolean first = true;
+      while(!finish) {
+        try {
+
+          while(true) {
+            if (w != null) {
+              w.close();
+            }
+            w = new IndexWriter(dir, new WhitespaceAnalyzer(), IndexWriter.MaxFieldLength.UNLIMITED);
+
+            //((ConcurrentMergeScheduler) w.getMergeScheduler()).setSuppressExceptions();
+            if (!first && !allowInterrupt) {
+              // tell main thread it can interrupt us any time,
+              // starting now
+              allowInterrupt = true;
+            }
+
+            w.setMaxBufferedDocs(2);
+            w.setMergeFactor(2);
+            Document doc = new Document();
+            doc.add(new Field("field", "some text contents", Field.Store.YES, Field.Index.ANALYZED));
+            for(int i=0;i<100;i++) {
+              w.addDocument(doc);
+              w.commit();
+            }
+            w.close();
+            _TestUtil.checkIndex(dir);
+            IndexReader.open(dir, true).close();
+
+            if (first && !allowInterrupt) {
+              // Strangely, if we interrupt a thread before
+              // all classes are loaded, the class loader
+              // seems to do scary things with the interrupt
+              // status.  In java 1.5, it'll throw an
+              // incorrect ClassNotFoundException.  In java
+              // 1.6, it'll silently clear the interrupt.
+              // So, on first iteration through here we
+              // don't open ourselves up for interrupts
+              // until we've done the above loop.
+              allowInterrupt = true;
+              first = false;
+            }
+          }
+        } catch (ThreadInterruptedException re) {
+          Throwable e = re.getCause();
+          assertTrue(e instanceof InterruptedException);
+          if (finish) {
+            break;
+          }
+          
+          // Make sure IW cleared the interrupted bit
+          // TODO: remove that false once test is fixed for real
+          if (false && interrupted()) {
+            System.out.println("FAILED; InterruptedException hit but thread.interrupted() was true");
+            e.printStackTrace(System.out);
+            failed = true;
+            break;
+          }
+
+        } catch (Throwable t) {
+          System.out.println("FAILED; unexpected exception");
+          t.printStackTrace(System.out);
+          failed = true;
+          break;
+        }
+      }
+
+      if (!failed) {
+        try {
+          _TestUtil.checkIndex(dir);
+        } catch (Exception e) {
+          failed = true;
+          System.out.println("CheckIndex FAILED: unexpected exception");
+          e.printStackTrace(System.out);
+        }
+        try {
+          IndexReader r = IndexReader.open(dir, true);
+          //System.out.println("doc count=" + r.numDocs());
+          r.close();
+        } catch (Exception e) {
+          failed = true;
+          System.out.println("IndexReader.open FAILED: unexpected exception");
+          e.printStackTrace(System.out);
+        }
+      }
+    }
+

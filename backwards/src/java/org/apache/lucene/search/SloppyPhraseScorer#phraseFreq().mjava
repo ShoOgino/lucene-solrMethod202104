@@ -1,0 +1,56 @@
+    /**
+     * Score a candidate doc for all slop-valid position-combinations (matches) 
+     * encountered while traversing/hopping the PhrasePositions.
+     * <br> The score contribution of a match depends on the distance: 
+     * <br> - highest score for distance=0 (exact match).
+     * <br> - score gets lower as distance gets higher.
+     * <br>Example: for query "a b"~2, a document "x a b a y" can be scored twice: 
+     * once for "a b" (distance=0), and once for "b a" (distance=2).
+     * <br>Possibly not all valid combinations are encountered, because for efficiency  
+     * we always propagate the least PhrasePosition. This allows to base on 
+     * PriorityQueue and move forward faster. 
+     * As result, for example, document "a b c b a"
+     * would score differently for queries "a b c"~4 and "c b a"~4, although 
+     * they really are equivalent. 
+     * Similarly, for doc "a b c b a f g", query "c b"~2 
+     * would get same score as "g f"~2, although "c b"~2 could be matched twice.
+     * We may want to fix this in the future (currently not, for performance reasons).
+     */
+    @Override
+    protected final float phraseFreq() throws IOException {
+        int end = initPhrasePositions();
+        
+        float freq = 0.0f;
+        boolean done = (end<0);
+        while (!done) {
+            PhrasePositions pp = pq.pop();
+            int start = pp.position;
+            int next = pq.top().position;
+
+            boolean tpsDiffer = true;
+            for (int pos = start; pos <= next || !tpsDiffer; pos = pp.position) {
+                if (pos<=next && tpsDiffer)
+                    start = pos;                  // advance pp to min window
+                if (!pp.nextPosition()) {
+                    done = true;          // ran out of a term -- done
+                    break;
+                }
+                PhrasePositions pp2 = null;
+                tpsDiffer = !pp.repeats || (pp2 = termPositionsDiffer(pp))==null;
+                if (pp2!=null && pp2!=pp) {
+                  pp = flip(pp,pp2); // flip pp to pp2
+                }
+            }
+
+            int matchLength = end - start;
+            if (matchLength <= slop)
+                freq += getSimilarity().sloppyFreq(matchLength); // score match
+
+            if (pp.position > end)
+                end = pp.position;
+            pq.add(pp);               // restore pq
+        }
+
+        return freq;
+    }
+

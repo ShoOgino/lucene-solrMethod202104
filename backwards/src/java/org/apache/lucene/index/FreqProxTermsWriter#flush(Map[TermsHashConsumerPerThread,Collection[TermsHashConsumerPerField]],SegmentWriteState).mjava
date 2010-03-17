@@ -1,0 +1,78 @@
+  @Override
+  public void flush(Map<TermsHashConsumerPerThread,Collection<TermsHashConsumerPerField>> threadsAndFields, final SegmentWriteState state) throws IOException {
+
+    // Gather all FieldData's that have postings, across all
+    // ThreadStates
+    List<FreqProxTermsWriterPerField> allFields = new ArrayList<FreqProxTermsWriterPerField>();
+
+    for (Map.Entry<TermsHashConsumerPerThread,Collection<TermsHashConsumerPerField>> entry : threadsAndFields.entrySet()) {
+
+      Collection<TermsHashConsumerPerField> fields = entry.getValue();
+
+
+      for (final TermsHashConsumerPerField i : fields) {
+        final FreqProxTermsWriterPerField perField = (FreqProxTermsWriterPerField) i;
+        if (perField.termsHashPerField.numPostings > 0)
+          allFields.add(perField);
+      }
+    }
+
+    // Sort by field name
+    Collections.sort(allFields);
+    final int numAllFields = allFields.size();
+
+    // TODO: allow Lucene user to customize this consumer:
+    final FormatPostingsFieldsConsumer consumer = new FormatPostingsFieldsWriter(state, fieldInfos);
+    /*
+    Current writer chain:
+      FormatPostingsFieldsConsumer
+        -> IMPL: FormatPostingsFieldsWriter
+          -> FormatPostingsTermsConsumer
+            -> IMPL: FormatPostingsTermsWriter
+              -> FormatPostingsDocConsumer
+                -> IMPL: FormatPostingsDocWriter
+                  -> FormatPostingsPositionsConsumer
+                    -> IMPL: FormatPostingsPositionsWriter
+    */
+
+    int start = 0;
+    while(start < numAllFields) {
+      final FieldInfo fieldInfo = allFields.get(start).fieldInfo;
+      final String fieldName = fieldInfo.name;
+
+      int end = start+1;
+      while(end < numAllFields && allFields.get(end).fieldInfo.name.equals(fieldName))
+        end++;
+      
+      FreqProxTermsWriterPerField[] fields = new FreqProxTermsWriterPerField[end-start];
+      for(int i=start;i<end;i++) {
+        fields[i-start] = allFields.get(i);
+
+        // Aggregate the storePayload as seen by the same
+        // field across multiple threads
+        fieldInfo.storePayloads |= fields[i-start].hasPayloads;
+      }
+
+      // If this field has postings then add them to the
+      // segment
+      appendPostings(fields, consumer);
+
+      for(int i=0;i<fields.length;i++) {
+        TermsHashPerField perField = fields[i].termsHashPerField;
+        int numPostings = perField.numPostings;
+        perField.reset();
+        perField.shrinkHash(numPostings);
+        fields[i].reset();
+      }
+
+      start = end;
+    }
+
+    for (Map.Entry<TermsHashConsumerPerThread,Collection<TermsHashConsumerPerField>> entry : threadsAndFields.entrySet()) {
+      FreqProxTermsWriterPerThread perThread = (FreqProxTermsWriterPerThread) entry.getKey();
+      perThread.termsHashPerThread.reset(true);
+    }
+
+    consumer.finish();
+  }
+

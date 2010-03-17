@@ -1,0 +1,53 @@
+  /** Process postings from multiple segments all positioned on the
+   *  same term. Writes out merged entries into freqOutput and
+   *  the proxOutput streams.
+   *
+   * @param smis array of segments
+   * @param n number of cells in the array actually occupied
+   * @return number of documents across all segments where this term was found
+   * @throws CorruptIndexException if the index is corrupt
+   * @throws IOException if there is a low-level IO error
+   */
+  private final int appendPostings(final FormatPostingsTermsConsumer termsConsumer, SegmentMergeInfo[] smis, int n)
+        throws CorruptIndexException, IOException {
+
+    final FormatPostingsDocsConsumer docConsumer = termsConsumer.addTerm(smis[0].term.text);
+    int df = 0;
+    for (int i = 0; i < n; i++) {
+      SegmentMergeInfo smi = smis[i];
+      TermPositions postings = smi.getPositions();
+      assert postings != null;
+      int base = smi.base;
+      int[] docMap = smi.getDocMap();
+      postings.seek(smi.termEnum);
+
+      while (postings.next()) {
+        df++;
+        int doc = postings.doc();
+        if (docMap != null)
+          doc = docMap[doc];                      // map around deletions
+        doc += base;                              // convert to merged space
+
+        final int freq = postings.freq();
+        final FormatPostingsPositionsConsumer posConsumer = docConsumer.addDoc(doc, freq);
+
+        if (!omitTermFreqAndPositions) {
+          for (int j = 0; j < freq; j++) {
+            final int position = postings.nextPosition();
+            final int payloadLength = postings.getPayloadLength();
+            if (payloadLength > 0) {
+              if (payloadBuffer == null || payloadBuffer.length < payloadLength)
+                payloadBuffer = new byte[payloadLength];
+              postings.getPayload(payloadBuffer, 0);
+            }
+            posConsumer.addPosition(position, payloadBuffer, 0, payloadLength);
+          }
+          posConsumer.finish();
+        }
+      }
+    }
+    docConsumer.finish();
+
+    return df;
+  }
+

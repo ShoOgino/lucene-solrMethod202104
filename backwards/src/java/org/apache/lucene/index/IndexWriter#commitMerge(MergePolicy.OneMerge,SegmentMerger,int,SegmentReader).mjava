@@ -1,0 +1,72 @@
+  /* FIXME if we want to support non-contiguous segment merges */
+  synchronized private boolean commitMerge(MergePolicy.OneMerge merge, SegmentMerger merger, int mergedDocCount, SegmentReader mergedReader) throws IOException {
+
+    assert testPoint("startCommitMerge");
+
+    if (hitOOM) {
+      throw new IllegalStateException("this writer hit an OutOfMemoryError; cannot complete merge");
+    }
+
+    if (infoStream != null)
+      message("commitMerge: " + merge.segString(directory) + " index=" + segString());
+
+    assert merge.registerDone;
+
+    // If merge was explicitly aborted, or, if rollback() or
+    // rollbackTransaction() had been called since our merge
+    // started (which results in an unqualified
+    // deleter.refresh() call that will remove any index
+    // file that current segments does not reference), we
+    // abort this merge
+    if (merge.isAborted()) {
+      if (infoStream != null)
+        message("commitMerge: skipping merge " + merge.segString(directory) + ": it was aborted");
+
+      deleter.refresh(merge.info.name);
+      return false;
+    }
+
+    final int start = ensureContiguousMerge(merge);
+
+    commitMergedDeletes(merge, mergedReader);
+    docWriter.remapDeletes(segmentInfos, merger.getDocMaps(), merger.getDelCounts(), merge, mergedDocCount);
+      
+    // Simple optimization: if the doc store we are using
+    // has been closed and is in now compound format (but
+    // wasn't when we started), then we will switch to the
+    // compound format as well:
+    final String mergeDocStoreSegment = merge.info.getDocStoreSegment(); 
+    if (mergeDocStoreSegment != null && !merge.info.getDocStoreIsCompoundFile()) {
+      final int size = segmentInfos.size();
+      for(int i=0;i<size;i++) {
+        final SegmentInfo info = segmentInfos.info(i);
+        final String docStoreSegment = info.getDocStoreSegment();
+        if (docStoreSegment != null &&
+            docStoreSegment.equals(mergeDocStoreSegment) && 
+            info.getDocStoreIsCompoundFile()) {
+          merge.info.setDocStoreIsCompoundFile(true);
+          break;
+        }
+      }
+    }
+
+    merge.info.setHasProx(merger.hasProx());
+
+    segmentInfos.subList(start, start + merge.segments.size()).clear();
+    assert !segmentInfos.contains(merge.info);
+    segmentInfos.add(start, merge.info);
+
+    // Must note the change to segmentInfos so any commits
+    // in-flight don't lose it:
+    checkpoint();
+
+    // If the merged segments had pending changes, clear
+    // them so that they don't bother writing them to
+    // disk, updating SegmentInfo, etc.:
+    readerPool.clear(merge.segments);
+
+    if (merge.optimize)
+      segmentsToOptimize.add(merge.info);
+    return true;
+  }
+

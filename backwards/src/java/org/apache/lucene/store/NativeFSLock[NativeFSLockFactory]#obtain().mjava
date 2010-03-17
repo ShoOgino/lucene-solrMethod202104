@@ -1,0 +1,100 @@
+  @Override
+  public synchronized boolean obtain() throws IOException {
+
+    if (lockExists()) {
+      // Our instance is already locked:
+      return false;
+    }
+
+    // Ensure that lockDir exists and is a directory.
+    if (!lockDir.exists()) {
+      if (!lockDir.mkdirs())
+        throw new IOException("Cannot create directory: " +
+                              lockDir.getAbsolutePath());
+    } else if (!lockDir.isDirectory()) {
+      throw new IOException("Found regular file where directory expected: " + 
+                            lockDir.getAbsolutePath());
+    }
+
+    String canonicalPath = path.getCanonicalPath();
+
+    boolean markedHeld = false;
+
+    try {
+
+      // Make sure nobody else in-process has this lock held
+      // already, and, mark it held if not:
+
+      synchronized(LOCK_HELD) {
+        if (LOCK_HELD.contains(canonicalPath)) {
+          // Someone else in this JVM already has the lock:
+          return false;
+        } else {
+          // This "reserves" the fact that we are the one
+          // thread trying to obtain this lock, so we own
+          // the only instance of a channel against this
+          // file:
+          LOCK_HELD.add(canonicalPath);
+          markedHeld = true;
+        }
+      }
+
+      try {
+        f = new RandomAccessFile(path, "rw");
+      } catch (IOException e) {
+        // On Windows, we can get intermittent "Access
+        // Denied" here.  So, we treat this as failure to
+        // acquire the lock, but, store the reason in case
+        // there is in fact a real error case.
+        failureReason = e;
+        f = null;
+      }
+
+      if (f != null) {
+        try {
+          channel = f.getChannel();
+          try {
+            lock = channel.tryLock();
+          } catch (IOException e) {
+            // At least on OS X, we will sometimes get an
+            // intermittent "Permission Denied" IOException,
+            // which seems to simply mean "you failed to get
+            // the lock".  But other IOExceptions could be
+            // "permanent" (eg, locking is not supported via
+            // the filesystem).  So, we record the failure
+            // reason here; the timeout obtain (usually the
+            // one calling us) will use this as "root cause"
+            // if it fails to get the lock.
+            failureReason = e;
+          } finally {
+            if (lock == null) {
+              try {
+                channel.close();
+              } finally {
+                channel = null;
+              }
+            }
+          }
+        } finally {
+          if (channel == null) {
+            try {
+              f.close();
+            } finally {
+              f = null;
+            }
+          }
+        }
+      }
+
+    } finally {
+      if (markedHeld && !lockExists()) {
+        synchronized(LOCK_HELD) {
+          if (LOCK_HELD.contains(canonicalPath)) {
+            LOCK_HELD.remove(canonicalPath);
+          }
+        }
+      }
+    }
+    return lockExists();
+  }
+

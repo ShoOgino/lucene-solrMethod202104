@@ -1,0 +1,75 @@
+  /* If any of our segments are using a directory != ours
+   * then we have to either copy them over one by one, merge
+   * them (if merge policy has chosen to) or wait until
+   * currently running merges (in the background) complete.
+   * We don't return until the SegmentInfos has no more
+   * external segments.  Currently this is only used by
+   * addIndexesNoOptimize(). */
+  private void resolveExternalSegments() throws CorruptIndexException, IOException {
+
+    boolean any = false;
+
+    boolean done = false;
+
+    while(!done) {
+      SegmentInfo info = null;
+      MergePolicy.OneMerge merge = null;
+      synchronized(this) {
+
+        if (stopMerges)
+          throw new MergePolicy.MergeAbortedException("rollback() was called or addIndexes* hit an unhandled exception");
+
+        final int numSegments = segmentInfos.size();
+
+        done = true;
+        for(int i=0;i<numSegments;i++) {
+          info = segmentInfos.info(i);
+          if (info.dir != directory) {
+            done = false;
+            final MergePolicy.OneMerge newMerge = new MergePolicy.OneMerge(segmentInfos.range(i, 1+i), mergePolicy instanceof LogMergePolicy && getUseCompoundFile());
+
+            // Returns true if no running merge conflicts
+            // with this one (and, records this merge as
+            // pending), ie, this segment is not currently
+            // being merged:
+            if (registerMerge(newMerge)) {
+              merge = newMerge;
+
+              // If this segment is not currently being
+              // merged, then advance it to running & run
+              // the merge ourself (below):
+              pendingMerges.remove(merge);
+              runningMerges.add(merge);
+              break;
+            }
+          }
+        }
+
+        if (!done && merge == null)
+          // We are not yet done (external segments still
+          // exist in segmentInfos), yet, all such segments
+          // are currently "covered" by a pending or running
+          // merge.  We now try to grab any pending merge
+          // that involves external segments:
+          merge = getNextExternalMerge();
+
+        if (!done && merge == null)
+          // We are not yet done, and, all external segments
+          // fall under merges that the merge scheduler is
+          // currently running.  So, we now wait and check
+          // back to see if the merge has completed.
+          doWait();
+      }
+
+      if (merge != null) {
+        any = true;
+        merge(merge);
+      }
+    }
+
+    if (any)
+      // Sometimes, on copying an external segment over,
+      // more merges may become necessary:
+      mergeScheduler.merge(this);
+  }
+

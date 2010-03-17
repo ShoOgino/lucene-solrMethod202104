@@ -1,0 +1,46 @@
+  private void copyVectorsWithDeletions(final TermVectorsWriter termVectorsWriter,
+                                        final TermVectorsReader matchingVectorsReader,
+                                        final IndexReader reader)
+    throws IOException, MergeAbortedException {
+    final int maxDoc = reader.maxDoc();
+    if (matchingVectorsReader != null) {
+      // We can bulk-copy because the fieldInfos are "congruent"
+      for (int docNum = 0; docNum < maxDoc;) {
+        if (reader.isDeleted(docNum)) {
+          // skip deleted docs
+          ++docNum;
+          continue;
+        }
+        // We can optimize this case (doing a bulk byte copy) since the field 
+        // numbers are identical
+        int start = docNum, numDocs = 0;
+        do {
+          docNum++;
+          numDocs++;
+          if (docNum >= maxDoc) break;
+          if (reader.isDeleted(docNum)) {
+            docNum++;
+            break;
+          }
+        } while(numDocs < MAX_RAW_MERGE_DOCS);
+        
+        matchingVectorsReader.rawDocs(rawDocLengths, rawDocLengths2, start, numDocs);
+        termVectorsWriter.addRawDocuments(matchingVectorsReader, rawDocLengths, rawDocLengths2, numDocs);
+        checkAbort.work(300 * numDocs);
+      }
+    } else {
+      for (int docNum = 0; docNum < maxDoc; docNum++) {
+        if (reader.isDeleted(docNum)) {
+          // skip deleted docs
+          continue;
+        }
+        
+        // NOTE: it's very important to first assign to vectors then pass it to
+        // termVectorsWriter.addAllDocVectors; see LUCENE-1282
+        TermFreqVector[] vectors = reader.getTermFreqVectors(docNum);
+        termVectorsWriter.addAllDocVectors(vectors);
+        checkAbort.work(300);
+      }
+    }
+  }
+

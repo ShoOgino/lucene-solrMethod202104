@@ -46,20 +46,20 @@
     int hashPos = code & postingsHashMask;
 
     // Locate RawPostingList in hash
-    p = postingsHash[hashPos];
+    int termID = postingsHash[hashPos];
 
-    if (p != null && !postingEquals(tokenText, tokenTextLen)) {
+    if (termID != -1 && !postingEquals(termID, tokenText, tokenTextLen)) {
       // Conflict: keep searching different locations in
       // the hash table.
       final int inc = ((code>>8)+code)|1;
       do {
         code += inc;
         hashPos = code & postingsHashMask;
-        p = postingsHash[hashPos];
-      } while (p != null && !postingEquals(tokenText, tokenTextLen));
+        termID = postingsHash[hashPos];
+      } while (termID != -1 && !postingEquals(termID, tokenText, tokenTextLen));
     }
 
-    if (p == null) {
+    if (termID == -1) {
 
       // First time we are seeing this token since we last
       // flushed the hash.
@@ -81,24 +81,26 @@
         charPool.nextBuffer();
       }
 
-      // Refill?
-      if (0 == perThread.freePostingsCount)
-        perThread.morePostings();
+      // New posting
+      termID = numPostings++;
+      if (termID >= postingsArray.textStarts.length) {
+        growParallelPostingsArray();
+      }
+      if (perThread.termsHash.trackAllocations) {
+        perThread.termsHash.docWriter.bytesUsed(bytesPerPosting);
+      }
 
-      // Pull next free RawPostingList from free list
-      p = perThread.freePostings[--perThread.freePostingsCount];
-      assert p != null;
+      assert termID != -1;
 
       final char[] text = charPool.buffer;
       final int textUpto = charPool.charUpto;
-      p.textStart = textUpto + charPool.charOffset;
+      postingsArray.textStarts[termID] = textUpto + charPool.charOffset;
       charPool.charUpto += textLen1;
       System.arraycopy(tokenText, 0, text, textUpto, tokenTextLen);
       text[textUpto+tokenTextLen] = 0xffff;
           
-      assert postingsHash[hashPos] == null;
-      postingsHash[hashPos] = p;
-      numPostings++;
+      assert postingsHash[hashPos] == -1;
+      postingsHash[hashPos] = termID;
 
       if (numPostings == postingsHashHalfSize)
         rehashPostings(2*postingsHashSize);
@@ -114,23 +116,24 @@
       intUptoStart = intPool.intUpto;
       intPool.intUpto += streamCount;
 
-      p.intStart = intUptoStart + intPool.intOffset;
+      postingsArray.intStarts[termID] = intUptoStart + intPool.intOffset;
 
       for(int i=0;i<streamCount;i++) {
         final int upto = bytePool.newSlice(ByteBlockPool.FIRST_LEVEL_SIZE);
         intUptos[intUptoStart+i] = upto + bytePool.byteOffset;
       }
-      p.byteStart = intUptos[intUptoStart];
+      postingsArray.byteStarts[termID] = intUptos[intUptoStart];
 
-      consumer.newTerm(p);
+      consumer.newTerm(termID);
 
     } else {
-      intUptos = intPool.buffers[p.intStart >> DocumentsWriter.INT_BLOCK_SHIFT];
-      intUptoStart = p.intStart & DocumentsWriter.INT_BLOCK_MASK;
-      consumer.addTerm(p);
+      final int intStart = postingsArray.intStarts[termID];
+      intUptos = intPool.buffers[intStart >> DocumentsWriter.INT_BLOCK_SHIFT];
+      intUptoStart = intStart & DocumentsWriter.INT_BLOCK_MASK;
+      consumer.addTerm(termID);
     }
 
     if (doNextCall)
-      nextPerField.add(p.textStart);
+      nextPerField.add(postingsArray.textStarts[termID]);
   }
 

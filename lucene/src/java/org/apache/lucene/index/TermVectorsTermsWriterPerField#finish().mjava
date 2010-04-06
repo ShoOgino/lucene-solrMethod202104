@@ -9,6 +9,8 @@
 
     final int numPostings = termsHashPerField.numPostings;
 
+    final BytesRef flushTerm = perThread.flushTerm;
+
     assert numPostings >= 0;
 
     if (!doVectors || numPostings == 0)
@@ -29,7 +31,9 @@
     perThread.doc.addField(termsHashPerField.fieldInfo.number);
     TermVectorsPostingsArray postings = (TermVectorsPostingsArray) termsHashPerField.postingsArray;
 
-    final int[] termIDs = termsHashPerField.sortPostings();
+    // TODO: we may want to make this sort in same order
+    // as Codec's terms dict?
+    final int[] termIDs = termsHashPerField.sortPostings(BytesRef.getUTF8SortedAsUTF16Comparator());
 
     tvf.writeVInt(numPostings);
     byte bits = 0x0;
@@ -39,46 +43,40 @@
       bits |= TermVectorsReader.STORE_OFFSET_WITH_TERMVECTOR;
     tvf.writeByte(bits);
 
-    int encoderUpto = 0;
-    int lastTermBytesCount = 0;
-
+    int lastLen = 0;
+    byte[] lastBytes = null;
+    int lastStart = 0;
+      
     final ByteSliceReader reader = perThread.vectorSliceReader;
-    final char[][] charBuffers = perThread.termsHashPerThread.charPool.buffers;
+    final ByteBlockPool termBytePool = perThread.termsHashPerThread.termBytePool;
+
     for(int j=0;j<numPostings;j++) {
       final int termID = termIDs[j];
       final int freq = postings.freqs[termID];
           
-      final char[] text2 = charBuffers[postings.textStarts[termID] >> DocumentsWriter.CHAR_BLOCK_SHIFT];
-      final int start2 = postings.textStarts[termID] & DocumentsWriter.CHAR_BLOCK_MASK;
+      // Get BytesRef
+      termBytePool.setBytesRef(flushTerm, postings.textStarts[termID]);
 
-      // We swap between two encoders to save copying
-      // last Term's byte array
-      final UnicodeUtil.UTF8Result utf8Result = perThread.utf8Results[encoderUpto];
-
-      // TODO: we could do this incrementally
-      UnicodeUtil.UTF16toUTF8(text2, start2, utf8Result);
-      final int termBytesCount = utf8Result.length;
-
-      // TODO: UTF16toUTF8 could tell us this prefix
-      // Compute common prefix between last term and
+      // Compute common byte prefix between last term and
       // this term
       int prefix = 0;
       if (j > 0) {
-        final byte[] lastTermBytes = perThread.utf8Results[1-encoderUpto].result;
-        final byte[] termBytes = perThread.utf8Results[encoderUpto].result;
-        while(prefix < lastTermBytesCount && prefix < termBytesCount) {
-          if (lastTermBytes[prefix] != termBytes[prefix])
+        while(prefix < lastLen && prefix < flushTerm.length) {
+          if (lastBytes[lastStart+prefix] != flushTerm.bytes[flushTerm.offset+prefix]) {
             break;
+          }
           prefix++;
         }
       }
-      encoderUpto = 1-encoderUpto;
-      lastTermBytesCount = termBytesCount;
 
-      final int suffix = termBytesCount - prefix;
+      lastLen = flushTerm.length;
+      lastBytes = flushTerm.bytes;
+      lastStart = flushTerm.offset;
+
+      final int suffix = flushTerm.length - prefix;
       tvf.writeVInt(prefix);
       tvf.writeVInt(suffix);
-      tvf.writeBytes(utf8Result.result, prefix, suffix);
+      tvf.writeBytes(flushTerm.bytes, lastStart+prefix, suffix);
       tvf.writeVInt(freq);
 
       if (doVectorPositions) {

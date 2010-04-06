@@ -1,0 +1,61 @@
+  @Override
+  public DocsEnum docs(Bits skipDocs, DocsEnum reuse) throws IOException {
+    final MultiDocsEnum docsEnum;
+    if (reuse != null) {
+      docsEnum = (MultiDocsEnum) reuse;
+    } else {
+      docsEnum = new MultiDocsEnum();
+    }
+    
+    final MultiBits multiSkipDocs;
+    if (skipDocs instanceof MultiBits) {
+      multiSkipDocs = (MultiBits) skipDocs;
+    } else {
+      multiSkipDocs = null;
+    }
+
+    int upto = 0;
+
+    for(int i=0;i<numTop;i++) {
+
+      final TermsEnumWithSlice entry = top[i];
+
+      final Bits b;
+
+      if (multiSkipDocs != null) {
+        // optimize for common case: requested skip docs is a
+        // congruent sub-slice of MultiBits: in this case, we
+        // just pull the skipDocs from the sub reader, rather
+        // than making the inefficient
+        // Slice(Multi(sub-readers)):
+        final MultiBits.SubResult sub = multiSkipDocs.getMatchingSub(top[i].subSlice);
+        if (sub.matches) {
+          b = sub.result;
+        } else {
+          // custom case: requested skip docs is foreign:
+          // must slice it on every access
+          b = new BitsSlice(skipDocs, top[i].subSlice);
+        }
+      } else if (skipDocs != null) {
+        b = new BitsSlice(skipDocs, top[i].subSlice);
+      } else {
+        // no deletions
+        b = null;
+      }
+
+      final DocsEnum subDocsEnum = entry.terms.docs(b, entry.reuseDocs);
+
+      if (subDocsEnum != null) {
+        entry.reuseDocs = subDocs[upto].docsEnum = subDocsEnum;
+        subDocs[upto].slice = entry.subSlice;
+        upto++;
+      }
+    }
+
+    if (upto == 0) {
+      return null;
+    } else {
+      return docsEnum.reset(subDocs, upto);
+    }
+  }
+

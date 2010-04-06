@@ -1,0 +1,57 @@
+  public SimpleStandardTermsIndexReader(Directory dir, FieldInfos fieldInfos, String segment, int indexDivisor, Comparator<BytesRef> termComp)
+    throws IOException {
+
+    this.termComp = termComp;
+
+    IndexInput in = dir.openInput(IndexFileNames.segmentFileName(segment, StandardCodec.TERMS_INDEX_EXTENSION));
+    
+    boolean success = false;
+
+    try {
+      CodecUtil.checkHeader(in, SimpleStandardTermsIndexWriter.CODEC_NAME, SimpleStandardTermsIndexWriter.VERSION_START);
+
+      final long dirOffset = in.readLong();
+
+      indexInterval = in.readInt();
+      this.indexDivisor = indexDivisor;
+
+      if (indexDivisor == -1) {
+        totalIndexInterval = indexInterval;
+      } else {
+        // In case terms index gets loaded, later, on demand
+        totalIndexInterval = indexInterval * indexDivisor;
+      }
+
+      // Read directory
+      in.seek(dirOffset);
+
+      final int numFields = in.readInt();
+
+      for(int i=0;i<numFields;i++) {
+        final int field = in.readInt();
+        final int numIndexTerms = in.readInt();
+        final long termsStart = in.readLong();
+        final long indexStart = in.readLong();
+        final long packedIndexStart = in.readLong();
+        final long packedOffsetsStart = in.readLong();
+        assert packedIndexStart >= indexStart: "packedStart=" + packedIndexStart + " indexStart=" + indexStart + " numIndexTerms=" + numIndexTerms + " seg=" + segment;
+        if (numIndexTerms > 0) {
+          final FieldInfo fieldInfo = fieldInfos.fieldInfo(field);
+          fields.put(fieldInfo, new FieldIndexReader(in, fieldInfo, numIndexTerms, indexStart, termsStart, packedIndexStart, packedOffsetsStart));
+        }
+      }
+      success = true;
+    } finally {
+      if (indexDivisor != -1) {
+        in.close();
+        this.in = null;
+        if (success) {
+          indexLoaded = true;
+        }
+        termBytes.finish();
+      } else {
+        this.in = in;
+      }
+    }
+  }
+

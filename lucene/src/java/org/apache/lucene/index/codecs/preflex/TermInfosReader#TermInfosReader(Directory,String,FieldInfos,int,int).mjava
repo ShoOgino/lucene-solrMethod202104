@@ -1,0 +1,63 @@
+  TermInfosReader(Directory dir, String seg, FieldInfos fis, int readBufferSize, int indexDivisor)
+       throws CorruptIndexException, IOException {
+    boolean success = false;
+
+    if (indexDivisor < 1 && indexDivisor != -1) {
+      throw new IllegalArgumentException("indexDivisor must be -1 (don't load terms index) or greater than 0: got " + indexDivisor);
+    }
+
+    try {
+      directory = dir;
+      segment = seg;
+      fieldInfos = fis;
+
+      origEnum = new SegmentTermEnum(directory.openInput(IndexFileNames.segmentFileName(segment, PreFlexCodec.TERMS_EXTENSION),
+                                                         readBufferSize), fieldInfos, false);
+      size = origEnum.size;
+
+
+      if (indexDivisor != -1) {
+        // Load terms index
+        totalIndexInterval = origEnum.indexInterval * indexDivisor;
+        final SegmentTermEnum indexEnum = new SegmentTermEnum(directory.openInput(IndexFileNames.segmentFileName(segment, PreFlexCodec.TERMS_INDEX_EXTENSION),
+                                                                                  readBufferSize), fieldInfos, true);
+
+        try {
+          int indexSize = 1+((int)indexEnum.size-1)/indexDivisor;  // otherwise read index
+
+          indexTerms = new Term[indexSize];
+          indexInfos = new TermInfo[indexSize];
+          indexPointers = new long[indexSize];
+        
+          for (int i = 0; indexEnum.next(); i++) {
+            indexTerms[i] = indexEnum.term();
+            indexInfos[i] = indexEnum.termInfo();
+            indexPointers[i] = indexEnum.indexPointer;
+        
+            for (int j = 1; j < indexDivisor; j++)
+              if (!indexEnum.next())
+                break;
+          }
+        } finally {
+          indexEnum.close();
+        }
+      } else {
+        // Do not load terms index:
+        totalIndexInterval = -1;
+        indexTerms = null;
+        indexInfos = null;
+        indexPointers = null;
+      }
+      success = true;
+    } finally {
+      // With lock-less commits, it's entirely possible (and
+      // fine) to hit a FileNotFound exception above. In
+      // this case, we want to explicitly close any subset
+      // of things that were opened so that we don't have to
+      // wait for a GC to do so.
+      if (!success) {
+        close();
+      }
+    }
+  }
+

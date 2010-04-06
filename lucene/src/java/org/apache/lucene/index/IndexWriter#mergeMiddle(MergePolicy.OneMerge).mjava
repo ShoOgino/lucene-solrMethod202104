@@ -18,7 +18,7 @@
     if (infoStream != null)
       message("merging " + merge.segString(directory));
 
-    merger = new SegmentMerger(this, mergedName, merge);
+    merger = new SegmentMerger(directory, termIndexInterval, mergedName, merge, codecs);
 
     merge.readers = new SegmentReader[numSegments];
     merge.readersClone = new SegmentReader[numSegments];
@@ -91,7 +91,16 @@
       // This is where all the work happens:
       mergedDocCount = merge.info.docCount = merger.merge(merge.mergeDocStores);
 
+      // Record which codec was used to write the segment
+      merge.info.setCodec(merger.getCodec());
+      
       assert mergedDocCount == totDocCount;
+
+      // Very important to do this before opening the reader
+      // because codec must know if prox was written for
+      // this segment:
+      //System.out.println("merger set hasProx=" + merger.hasProx() + " seg=" + merge.info.name);
+      merge.info.setHasProx(merger.hasProx());
 
       // TODO: in the non-realtime case, we may want to only
       // keep deletes (it's costly to open entire reader
@@ -130,8 +139,9 @@
                 merge.readersClone[i].close();
               } catch (Throwable t) {
               }
-              // This was a private clone and we had the only reference
-              assert merge.readersClone[i].getRefCount() == 0;
+              // This was a private clone and we had the
+              // only reference
+              assert merge.readersClone[i].getRefCount() == 0: "refCount should be 0 but is " + merge.readersClone[i].getRefCount();
             }
           }
         } else {
@@ -164,7 +174,7 @@
       final String compoundFileName = IndexFileNames.segmentFileName(mergedName, IndexFileNames.COMPOUND_FILE_EXTENSION);
 
       try {
-        merger.createCompoundFile(compoundFileName);
+        merger.createCompoundFile(compoundFileName, merge.info);
         success = true;
       } catch (IOException ioe) {
         synchronized(this) {

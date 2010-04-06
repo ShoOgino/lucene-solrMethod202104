@@ -1,0 +1,135 @@
+    public void _run() throws Throwable {
+
+      for(int iter=0;iter<NUM_TEST_ITER;iter++) {
+        final FieldData field = fields[TestCodecs.this.nextInt(fields.length)];
+        final TermsEnum termsEnum = termsDict.terms(field.fieldInfo.name).iterator();
+
+        // Test straight enum of the terms:
+        int upto = 0;
+        while(true) {
+          final BytesRef term = termsEnum.next();
+          if (term == null) {
+            break;
+          }
+          assertTrue(new BytesRef(field.terms[upto++].text2).bytesEquals(term));
+        }
+        assertEquals(upto, field.terms.length);
+
+        // Test random seek:
+        TermData term = field.terms[TestCodecs.this.nextInt(field.terms.length)];
+        TermsEnum.SeekStatus status = termsEnum.seek(new BytesRef(term.text2));
+        assertEquals(status, TermsEnum.SeekStatus.FOUND);
+        assertEquals(term.docs.length, termsEnum.docFreq());
+        if (field.omitTF) {
+          this.verifyDocs(term.docs, term.positions, termsEnum.docs(null, null), false);
+        } else {
+          this.verifyDocs(term.docs, term.positions, termsEnum.docsAndPositions(null, null), true);
+        }
+
+        // Test random seek by ord:
+        final int idx = TestCodecs.this.nextInt(field.terms.length);
+        term = field.terms[idx];
+        status = termsEnum.seek(idx);
+        assertEquals(status, TermsEnum.SeekStatus.FOUND);
+        assertTrue(termsEnum.term().bytesEquals(new BytesRef(term.text2)));
+        assertEquals(term.docs.length, termsEnum.docFreq());
+        if (field.omitTF) {
+          this.verifyDocs(term.docs, term.positions, termsEnum.docs(null, null), false);
+        } else {
+          this.verifyDocs(term.docs, term.positions, termsEnum.docsAndPositions(null, null), true);
+        }
+
+        // Test seek to non-existent terms:
+        for(int i=0;i<100;i++) {
+          final char[] text = TestCodecs.this.getRandomText();
+          final String text2 = new String(text, 0, text.length-1) + ".";
+          status = termsEnum.seek(new BytesRef(text2));
+          assertTrue(status == TermsEnum.SeekStatus.NOT_FOUND ||
+                     status == TermsEnum.SeekStatus.END);
+        }
+
+        // Seek to each term, backwards:
+        for(int i=field.terms.length-1;i>=0;i--) {
+          assertEquals(Thread.currentThread().getName() + ": field=" + field.fieldInfo.name + " term=" + field.terms[i].text2, TermsEnum.SeekStatus.FOUND, termsEnum.seek(new BytesRef(field.terms[i].text2)));
+          assertEquals(field.terms[i].docs.length, termsEnum.docFreq());
+        }
+
+        // Seek to each term by ord, backwards
+        for(int i=field.terms.length-1;i>=0;i--) {
+          assertEquals(Thread.currentThread().getName() + ": field=" + field.fieldInfo.name + " term=" + field.terms[i].text2, TermsEnum.SeekStatus.FOUND, termsEnum.seek(i));
+          assertEquals(field.terms[i].docs.length, termsEnum.docFreq());
+          assertTrue(termsEnum.term().bytesEquals(new BytesRef(field.terms[i].text2)));
+        }
+
+        // Seek to non-existent empty-string term
+        status = termsEnum.seek(new BytesRef(""));
+        assertNotNull(status);
+        assertEquals(status, TermsEnum.SeekStatus.NOT_FOUND);
+
+        // Make sure we're now pointing to first term
+        assertTrue(termsEnum.term().bytesEquals(new BytesRef(field.terms[0].text2)));
+
+        // Test docs enum
+        termsEnum.seek(new BytesRef(""));
+        upto = 0;
+        do {
+          term = field.terms[upto];
+          if (TestCodecs.this.nextInt(3) == 1) {
+            final DocsEnum docs = termsEnum.docs(null, null);
+            final DocsAndPositionsEnum postings = termsEnum.docsAndPositions(null, null);
+
+            final DocsEnum docsEnum;
+            if (postings != null) {
+              docsEnum = postings;
+            } else {
+              docsEnum = docs;
+            }
+            int upto2 = -1;
+            while(upto2 < term.docs.length-1) {
+              // Maybe skip:
+              final int left = term.docs.length-upto2;
+              int doc;
+              if (TestCodecs.this.nextInt(3) == 1 && left >= 1) {
+                final int inc = 1+TestCodecs.this.nextInt(left-1);
+                upto2 += inc;
+                if (TestCodecs.this.nextInt(2) == 1) {
+                  doc = docsEnum.advance(term.docs[upto2]);
+                  assertEquals(term.docs[upto2], doc);
+                } else {
+                  doc = docsEnum.advance(1+term.docs[upto2]);
+                  if (doc == DocIdSetIterator.NO_MORE_DOCS) {
+                    // skipped past last doc
+                    assert upto2 == term.docs.length-1;
+                    break;
+                  } else {
+                    // skipped to next doc
+                    assert upto2 < term.docs.length-1;
+                    if (doc >= term.docs[1+upto2]) {
+                      upto2++;
+                    }
+                  }
+                }
+              } else {
+                doc = docsEnum.nextDoc();
+                assertTrue(doc != -1);
+                upto2++;
+              }
+              assertEquals(term.docs[upto2], doc);
+              if (!field.omitTF) {
+                assertEquals(term.positions[upto2].length, docsEnum.freq());
+                if (TestCodecs.this.nextInt(2) == 1) {
+                  this.verifyPositions(term.positions[upto2], postings);
+                }
+              }
+            }
+
+            assertEquals(DocIdSetIterator.NO_MORE_DOCS, docsEnum.nextDoc());
+          }
+          upto++;
+
+        } while (termsEnum.next() != null);
+
+        assertEquals(upto, field.terms.length);
+      }
+    }
+

@@ -1,0 +1,67 @@
+  /** Called when we are done adding docs to this term */
+  @Override
+  public void finishTerm(int docCount, boolean isIndexTerm) throws IOException {
+
+    assert docCount > 0;
+
+    pendingIsIndexTerm |= isIndexTerm;
+
+    if (pulsed) {
+      wrappedPostingsWriter.finishTerm(docCount, pendingIsIndexTerm);
+      pendingIsIndexTerm = false;
+      pulsedCount++;
+    } else {
+      nonPulsedCount++;
+      // OK, there were few enough occurrences for this
+      // term, so we fully inline our postings data into
+      // terms dict, now:
+      int lastDocID = 0;
+      for(int i=0;i<pendingDocCount;i++) {
+        final Document doc = pendingDocs[i];
+        final int delta = doc.docID - lastDocID;
+        lastDocID = doc.docID;
+        if (omitTF) {
+          termsOut.writeVInt(delta);
+        } else {
+          assert doc.numPositions == doc.termDocFreq;
+          if (doc.numPositions == 1)
+            termsOut.writeVInt((delta<<1)|1);
+          else {
+            termsOut.writeVInt(delta<<1);
+            termsOut.writeVInt(doc.numPositions);
+          }
+
+          // TODO: we could do better in encoding
+          // payloadLength, eg, if it's always the same
+          // across all terms
+          int lastPosition = 0;
+          int lastPayloadLength = -1;
+
+          for(int j=0;j<doc.numPositions;j++) {
+            final Position pos = doc.positions[j];
+            final int delta2 = pos.pos - lastPosition;
+            lastPosition = pos.pos;
+            if (storePayloads) {
+              final int payloadLength = pos.payload == null ? 0 : pos.payload.length;
+              if (payloadLength != lastPayloadLength) {
+                termsOut.writeVInt((delta2 << 1)|1);
+                termsOut.writeVInt(payloadLength);
+                lastPayloadLength = payloadLength;
+              } else {
+                termsOut.writeVInt(delta2 << 1);
+              }
+
+              if (payloadLength > 0) {
+                termsOut.writeBytes(pos.payload.bytes, 0, pos.payload.length);
+              }
+            } else {
+              termsOut.writeVInt(delta2);
+            }
+          }
+        }
+      }
+    }
+
+    pendingDocCount = 0;
+  }
+

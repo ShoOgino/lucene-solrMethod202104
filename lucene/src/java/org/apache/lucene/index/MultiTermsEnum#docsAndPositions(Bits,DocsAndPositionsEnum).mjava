@@ -1,0 +1,69 @@
+  @Override
+  public DocsAndPositionsEnum docsAndPositions(Bits skipDocs, DocsAndPositionsEnum reuse) throws IOException {
+    final MultiDocsAndPositionsEnum docsAndPositionsEnum;
+    if (reuse != null) {
+      docsAndPositionsEnum = (MultiDocsAndPositionsEnum) reuse;
+    } else {
+      docsAndPositionsEnum = new MultiDocsAndPositionsEnum();
+    }
+    
+    final MultiBits multiSkipDocs;
+    if (skipDocs instanceof MultiBits) {
+      multiSkipDocs = (MultiBits) skipDocs;
+    } else {
+      multiSkipDocs = null;
+    }
+
+    int upto = 0;
+
+    for(int i=0;i<numTop;i++) {
+
+      final TermsEnumWithSlice entry = top[i];
+
+      final Bits b;
+
+      if (multiSkipDocs != null) {
+        // Optimize for common case: requested skip docs is a
+        // congruent sub-slice of MultiBits: in this case, we
+        // just pull the skipDocs from the sub reader, rather
+        // than making the inefficient
+        // Slice(Multi(sub-readers)):
+        final MultiBits.SubResult sub = multiSkipDocs.getMatchingSub(top[i].subSlice);
+        if (sub.matches) {
+          b = sub.result;
+        } else {
+          // custom case: requested skip docs is foreign:
+          // must slice it on every access (very
+          // inefficient)
+          b = new BitsSlice(skipDocs, top[i].subSlice);
+        }
+      } else if (skipDocs != null) {
+        b = new BitsSlice(skipDocs, top[i].subSlice);
+      } else {
+        // no deletions
+        b = null;
+      }
+
+      final DocsAndPositionsEnum subPostings = entry.terms.docsAndPositions(b, entry.reusePostings);
+
+      if (subPostings != null) {
+        entry.reusePostings = subDocsAndPositions[upto].docsAndPositionsEnum = subPostings;
+        subDocsAndPositions[upto].slice = entry.subSlice;
+        upto++;
+      } else {
+        if (entry.terms.docs(b, entry.reuseDocs) != null) {
+          // At least one of our subs does not store
+          // positions -- we can't correctly produce a
+          // MultiDocsAndPositions enum
+          return null;
+        }
+      }
+    }
+
+    if (upto == 0) {
+      return null;
+    } else {
+      return docsAndPositionsEnum.reset(subDocsAndPositions, upto);
+    }
+  }
+

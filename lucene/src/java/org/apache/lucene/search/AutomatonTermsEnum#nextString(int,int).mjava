@@ -21,19 +21,18 @@
      * the next lexicographic character must be greater than the existing
      * character, if it exists.
      */
-    char c = 0;
-    if (position < utf16.length) {
-      c = utf16.result[position];
+    int c = 0;
+    if (position < seekBytesRef.length) {
+      c = seekBytesRef.bytes[position] & 0xff;
       // if the next character is U+FFFF and is not part of the useful portion,
       // then by definition it puts us in a reject state, and therefore this
       // path is dead. there cannot be any higher transitions. backtrack.
-      if (c == '\uFFFF')
+      c = incrementUTF16(c);
+      if (c == -1)
         return false;
-      else
-        c++;
     }
 
-    utf16.setLength(position);
+    seekBytesRef.length = position;
     visited[state] = curGen;
 
     Transition transitions[] = allTransitions[state];
@@ -42,11 +41,12 @@
     
     for (int i = 0; i < transitions.length; i++) {
       Transition transition = transitions[i];
-      if (transition.getMax() >= c) {
-        char nextChar = (char) Math.max(c, transition.getMin());
+      if (compareToUTF16(transition.getMax(), c) >= 0) {
+        int nextChar = compareToUTF16(c, transition.getMin()) > 0 ? c : transition.getMin();
         // append either the next sequential char, or the minimum transition
-        utf16.setLength(utf16.length + 1);
-        utf16.result[utf16.length - 1] = nextChar;
+        seekBytesRef.grow(seekBytesRef.length + 1);
+        seekBytesRef.length++;
+        seekBytesRef.bytes[seekBytesRef.length - 1] = (byte) nextChar;
         state = transition.getDest().getNumber();
         /* 
          * as long as is possible, continue down the minimal path in
@@ -64,11 +64,12 @@
           // we found a loop, record it for faster enumeration
           if (!finite && !linear && visited[state] == curGen) {
             linear = true;
-            infinitePosition = utf16.length;
+            infinitePosition = seekBytesRef.length;
           }
           // append the minimum transition
-          utf16.setLength(utf16.length + 1);
-          utf16.result[utf16.length - 1] = transition.getMin();
+          seekBytesRef.grow(seekBytesRef.length + 1);
+          seekBytesRef.length++;
+          seekBytesRef.bytes[seekBytesRef.length - 1] = (byte) transition.getMin();
         }
         return true;
       }

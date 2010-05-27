@@ -1,0 +1,124 @@
+  /**
+   * Adds all segments from an array of indexes into this index.
+   *
+   * <p>This may be used to parallelize batch indexing. A large document
+   * collection can be broken into sub-collections. Each sub-collection can be
+   * indexed in parallel, on a different thread, process or machine. The
+   * complete index can then be created by merging sub-collection indexes
+   * with this method.
+   *
+   * <p>
+   * <b>NOTE:</b> the index in each {@link Directory} must not be
+   * changed (opened by a writer) while this method is
+   * running.  This method does not acquire a write lock in
+   * each input Directory, so it is up to the caller to
+   * enforce this.
+   *
+   * <p>This method is transactional in how Exceptions are
+   * handled: it does not commit a new segments_N file until
+   * all indexes are added.  This means if an Exception
+   * occurs (for example disk full), then either no indexes
+   * will have been added or they all will have been.
+   *
+   * <p>Note that this requires temporary free space in the
+   * {@link Directory} up to 2X the sum of all input indexes
+   * (including the starting index). If readers/searchers
+   * are open against the starting index, then temporary
+   * free space required will be higher by the size of the
+   * starting index (see {@link #optimize()} for details).
+   *
+   * <p>
+   * <b>NOTE:</b> this method only copies the segments of the incomning indexes
+   * and does not merge them. Therefore deleted documents are not removed and
+   * the new segments are not merged with the existing ones. Also, the segments 
+   * are copied as-is, meaning they are not converted to CFS if they aren't, 
+   * and vice-versa. If you wish to do that, you can call {@link #maybeMerge} 
+   * or {@link #optimize} afterwards.
+   * 
+   * <p>This requires this index not be among those to be added.
+   *
+   * <p>
+   * <b>NOTE</b>: if this method hits an OutOfMemoryError
+   * you should immediately close the writer. See <a
+   * href="#OOME">above</a> for details.
+   *
+   * @throws CorruptIndexException if the index is corrupt
+   * @throws IOException if there is a low-level IO error
+   */
+  public void addIndexes(Directory... dirs) throws CorruptIndexException, IOException {
+    ensureOpen();
+
+    noDupDirs(dirs);
+
+    try {
+      if (infoStream != null)
+        message("flush at addIndexes(Directory...)");
+      flush(true, false, true);
+
+      int docCount = 0;
+      List<SegmentInfo> infos = new ArrayList<SegmentInfo>();
+      for (Directory dir : dirs) {
+        if (infoStream != null) {
+          message("process directory " + dir);
+        }
+        SegmentInfos sis = new SegmentInfos(); // read infos from dir
+        sis.read(dir);
+        Map<String, String> dsNames = new HashMap<String, String>();
+        for (SegmentInfo info : sis) {
+          assert !infos.contains(info): "dup info dir=" + info.dir + " name=" + info.name;
+
+          if (infoStream != null) {
+            message("process segment=" + info.name);
+          }
+          docCount += info.docCount;
+          String newSegName = newSegmentName();
+          String dsName = info.getDocStoreSegment();
+
+          // Determine if the doc store of this segment needs to be copied. It's
+          // only relevant for segments who share doc store with others, because
+          // the DS might have been copied already, in which case we just want
+          // to update the DS name of this SegmentInfo.
+          // NOTE: pre-3x segments include a null DSName if they don't share doc
+          // store. So the following code ensures we don't accidentally insert
+          // 'null' to the map.
+          String newDsName = newSegName;
+          boolean docStoreCopied = false;
+          if (dsNames.containsKey(dsName)) {
+            newDsName = dsNames.get(dsName);
+            docStoreCopied = true;
+          } else if (dsName != null) {
+            dsNames.put(dsName, newSegName);
+            docStoreCopied = false;
+          }
+
+          // Copy the segment files
+          for (String file : info.files()) {
+            if (docStoreCopied && IndexFileNames.isDocStoreFile(file)) {
+              continue;
+            } 
+            dir.copy(directory, file, newSegName + IndexFileNames.stripSegmentName(file));
+          }
+
+          // Update SI appropriately
+          info.setDocStore(info.getDocStoreOffset(), newDsName, info.getDocStoreIsCompoundFile());
+          info.dir = directory;
+          info.name = newSegName;
+
+          infos.add(info);
+        }
+      }      
+
+      synchronized (this) {
+        ensureOpen();
+        segmentInfos.addAll(infos);
+        // Notify DocumentsWriter that the flushed count just increased
+        docWriter.updateFlushedDocCount(docCount);
+
+        checkpoint();
+      }
+
+    } catch (OutOfMemoryError oom) {
+      handleOOM(oom, "addIndexes(Directory...)");
+    }
+  }
+

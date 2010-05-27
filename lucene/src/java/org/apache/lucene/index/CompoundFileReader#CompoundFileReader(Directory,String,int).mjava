@@ -1,6 +1,4 @@
-  public CompoundFileReader(Directory dir, String name, int readBufferSize)
-    throws IOException
-    {
+  public CompoundFileReader(Directory dir, String name, int readBufferSize) throws IOException {
         directory = dir;
         fileName = name;
         this.readBufferSize = readBufferSize;
@@ -10,13 +8,37 @@
         try {
             stream = dir.openInput(name, readBufferSize);
 
+            // read the first VInt. If it is negative, it's the version number
+            // otherwise it's the count (pre-3.1 indexes)
+            int firstInt = stream.readVInt();
+            
+            final int count;
+            final boolean stripSegmentName;
+            if (firstInt < CompoundFileWriter.FORMAT_PRE_VERSION) {
+              if (firstInt < CompoundFileWriter.FORMAT_CURRENT) {
+                throw new CorruptIndexException("Incompatible format version: "
+                    + firstInt + " expected " + CompoundFileWriter.FORMAT_CURRENT);
+              }
+              // It's a post-3.1 index, read the count.
+              count = stream.readVInt();
+              stripSegmentName = false;
+            } else {
+              count = firstInt;
+              stripSegmentName = true;
+            }
+
             // read the directory and init files
-            int count = stream.readVInt();
             FileEntry entry = null;
             for (int i=0; i<count; i++) {
                 long offset = stream.readLong();
                 String id = stream.readString();
 
+                if (stripSegmentName) {
+                  // Fix the id to not include the segment names. This is relevant for
+                  // pre-3.1 indexes.
+                  id = IndexFileNames.stripSegmentName(id);
+                }
+                
                 if (entry != null) {
                     // set length of the previous entry
                     entry.length = offset - entry.offset;
@@ -35,7 +57,7 @@
             success = true;
 
         } finally {
-            if (! success && (stream != null)) {
+            if (!success && (stream != null)) {
                 try {
                     stream.close();
                 } catch (IOException e) { }

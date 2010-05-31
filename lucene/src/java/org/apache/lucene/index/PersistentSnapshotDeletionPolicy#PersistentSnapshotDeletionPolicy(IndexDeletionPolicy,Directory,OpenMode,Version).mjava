@@ -1,0 +1,59 @@
+  /**
+   * {@link PersistentSnapshotDeletionPolicy} wraps another
+   * {@link IndexDeletionPolicy} to enable flexible snapshotting.
+   * 
+   * @param primary
+   *          the {@link IndexDeletionPolicy} that is used on non-snapshotted
+   *          commits. Snapshotted commits, by definition, are not deleted until
+   *          explicitly released via {@link #release(String)}.
+   * @param dir
+   *          the {@link Directory} which will be used to persist the snapshots
+   *          information.
+   * @param mode
+   *          specifies whether a new index should be created, deleting all
+   *          existing snapshots information (immediately), or open an existing
+   *          index, initializing the class with the snapsthots information.
+   * @param matchVersion
+   *          specifies the {@link Version} that should be used when opening the
+   *          IndexWriter.
+   */
+  public PersistentSnapshotDeletionPolicy(IndexDeletionPolicy primary,
+      Directory dir, OpenMode mode, Version matchVersion)
+      throws CorruptIndexException, LockObtainFailedException, IOException {
+    super(primary, null);
+
+    // Initialize the index writer over the snapshot directory.
+    writer = new IndexWriter(dir, new IndexWriterConfig(matchVersion, null).setOpenMode(mode));
+    if (mode != OpenMode.APPEND) {
+      // IndexWriter no longer creates a first commit on an empty Directory. So
+      // if we were asked to CREATE*, call commit() just to be sure. If the
+      // index contains information and mode is CREATE_OR_APPEND, it's a no-op.
+      writer.commit();
+    }
+
+    // Initializes the snapshots information. This code should basically run
+    // only if mode != CREATE, but if it is, it's no harm as we only open the
+    // reader once and immediately close it.
+    IndexReader r = writer.getReader();
+    try {
+      int numDocs = r.numDocs();
+      // index is allowed to have exactly one document or 0.
+      if (numDocs == 1) {
+        Document doc = r.document(r.maxDoc() - 1);
+        Field sid = doc.getField(SNAPSHOTS_ID);
+        if (sid == null) {
+          throw new IllegalStateException("directory is not a valid snapshots store!");
+        }
+        doc.removeField(SNAPSHOTS_ID);
+        for (Fieldable f : doc.getFields()) {
+          registerSnapshotInfo(f.name(), f.stringValue(), null);
+        }
+      } else if (numDocs != 0) {
+        throw new IllegalStateException(
+            "should be at most 1 document in the snapshots directory: " + numDocs);
+      }
+    } finally {
+      r.close();
+    }
+  }
+

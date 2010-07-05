@@ -1,14 +1,14 @@
     @Override
-    public Query rewrite(IndexReader reader, MultiTermQuery query) throws IOException {
+    public Query rewrite(final IndexReader reader, final MultiTermQuery query) throws IOException {
       final int maxSize = Math.min(size, BooleanQuery.getMaxClauseCount());
       final PriorityQueue<ScoreTerm> stQueue = new PriorityQueue<ScoreTerm>();
       collectTerms(reader, query, new TermCollector() {
-        public boolean collect(Term t, float boost) {
+        public boolean collect(BytesRef bytes, float boost) {
           // ignore uncompetetive hits
           if (stQueue.size() >= maxSize && boost <= stQueue.peek().boost)
             return true;
-          // add new entry in PQ
-          st.term = t;
+          // add new entry in PQ, we must clone the term, else it may get overwritten!
+          st.bytes.copy(bytes);
           st.boost = boost;
           stQueue.offer(st);
           // possibly drop entries from queue
@@ -21,9 +21,11 @@
         private ScoreTerm st = new ScoreTerm();
       });
       
+      final Term placeholderTerm = new Term(query.field);
       final BooleanQuery bq = new BooleanQuery(true);
       for (final ScoreTerm st : stQueue) {
-        Query tq = getQuery(st.term);    // found a match
+        // add new query, we must clone the term, else it may get overwritten!
+        Query tq = getQuery(placeholderTerm.createTerm(st.bytes));
         tq.setBoost(query.getBoost() * st.boost); // set the boost
         bq.add(tq, BooleanClause.Occur.SHOULD);   // add to query
       }

@@ -1,0 +1,104 @@
+  @Override
+  public Query createSpatialQuery(QParser parser, SpatialOptions options) {
+    BooleanQuery result = new BooleanQuery();
+    double[] point = new double[0];
+    try {
+      point = DistanceUtils.parseLatitudeLongitude(options.pointStr);
+    } catch (InvalidGeoException e) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e);
+    }
+
+    //Get the distance
+    double[] ur;
+    double[] ll;
+    if (options.measStr == null || options.measStr.equals("hsin")) {
+      ur = DistanceUtils.latLonCornerDegs(point[LAT], point[LONG], options.distance, null, true, options.radius);
+      ll = DistanceUtils.latLonCornerDegs(point[LAT], point[LONG], options.distance, null, false, options.radius);
+    } else {
+      ur = DistanceUtils.vectorBoxCorner(point, null, options.distance, true);
+      ll = DistanceUtils.vectorBoxCorner(point, null, options.distance, false);
+    }
+
+    SchemaField subSF;
+    Query range;
+
+    double angDistDegs = DistanceUtils.angularDistance(options.distance,
+            DistanceUtils.EARTH_MEAN_RADIUS_MI) * DistanceUtils.RADIANS_TO_DEGREES;
+    //for the poles, do something slightly different
+    if (point[LAT] + angDistDegs > 90.0) { //we cross the north pole
+      //we don't need a longitude boundary at all
+
+      double minLat = Math.min(ll[LAT], ur[LAT]);
+      subSF = subField(options.field, LAT);
+      range = subSF.getType().getRangeQuery(parser, subSF,
+              String.valueOf(minLat),
+              "90", true, true);
+      result.add(range, BooleanClause.Occur.MUST);
+    } else if (point[LAT] - angDistDegs < -90.0) {//we cross the south pole
+      subSF = subField(options.field, LAT);
+      double maxLat = Math.max(ll[LAT], ur[LAT]);
+      range = subSF.getType().getRangeQuery(parser, subSF,
+              "-90", String.valueOf(maxLat), true, true);
+      result.add(range, BooleanClause.Occur.MUST);
+    } else{
+        //Latitude
+        //we may need to generate multiple queries depending on the range
+        //Are we crossing the 180 deg. longitude, if so, we need to do some special things
+        if (ll[LONG] > 0.0 && ur[LONG] < 0.0) {
+          //TODO: refactor into common code, etc.
+          //Now check other side of the Equator
+          if (ll[LAT] < 0.0 && ur[LAT] > 0.0) {
+            addEquatorialBoundary(parser, options, result, ur[LAT], ll[LAT]);
+          } //check poles
+          else {
+            subSF = subField(options.field, LAT);
+            //not crossing the equator
+            range = subSF.getType().getRangeQuery(parser, subSF,
+                    String.valueOf(ll[LAT]),
+                    String.valueOf(ur[LAT]), true, true);
+            result.add(range, BooleanClause.Occur.MUST);
+          }
+          //Longitude
+          addMeridianBoundary(parser, options, result, ur[LONG], ll[LONG], "180.0", "-180.0");
+
+        } else if (ll[LONG] < 0.0 && ur[LONG] > 0.0) {//prime meridian (0 degrees
+          //Now check other side of the Equator
+          if (ll[LAT] < 0.0 && ur[LAT] > 0.0) {
+            addEquatorialBoundary(parser, options, result, ur[LAT], ll[LAT]);
+          } else {
+            subSF = subField(options.field, LAT);
+            //not crossing the equator
+            range = subSF.getType().getRangeQuery(parser, subSF,
+                    String.valueOf(ll[LAT]),
+                    String.valueOf(ur[LAT]), true, true);
+            result.add(range, BooleanClause.Occur.MUST);
+          }
+          //Longitude
+          addMeridianBoundary(parser, options, result, ur[LONG], ll[LONG], "0.0", ".0");
+
+        } else {// we are all in the Eastern or Western hemi
+          //Now check other side of the Equator
+          if (ll[LAT] < 0.0 && ur[LAT] > 0.0) {
+            addEquatorialBoundary(parser, options, result, ur[LAT], ll[LAT]);
+          } else {//we are all in either the Northern or the Southern Hemi.
+            //TODO: nice to move this up so that it is the first thing and we can avoid the extra checks since
+            //this is actually the most likely case
+            subSF = subField(options.field, LAT);
+            range = subSF.getType().getRangeQuery(parser, subSF,
+                    String.valueOf(ll[LAT]),
+                    String.valueOf(ur[LAT]), true, true);
+            result.add(range, BooleanClause.Occur.MUST);
+
+          }
+          //Longitude, all in the same hemi
+          subSF = subField(options.field, LONG);
+          range = subSF.getType().getRangeQuery(parser, subSF,
+                  String.valueOf(ll[LONG]),
+                  String.valueOf(ur[LONG]), true, true);
+          result.add(range, BooleanClause.Occur.MUST);
+        }
+      }
+
+      return result;
+    }
+

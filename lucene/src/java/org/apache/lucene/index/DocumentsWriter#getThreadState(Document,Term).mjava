@@ -1,0 +1,88 @@
+  /** Returns a free (idle) ThreadState that may be used for
+   * indexing this one document.  This call also pauses if a
+   * flush is pending.  If delTerm is non-null then we
+   * buffer this deleted term after the thread state has
+   * been acquired. */
+  synchronized DocumentsWriterThreadState getThreadState(Document doc, Term delTerm) throws IOException {
+
+    // First, find a thread state.  If this thread already
+    // has affinity to a specific ThreadState, use that one
+    // again.
+    DocumentsWriterThreadState state = threadBindings.get(Thread.currentThread());
+    if (state == null) {
+
+      // First time this thread has called us since last
+      // flush.  Find the least loaded thread state:
+      DocumentsWriterThreadState minThreadState = null;
+      for(int i=0;i<threadStates.length;i++) {
+        DocumentsWriterThreadState ts = threadStates[i];
+        if (minThreadState == null || ts.numThreads < minThreadState.numThreads)
+          minThreadState = ts;
+      }
+      if (minThreadState != null && (minThreadState.numThreads == 0 || threadStates.length >= maxThreadStates)) {
+        state = minThreadState;
+        state.numThreads++;
+      } else {
+        // Just create a new "private" thread state
+        DocumentsWriterThreadState[] newArray = new DocumentsWriterThreadState[1+threadStates.length];
+        if (threadStates.length > 0)
+          System.arraycopy(threadStates, 0, newArray, 0, threadStates.length);
+        state = newArray[threadStates.length] = new DocumentsWriterThreadState(this);
+        threadStates = newArray;
+      }
+      threadBindings.put(Thread.currentThread(), state);
+    }
+
+    // Next, wait until my thread state is idle (in case
+    // it's shared with other threads) and for threads to
+    // not be paused nor a flush pending:
+    waitReady(state);
+
+    // Allocate segment name if this is the first doc since
+    // last flush:
+    initSegmentName(false);
+
+    state.isIdle = false;
+
+    boolean success = false;
+    try {
+      state.docState.docID = nextDocID;
+
+      assert writer.testPoint("DocumentsWriter.ThreadState.init start");
+
+      if (delTerm != null) {
+        addDeleteTerm(delTerm, state.docState.docID);
+        state.doFlushAfter = timeToFlushDeletes();
+      }
+
+      assert writer.testPoint("DocumentsWriter.ThreadState.init after delTerm");
+
+      nextDocID++;
+      numDocsInRAM++;
+
+      // We must at this point commit to flushing to ensure we
+      // always get N docs when we flush by doc count, even if
+      // > 1 thread is adding documents:
+      if (!flushPending &&
+          maxBufferedDocs != IndexWriterConfig.DISABLE_AUTO_FLUSH
+          && numDocsInRAM >= maxBufferedDocs) {
+        flushPending = true;
+        state.doFlushAfter = true;
+      }
+
+      success = true;
+    } finally {
+      if (!success) {
+        // Forcefully idle this ThreadState:
+        state.isIdle = true;
+        notifyAll();
+        if (state.doFlushAfter) {
+          state.doFlushAfter = false;
+          flushPending = false;
+        }
+      }
+    }
+
+    return state;
+  }
+

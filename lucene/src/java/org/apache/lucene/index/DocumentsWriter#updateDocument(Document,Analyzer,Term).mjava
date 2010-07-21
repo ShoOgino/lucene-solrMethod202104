@@ -1,0 +1,72 @@
+  boolean updateDocument(Document doc, Analyzer analyzer, Term delTerm)
+    throws CorruptIndexException, IOException {
+    
+    // This call is synchronized but fast
+    final DocumentsWriterThreadState state = getThreadState(doc, delTerm);
+
+    final DocState docState = state.docState;
+    docState.doc = doc;
+    docState.analyzer = analyzer;
+
+    boolean success = false;
+    try {
+      // This call is not synchronized and does all the
+      // work
+      final DocWriter perDoc;
+      try {
+        perDoc = state.consumer.processDocument();
+      } finally {
+        docState.clear();
+      }
+
+      // This call is synchronized but fast
+      finishDocument(state, perDoc);
+
+      success = true;
+    } finally {
+      if (!success) {
+        synchronized(this) {
+
+          if (aborting) {
+            state.isIdle = true;
+            notifyAll();
+            abort();
+          } else {
+            skipDocWriter.docID = docState.docID;
+            boolean success2 = false;
+            try {
+              waitQueue.add(skipDocWriter);
+              success2 = true;
+            } finally {
+              if (!success2) {
+                state.isIdle = true;
+                notifyAll();
+                abort();
+                return false;
+              }
+            }
+
+            state.isIdle = true;
+            notifyAll();
+
+            // If this thread state had decided to flush, we
+            // must clear it so another thread can flush
+            if (state.doFlushAfter) {
+              state.doFlushAfter = false;
+              flushPending = false;
+              notifyAll();
+            }
+
+            // Immediately mark this document as deleted
+            // since likely it was partially added.  This
+            // keeps indexing as "all or none" (atomic) when
+            // adding a document:
+            addDeleteDocID(state.docState.docID);
+          }
+        }
+      }
+    }
+
+    return state.doFlushAfter || timeToFlushDeletes();
+  }
+

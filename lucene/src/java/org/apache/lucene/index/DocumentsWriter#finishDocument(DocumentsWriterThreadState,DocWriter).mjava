@@ -1,0 +1,51 @@
+  /** Does the synchronized work to finish/flush the
+   *  inverted document. */
+  private void finishDocument(DocumentsWriterThreadState perThread, DocWriter docWriter) throws IOException {
+
+    // Must call this w/o holding synchronized(this) else
+    // we'll hit deadlock:
+    balanceRAM();
+
+    synchronized(this) {
+
+      assert docWriter == null || docWriter.docID == perThread.docState.docID;
+
+      if (aborting) {
+
+        // We are currently aborting, and another thread is
+        // waiting for me to become idle.  We just forcefully
+        // idle this threadState; it will be fully reset by
+        // abort()
+        if (docWriter != null)
+          try {
+            docWriter.abort();
+          } catch (Throwable t) {
+          }
+
+        perThread.isIdle = true;
+        notifyAll();
+        return;
+      }
+
+      final boolean doPause;
+
+      if (docWriter != null)
+        doPause = waitQueue.add(docWriter);
+      else {
+        skipDocWriter.docID = perThread.docState.docID;
+        doPause = waitQueue.add(skipDocWriter);
+      }
+
+      if (doPause)
+        waitForWaitQueue();
+
+      if (bufferIsFull && !flushPending) {
+        flushPending = true;
+        perThread.doFlushAfter = true;
+      }
+
+      perThread.isIdle = true;
+      notifyAll();
+    }
+  }
+

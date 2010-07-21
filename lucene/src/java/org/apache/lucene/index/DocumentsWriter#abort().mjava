@@ -1,20 +1,65 @@
-  void abort() throws IOException {
-    threadPool.abort();
-    try {
-      try {
-        abortedFiles = openFiles();
-      } catch (Throwable t) {
-        abortedFiles = null;
-      }
-  
-      deletesInRAM.clear();
-      // nocommit
-  //        deletesFlushed.clear();
-  
-      openFiles.clear();
-    } finally {
-      threadPool.finishAbort();
-    }
+  /** Called if we hit an exception at a bad time (when
+   *  updating the index files) and must discard all
+   *  currently buffered docs.  This resets our state,
+   *  discarding any docs added since last flush. */
+  synchronized void abort() throws IOException {
 
+    try {
+      if (infoStream != null) {
+        message("docWriter: now abort");
+      }
+
+      // Forcefully remove waiting ThreadStates from line
+      waitQueue.abort();
+
+      // Wait for all other threads to finish with
+      // DocumentsWriter:
+      pauseAllThreads();
+
+      try {
+
+        assert 0 == waitQueue.numWaiting;
+
+        waitQueue.waitingBytes = 0;
+
+        try {
+          abortedFiles = openFiles();
+        } catch (Throwable t) {
+          abortedFiles = null;
+        }
+
+        deletesInRAM.clear();
+        deletesFlushed.clear();
+
+        openFiles.clear();
+
+        for(int i=0;i<threadStates.length;i++)
+          try {
+            threadStates[i].consumer.abort();
+          } catch (Throwable t) {
+          }
+
+        try {
+          consumer.abort();
+        } catch (Throwable t) {
+        }
+
+        docStoreSegment = null;
+        numDocsInStore = 0;
+        docStoreOffset = 0;
+
+        // Reset all postings data
+        doAfterFlush();
+
+      } finally {
+        resumeAllThreads();
+      }
+    } finally {
+      aborting = false;
+      notifyAll();
+      if (infoStream != null) {
+        message("docWriter: done abort");
+      }
+    }
   }
 

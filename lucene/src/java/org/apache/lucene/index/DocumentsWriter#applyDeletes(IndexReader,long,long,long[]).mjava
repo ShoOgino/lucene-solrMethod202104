@@ -1,0 +1,124 @@
+  // Apply buffered delete terms, queries and docIDs to the
+  // provided reader
+  final boolean applyDeletes(IndexReader reader, long minSequenceID, long maxSequenceID, long[] sequenceIDs)
+      throws CorruptIndexException, IOException {
+
+    assert sequenceIDs == null || sequenceIDs.length >= reader.maxDoc() : "reader.maxDoc="
+        + reader.maxDoc() + ",sequenceIDs.length=" + sequenceIDs.length;
+
+    boolean any = false;
+
+    // first: delete the documents that had non-aborting exceptions
+    if (sequenceIDs != null) {
+      for (int i = 0; i < reader.maxDoc(); i++) {
+        if (sequenceIDs[i] == -1) {
+          reader.deleteDocument(i);
+          any = true;
+        }
+      }
+    }
+    
+    if (deletesInRAM.hasDeletes()) {
+      IndexSearcher searcher = new IndexSearcher(reader);
+
+      SortedMap<Long, BufferedDeletesInRAM.Delete> deletes = deletesInRAM.deletes.getReadCopy();
+      
+      SortedMap<Term, Long> deleteTerms = new TreeMap<Term, Long>();
+      for (Entry<Long, BufferedDeletesInRAM.Delete> entry : deletes.entrySet()) {
+        if (minSequenceID < entry.getKey()) {
+          BufferedDeletesInRAM.Delete delete = entry.getValue();
+          if (delete instanceof BufferedDeletesInRAM.DeleteTerm) {
+            BufferedDeletesInRAM.DeleteTerm deleteTerm = (BufferedDeletesInRAM.DeleteTerm) delete;
+            deleteTerms.put(deleteTerm.term, entry.getKey());
+          } else if (delete instanceof BufferedDeletesInRAM.DeleteTerms) {
+            BufferedDeletesInRAM.DeleteTerms terms = (BufferedDeletesInRAM.DeleteTerms) delete;
+            for (Term t : terms.terms) {
+              deleteTerms.put(t, entry.getKey());
+            }
+          } else {
+            // delete query
+            BufferedDeletesInRAM.DeleteQuery deleteQuery = (BufferedDeletesInRAM.DeleteQuery) delete;
+            Query query = deleteQuery.query;
+            Weight weight = query.weight(searcher);
+            Scorer scorer = weight.scorer(reader, true, false);
+            if (scorer != null) {
+              while (true) {
+                int doc = scorer.nextDoc();
+                if (doc == DocsEnum.NO_MORE_DOCS) {
+                  break;
+                }
+                if ( (sequenceIDs != null && sequenceIDs[doc] < entry.getKey())
+                    || (sequenceIDs == null && maxSequenceID < entry.getKey())) {
+                  reader.deleteDocument(doc);
+                  any = true;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Delete by term
+      if (deleteTerms.size() > 0) {
+        Fields fields = reader.fields();
+        if (fields == null) {
+          // This reader has no postings
+          return false;
+        }
+
+        TermsEnum termsEnum = null;
+
+        String currentField = null;
+        BytesRef termRef = new BytesRef();
+        DocsEnum docs = null;
+
+        for (Entry<Term, Long> entry : deleteTerms.entrySet()) {
+          Term term = entry.getKey();
+          // Since we visit terms sorted, we gain performance
+          // by re-using the same TermsEnum and seeking only
+          // forwards
+          if (term.field() != currentField) {
+            assert currentField == null || currentField.compareTo(term.field()) < 0;
+            currentField = term.field();
+            Terms terms = fields.terms(currentField);
+            if (terms != null) {
+              termsEnum = terms.iterator();
+            } else {
+              termsEnum = null;
+            }
+          }
+
+          if (termsEnum == null) {
+            continue;
+          }
+          // assert checkDeleteTerm(term);
+
+          termRef.copy(term.text());
+
+          if (termsEnum.seek(termRef, false) == TermsEnum.SeekStatus.FOUND) {
+            DocsEnum docsEnum = termsEnum.docs(reader.getDeletedDocs(), docs);
+
+            if (docsEnum != null) {
+              docs = docsEnum;
+              // int limit = entry.getValue().getNum();
+              while (true) {
+                final int doc = docs.nextDoc();
+                // if (docID == DocsEnum.NO_MORE_DOCS || docIDStart+docID >= limit) {
+                if (doc == DocsEnum.NO_MORE_DOCS) {
+                  break;
+                }
+                if ( (sequenceIDs != null && sequenceIDs[doc] < entry.getValue())
+                    || (sequenceIDs == null && maxSequenceID < entry.getValue())) {
+                  reader.deleteDocument(doc);
+                  any = true;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return any;
+  }
+

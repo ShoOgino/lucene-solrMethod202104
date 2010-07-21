@@ -1,0 +1,55 @@
+  /** Produce _X.nrm if any document had a field with norms
+   *  not disabled */
+  @Override
+  public void flush(Map<FieldInfo,InvertedDocEndConsumerPerField> fieldsToFlush, SegmentWriteState state) throws IOException {
+
+    final String normsFileName = IndexFileNames.segmentFileName(state.segmentName, "", IndexFileNames.NORMS_EXTENSION);
+    state.flushedFiles.add(normsFileName);
+    IndexOutput normsOut = state.directory.createOutput(normsFileName);
+
+    try {
+      normsOut.writeBytes(SegmentMerger.NORMS_HEADER, 0, SegmentMerger.NORMS_HEADER.length);
+
+      final int numField = fieldInfos.size();
+
+      int normCount = 0;
+
+      for(int fieldNumber=0;fieldNumber<numField;fieldNumber++) {
+
+        final FieldInfo fieldInfo = fieldInfos.fieldInfo(fieldNumber);
+
+        NormsWriterPerField toWrite = (NormsWriterPerField) fieldsToFlush.get(fieldInfo);
+
+        int upto = 0;
+        if (toWrite != null && toWrite.upto > 0) {
+          normCount++;
+
+          int docID = 0;
+          for (; docID < state.numDocs; docID++) {
+            if (upto < toWrite.upto && toWrite.docIDs[upto] == docID) {
+              normsOut.writeByte(toWrite.norms[upto]);
+              upto++;
+            } else {
+              normsOut.writeByte(defaultNorm);
+            }
+          }
+
+          // we should have consumed every norm
+          assert upto == toWrite.upto;
+
+          toWrite.reset();
+        } else if (fieldInfo.isIndexed && !fieldInfo.omitNorms) {
+          normCount++;
+          // Fill entire field with default norm:
+          for(;upto<state.numDocs;upto++)
+            normsOut.writeByte(defaultNorm);
+        }
+
+        assert 4+normCount*state.numDocs == normsOut.getFilePointer() : ".nrm file size mismatch: expected=" + (4+normCount*state.numDocs) + " actual=" + normsOut.getFilePointer();
+      }
+
+    } finally {
+      normsOut.close();
+    }
+  }
+

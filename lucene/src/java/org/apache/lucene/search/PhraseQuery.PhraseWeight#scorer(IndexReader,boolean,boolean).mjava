@@ -3,19 +3,18 @@
       if (terms.size() == 0)			  // optimize zero-term case
         return null;
 
-      DocsAndPositionsEnum[] postings = new DocsAndPositionsEnum[terms.size()];
+      PostingsAndFreq[] postingsFreqs = new PostingsAndFreq[terms.size()];
       final Bits delDocs = MultiFields.getDeletedDocs(reader);
       for (int i = 0; i < terms.size(); i++) {
         final Term t = terms.get(i);
-        final BytesRef text = new BytesRef(t.text());
         DocsAndPositionsEnum postingsEnum = MultiFields.getTermPositionsEnum(reader,
                                                                              delDocs,
                                                                              t.field(),
-                                                                             text);
+                                                                             t.bytes());
         // PhraseQuery on a field that did not index
         // positions.
         if (postingsEnum == null) {
-          if (MultiFields.getTermDocsEnum(reader, delDocs, t.field(), text) != null) {
+          if (MultiFields.getTermDocsEnum(reader, delDocs, t.field(), t.bytes()) != null) {
             // term does exist, but has no positions
             throw new IllegalStateException("field \"" + t.field() + "\" was indexed with Field.omitTermFreqAndPositions=true; cannot run PhraseQuery (term=" + t.text() + ")");
           } else {
@@ -23,16 +22,26 @@
             return null;
           }
         }
-        postings[i] = postingsEnum;
+        postingsFreqs[i] = new PostingsAndFreq(postingsEnum, reader.docFreq(t.field(), t.bytes()), positions.get(i).intValue());
       }
 
-      if (slop == 0)				  // optimize exact case
-        return new ExactPhraseScorer(this, postings, getPositions(), similarity,
-                                     reader.norms(field));
-      else
-        return
-          new SloppyPhraseScorer(this, postings, getPositions(), similarity, slop,
-                                 reader.norms(field));
+      // sort by increasing docFreq order
+      if (slop == 0) {
+        Arrays.sort(postingsFreqs);
+      }
 
+      if (slop == 0) {				  // optimize exact case
+        ExactPhraseScorer s = new ExactPhraseScorer(this, postingsFreqs, similarity,
+                                                    reader.norms(field));
+        if (s.noDocs) {
+          return null;
+        } else {
+          return s;
+        }
+      } else {
+        return
+          new SloppyPhraseScorer(this, postingsFreqs, similarity, slop,
+                                 reader.norms(field));
+      }
     }
 

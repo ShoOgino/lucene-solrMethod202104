@@ -1,0 +1,176 @@
+  /**
+   * @exception ParseException throw in overridden method to disallow
+   */
+  protected Query getFieldQuery(String field, String queryText, boolean quoted)  throws ParseException {
+    // Use the analyzer to get all the tokens, and then build a TermQuery,
+    // PhraseQuery, or nothing based on the term count
+
+    TokenStream source;
+    try {
+      source = analyzer.reusableTokenStream(field, new StringReader(queryText));
+      source.reset();
+    } catch (IOException e) {
+      source = analyzer.tokenStream(field, new StringReader(queryText));
+    }
+    CachingTokenFilter buffer = new CachingTokenFilter(source);
+    TermToBytesRefAttribute termAtt = null;
+    PositionIncrementAttribute posIncrAtt = null;
+    int numTokens = 0;
+
+    boolean success = false;
+    try {
+      buffer.reset();
+      success = true;
+    } catch (IOException e) {
+      // success==false if we hit an exception
+    }
+    if (success) {
+      if (buffer.hasAttribute(TermToBytesRefAttribute.class)) {
+        termAtt = buffer.getAttribute(TermToBytesRefAttribute.class);
+      }
+      if (buffer.hasAttribute(PositionIncrementAttribute.class)) {
+        posIncrAtt = buffer.getAttribute(PositionIncrementAttribute.class);
+      }
+    }
+
+    int positionCount = 0;
+    boolean severalTokensAtSamePosition = false;
+
+    boolean hasMoreTokens = false;
+    if (termAtt != null) {
+      try {
+        hasMoreTokens = buffer.incrementToken();
+        while (hasMoreTokens) {
+          numTokens++;
+          int positionIncrement = (posIncrAtt != null) ? posIncrAtt.getPositionIncrement() : 1;
+          if (positionIncrement != 0) {
+            positionCount += positionIncrement;
+          } else {
+            severalTokensAtSamePosition = true;
+          }
+          hasMoreTokens = buffer.incrementToken();
+        }
+      } catch (IOException e) {
+        // ignore
+      }
+    }
+    try {
+      // rewind the buffer stream
+      buffer.reset();
+
+      // close original stream - all tokens buffered
+      source.close();
+    }
+    catch (IOException e) {
+      // ignore
+    }
+
+    if (numTokens == 0)
+      return null;
+    else if (numTokens == 1) {
+      BytesRef term = new BytesRef();
+      try {
+        boolean hasNext = buffer.incrementToken();
+        assert hasNext == true;
+        termAtt.toBytesRef(term);
+      } catch (IOException e) {
+        // safe to ignore, because we know the number of tokens
+      }
+      return newTermQuery(new Term(field, term));
+    } else {
+      if (severalTokensAtSamePosition || (!quoted && !autoGeneratePhraseQueries)) {
+        if (positionCount == 1 || (!quoted && !autoGeneratePhraseQueries)) {
+          // no phrase query:
+          BooleanQuery q = newBooleanQuery(positionCount == 1);
+
+          BooleanClause.Occur occur = positionCount > 1 && operator == AND_OPERATOR ?
+            BooleanClause.Occur.MUST : BooleanClause.Occur.SHOULD;
+
+          for (int i = 0; i < numTokens; i++) {
+            BytesRef term = new BytesRef();
+            try {
+              boolean hasNext = buffer.incrementToken();
+              assert hasNext == true;
+              termAtt.toBytesRef(term);
+            } catch (IOException e) {
+              // safe to ignore, because we know the number of tokens
+            }
+
+            Query currentQuery = newTermQuery(
+                new Term(field, term));
+            q.add(currentQuery, occur);
+          }
+          return q;
+        }
+        else {
+          // phrase query:
+          MultiPhraseQuery mpq = newMultiPhraseQuery();
+          mpq.setSlop(phraseSlop);
+          List<Term> multiTerms = new ArrayList<Term>();
+          int position = -1;
+          for (int i = 0; i < numTokens; i++) {
+            BytesRef term = new BytesRef();
+            int positionIncrement = 1;
+            try {
+              boolean hasNext = buffer.incrementToken();
+              assert hasNext == true;
+              termAtt.toBytesRef(term);
+              if (posIncrAtt != null) {
+                positionIncrement = posIncrAtt.getPositionIncrement();
+              }
+            } catch (IOException e) {
+              // safe to ignore, because we know the number of tokens
+            }
+
+            if (positionIncrement > 0 && multiTerms.size() > 0) {
+              if (enablePositionIncrements) {
+                mpq.add(multiTerms.toArray(new Term[0]),position);
+              } else {
+                mpq.add(multiTerms.toArray(new Term[0]));
+              }
+              multiTerms.clear();
+            }
+            position += positionIncrement;
+            multiTerms.add(new Term(field, term));
+          }
+          if (enablePositionIncrements) {
+            mpq.add(multiTerms.toArray(new Term[0]),position);
+          } else {
+            mpq.add(multiTerms.toArray(new Term[0]));
+          }
+          return mpq;
+        }
+      }
+      else {
+        PhraseQuery pq = newPhraseQuery();
+        pq.setSlop(phraseSlop);
+        int position = -1;
+
+
+        for (int i = 0; i < numTokens; i++) {
+          BytesRef term = new BytesRef();
+          int positionIncrement = 1;
+
+          try {
+            boolean hasNext = buffer.incrementToken();
+            assert hasNext == true;
+            termAtt.toBytesRef(term);
+            if (posIncrAtt != null) {
+              positionIncrement = posIncrAtt.getPositionIncrement();
+            }
+          } catch (IOException e) {
+            // safe to ignore, because we know the number of tokens
+          }
+
+          if (enablePositionIncrements) {
+            position += positionIncrement;
+            pq.add(new Term(field, term),position);
+          } else {
+            pq.add(new Term(field, term));
+          }
+        }
+        return pq;
+      }
+    }
+  }
+

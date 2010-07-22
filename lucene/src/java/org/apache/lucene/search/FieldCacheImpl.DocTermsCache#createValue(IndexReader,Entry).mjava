@@ -7,6 +7,8 @@
 
       final boolean fasterButMoreRAM = ((Boolean) entryKey.custom).booleanValue();
 
+      final int termCountHardLimit = reader.maxDoc();
+
       // Holds the actual term data, expanded.
       final PagedBytes bytes = new PagedBytes(15);
 
@@ -23,6 +25,9 @@
           numUniqueTerms = -1;
         }
         if (numUniqueTerms != -1) {
+          if (numUniqueTerms > termCountHardLimit) {
+            numUniqueTerms = termCountHardLimit;
+          }
           startBPV = PackedInts.bitsRequired(numUniqueTerms*4);
         } else {
           startBPV = 1;
@@ -37,10 +42,18 @@
       bytes.copyUsingLengthPrefix(new BytesRef());
 
       if (terms != null) {
+        int termCount = 0;
         final TermsEnum termsEnum = terms.iterator();
         final Bits delDocs = MultiFields.getDeletedDocs(reader);
         DocsEnum docs = null;
         while(true) {
+          if (termCount++ == termCountHardLimit) {
+            // app is misusing the API (there is more than
+            // one term per doc); in this case we make best
+            // effort to load what we can (see LUCENE-2142)
+            break;
+          }
+
           final BytesRef term = termsEnum.next();
           if (term == null) {
             break;
@@ -58,6 +71,6 @@
       }
 
       // maybe an int-only impl?
-      return new DocTermsImpl(bytes.freeze(), docToOffset.getMutable());
+      return new DocTermsImpl(bytes.freeze(true), docToOffset.getMutable());
     }
 

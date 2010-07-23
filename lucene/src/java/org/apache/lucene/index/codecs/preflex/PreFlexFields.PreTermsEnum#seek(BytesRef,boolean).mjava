@@ -1,7 +1,7 @@
     @Override
     public SeekStatus seek(BytesRef term, boolean useCache) throws IOException {
       if (DEBUG_SURROGATES) {
-        System.out.println("TE.seek() term=" + term.utf8ToString());
+        System.out.println("TE.seek target=" + UnicodeUtil.toHexString(term.utf8ToString()));
       }
       skipNext = false;
       final TermInfosReader tis = getTermsDict();
@@ -9,28 +9,90 @@
 
       assert termEnum != null;
 
-      if (termEnum == null) {
-        termEnum = tis.terms(t0);
-      } else {
-        tis.seekEnum(termEnum, t0);
-      }
-
-      surrogateSeekUpto = 0;
-      surrogatesDance();
+      tis.seekEnum(termEnum, t0);
 
       final Term t = termEnum.term();
 
-      final BytesRef tr = t == null ? null : t.bytes();
-
-      if (t != null && t.field() == fieldInfo.name && term.bytesEquals(tr)) {
-        current = tr;
+      if (t != null && t.field() == fieldInfo.name && term.bytesEquals(t.bytes())) {
+        // If we found an exact match, no need to do the
+        // surrogate dance
+        if (DEBUG_SURROGATES) {
+          System.out.println("  seek exact match");
+        }
+        current = t.bytes();
         return SeekStatus.FOUND;
       } else if (t == null || t.field() != fieldInfo.name) {
+
+        // nocommit -- why can't we handle this like the
+        // next() into null?  set term as prevTerm then dance?
+
+        if (DEBUG_SURROGATES) {
+          System.out.println("  seek hit EOF");
+        }
+
+        // We hit EOF; try end-case surrogate dance: if we
+        // find an E, try swapping in S, backwards:
+        scratchTerm.copy(term);
+
+        assert scratchTerm.offset == 0;
+
+        for(int i=scratchTerm.length-1;i>=0;i--) {
+          if (isHighBMPChar(scratchTerm.bytes, i)) {
+            if (DEBUG_SURROGATES) {
+              System.out.println("    found E pos=" + i + "; try seek");
+            }
+
+            if (seekToNonBMP(seekTermEnum, scratchTerm, i)) {
+
+              scratchTerm.copy(seekTermEnum.term().bytes());
+              getTermsDict().seekEnum(termEnum, seekTermEnum.term());
+
+              newSuffixStart = 1+i;
+
+              doPushes();
+
+              // Found a match
+              // TODO: faster seek?
+              current = termEnum.term().bytes();
+              return SeekStatus.NOT_FOUND;
+            }
+          }
+        }
+        
+        if (DEBUG_SURROGATES) {
+          System.out.println("  seek END");
+        }
+
         current = null;
         return SeekStatus.END;
       } else {
-        current = tr;
-        return SeekStatus.NOT_FOUND;
+
+        // We found a non-exact but non-null term; this one
+        // is fun -- just treat it like next, by pretending
+        // requested term was prev:
+        prevTerm.copy(term);
+
+        if (DEBUG_SURROGATES) {
+          System.out.println("  seek hit non-exact term=" + UnicodeUtil.toHexString(t.text()));
+        }
+
+        final BytesRef br = t.bytes();
+        assert br.offset == 0;
+
+        setNewSuffixStart(term, br);
+
+        surrogateDance();
+
+        final Term t2 = termEnum.term();
+        if (t2 == null || t2.field() != fieldInfo.name) {
+          assert t2 == null || !t2.field().equals(fieldInfo.name); // make sure fields are in fact interned
+          current = null;
+          return SeekStatus.END;
+        } else {
+          current = t2.bytes();
+          assert !unicodeSortOrder || term.compareTo(current) < 0 : "term=" + UnicodeUtil.toHexString(term.utf8ToString()) + " vs current=" + UnicodeUtil.toHexString(current.utf8ToString());
+          return SeekStatus.NOT_FOUND;
+        }
       }
     }
 

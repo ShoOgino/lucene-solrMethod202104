@@ -1,0 +1,70 @@
+    // Look for seek type 3 ("pop"): if the delta from
+    // prev -> current was replacing an S with an E,
+    // we must now seek to beyond that E.  This seek
+    // "finishes" the dance at this character
+    // position.
+    private boolean doPop() throws IOException {
+
+      if (DEBUG_SURROGATES) {
+        System.out.println("  try pop");
+      }
+
+      assert newSuffixStart <= prevTerm.length;
+      assert newSuffixStart < scratchTerm.length || newSuffixStart == 0;
+
+      if (prevTerm.length > newSuffixStart &&
+          isNonBMPChar(prevTerm.bytes, newSuffixStart) &&
+          isHighBMPChar(scratchTerm.bytes, newSuffixStart)) {
+
+        // Seek type 2 -- put U+FFFF at this position:
+        // nocommit -- can we somehow use 0xff???
+        scratchTerm.bytes[newSuffixStart] = (byte) 0xff;
+        //scratchTerm.bytes[newSuffixStart] = (byte) 0xef;
+        scratchTerm.bytes[newSuffixStart+1] = (byte) 0xbf;
+        scratchTerm.bytes[newSuffixStart+2] = (byte) 0xbf;
+        scratchTerm.length = newSuffixStart+3;
+
+        if (DEBUG_SURROGATES) {
+          System.out.println("    seek to term=" + UnicodeUtil.toHexString(scratchTerm.utf8ToString()) + " " + scratchTerm.toString());
+        }
+          
+        // TODO: more efficient seek?  can we simply swap
+        // the enums?
+        getTermsDict().seekEnum(termEnum, protoTerm.createTerm(scratchTerm));
+
+        final Term t2 = termEnum.term();
+
+        // We could hit EOF or different field since this
+        // was a seek "forward":
+        if (t2 != null && t2.field() == fieldInfo.name) {
+
+          if (DEBUG_SURROGATES) {
+            System.out.println("      got term=" + UnicodeUtil.toHexString(t2.text()) + " " + t2.bytes());
+          }
+
+          final BytesRef b2 = t2.bytes();
+          assert b2.offset == 0;
+
+
+          // Set newSuffixStart -- we can't use
+          // termEnum's since the above seek may have
+          // done no scanning (eg, term was precisely
+          // and index term, or, was in the term seek
+          // cache):
+          scratchTerm.copy(b2);
+          setNewSuffixStart(prevTerm, scratchTerm);
+
+          return true;
+        } else if (newSuffixStart != 0 || scratchTerm.length != 0) {
+          if (DEBUG_SURROGATES) {
+            System.out.println("      got term=null (or next field)");
+          }
+          newSuffixStart = 0;
+          scratchTerm.length = 0;
+          return true;
+        }
+      }
+
+      return false;
+    }
+

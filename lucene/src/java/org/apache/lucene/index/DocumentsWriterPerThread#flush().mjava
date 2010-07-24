@@ -1,0 +1,61 @@
+  /** Flush all pending docs to a new segment */
+  SegmentInfo flush() throws IOException {
+    assert numDocsInRAM > 0;
+
+    flushState = new SegmentWriteState(infoStream, directory, segment, docFieldProcessor.fieldInfos,
+        numDocsInRAM, writer.getConfig().getTermIndexInterval(),
+        writer.codecs);
+
+    if (infoStream != null) {
+      message("flush postings as segment " + flushState.segmentName + " numDocs=" + numDocsInRAM);
+    }
+    
+    boolean success = false;
+
+    try {
+      consumer.flush(flushState);
+
+      if (infoStream != null) {
+        SegmentInfo si = new SegmentInfo(flushState.segmentName,
+            flushState.numDocs,
+            directory, false,
+            hasProx(),
+            getCodec());
+
+        final long newSegmentSize = si.sizeInBytes();
+        String message = "  ramUsed=" + ramAllocator.nf.format(((double) numBytesUsed)/1024./1024.) + " MB" +
+          " newFlushedSize=" + newSegmentSize +
+          " docs/MB=" + ramAllocator.nf.format(numDocsInRAM/(newSegmentSize/1024./1024.)) +
+          " new/old=" + ramAllocator.nf.format(100.0*newSegmentSize/numBytesUsed) + "%";
+        message(message);
+      }
+
+      flushedDocCount += flushState.numDocs;
+
+      long maxSequenceID = sequenceIDs[numDocsInRAM-1];
+      doAfterFlush();
+      
+      // Create new SegmentInfo, but do not add to our
+      // segmentInfos until deletes are flushed
+      // successfully.
+      SegmentInfo newSegment = new SegmentInfo(flushState.segmentName,
+                                   flushState.numDocs,
+                                   directory, false,
+                                   hasProx(),
+                                   getCodec());
+
+      
+      newSegment.setMinSequenceID(sequenceIDs[0]);
+      newSegment.setMaxSequenceID(maxSequenceID);
+      
+      IndexWriter.setDiagnostics(newSegment, "flush");
+      success = true;
+
+      return newSegment;
+    } finally {
+      if (!success) {
+        setAborting();
+      }
+    }
+  }
+

@@ -23,10 +23,6 @@
     merge.readers = new SegmentReader[numSegments];
     merge.readersClone = new SegmentReader[numSegments];
 
-    boolean mergeDocStores = false;
-
-    final Set<String> dss = new HashSet<String>();
-    
     // This is try/finally to make sure merger's readers are
     // closed:
     boolean success = false;
@@ -39,7 +35,7 @@
 
         // Hold onto the "live" reader; we will use this to
         // commit merged deletes
-        SegmentReader reader = merge.readers[i] = readerPool.get(info, merge.mergeDocStores,
+        SegmentReader reader = merge.readers[i] = readerPool.get(info, true,
                                                                  MERGE_READ_BUFFER_SIZE,
                                                                  -config.getReaderTermsIndexDivisor());
 
@@ -48,14 +44,6 @@
         // need readers that will not change
         SegmentReader clone = merge.readersClone[i] = (SegmentReader) reader.clone(true);
         merger.add(clone);
-
-        if (clone.hasDeletions()) {
-          mergeDocStores = true;
-        }
-        
-        if (info.getDocStoreOffset() != -1) {
-          dss.add(info.getDocStoreSegment());
-        }
 
         totDocCount += clone.numDocs();
       }
@@ -66,40 +54,12 @@
 
       merge.checkAborted(directory);
 
-      // If deletions have arrived and it has now become
-      // necessary to merge doc stores, go and open them:
-      if (mergeDocStores && !merge.mergeDocStores) {
-        merge.mergeDocStores = true;
-        synchronized(this) {
-
-          // If 1) we must now merge doc stores, and 2) at
-          // least one of the segments we are merging uses
-          // the doc store we are now writing to, we must at
-          // this point force this doc store closed (by
-          // calling flush).  If we didn't do this then the
-          // readers will attempt to open an IndexInput
-          // on files that have still-open IndexOutputs
-          // against them:
-          // nocommit
-//          if (dss.contains(docWriter.getDocStoreSegment())) {
-//            if (infoStream != null)
-//              message("now flush at mergeMiddle");
-//            doFlush(true, false);
-//          }
-        }
-
-        for(int i=0;i<numSegments;i++) {
-          merge.readersClone[i].openDocStores();
-        }
-
-        // Clear DSS
-        synchronized(this) {
-          merge.info.setDocStore(-1, null, false);
-        }
+      for(int i=0;i<numSegments;i++) {
+        merge.readersClone[i].openDocStores();
       }
 
       // This is where all the work happens:
-      mergedDocCount = merge.info.docCount = merger.merge(merge.mergeDocStores);
+      mergedDocCount = merge.info.docCount = merger.merge();
 
       // Record which codec was used to write the segment
       merge.info.setCodec(merger.getCodec());
@@ -120,11 +80,6 @@
       final boolean loadDocStores;
 
       synchronized(this) {
-        // If the doc store we are using has been closed and
-        // is in now compound format (but wasn't when we
-        // started), then we will switch to the compound
-        // format as well:
-        setMergeDocStoreIsCompoundFile(merge);
         assert merge.mergeFiles == null;
         merge.mergeFiles = merge.info.files();
         deleter.incRef(merge.mergeFiles);

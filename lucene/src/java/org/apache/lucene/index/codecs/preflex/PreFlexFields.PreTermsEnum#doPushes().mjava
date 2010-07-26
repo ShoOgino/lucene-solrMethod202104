@@ -1,0 +1,110 @@
+    // Look for seek type 1 ("push"): if the newly added
+    // suffix contains any S, we must try to seek to the
+    // corresponding E.  If we find a match, we go there;
+    // else we keep looking for additional S's in the new
+    // suffix.  This "starts" the dance, at this character
+    // position:
+    private void doPushes() throws IOException {
+
+      int upTo = newSuffixStart;
+      if (DEBUG_SURROGATES) {
+        System.out.println("  try push newSuffixStart=" + newSuffixStart + " scratchLen=" + scratchTerm.length);
+      }
+
+      while(upTo < scratchTerm.length) {
+        if (isNonBMPChar(scratchTerm.bytes, upTo) &&
+            (upTo > newSuffixStart ||
+             (upTo >= prevTerm.length ||
+              (!isNonBMPChar(prevTerm.bytes, upTo) &&
+               !isHighBMPChar(prevTerm.bytes, upTo))))) {
+
+          // A non-BMP char (4 bytes UTF8) starts here:
+          assert scratchTerm.length >= upTo + 4;
+          
+          final int savLength = scratchTerm.length;
+          scratch[0] = scratchTerm.bytes[upTo];
+          scratch[1] = scratchTerm.bytes[upTo+1];
+          scratch[2] = scratchTerm.bytes[upTo+2];
+
+          scratchTerm.bytes[upTo] = UTF8_HIGH_BMP_LEAD;
+          scratchTerm.bytes[upTo+1] = (byte) 0x80;
+          scratchTerm.bytes[upTo+2] = (byte) 0x80;
+          scratchTerm.length = upTo+3;
+
+          if (DEBUG_SURROGATES) {
+            System.out.println("    try seek 1 pos=" + upTo + " term=" + UnicodeUtil.toHexString(scratchTerm.utf8ToString()) + " " + scratchTerm.toString() + " len=" + scratchTerm.length);
+          }
+
+          // Seek "forward":
+          // TODO: more efficient seek?
+          getTermsDict().seekEnum(seekTermEnum, protoTerm.createTerm(scratchTerm));
+
+          scratchTerm.bytes[upTo] = scratch[0];
+          scratchTerm.bytes[upTo+1] = scratch[1];
+          scratchTerm.bytes[upTo+2] = scratch[2];
+          scratchTerm.length = savLength;
+
+          // Did we find a match?
+          final Term t2 = seekTermEnum.term();
+            
+          if (DEBUG_SURROGATES) {
+            if (t2 == null) {
+              System.out.println("      hit term=null");
+            } else {
+              System.out.println("      hit term=" + UnicodeUtil.toHexString(t2.text()) + " " + (t2==null? null:t2.bytes()));
+            }
+          }
+
+          // Since this was a seek "forward", we could hit
+          // EOF or a different field:
+          boolean matches;
+
+          if (t2 != null && t2.field() == fieldInfo.name) {
+            final BytesRef b2 = t2.bytes();
+            assert b2.offset == 0;
+            if (b2.length >= upTo+3 && isHighBMPChar(b2.bytes, upTo)) {
+              matches = true;
+              for(int i=0;i<upTo;i++) {
+                if (scratchTerm.bytes[i] != b2.bytes[i]) {
+                  matches = false;
+                  break;
+                }
+              }              
+                
+            } else {
+              matches = false;
+            }
+          } else {
+            matches = false;
+          }
+
+          if (matches) {
+
+            if (DEBUG_SURROGATES) {
+              System.out.println("      matches!");
+            }
+
+            // OK seek "back"
+            // TODO: more efficient seek?
+            getTermsDict().seekEnum(termEnum, seekTermEnum.term());
+
+            scratchTerm.copy(seekTermEnum.term().bytes());
+
+            // +3 because we don't need to check the char
+            // at upTo: we know it's > BMP
+            upTo += 3;
+
+            // NOTE: we keep iterating, now, since this
+            // can easily "recurse".  Ie, after seeking
+            // forward at a certain char position, we may
+            // find another surrogate in our [new] suffix
+            // and must then do another seek (recurse)
+          } else {
+            upTo++;
+          }
+        } else {
+          upTo++;
+        }
+      }
+    }
+

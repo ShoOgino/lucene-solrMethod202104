@@ -1,10 +1,10 @@
   long updateDocument(final Term delTerm, final Document doc, final Analyzer analyzer)
       throws CorruptIndexException, IOException {
 
-    long seqID = threadPool.executePerThread(this, doc,
-        new DocumentsWriterThreadPool.PerThreadTask<Long>() {
+    UpdateResult result = threadPool.executePerThread(this, doc,
+        new DocumentsWriterThreadPool.PerThreadTask<UpdateResult>() {
           @Override
-          public Long process(final DocumentsWriterPerThread perThread) throws IOException {
+          public UpdateResult process(final DocumentsWriterPerThread perThread) throws IOException {
             long perThreadRAMUsedBeforeAdd = perThread.numBytesUsed;
             perThread.addDocument(doc, analyzer);
 
@@ -25,15 +25,22 @@
               sequenceIDLock.unlock();
             }
 
+            UpdateResult result = new UpdateResult(sequenceID);
             if (finishAddDocument(perThread, perThreadRAMUsedBeforeAdd)) {
+              result.flushed = true;
               super.clearThreadBindings();
             }
-            return sequenceID;
+            return result;
           }
         });
+        
+    if (result == null) {
+      return -1;
+    }
     
-    indexWriter.maybeMerge();
-    
-    return seqID;
+    if (result.flushed) {
+      indexWriter.maybeMerge();
+    }
+    return result.sequenceID;
   }
 

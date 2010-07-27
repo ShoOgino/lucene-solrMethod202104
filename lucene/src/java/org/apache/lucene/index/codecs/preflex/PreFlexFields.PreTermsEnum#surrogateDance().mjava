@@ -1,0 +1,93 @@
+    private void surrogateDance() throws IOException {
+
+      if (!unicodeSortOrder) {
+        return;
+      }
+
+      // We are invoked after TIS.next() (by UTF16 order) to
+      // possibly seek to a different "next" (by unicode
+      // order) term.
+
+      // We scan only the "delta" from the last term to the
+      // current term, in UTF8 bytes.  We look at 1) the bytes
+      // stripped from the prior term, and then 2) the bytes
+      // appended to that prior term's prefix.
+    
+      // We don't care about specific UTF8 sequences, just
+      // the "category" of the UTF16 character.  Category S
+      // is a high/low surrogate pair (it non-BMP).
+      // Category E is any BMP char > UNI_SUR_LOW_END (and <
+      // U+FFFF). Category A is the rest (any unicode char
+      // <= UNI_SUR_HIGH_START).
+
+      // The core issue is that pre-flex indices sort the
+      // characters as ASE, while flex must sort as AES.  So
+      // when scanning, when we hit S, we must 1) seek
+      // forward to E and enum the terms there, then 2) seek
+      // back to S and enum all terms there, then 3) seek to
+      // after E.  Three different seek points (1, 2, 3).
+    
+      // We can easily detect S in UTF8: if a byte has
+      // prefix 11110 (0xf0), then that byte and the
+      // following 3 bytes encode a single unicode codepoint
+      // in S.  Similary,we can detect E: if a byte has
+      // prefix 1110111 (0xee), then that byte and the
+      // following 2 bytes encode a single unicode codepoint
+      // in E.
+
+      // Note that this is really a recursive process --
+      // maybe the char at pos 2 needs to dance, but any
+      // point in its dance, suddenly pos 4 needs to dance
+      // so you must finish pos 4 before returning to pos
+      // 2.  But then during pos 4's dance maybe pos 7 needs
+      // to dance, etc.  However, despite being recursive,
+      // we don't need to hold any state because the state
+      // can always be derived by looking at prior term &
+      // current term.
+
+      // TODO: can we avoid this copy?
+      if (termEnum.term() == null || termEnum.term().field() != fieldInfo.name) {
+        scratchTerm.length = 0;
+      } else {
+        scratchTerm.copy(termEnum.term().bytes());
+      }
+      
+      if (DEBUG_SURROGATES) {
+        System.out.println("  dance");
+        System.out.println("    prev=" + UnicodeUtil.toHexString(prevTerm.utf8ToString()));
+        System.out.println("         " + prevTerm.toString());
+        System.out.println("    term=" + UnicodeUtil.toHexString(scratchTerm.utf8ToString()));
+        System.out.println("         " + scratchTerm.toString());
+      }
+
+      // This code assumes TermInfosReader/SegmentTermEnum
+      // always use BytesRef.offset == 0
+      assert prevTerm.offset == 0;
+      assert scratchTerm.offset == 0;
+
+      // Need to loop here because we may need to do multiple
+      // pops, and possibly a continue in the end, ie:
+      //
+      //  cont
+      //  pop, cont
+      //  pop, pop, cont
+      //  <nothing>
+      //
+
+      while(true) {
+        if (doContinue()) {
+          break;
+        } else {
+          if (!doPop()) {
+            break;
+          }
+        }
+      }
+
+      if (DEBUG_SURROGATES) {
+        System.out.println("  finish bmp ends");
+      }
+
+      doPushes();
+    }
+

@@ -1,0 +1,81 @@
+    // Swap in S, in place of E:
+    private boolean seekToNonBMP(SegmentTermEnum te, BytesRef term, int pos) throws IOException {
+      final int savLength = term.length;
+
+      assert term.offset == 0;
+
+      // The 3 bytes starting at downTo make up 1
+      // unicode character:
+      assert isHighBMPChar(term.bytes, pos);
+
+      // NOTE: we cannot make this assert, because
+      // AutomatonQuery legitimately sends us malformed UTF8
+      // (eg the UTF8 bytes with just 0xee)
+      // assert term.length >= pos + 3: "term.length=" + term.length + " pos+3=" + (pos+3) + " byte=" + Integer.toHexString(term.bytes[pos]) + " term=" + term.toString();
+
+      // Save the bytes && length, since we need to
+      // restore this if seek "back" finds no matching
+      // terms
+      if (term.bytes.length < 4+pos) {
+        term.grow(4+pos);
+      }
+
+      scratch[0] = term.bytes[pos];
+      scratch[1] = term.bytes[pos+1];
+      scratch[2] = term.bytes[pos+2];
+
+      term.bytes[pos] = (byte) 0xf0;
+      term.bytes[pos+1] = (byte) 0x90;
+      term.bytes[pos+2] = (byte) 0x80;
+      term.bytes[pos+3] = (byte) 0x80;
+      term.length = 4+pos;
+
+      if (DEBUG_SURROGATES) {
+        System.out.println("      try seek term=" + UnicodeUtil.toHexString(term.utf8ToString()));
+      }
+
+      // Seek "back":
+      getTermsDict().seekEnum(te, protoTerm.createTerm(term));
+
+      // Test if the term we seek'd to in fact found a
+      // surrogate pair at the same position as the E:
+      Term t2 = te.term();
+
+      // Cannot be null (or move to next field) because at
+      // "worst" it'd seek to the same term we are on now,
+      // unless we are being called from seek
+      if (t2 == null || t2.field() != fieldInfo.name) {
+        return false;
+      }
+
+      if (DEBUG_SURROGATES) {
+        System.out.println("      got term=" + UnicodeUtil.toHexString(t2.text()));
+      }
+
+      // Now test if prefix is identical and we found
+      // a non-BMP char at the same position:
+      BytesRef b2 = t2.bytes();
+      assert b2.offset == 0;
+
+      boolean matches;
+      if (b2.length >= term.length && isNonBMPChar(b2.bytes, pos)) {
+        matches = true;
+        for(int i=0;i<pos;i++) {
+          if (term.bytes[i] != b2.bytes[i]) {
+            matches = false;
+            break;
+          }
+        }              
+      } else {
+        matches = false;
+      }
+
+      // Restore term:
+      term.length = savLength;
+      term.bytes[pos] = scratch[0];
+      term.bytes[pos+1] = scratch[1];
+      term.bytes[pos+2] = scratch[2];
+
+      return matches;
+    }
+

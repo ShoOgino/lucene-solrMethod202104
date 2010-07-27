@@ -1,0 +1,187 @@
+  /**
+   * Make sure if modifier tries to commit but hits disk full that modifier
+   * remains consistent and usable. Similar to TestIndexReader.testDiskFull().
+   */
+  private void doTestOperationsOnDiskFull(boolean updates) throws IOException {
+
+    Term searchTerm = new Term("content", "aaa");
+    int START_COUNT = 157;
+    int END_COUNT = 144;
+
+    // First build up a starting index:
+    MockRAMDirectory startDir = new MockRAMDirectory();
+    IndexWriter writer = new IndexWriter(startDir, new IndexWriterConfig(TEST_VERSION_CURRENT, new MockAnalyzer(MockTokenizer.WHITESPACE, false)));
+    for (int i = 0; i < 157; i++) {
+      Document d = new Document();
+      d.add(new Field("id", Integer.toString(i), Field.Store.YES,
+                      Field.Index.NOT_ANALYZED));
+      d.add(new Field("content", "aaa " + i, Field.Store.NO,
+                      Field.Index.ANALYZED));
+      writer.addDocument(d);
+    }
+    writer.close();
+
+    long diskUsage = startDir.sizeInBytes();
+    long diskFree = diskUsage + 10;
+
+    IOException err = null;
+
+    boolean done = false;
+
+    // Iterate w/ ever increasing free disk space:
+    while (!done) {
+      MockRAMDirectory dir = new MockRAMDirectory(startDir);
+      dir.setPreventDoubleWrite(false);
+      IndexWriter modifier = new IndexWriter(dir, new IndexWriterConfig(
+          TEST_VERSION_CURRENT, new MockAnalyzer(MockTokenizer.WHITESPACE, false)).setMaxBufferedDocs(1000)
+          .setMaxBufferedDeleteTerms(1000));
+
+      // For each disk size, first try to commit against
+      // dir that will hit random IOExceptions & disk
+      // full; after, give it infinite disk space & turn
+      // off random IOExceptions & retry w/ same reader:
+      boolean success = false;
+
+      for (int x = 0; x < 2; x++) {
+
+        double rate = 0.1;
+        double diskRatio = ((double)diskFree) / diskUsage;
+        long thisDiskFree;
+        String testName;
+
+        if (0 == x) {
+          thisDiskFree = diskFree;
+          if (diskRatio >= 2.0) {
+            rate /= 2;
+          }
+          if (diskRatio >= 4.0) {
+            rate /= 2;
+          }
+          if (diskRatio >= 6.0) {
+            rate = 0.0;
+          }
+          if (VERBOSE) {
+            System.out.println("\ncycle: " + diskFree + " bytes");
+          }
+          testName = "disk full during reader.close() @ " + thisDiskFree
+            + " bytes";
+        } else {
+          thisDiskFree = 0;
+          rate = 0.0;
+          if (VERBOSE) {
+            System.out.println("\ncycle: same writer: unlimited disk space");
+          }
+          testName = "reader re-use after disk full";
+        }
+
+        dir.setMaxSizeInBytes(thisDiskFree);
+        dir.setRandomIOExceptionRate(rate, diskFree);
+
+        try {
+          if (0 == x) {
+            int docId = 12;
+            for (int i = 0; i < 13; i++) {
+              if (updates) {
+                Document d = new Document();
+                d.add(new Field("id", Integer.toString(i), Field.Store.YES,
+                                Field.Index.NOT_ANALYZED));
+                d.add(new Field("content", "bbb " + i, Field.Store.NO,
+                                Field.Index.ANALYZED));
+                modifier.updateDocument(new Term("id", Integer.toString(docId)), d);
+              } else { // deletes
+                modifier.deleteDocuments(new Term("id", Integer.toString(docId)));
+                // modifier.setNorm(docId, "contents", (float)2.0);
+              }
+              docId += 12;
+            }
+          }
+          modifier.close();
+          success = true;
+          if (0 == x) {
+            done = true;
+          }
+        }
+        catch (IOException e) {
+          if (VERBOSE) {
+            System.out.println("  hit IOException: " + e);
+            e.printStackTrace(System.out);
+          }
+          err = e;
+          if (1 == x) {
+            e.printStackTrace();
+            fail(testName + " hit IOException after disk space was freed up");
+          }
+        }
+
+        // If the close() succeeded, make sure there are
+        // no unreferenced files.
+        if (success)
+          TestIndexWriter.assertNoUnreferencedFiles(dir, "after writer.close");
+
+        // Finally, verify index is not corrupt, and, if
+        // we succeeded, we see all docs changed, and if
+        // we failed, we see either all docs or no docs
+        // changed (transactional semantics):
+        IndexReader newReader = null;
+        try {
+          newReader = IndexReader.open(dir, true);
+        }
+        catch (IOException e) {
+          e.printStackTrace();
+          fail(testName
+               + ":exception when creating IndexReader after disk full during close: "
+               + e);
+        }
+
+        IndexSearcher searcher = new IndexSearcher(newReader);
+        ScoreDoc[] hits = null;
+        try {
+          hits = searcher.search(new TermQuery(searchTerm), null, 1000).scoreDocs;
+        }
+        catch (IOException e) {
+          e.printStackTrace();
+          fail(testName + ": exception when searching: " + e);
+        }
+        int result2 = hits.length;
+        if (success) {
+          if (x == 0 && result2 != END_COUNT) {
+            fail(testName
+                 + ": method did not throw exception but hits.length for search on term 'aaa' is "
+                 + result2 + " instead of expected " + END_COUNT);
+          } else if (x == 1 && result2 != START_COUNT && result2 != END_COUNT) {
+            // It's possible that the first exception was
+            // "recoverable" wrt pending deletes, in which
+            // case the pending deletes are retained and
+            // then re-flushing (with plenty of disk
+            // space) will succeed in flushing the
+            // deletes:
+            fail(testName
+                 + ": method did not throw exception but hits.length for search on term 'aaa' is "
+                 + result2 + " instead of expected " + START_COUNT + " or " + END_COUNT);
+          }
+        } else {
+          // On hitting exception we still may have added
+          // all docs:
+          if (result2 != START_COUNT && result2 != END_COUNT) {
+            err.printStackTrace();
+            fail(testName
+                 + ": method did throw exception but hits.length for search on term 'aaa' is "
+                 + result2 + " instead of expected " + START_COUNT + " or " + END_COUNT);
+          }
+        }
+
+        searcher.close();
+        newReader.close();
+
+        if (result2 == END_COUNT) {
+          break;
+        }
+      }
+
+      dir.close();
+
+      // Try again with 10 more bytes of free space:
+      diskFree += 10;
+    }
+  }
+

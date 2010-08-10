@@ -1,6 +1,10 @@
     /** Remove all our references to readers, and commits
      *  any pending changes. */
     synchronized void close() throws IOException {
+      // We invoke deleter.checkpoint below, so we must be
+      // sync'd on IW:
+      assert Thread.holdsLock(IndexWriter.this);
+
       Iterator<Map.Entry<SegmentInfo,SegmentReader>> iter = readerMap.entrySet().iterator();
       while (iter.hasNext()) {
         
@@ -9,16 +13,12 @@
         SegmentReader sr = ent.getValue();
         if (sr.hasChanges) {
           assert infoIsLive(sr.getSegmentInfo());
-          sr.startCommit();
-          boolean success = false;
-          try {
-            sr.doCommit(null);
-            success = true;
-          } finally {
-            if (!success) {
-              sr.rollbackCommit();
-            }
-          }
+          sr.doCommit(null);
+
+          // Must checkpoint w/ deleter, because this
+          // segment reader will have created new _X_N.del
+          // file.
+          deleter.checkpoint(segmentInfos, false);
         }
 
         iter.remove();

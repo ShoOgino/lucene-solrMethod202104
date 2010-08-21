@@ -1,0 +1,121 @@
+  @Override
+  public void collect(int doc) throws IOException {
+    matches++;
+    filler.fillValue(doc);
+    SearchGroup group = groupMap.get(mval);
+    if (group == null) {
+      int num = groupMap.size();
+      if (groupMap.size() < nGroups) {
+        SearchGroup sg = new SearchGroup();
+        SortField[] sortGroupFields = groupSort.getSort();
+        sg.sortGroupComparators = new FieldComparator[sortGroupFields.length];
+        sg.sortGroupReversed = new int[sortGroupFields.length];
+        constructComparators(sg.sortGroupComparators, sg.sortGroupReversed, sortGroupFields, 1);
+
+        sg.groupValue = mval.duplicate();
+        sg.comparatorSlot = num++;
+        sg.matches = 1;
+        sg.topDoc = docBase + doc;
+        // sg.topDocScore = scorer.score();
+        for (FieldComparator fc : comparators)
+          fc.copy(sg.comparatorSlot, doc);
+        for (FieldComparator fc : sg.sortGroupComparators) {
+          fc.copy(0, doc);
+          fc.setBottom(0);
+        }
+        groupMap.put(sg.groupValue, sg);
+        return;
+      }
+
+      if (orderedGroups == null) {
+        buildSet();
+      }
+
+      SearchGroup leastSignificantGroup = orderedGroups.last();
+      for (int i = 0;; i++) {
+        final int c = leastSignificantGroup.sortGroupReversed[i] * leastSignificantGroup.sortGroupComparators[i].compareBottom(doc);
+        if (c < 0) {
+          // Definitely not competitive.
+          return;
+        } else if (c > 0) {
+          // Definitely competitive.
+          break;
+        } else if (i == leastSignificantGroup.sortGroupComparators.length - 1) {
+          // Here c=0. If we're at the last comparator, this doc is not
+          // competitive, since docs are visited in doc Id order, which means
+          // this doc cannot compete with any other document in the queue.
+          return;
+        }
+      }
+
+      // remove current smallest group
+      SearchGroup smallest = orderedGroups.pollLast();
+      groupMap.remove(smallest.groupValue);
+
+      // reuse the removed SearchGroup
+      smallest.groupValue.copy(mval);
+      smallest.matches = 1;
+      smallest.topDoc = docBase + doc;
+      // smallest.topDocScore = scorer.score();
+      for (FieldComparator fc : comparators)
+        fc.copy(smallest.comparatorSlot, doc);
+      for (FieldComparator fc : smallest.sortGroupComparators) {
+        fc.copy(0, doc);
+        fc.setBottom(0);
+      }
+
+      groupMap.put(smallest.groupValue, smallest);
+      orderedGroups.add(smallest);
+
+      for (FieldComparator fc : comparators)
+        fc.setBottom(orderedGroups.last().comparatorSlot);
+      for (FieldComparator fc : smallest.sortGroupComparators)
+        fc.setBottom(0);
+
+      return;
+    }
+
+    //
+    // update existing group
+    //
+
+    group.matches++; // TODO: these aren't valid if the group is every discarded then re-added.  keep track if there have been discards?
+
+    for (int i = 0;; i++) {
+      FieldComparator fc = group.sortGroupComparators[i];
+
+      final int c = group.sortGroupReversed[i] * fc.compareBottom(doc);
+      if (c < 0) {
+        // Definitely not competitive.
+        return;
+      } else if (c > 0) {
+        // Definitely competitive.
+        // Set remaining comparators
+        for (int j = 0; j < group.sortGroupComparators.length; j++) {
+          group.sortGroupComparators[j].copy(0, doc);
+          group.sortGroupComparators[j].setBottom(0);
+        }
+        for (FieldComparator comparator : comparators) comparator.copy(spareSlot, doc);
+        break;
+      } else if (i == group.sortGroupComparators.length - 1) {
+        // Here c=0. If we're at the last comparator, this doc is not
+        // competitive, since docs are visited in doc Id order, which means
+        // this doc cannot compete with any other document in the queue.
+        return;
+      }
+    }
+
+    // remove before updating the group since lookup is done via comparators
+    // TODO: optimize this
+    if (orderedGroups != null)
+      orderedGroups.remove(group);
+
+    group.topDoc = docBase + doc;
+    // group.topDocScore = scorer.score();
+    int tmp = spareSlot; spareSlot = group.comparatorSlot; group.comparatorSlot=tmp;  // swap slots
+
+    // re-add the changed group
+    if (orderedGroups != null)
+      orderedGroups.add(group);
+  }
+

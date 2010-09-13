@@ -1,0 +1,48 @@
+  /**
+   * Recursive function to do all the pivots
+   */
+  protected List<NamedList<Object>> doPivots( NamedList<Integer> superFacets, String field, String subField, Deque<String> fnames, ResponseBuilder rb, DocSet docs, int minMatch ) throws IOException
+  {
+    SolrIndexSearcher searcher = rb.req.getSearcher();
+    // TODO: optimize to avoid converting to an external string and then having to convert back to internal below
+    FieldType ftype = null;
+
+ //   SimpleFacets sf = getFacetImplementation(rb.req, docs, rb.req.getParams());
+    String nextField = fnames.poll();
+
+    List<NamedList<Object>> values = new ArrayList<NamedList<Object>>( superFacets.size() );
+    for (Map.Entry<String, Integer> kv : superFacets) {
+      // Only sub-facet if parent facet has positive count - still may not be any values for the sub-field though
+      if (kv.getValue() > minMatch ) {  
+        SimpleOrderedMap<Object> pivot = new SimpleOrderedMap<Object>();
+        pivot.add( "field", field );
+        pivot.add( "value", kv.getKey() );
+        pivot.add( "count", kv.getValue() );
+        
+        if( subField == null ) {
+          values.add( pivot );
+        }
+        else {
+          String s = kv.getKey();
+          if( ftype == null ) {
+            ftype = searcher.getSchema().getField(field).getType();
+          }
+          
+          Query query = new TermQuery(new Term(field, ftype.toInternal(s)));
+          DocSet subset = searcher.getDocSet(query, docs);
+          SimpleFacets sf = getFacetImplementation(rb.req, subset, rb.req.getParams());
+          
+          NamedList<Integer> nl = sf.getTermCounts(subField);
+          if (nl.size() > minMatch ) {
+            pivot.add( "pivot", doPivots( nl, subField, nextField, fnames, rb, subset, minMatch ) );
+            values.add( pivot ); // only add response if there are some counts
+          }
+        }
+      }
+    }
+    
+    // put the field back on the list
+    fnames.push( nextField );
+    return values;
+  }
+

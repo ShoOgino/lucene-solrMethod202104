@@ -9,6 +9,7 @@
 
     boolean needScores = (cmd.getFlags() & GET_SCORES) != 0;
     boolean getDocSet = (cmd.getFlags() & GET_DOCSET) != 0;
+    boolean getDocList = (cmd.getFlags() & GET_DOCLIST) != 0; // doclist needed for debugging or highlighting
     Query query = QueryUtils.makeQueryable(cmd.getQuery());
 
     final Filter luceneFilter = filter==null ? null : filter.getTopFilter();
@@ -73,6 +74,9 @@
     // TODO: optionally cache docs and feed them back through rather than re-searching
     search(query, luceneFilter, MultiCollector.wrap(phase2Collectors));
 
+    Set<Integer> idSet = new LinkedHashSet<Integer>();  // used for tracking unique docs when we need a doclist
+    int maxMatches = 0;
+    float maxScore = Float.NEGATIVE_INFINITY;
 
     NamedList grouped = new SimpleOrderedMap();
     for (int cmdnum=0; cmdnum<cmd.groupCommands.size(); cmdnum++) {
@@ -86,7 +90,9 @@
       NamedList groupResult = new SimpleOrderedMap();
       grouped.add(groupCommand.key, groupResult);  // grouped={ key={
 
-      groupResult.add("matches", collector.getMatches());
+      int this_matches = collector.getMatches();
+      groupResult.add("matches", this_matches);
+      maxMatches = Math.max(maxMatches, this_matches);
 
       List groupList = new ArrayList();
       groupResult.add("groups", groupList);        // grouped={ key={ groups=[
@@ -110,9 +116,15 @@
             scores[i] = topDocs.scoreDocs[i].score;
         }
 
-        DocSlice docs = new DocSlice(0, ids.length, ids, scores, topDocs.totalHits, topDocs.getMaxScore());
+        float score = topDocs.getMaxScore();
+        maxScore = Math.max(maxScore, score);
+        DocSlice docs = new DocSlice(0, ids.length, ids, scores, topDocs.totalHits, score);
         nl.add("doclist", docs);
 
+        if (getDocList) {
+          for (int id : ids)
+            idSet.add(id);
+        }
 
         /*** values from stage 1
          DocSlice docs = new DocSlice(0, 1, new int[] {group.topDoc}, null, 1, 0);
@@ -126,8 +138,19 @@
          groupResult.add(nl);
          ***/
       }
-      qr.groupedResults = grouped;
-
     }
+
+    qr.groupedResults = grouped;    
+
+    if (getDocList) {
+      int sz = idSet.size();
+      int[] ids = new int[sz];
+      int idx = 0;
+      for (int val : idSet) {
+        ids[idx++] = val;
+      }
+      qr.docListAndSet.docList = new DocSlice(0, sz, ids, null, maxMatches, maxScore);
+    }
+
   }
 

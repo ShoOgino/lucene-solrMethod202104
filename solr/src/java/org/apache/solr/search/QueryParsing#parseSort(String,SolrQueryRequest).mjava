@@ -1,0 +1,141 @@
+  /**
+   * Returns null if the sortSpec is the standard sort desc.
+   * <p/>
+   * <p>
+   * The form of the sort specification string currently parsed is:
+   * </p>
+   * <pre>>
+   * SortSpec ::= SingleSort [, SingleSort]*
+   * SingleSort ::= <fieldname> SortDirection
+   * SortDirection ::= top | desc | bottom | asc
+   * </pre>
+   * Examples:
+   * <pre>
+   *   score desc               #normal sort by score (will return null)
+   *   weight bottom            #sort by weight ascending
+   *   weight desc              #sort by weight descending
+   *   height desc,weight desc  #sort by height descending, and use weight descending to break any ties
+   *   height desc,weight asc   #sort by height descending, using weight ascending as a tiebreaker
+   * </pre>
+   */
+  public static Sort parseSort(String sortSpec, SolrQueryRequest req) {
+    if (sortSpec == null || sortSpec.length() == 0) return null;
+    List<SortField> lst = new ArrayList<SortField>(4);
+
+    try {
+
+      StrParser sp = new StrParser(sortSpec);
+      while (sp.pos < sp.end) {
+        sp.eatws();
+
+        int start = sp.pos;
+
+        String field = sp.getId(null);
+        ValueSource vs = null;
+
+        if (field == null || sp.ch() != ' ') {
+          // let's try it as a function instead
+          String funcStr = sp.val.substring(start);
+
+          QParser parser = QParser.getParser(funcStr, FunctionQParserPlugin.NAME, req);
+          Query q = null;
+          if (parser instanceof FunctionQParser) {
+            FunctionQParser fparser = (FunctionQParser)parser;
+            fparser.setParseMultipleSources(false);
+            fparser.setParseToEnd(false);
+
+            q = fparser.getQuery();
+
+            if (fparser.localParams != null) {
+              if (fparser.valFollowedParams) {
+                // need to find the end of the function query via the string parser
+                int leftOver = fparser.sp.end - fparser.sp.pos;
+                sp.pos = sp.end - leftOver;   // reset our parser to the same amount of leftover
+              } else {
+                // the value was via the "v" param in localParams, so we need to find
+                // the end of the local params themselves to pick up where we left off
+                sp.pos = start + fparser.localParamsEnd;
+              }
+            } else {
+              // need to find the end of the function query via the string parser
+              int leftOver = fparser.sp.end - fparser.sp.pos;
+              sp.pos = sp.end - leftOver;   // reset our parser to the same amount of leftover
+            }
+          } else {
+            // A QParser that's not for function queries.
+            // It must have been specified via local params.
+            q = parser.getQuery();
+
+            assert parser.getLocalParams() != null;
+            sp.pos = start + parser.localParamsEnd;
+          }
+
+          // OK, now we have our query.
+          if (q instanceof FunctionQuery) {
+            vs = ((FunctionQuery)q).getValueSource();
+          } else {
+            vs = new QueryValueSource(q, 0.0f);
+          }
+        }
+
+        // now we have our field or value source, so find the sort order
+        String order = sp.getId("Expected sort order asc/desc");
+        boolean top;
+        if ("desc".equals(order) || "top".equals(order)) {
+          top = true;
+        } else if ("asc".equals(order) || "bottom".equals(order)) {
+          top = false;
+        } else {
+          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Unknown sort order: " + order);
+        }
+
+        if (vs == null) {
+          //we got the order, now deal with the sort
+          if ("score".equals(field)) {
+            if (top) {
+              lst.add(SortField.FIELD_SCORE);
+            } else {
+              lst.add(new SortField(null, SortField.SCORE, true));
+            }
+          } else if (DOCID.equals(field)) {
+            lst.add(new SortField(null, SortField.DOC, top));
+          } else {
+            //See if we have a Field first, then see if it is a function, then throw an exception
+            // getField could throw an exception if the name isn't found
+            SchemaField sf = req.getSchema().getField(field);
+
+            // TODO: remove this - it should be up to the FieldType
+            if (!sf.indexed()) {
+              throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "can not sort on unindexed field: " + field);
+            }
+
+            lst.add(sf.getType().getSortField(sf, top));
+
+
+          }
+        } else {
+          lst.add(vs.getSortField(top));
+        }
+
+        sp.eatws();
+        if (sp.pos < sp.end) {
+          sp.expect(",");
+        }
+
+      }
+
+    } catch (ParseException e) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "error in sort: " + sortSpec, e);
+    } catch (IOException e) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "error in sort: " + sortSpec, e);
+    }
+
+
+    // normalize a sort on score desc to null
+    if (lst.size()==1 && lst.get(0) == SortField.FIELD_SCORE) {
+      return null;
+    }
+
+    return new Sort((SortField[]) lst.toArray(new SortField[lst.size()]));
+  }
+

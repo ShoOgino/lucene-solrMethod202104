@@ -1,0 +1,57 @@
+  private Collection<ScoreTerm> suggestSimilar(Term term, int numSug, 
+      IndexReader ir, int docfreq, int editDistance, float accuracy) throws IOException {
+    
+    FuzzyTermsEnum e = new FuzzyTermsEnum(ir, term, editDistance, Math.max(minPrefix, editDistance-1));
+    final PriorityQueue<ScoreTerm> stQueue = new PriorityQueue<ScoreTerm>();
+    
+    BytesRef queryTerm = new BytesRef(term.text());
+    BytesRef candidateTerm;
+    ScoreTerm st = new ScoreTerm();
+    MultiTermQuery.BoostAttribute boostAtt =
+      e.attributes().addAttribute(MultiTermQuery.BoostAttribute.class);
+    while ((candidateTerm = e.next()) != null) {
+      final float boost = boostAtt.getBoost();
+      // ignore uncompetitive hits
+      if (stQueue.size() >= numSug && boost <= stQueue.peek().boost)
+        continue;
+      
+      // ignore exact match of the same term
+      if (queryTerm.bytesEquals(candidateTerm))
+        continue;
+      
+      int df = e.docFreq();
+      
+      // check docFreq if required
+      if (df <= docfreq)
+        continue;
+      
+      final float score;
+      final String termAsString;
+      if (distance == INTERNAL_LEVENSHTEIN) {
+        // delay creating strings until the end
+        termAsString = null;
+        // undo FuzzyTermsEnum's scale factor for a real scaled lev score
+        score = boost / e.getScaleFactor() + e.getMinSimilarity();
+      } else {
+        termAsString = candidateTerm.utf8ToString();
+        score = distance.getDistance(term.text(), termAsString);
+      }
+      
+      if (score < accuracy)
+        continue;
+      
+      // add new entry in PQ
+      st.term = new BytesRef(candidateTerm);
+      st.boost = boost;
+      st.docfreq = df;
+      st.termAsString = termAsString;
+      st.score = score;
+      stQueue.offer(st);
+      // possibly drop entries from queue
+      st = (stQueue.size() > numSug) ? stQueue.poll() : new ScoreTerm();
+      boostAtt.setMaxNonCompetitiveBoost((stQueue.size() >= numSug) ? stQueue.peek().boost : Float.NEGATIVE_INFINITY);
+    }
+      
+    return stQueue;
+  }
+

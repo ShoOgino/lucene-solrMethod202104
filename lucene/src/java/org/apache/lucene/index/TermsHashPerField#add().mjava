@@ -2,105 +2,39 @@
   @Override
   void add() throws IOException {
 
-    assert !postingsCompacted;
-
     // We are first in the chain so we must "intern" the
     // term text into textStart address
-
     // Get the text & hash of this term.
-    int code = termAtt.toBytesRef(utf8);
-
-    int hashPos = code & postingsHashMask;
-
-    // Locate RawPostingList in hash
-    int termID = postingsHash[hashPos];
-
-    if (termID != -1 && !postingEquals(termID)) {
-      // Conflict: keep searching different locations in
-      // the hash table.
-      final int inc = ((code>>8)+code)|1;
-      do {
-        code += inc;
-        hashPos = code & postingsHashMask;
-        termID = postingsHash[hashPos];
-      } while (termID != -1 && !postingEquals(termID));
-    }
-
-    if (termID == -1) {
-
-      // First time we are seeing this token since we last
-      // flushed the hash.
-      final int textLen2 = 2+utf8.length;
-      if (textLen2 + bytePool.byteUpto > DocumentsWriter.BYTE_BLOCK_SIZE) {
-        // Not enough room in current block
-
-        if (utf8.length > DocumentsWriter.MAX_TERM_LENGTH_UTF8) {
-          // Just skip this term, to remain as robust as
-          // possible during indexing.  A TokenFilter
-          // can be inserted into the analyzer chain if
-          // other behavior is wanted (pruning the term
-          // to a prefix, throwing an exception, etc).
-          if (docState.maxTermPrefix == null) {
-            final int saved = utf8.length;
-            try {
-              utf8.length = Math.min(30, DocumentsWriter.MAX_TERM_LENGTH_UTF8);
-              docState.maxTermPrefix = utf8.toString();
-            } finally {
-              utf8.length = saved;
-            }
-          }
-
-          consumer.skippingLongTerm();
-          return;
+    int termID;
+    try{
+       termID = bytesHash.add(termBytesRef, termAtt.toBytesRef(termBytesRef));
+    }catch (MaxBytesLengthExceededException e) {
+      // Not enough room in current block
+      // Just skip this term, to remain as robust as
+      // possible during indexing.  A TokenFilter
+      // can be inserted into the analyzer chain if
+      // other behavior is wanted (pruning the term
+      // to a prefix, throwing an exception, etc).
+      if (docState.maxTermPrefix == null) {
+        final int saved = termBytesRef.length;
+        try {
+          termBytesRef.length = Math.min(30, DocumentsWriter.MAX_TERM_LENGTH_UTF8);
+          docState.maxTermPrefix = termBytesRef.toString();
+        } finally {
+          termBytesRef.length = saved;
         }
-        bytePool.nextBuffer();
       }
-
-      // New posting
-      termID = numPostings++;
-      if (termID >= postingsArray.size) {
-        growParallelPostingsArray();
-      }
-
-      assert termID != -1;
-      assert postingsHash[hashPos] == -1;
-
-      postingsHash[hashPos] = termID;
-
-      final byte[] text = bytePool.buffer;
-      final int textUpto = bytePool.byteUpto;
-      postingsArray.textStarts[termID] = textUpto + bytePool.byteOffset;
-
-      // We first encode the length, followed by the UTF8
-      // bytes.  Length is encoded as vInt, but will consume
-      // 1 or 2 bytes at most (we reject too-long terms,
-      // above).
-
-      // encode length @ start of bytes
-      if (utf8.length < 128) {
-        // 1 byte to store length
-        text[textUpto] = (byte) utf8.length;
-        bytePool.byteUpto += utf8.length + 1;
-        System.arraycopy(utf8.bytes, 0, text, textUpto+1, utf8.length);
-      } else {
-        // 2 byte to store length
-        text[textUpto] = (byte) (0x80 | (utf8.length & 0x7f));
-        text[textUpto+1] = (byte) ((utf8.length>>7) & 0xff);
-        bytePool.byteUpto += utf8.length + 2;
-        System.arraycopy(utf8.bytes, 0, text, textUpto+2, utf8.length);
-      }
-
-      if (numPostings == postingsHashHalfSize) {
-        rehashPostings(2*postingsHashSize);
-        bytesUsed(2*numPostings * RamUsageEstimator.NUM_BYTES_INT);
-      }
-
+      consumer.skippingLongTerm();
+      return;
+    }
+    if (termID >= 0) {// New posting
+      bytesHash.byteStart(termID);
       // Init stream slices
       if (numPostingInt + intPool.intUpto > DocumentsWriter.INT_BLOCK_SIZE) {
         intPool.nextBuffer();
       }
 
-      if (DocumentsWriter.BYTE_BLOCK_SIZE - bytePool.byteUpto < numPostingInt*ByteBlockPool.FIRST_LEVEL_SIZE) {
+      if (ByteBlockPool.BYTE_BLOCK_SIZE - bytePool.byteUpto < numPostingInt*ByteBlockPool.FIRST_LEVEL_SIZE) {
         bytePool.nextBuffer();
       }
 
@@ -119,6 +53,7 @@
       consumer.newTerm(termID);
 
     } else {
+      termID = (-termID)-1;
       final int intStart = postingsArray.intStarts[termID];
       intUptos = intPool.buffers[intStart >> DocumentsWriter.INT_BLOCK_SHIFT];
       intUptoStart = intStart & DocumentsWriter.INT_BLOCK_MASK;

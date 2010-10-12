@@ -1,0 +1,51 @@
+    // Important that we get docCount, in case there were
+    // some last docs that we didn't see
+    @Override
+    synchronized public void finish(int docCount) throws IOException {
+      if(datOut == null)// no data added
+        return;
+      initIndexOut();
+      final int[] sortedEntries = hash.sort(comp);
+      final int count = hash.size();
+      int[] address= new int[count];
+      // first dump bytes data, recording address as we go
+      for(int i=0;i<count;i++) {
+        final int e = sortedEntries[i];
+        final BytesRef bytes = hash.get(e);
+        assert bytes.length == size;
+        datOut.writeBytes(bytes.bytes, bytes.offset, bytes.length);
+        address[e] = 1+i;
+      }
+
+      idxOut.writeInt(count);
+
+      // next write index
+      PackedInts.Writer w = PackedInts.getWriter(idxOut, docCount, PackedInts.bitsRequired(count));
+      final int limit;
+      if (docCount > docToEntry.length) {
+        limit = docToEntry.length;
+      } else {
+        limit = docCount;
+      }
+      for(int i=0;i<limit;i++) {
+        final int e = docToEntry[i];
+        if (e == 0) {
+          // null is encoded as zero
+          w.add(0);
+        } else {
+          assert e > 0 && e <= count: "index must  0 > && <= " + count + " was: " + e;
+          w.add(address[e-1]);
+        }
+      }
+
+      for(int i=limit;i<docCount;i++) {
+        w.add(0);
+      }
+      w.finish();
+
+      super.finish(docCount);
+      bytesUsed.addAndGet((-docToEntry.length)
+          * RamUsageEstimator.NUM_BYTES_INT);
+      docToEntry = null;
+    }
+

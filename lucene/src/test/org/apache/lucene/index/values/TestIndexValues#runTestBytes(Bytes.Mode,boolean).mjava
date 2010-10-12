@@ -1,0 +1,131 @@
+  // nocommit -- for sorted test, do our own Sort of the
+  // values and verify it's identical
+  public void runTestBytes(final Bytes.Mode mode,
+      final boolean fixedSize) throws IOException {
+
+    final BytesRef bytesRef = new BytesRef();
+
+    final Comparator<BytesRef> comp = mode == Bytes.Mode.SORTED ? BytesRef
+        .getUTF8SortedAsUnicodeComparator()
+        : null;
+
+    Directory dir = newDirectory();
+    Writer w = Bytes
+        .getWriter(dir, "test", mode, comp, fixedSize);
+    int maxDoc = 220;
+    final String[] values = new String[maxDoc];
+    final int lenMin, lenMax;
+    if (fixedSize) {
+      lenMin = lenMax = 3 + random.nextInt(7);
+    } else {
+      lenMin = 1;
+      lenMax = 15 + random.nextInt(6);
+    }
+    for (int i = 0; i < 100; i++) {
+      final String s;
+      if (i > 0 && random.nextInt(5) <= 2) {
+        // use prior value
+        s = values[2 * random.nextInt(i)];
+      } else {
+        s = _TestUtil.randomUnicodeString(random, lenMin, lenMax);
+      }
+      values[2 * i] = s;
+
+      UnicodeUtil.UTF16toUTF8(s, 0, s.length(), bytesRef);
+      w.add(2 * i, bytesRef);
+    }
+    w.finish(maxDoc);
+
+    Reader r = Bytes.getReader(dir, "test", mode, fixedSize, maxDoc);
+    for (int iter = 0; iter < 2; iter++) {
+      ValuesEnum bytesEnum = r.getEnum();
+      assertNotNull("enum is null", bytesEnum);
+      ValuesAttribute attr = bytesEnum.addAttribute(ValuesAttribute.class);
+      assertNotNull("attribute is null", attr);
+      BytesRef ref = attr.bytes();
+      assertNotNull("BytesRef is null - enum not initialized to use bytes", attr);
+
+      for (int i = 0; i < 2; i++) {
+        final int idx = 2 * i;
+        assertEquals("doc: " + idx, idx, bytesEnum.advance(idx));
+        String utf8String = ref.utf8ToString();
+        assertEquals("doc: " + idx + " lenLeft: " + values[idx].length() + " lenRight: " + utf8String.length() , values[idx],  utf8String);
+      }
+      assertEquals(ValuesEnum.NO_MORE_DOCS, bytesEnum.advance(maxDoc));
+      assertEquals(ValuesEnum.NO_MORE_DOCS, bytesEnum.advance(maxDoc+1));
+
+      bytesEnum.close();
+    }
+    
+    
+    // Verify we can load source twice:
+    for (int iter = 0; iter < 2; iter++) {
+      Source s;
+      Reader.SortedSource ss;
+      if (mode == Bytes.Mode.SORTED) {
+        s = ss = r.loadSorted(comp);
+      } else {
+        s = r.load();
+        ss = null;
+      }
+
+      for (int i = 0; i < 100; i++) {
+        final int idx = 2 * i;
+        assertNotNull("doc " + idx + "; value=" + values[idx], s.bytes(idx));
+        assertEquals("doc " + idx, values[idx], s.bytes(idx).utf8ToString());
+        if (ss != null) {
+          assertEquals("doc " + idx, values[idx], ss.getByOrd(ss.ord(idx))
+              .utf8ToString());
+          Reader.SortedSource.LookupResult result = ss.getByValue(new BytesRef(
+              values[idx]));
+          assertTrue(result.found);
+          assertEquals(ss.ord(idx), result.ord);
+        }
+      }
+
+      // Lookup random strings:
+      if (mode == Bytes.Mode.SORTED) {
+        final int numValues = ss.getValueCount();
+        for (int i = 0; i < 1000; i++) {
+          BytesRef bytesValue = new BytesRef(_TestUtil.randomUnicodeString(
+              random, lenMin, lenMax));
+          SortedSource.LookupResult result = ss.getByValue(bytesValue);
+          if (result.found) {
+            assert result.ord > 0;
+            assertTrue(bytesValue.bytesEquals(ss.getByOrd(result.ord)));
+            int count = 0;
+            for (int k = 0; k < 100; k++) {
+              if (bytesValue.utf8ToString().equals(values[2 * k])) {
+                assertEquals(ss.ord(2 * k), result.ord);
+                count++;
+              }
+            }
+            assertTrue(count > 0);
+          } else {
+            assert result.ord >= 0;
+            if (result.ord == 0) {
+              final BytesRef firstRef = ss.getByOrd(1);
+              // random string was before our first
+              assertTrue(firstRef.compareTo(bytesValue) > 0);
+            } else if (result.ord == numValues) {
+              final BytesRef lastRef = ss.getByOrd(numValues);
+              // random string was after our last
+              assertTrue(lastRef.compareTo(bytesValue) < 0);
+            } else {
+              // random string fell between two of our values
+              final BytesRef before = (BytesRef) ss.getByOrd(result.ord)
+                  .clone();
+              final BytesRef after = ss.getByOrd(result.ord + 1);
+              assertTrue(before.compareTo(bytesValue) < 0);
+              assertTrue(bytesValue.compareTo(after) < 0);
+
+            }
+          }
+        }
+      }
+    }
+
+    r.close();
+    dir.close();
+  }
+

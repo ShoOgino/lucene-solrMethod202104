@@ -1,0 +1,92 @@
+  public void createCollectionZkNode(CloudDescriptor cd) throws KeeperException, InterruptedException, IOException {
+    String collection = cd.getCollectionName();
+    
+    log.info("Check for collection zkNode:" + collection);
+    String collectionPath = ZkStateReader.COLLECTIONS_ZKNODE + "/" + collection;
+    
+    try {
+      if(!zkClient.exists(collectionPath)) {
+        log.info("Creating collection in ZooKeeper:" + collection);
+       SolrParams params = cd.getParams();
+
+        try {
+          ZkNodeProps collectionProps = new ZkNodeProps();
+          // TODO: if collection.configName isn't set, and there isn't already a conf in zk, just use that?
+          String defaultConfigName = System.getProperty(COLLECTION_PARAM_PREFIX+CONFIGNAME_PROP, "configuration1");
+
+          // params passed in - currently only done via core admin (create core commmand).
+          if (params != null) {
+            Iterator<String> iter = params.getParameterNamesIterator();
+            while (iter.hasNext()) {
+              String paramName = iter.next();
+              if (paramName.startsWith(COLLECTION_PARAM_PREFIX)) {
+                collectionProps.put(paramName.substring(COLLECTION_PARAM_PREFIX.length()), params.get(paramName));
+              }
+            }
+
+            // if the config name wasn't passed in, use the default
+            if (!collectionProps.containsKey(CONFIGNAME_PROP))
+              collectionProps.put(CONFIGNAME_PROP,  defaultConfigName);
+            
+          } else if(System.getProperty("bootstrap_confdir") != null) {
+            // if we are bootstrapping a collection, default the config for
+            // a new collection to the collection we are bootstrapping
+            log.info("Setting config for collection:" + collection + " to " + defaultConfigName);
+
+            Properties sysProps = System.getProperties();
+            for (String sprop : System.getProperties().stringPropertyNames()) {
+              if (sprop.startsWith(COLLECTION_PARAM_PREFIX)) {
+                collectionProps.put(sprop.substring(COLLECTION_PARAM_PREFIX.length()), sysProps.getProperty(sprop));                
+              }
+            }
+            
+            // if the config name wasn't passed in, use the default
+            if (!collectionProps.containsKey(CONFIGNAME_PROP))
+              collectionProps.put(CONFIGNAME_PROP,  defaultConfigName);
+
+          } else {
+            // check for configName
+            log.info("Looking for collection configName");
+            int retry = 1;
+            for (; retry < 6; retry++) {
+              if (zkClient.exists(collectionPath)) {
+                collectionProps = new ZkNodeProps();
+                collectionProps.load(zkClient.getData(collectionPath, null, null));
+                if (collectionProps.containsKey(CONFIGNAME_PROP)) {
+                  break;
+                }
+              }
+              log.info("Could not find collection configName - pausing for 2 seconds and trying again - try: " + retry);
+              Thread.sleep(2000);
+            }
+            if (retry == 6) {
+              log.error("Could not find configName for collection " + collection);
+              throw new ZooKeeperException(
+                  SolrException.ErrorCode.SERVER_ERROR,
+                  "Could not find configName for collection " + collection);
+            }
+          }
+          
+          zkClient.makePath(collectionPath, collectionProps.store(), CreateMode.PERSISTENT, null, true);
+         
+          // ping that there is a new collection
+          zkClient.setData(ZkStateReader.COLLECTIONS_ZKNODE, (byte[])null);
+        } catch (KeeperException e) {
+          // its okay if the node already exists
+          if (e.code() != KeeperException.Code.NODEEXISTS) {
+            throw e;
+          }
+        }
+      } else {
+        log.info("Collection zkNode exists");
+      }
+      
+    } catch (KeeperException e) {
+      // its okay if another beats us creating the node
+      if (e.code() != KeeperException.Code.NODEEXISTS) {
+        throw e;
+      }
+    }
+    
+  }
+

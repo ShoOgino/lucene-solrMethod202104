@@ -1,0 +1,90 @@
+  /**
+   * Tries to query a live server from the list provided in Req. Servers in the dead pool are skipped.
+   * If a request fails due to an IOException, the server is moved to the dead pool for a certain period of
+   * time, or until a test request on that server succeeds.
+   *
+   * Servers are queried in the exact order given (except servers currently in the dead pool are skipped).
+   * If no live servers from the provided list remain to be tried, a number of previously skipped dead servers will be tried.
+   * Req.getNumDeadServersToTry() controls how many dead servers will be tried.
+   *
+   * If no live servers are found a SolrServerException is thrown.
+   *
+   * @param req contains both the request as well as the list of servers to query
+   *
+   * @return the result of the request
+   *
+   * @throws SolrServerException
+   * @throws IOException
+   */
+  public Rsp request(Req req) throws SolrServerException, IOException {
+    Rsp rsp = new Rsp();
+    Exception ex = null;
+
+    List<ServerWrapper> skipped = new ArrayList<ServerWrapper>(req.getNumDeadServersToTry());
+
+    for (String serverStr : req.getServers()) {
+      serverStr = normalize(serverStr);
+      // if the server is currently a zombie, just skip to the next one
+      ServerWrapper wrapper = zombieServers.get(serverStr);
+      if (wrapper != null) {
+        // System.out.println("ZOMBIE SERVER QUERIED: " + serverStr);
+        if (skipped.size() < req.getNumDeadServersToTry())
+          skipped.add(wrapper);
+        continue;
+      }
+      rsp.server = serverStr;
+      CommonsHttpSolrServer server = makeServer(serverStr);
+
+      try {
+        rsp.rsp = server.request(req.getRequest());
+        return rsp; // SUCCESS
+      } catch (SolrException e) {
+        // Server is alive but the request was malformed or invalid
+        throw e;
+      } catch (SolrServerException e) {
+        if (e.getRootCause() instanceof IOException) {
+          ex = e;
+          wrapper = new ServerWrapper(server);
+          wrapper.lastUsed = System.currentTimeMillis();
+          wrapper.standard = false;
+          zombieServers.put(wrapper.getKey(), wrapper);
+          startAliveCheckExecutor();
+        } else {
+          throw e;
+        }
+      } catch (Exception e) {
+        throw new SolrServerException(e);
+      }
+    }
+
+    // try the servers we previously skipped
+    for (ServerWrapper wrapper : skipped) {
+      try {
+        rsp.rsp = wrapper.solrServer.request(req.getRequest());
+        zombieServers.remove(wrapper.getKey());
+        return rsp; // SUCCESS
+      } catch (SolrException e) {
+        // Server is alive but the request was malformed or invalid
+        zombieServers.remove(wrapper.getKey());
+        throw e;
+      } catch (SolrServerException e) {
+        if (e.getRootCause() instanceof IOException) {
+          ex = e;
+          // already a zombie, no need to re-add
+        } else {
+          throw e;
+        }
+      } catch (Exception e) {
+        throw new SolrServerException(e);
+      }
+    }
+
+
+    if (ex == null) {
+      throw new SolrServerException("No live SolrServers available to handle this request");
+    } else {
+      throw new SolrServerException("No live SolrServers available to handle this request", ex);
+    }
+
+  }  
+

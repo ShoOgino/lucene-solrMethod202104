@@ -1,0 +1,63 @@
+  /**
+   * Register shard with ZooKeeper.
+   * 
+   * @param coreName
+   * @param cloudDesc
+   * @param forcePropsUpdate update solr.xml core props even if the shard is already registered
+   * @throws IOException
+   * @throws KeeperException
+   * @throws InterruptedException
+   */
+  public void register(String coreName, CloudDescriptor cloudDesc, boolean forcePropsUpdate) throws IOException,
+      KeeperException, InterruptedException {
+    String shardUrl = localHostName + ":" + localHostPort + "/" + localHostContext
+        + "/" + coreName;
+    
+    String collection = cloudDesc.getCollectionName();
+    
+    String shardsZkPath = ZkStateReader.COLLECTIONS_ZKNODE + "/" + collection + ZkStateReader.SHARDS_ZKNODE + "/" + cloudDesc.getShardId();
+
+    boolean shardZkNodeAlreadyExists = zkClient.exists(shardsZkPath);
+    
+    if(shardZkNodeAlreadyExists && !forcePropsUpdate) {
+      return;
+    }
+    
+    if (log.isInfoEnabled()) {
+      log.info("Register shard - core:" + coreName + " address:"
+          + shardUrl);
+    }
+
+    ZkNodeProps props = new ZkNodeProps();
+    props.put(ZkStateReader.URL_PROP, shardUrl);
+    
+    props.put(ZkStateReader.NODE_NAME, getNodeName());
+
+    byte[] bytes = props.store();
+    
+    String shardZkNodeName = getNodeName() + "_" + coreName;
+
+    if(shardZkNodeAlreadyExists && forcePropsUpdate) {
+      zkClient.setData(shardsZkPath + "/" + shardZkNodeName, bytes);
+      // tell everyone to update cloud info
+      zkClient.setData(ZkStateReader.COLLECTIONS_ZKNODE, (byte[])null);
+    } else {
+      addZkShardsNode(cloudDesc.getShardId(), collection);
+      try {
+        zkClient.create(shardsZkPath + "/" + shardZkNodeName, bytes,
+            CreateMode.PERSISTENT);
+        // tell everyone to update cloud info
+        zkClient.setData(ZkStateReader.COLLECTIONS_ZKNODE, (byte[])null);
+      } catch (KeeperException e) {
+        // its okay if the node already exists
+        if (e.code() != KeeperException.Code.NODEEXISTS) {
+          throw e;
+        }
+        // for some reason the shard already exists, though it didn't when we
+        // started registration - just return
+        return;
+      }
+    }
+
+  }
+

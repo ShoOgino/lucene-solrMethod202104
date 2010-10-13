@@ -1,0 +1,69 @@
+  private void initZooKeeper(String zkHost, int zkClientTimeout) {
+    // if zkHost sys property is not set, we are not using ZooKeeper
+    String zookeeperHost;
+    if(zkHost == null) {
+      zookeeperHost = System.getProperty("zkHost");
+    } else {
+      zookeeperHost = zkHost;
+    }
+
+    String zkRun = System.getProperty("zkRun");
+
+    if (zkRun == null && zookeeperHost == null)
+        return;  // not in zk mode
+
+    zkServer = new SolrZkServer(zkRun, zookeeperHost, solrHome, hostPort);
+    zkServer.parseConfig();
+    zkServer.start();
+
+    // set client from server config if not already set
+    if (zookeeperHost == null) {
+      zookeeperHost = zkServer.getClientString();
+    }
+
+    int zkClientConnectTimeout = 5000;
+
+    if (zookeeperHost != null) {
+      // we are ZooKeeper enabled
+      try {
+        // If this is an ensemble, allow for a long connect time for other servers to come up
+        if (zkRun != null && zkServer.getServers().size() > 1) {
+          zkClientConnectTimeout = 24 * 60 * 60 * 1000;  // 1 day for embedded ensemble
+          log.info("Zookeeper client=" + zookeeperHost + "  Waiting for a quorum.");
+        } else {
+          log.info("Zookeeper client=" + zookeeperHost);          
+        }
+        zkController = new ZkController(zookeeperHost, zkClientTimeout, zkClientConnectTimeout, host, hostPort, hostContext);
+        
+        String confDir = System.getProperty("bootstrap_confdir");
+        if(confDir != null) {
+          File dir = new File(confDir);
+          if(!dir.isDirectory()) {
+            throw new IllegalArgumentException("bootstrap_confdir must be a directory of configuration files");
+          }
+          String confName = System.getProperty(ZkController.COLLECTION_PARAM_PREFIX+ZkController.CONFIGNAME_PROP, "configuration1");
+          zkController.uploadConfigDir(dir, confName);
+        }
+      } catch (InterruptedException e) {
+        // Restore the interrupted status
+        Thread.currentThread().interrupt();
+        log.error("", e);
+        throw new ZooKeeperException(SolrException.ErrorCode.SERVER_ERROR,
+            "", e);
+      } catch (TimeoutException e) {
+        log.error("Could not connect to ZooKeeper", e);
+        throw new ZooKeeperException(SolrException.ErrorCode.SERVER_ERROR,
+            "", e);
+      } catch (IOException e) {
+        log.error("", e);
+        throw new ZooKeeperException(SolrException.ErrorCode.SERVER_ERROR,
+            "", e);
+      } catch (KeeperException e) {
+        log.error("", e);
+        throw new ZooKeeperException(SolrException.ErrorCode.SERVER_ERROR,
+            "", e);
+      }
+    }
+    
+  }
+

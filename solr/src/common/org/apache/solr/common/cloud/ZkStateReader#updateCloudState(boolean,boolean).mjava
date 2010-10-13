@@ -1,0 +1,63 @@
+  // load and publish a new CollectionInfo
+  private synchronized void updateCloudState(boolean immediate, final boolean onlyLiveNodes) throws KeeperException, InterruptedException,
+      IOException {
+
+    // TODO: - possibly: incremental update rather than reread everything
+    
+    // build immutable CloudInfo
+    
+    if(immediate) {
+      if(!onlyLiveNodes) {
+        log.info("Updating cloud state from ZooKeeper... ");
+      } else {
+        log.info("Updating live nodes from ZooKeeper... ");
+      }
+      CloudState cloudState;
+      cloudState = CloudState.buildCloudState(zkClient, this.cloudState, onlyLiveNodes);
+      // update volatile
+      this.cloudState = cloudState;
+    } else {
+      if(cloudStateUpdateScheduled) {
+        log.info("Cloud state update for ZooKeeper already scheduled");
+        return;
+      }
+      log.info("Scheduling cloud state update from ZooKeeper...");
+      cloudStateUpdateScheduled = true;
+      updateCloudExecutor.schedule(new Runnable() {
+        
+        public void run() {
+          log.info("Updating cloud state from ZooKeeper...");
+          synchronized (getUpdateLock()) {
+            cloudStateUpdateScheduled = false;
+            CloudState cloudState;
+            try {
+              cloudState = CloudState.buildCloudState(zkClient,
+                  ZkStateReader.this.cloudState, onlyLiveNodes);
+            } catch (KeeperException e) {
+              if(e.code() == KeeperException.Code.SESSIONEXPIRED || e.code() == KeeperException.Code.CONNECTIONLOSS) {
+                log.warn("ZooKeeper watch triggered, but Solr cannot talk to ZK");
+                return;
+              }
+              log.error("", e);
+              throw new ZooKeeperException(
+                  SolrException.ErrorCode.SERVER_ERROR, "", e);
+            } catch (InterruptedException e) {
+              // Restore the interrupted status
+              Thread.currentThread().interrupt();
+              log.error("", e);
+              throw new ZooKeeperException(
+                  SolrException.ErrorCode.SERVER_ERROR, "", e);
+            } catch (IOException e) {
+              log.error("", e);
+              throw new ZooKeeperException(
+                  SolrException.ErrorCode.SERVER_ERROR, "", e);
+            }
+            // update volatile
+            ZkStateReader.this.cloudState = cloudState;
+          }
+        }
+      }, CLOUD_UPDATE_DELAY, TimeUnit.MILLISECONDS);
+    }
+
+  }
+

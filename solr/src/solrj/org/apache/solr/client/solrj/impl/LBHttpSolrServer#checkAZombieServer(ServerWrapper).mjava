@@ -6,22 +6,33 @@
    */
   private void checkAZombieServer(ServerWrapper zombieServer) {
     long currTime = System.currentTimeMillis();
-    checkLock.lock();
     try {
       zombieServer.lastChecked = currTime;
       QueryResponse resp = zombieServer.solrServer.query(solrQuery);
       if (resp.getStatus() == 0) {
-        //server has come back up
-        zombieServer.lastUsed = currTime;
-        zombieServers.remove(zombieServer);
-        aliveServers.add(zombieServer);
-        zombieServer.failedPings = 0;
+        // server has come back up.
+        // make sure to remove from zombies before adding to alive to avoid a race condition
+        // where another thread could mark it down, move it back to zombie, and then we delete
+        // from zombie and lose it forever.
+        ServerWrapper wrapper = zombieServers.remove(zombieServer.getKey());
+        if (wrapper != null) {
+          wrapper.failedPings = 0;
+          if (wrapper.standard) {
+            addToAlive(wrapper);
+          }
+        } else {
+          // something else already moved the server from zombie to alive
+        }
       }
     } catch (Exception e) {
+      //Expected. The server is still down.
       zombieServer.failedPings++;
-      //Expected . The server is still down
-    } finally {
-      checkLock.unlock();
+
+      // If the server doesn't belong in the standard set belonging to this load balancer
+      // then simply drop it after a certain number of failed pings.
+      if (!zombieServer.standard && zombieServer.failedPings >= NONSTANDARD_PING_LIMIT) {
+        zombieServers.remove(zombieServer.getKey());
+      }
     }
   }
 

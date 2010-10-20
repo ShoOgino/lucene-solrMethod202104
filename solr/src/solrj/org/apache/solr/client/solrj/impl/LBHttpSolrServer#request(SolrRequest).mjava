@@ -1,7 +1,8 @@
   /**
-   * Tries to query a live server. If no live servers are found it throws a SolrServerException. If the request failed
-   * due to IOException then the live server is moved to dead pool and the request is retried on another live server if
-   * available. If all live servers are exhausted then a SolrServerException is thrown.
+   * Tries to query a live server. A SolrServerException is thrown if all servers are dead.
+   * If the request failed due to IOException then the live server is moved to dead pool and the request is
+   * retried on another live server.  After live servers are exhausted, any servers previously marked as dead
+   * will be tried before failing the request.
    *
    * @param request the SolrRequest.
    *
@@ -12,38 +13,66 @@
    */
   public NamedList<Object> request(final SolrRequest request)
           throws SolrServerException, IOException {
-    int count = counter.incrementAndGet();
-    int attempts = 0;
-    Exception ex;
-    int startSize = aliveServers.size();
-    while (true) {
-      int size = aliveServers.size();
-      if (size < 1) throw new SolrServerException("No live SolrServers available to handle this request");
-      ServerWrapper solrServer;
+    Exception ex = null;
+    ServerWrapper[] serverList = aliveServerList;
+    
+    int maxTries = serverList.length;
+    Map<String,ServerWrapper> justFailed = null;
+
+    for (int attempts=0; attempts<maxTries; attempts++) {
+      int count = counter.incrementAndGet();      
+      ServerWrapper wrapper = serverList[count % serverList.length];
+      wrapper.lastUsed = System.currentTimeMillis();
+
       try {
-        solrServer = aliveServers.get(count % size);
-      } catch (IndexOutOfBoundsException e) {
-        //this list changes dynamically. so it is expected to get IndexOutOfBoundsException
-        continue;
-      }
-      try {
-        return solrServer.solrServer.request(request);
+        return wrapper.solrServer.request(request);
       } catch (SolrException e) {
         // Server is alive but the request was malformed or invalid
         throw e;
       } catch (SolrServerException e) {
         if (e.getRootCause() instanceof IOException) {
           ex = e;
-          moveAliveToDead(solrServer);
+          moveAliveToDead(wrapper);
+          if (justFailed == null) justFailed = new HashMap<String,ServerWrapper>();
+          justFailed.put(wrapper.getKey(), wrapper);
         } else {
           throw e;
         }
       } catch (Exception e) {
         throw new SolrServerException(e);
       }
-      attempts++;
-      if (attempts >= startSize)
-        throw new SolrServerException("No live SolrServers available to handle this request", ex);
+    }
+
+
+    // try other standard servers that we didn't try just now
+    for (ServerWrapper wrapper : zombieServers.values()) {
+      if (wrapper.standard==false || justFailed!=null && justFailed.containsKey(wrapper.getKey())) continue;
+      try {
+        NamedList<Object> rsp = wrapper.solrServer.request(request);
+        // remove from zombie list *before* adding to alive to avoid a race that could lose a server
+        zombieServers.remove(wrapper.getKey());
+        addToAlive(wrapper);
+        return rsp;
+      } catch (SolrException e) {
+        // Server is alive but the request was malformed or invalid
+        throw e;
+      } catch (SolrServerException e) {
+        if (e.getRootCause() instanceof IOException) {
+          ex = e;
+          // still dead
+        } else {
+          throw e;
+        }
+      } catch (Exception e) {
+        throw new SolrServerException(e);
+      }
+    }
+
+
+    if (ex == null) {
+      throw new SolrServerException("No live SolrServers available to handle this request");
+    } else {
+      throw new SolrServerException("No live SolrServers available to handle this request", ex);
     }
   }
 

@@ -1,26 +1,32 @@
     @Override
-    synchronized public void finish(int docCount) throws IOException {
-      if(!started)
+    public synchronized void finish(int docCount) throws IOException {
+      if (!started)
         return;
       final IndexOutput datOut = dir.createOutput(IndexFileNames
-          .segmentFileName(id, "", IndexFileNames.CSF_DATA_EXTENSION));
+          .segmentFileName(id, "", DATA_EXTENSION));
       CodecUtil.writeHeader(datOut, CODEC_NAME, VERSION_CURRENT);
 
-      // nocommit -- long can't work right since it's signed
+      // TODO -- long can't work right since it's signed
       datOut.writeLong(minValue);
       // write a default value to recognize docs without a value for that field
       final long defaultValue = ++maxValue - minValue;
       datOut.writeLong(defaultValue);
-      PackedInts.Writer w = PackedInts.getWriter(datOut, docCount, PackedInts.bitsRequired(maxValue-minValue));
-         
-      final int limit = maxDocID + 1;
-      for (int i = 0; i < minDocID; i++) {
-        w.add(defaultValue);
+      PackedInts.Writer w = PackedInts.getWriter(datOut, docCount, PackedInts
+          .bitsRequired(maxValue - minValue));
+      final int firstDoc = defaultValues.nextSetBit(0);
+      assert firstDoc >= 0; // we have at lest one value!
+      for (int i = 0; i < firstDoc; i++) {
+        w.add(defaultValue); // fill with defaults until first bit set
       }
-      for (int i = minDocID; i < limit; i++) {
+      lastDocId++;
+      for (int i = firstDoc; i < lastDocId;) {
         w.add(docToValue[i] - minValue);
+        final int nextValue = defaultValues.nextSetBit(i);
+        for (i++; i < nextValue; i++) {
+          w.add(defaultValue); // fill all gaps
+        }
       }
-      for (int i = limit; i < docCount; i++) {
+      for (int i = lastDocId; i < docCount; i++) {
         w.add(defaultValue);
       }
       w.finish();

@@ -17,8 +17,7 @@
    * @throws CorruptIndexException if the index is corrupt
    * @throws IOException if there is a low-level IO error
    */
-  public void addIndexes(IndexReader... readers)
-    throws CorruptIndexException, IOException {
+  public void addIndexes(IndexReader... readers) throws CorruptIndexException, IOException {
     ensureOpen();
 
     try {
@@ -31,47 +30,33 @@
       
       int docCount = merger.merge();                // merge 'em
       
-      SegmentInfo info = null;
-      synchronized(this) {
-        info = new SegmentInfo(mergedName, docCount, directory, false, -1,
-            null, false, merger.hasProx(), merger.getSegmentCodecs());
-        setDiagnostics(info, "addIndexes(IndexReader...)");
-        segmentInfos.add(info);
-        checkpoint();
-        
-        // Notify DocumentsWriter that the flushed count just increased
-        docWriter.updateFlushedDocCount(docCount);
+      SegmentInfo info = new SegmentInfo(mergedName, docCount, directory,
+          false, -1, null, false, merger.hasProx(), merger.getSegmentCodecs());
+      setDiagnostics(info, "addIndexes(IndexReader...)");
+
+      boolean useCompoundFile;
+      synchronized(this) { // Guard segmentInfos
+        useCompoundFile = mergePolicy.useCompoundFile(segmentInfos, info);
       }
       
       // Now create the compound file if needed
-      if (mergePolicy instanceof LogMergePolicy && ((LogMergePolicy) mergePolicy).getUseCompoundFile()) {
+      if (useCompoundFile) {
+        merger.createCompoundFile(mergedName + ".cfs", info);
+        info.setUseCompoundFile(true);
+        
+        // delete new non cfs files directly: they were never
+        // registered with IFD
+        deleter.deleteNewFiles(merger.getMergedFiles(info));
+      }
 
-        List<String> files = null;
-
-        synchronized(this) {
-          // Must incRef our files so that if another thread
-          // is running merge/optimize, it doesn't delete our
-          // segment's files before we have a chance to
-          // finish making the compound file.
-          if (segmentInfos.contains(info)) {
-            files = info.files();
-            deleter.incRef(files);
-          }
-        }
-
-        if (files != null) {
-          try {
-            merger.createCompoundFile(mergedName + ".cfs", info);
-            synchronized(this) {
-              info.setUseCompoundFile(true);
-              checkpoint();
-            }
-          } finally {
-            synchronized(this) {
-              deleter.decRef(files);
-            }
-          }
-        }
+      // Register the new segment
+      synchronized(this) {
+        segmentInfos.add(info);
+        
+        // Notify DocumentsWriter that the flushed count just increased
+        docWriter.updateFlushedDocCount(docCount);
+        
+        checkpoint();
       }
     } catch (OutOfMemoryError oom) {
       handleOOM(oom, "addIndexes(IndexReader...)");

@@ -6,34 +6,28 @@
     int docBase = 0;
 
     final List<Fields> fields = new ArrayList<Fields>();
-    final List<IndexReader> subReaders = new ArrayList<IndexReader>();
     final List<ReaderUtil.Slice> slices = new ArrayList<ReaderUtil.Slice>();
     final List<Bits> bits = new ArrayList<Bits>();
     final List<Integer> bitsStarts = new ArrayList<Integer>();
 
-    final int numReaders = readers.size();
-    for(int i=0;i<numReaders;i++) {
-      docBase = new ReaderUtil.Gather(readers.get(i)) {
-          @Override
-          protected void add(int base, IndexReader r) throws IOException {
-            final Fields f = r.fields();
-            if (f != null) {
-              subReaders.add(r);
-              fields.add(f);
-              slices.add(new ReaderUtil.Slice(base, r.maxDoc(), fields.size()-1));
-              bits.add(r.getDeletedDocs());
-              bitsStarts.add(base);
-            }
-          }
-        }.run(docBase);
+    for(IndexReader r : readers) {
+      final Fields f = r.fields();
+      final int maxDoc = r.maxDoc();
+      if (f != null) {
+        slices.add(new ReaderUtil.Slice(docBase, maxDoc, fields.size()));
+        fields.add(f);
+        bits.add(r.getDeletedDocs());
+        bitsStarts.add(docBase);
+      }
+      docBase += maxDoc;
     }
 
     bitsStarts.add(docBase);
 
     // we may gather more readers than mergeState.readerCount
     mergeState = new MergeState();
-    mergeState.readers = subReaders;
-    mergeState.readerCount = subReaders.size();
+    mergeState.readers = readers;
+    mergeState.readerCount = readers.size();
     mergeState.fieldInfos = fieldInfos;
     mergeState.mergedDocCount = mergedDocs;
     
@@ -48,13 +42,9 @@
     docBase = 0;
     int inputDocBase = 0;
 
-    final int[] starts = new int[mergeState.readerCount+1];
-
     for(int i=0;i<mergeState.readerCount;i++) {
 
-      final IndexReader reader = subReaders.get(i);
-
-      starts[i] = inputDocBase;
+      final IndexReader reader = readers.get(i);
 
       mergeState.delCounts[i] = reader.numDeletedDocs();
       mergeState.docBase[i] = docBase;
@@ -62,7 +52,7 @@
       inputDocBase += reader.maxDoc();
       if (mergeState.delCounts[i] != 0) {
         int delCount = 0;
-        final Bits delDocs = MultiFields.getDeletedDocs(reader);
+        final Bits delDocs = reader.getDeletedDocs();
         assert delDocs != null;
         final int maxDoc = reader.maxDoc();
         final int[] docMap = mergeState.docMaps[i] = new int[maxDoc];
@@ -82,7 +72,6 @@
         mergeState.dirPayloadProcessor[i] = payloadProcessorProvider.getDirProcessor(reader.directory());
       }
     }
-    starts[mergeState.readerCount] = inputDocBase;
     codec = segmentWriteState.segmentCodecs.codec();
     final FieldsConsumer consumer = codec.fieldsConsumer(segmentWriteState);
 

@@ -1,0 +1,66 @@
+  /* FIXME if we want to support non-contiguous segment merges */
+  synchronized private boolean commitMerge(MergePolicy.OneMerge merge, SegmentMerger merger, SegmentReader mergedReader) throws IOException {
+
+    assert testPoint("startCommitMerge");
+
+    if (hitOOM) {
+      throw new IllegalStateException("this writer hit an OutOfMemoryError; cannot complete merge");
+    }
+
+    if (infoStream != null)
+      message("commitMerge: " + merge.segString(directory) + " index=" + segString());
+
+    assert merge.registerDone;
+
+    // If merge was explicitly aborted, or, if rollback() or
+    // rollbackTransaction() had been called since our merge
+    // started (which results in an unqualified
+    // deleter.refresh() call that will remove any index
+    // file that current segments does not reference), we
+    // abort this merge
+    if (merge.isAborted()) {
+      if (infoStream != null)
+        message("commitMerge: skipping merge " + merge.segString(directory) + ": it was aborted");
+      return false;
+    }
+
+    final int start = ensureContiguousMerge(merge);
+
+    commitMergedDeletes(merge, mergedReader);
+      
+    // If the doc store we are using has been closed and
+    // is in now compound format (but wasn't when we
+    // started), then we will switch to the compound
+    // format as well:
+    setMergeDocStoreIsCompoundFile(merge);
+
+    merge.info.setHasProx(merger.hasProx());
+
+    segmentInfos.subList(start, start + merge.segments.size()).clear();
+    assert !segmentInfos.contains(merge.info);
+    segmentInfos.add(start, merge.info);
+    
+    closeMergeReaders(merge, false);
+
+    // Must note the change to segmentInfos so any commits
+    // in-flight don't lose it:
+    checkpoint();
+
+    // If the merged segments had pending changes, clear
+    // them so that they don't bother writing them to
+    // disk, updating SegmentInfo, etc.:
+    readerPool.clear(merge.segments);
+    
+    // remove pending deletes of the segments 
+    // that were merged, moving them onto the segment just
+    // before the merged segment
+    // Lock order: IW -> BD
+    bufferedDeletes.commitMerge(merge);
+
+    if (merge.optimize) {
+      // cascade the optimize:
+      segmentsToOptimize.add(merge.info);
+    }
+    return true;
+  }
+

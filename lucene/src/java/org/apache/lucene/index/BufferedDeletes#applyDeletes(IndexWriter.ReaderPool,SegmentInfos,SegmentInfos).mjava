@@ -1,0 +1,120 @@
+  public synchronized boolean applyDeletes(IndexWriter.ReaderPool readerPool, SegmentInfos segmentInfos, SegmentInfos applyInfos) throws IOException {
+    if (!any()) {
+      return false;
+    }
+    final long t0 = System.currentTimeMillis();
+
+    if (infoStream != null) {
+      message("applyDeletes: applyInfos=" + applyInfos + "; index=" + segmentInfos);
+    }
+
+    assert checkDeleteStats();
+
+    assert applyInfos.size() > 0;
+
+    boolean any = false;
+    
+    final SegmentInfo lastApplyInfo = applyInfos.lastElement();
+    final int lastIdx = segmentInfos.indexOf(lastApplyInfo);
+    
+    final SegmentInfo firstInfo = applyInfos.firstElement();
+    final int firstIdx = segmentInfos.indexOf(firstInfo);
+
+    // applyInfos must be a slice of segmentInfos
+    assert lastIdx - firstIdx + 1 == applyInfos.size();
+    
+    // iterate over all segment infos backwards
+    // coalesceing deletes along the way 
+    // when we're at or below the last of the 
+    // segments to apply to, start applying the deletes
+    // we traverse up to the first apply infos
+    SegmentDeletes coalescedDeletes = null;
+    boolean hasDeletes = false;
+    for (int segIdx=segmentInfos.size()-1; segIdx >= firstIdx; segIdx--) {
+      final SegmentInfo info = segmentInfos.info(segIdx);
+      final SegmentDeletes deletes = deletesMap.get(info);
+      assert deletes == null || deletes.any();
+
+      if (deletes == null && coalescedDeletes == null) {
+        continue;
+      }
+
+      if (infoStream != null) {
+        message("applyDeletes: seg=" + info + " segment's deletes=[" + (deletes == null ? "null" : deletes) + "]; coalesced deletes=[" + (coalescedDeletes == null ? "null" : coalescedDeletes) + "]");
+      }
+
+      hasDeletes |= deletes != null;
+
+      if (segIdx <= lastIdx && hasDeletes) {
+
+        any |= applyDeletes(readerPool, info, coalescedDeletes, deletes);
+      
+        if (deletes != null) {
+          // we've applied doc ids, and they're only applied
+          // on the current segment
+          bytesUsed.addAndGet(-deletes.docIDs.size() * SegmentDeletes.BYTES_PER_DEL_DOCID);
+          deletes.clearDocIDs();
+        }
+      }
+      
+      // now coalesce at the max limit
+      if (deletes != null) {
+        if (coalescedDeletes == null) {
+          coalescedDeletes = new SegmentDeletes();
+        }
+        // TODO: we could make this single pass (coalesce as
+        // we apply the deletes
+        coalescedDeletes.update(deletes, true);
+      }
+    }
+
+    // move all deletes to segment just before our merge.
+    if (firstIdx > 0) {
+
+      SegmentDeletes mergedDeletes = null;
+      // TODO: we could also make this single pass
+      for (SegmentInfo info : applyInfos) {
+        final SegmentDeletes deletes = deletesMap.get(info);
+        if (deletes != null) {
+          assert deletes.any();
+          if (mergedDeletes == null) {
+            mergedDeletes = getDeletes(segmentInfos.info(firstIdx-1));
+            numTerms.addAndGet(-mergedDeletes.numTermDeletes.get());
+            bytesUsed.addAndGet(-mergedDeletes.bytesUsed.get());
+          }
+
+          mergedDeletes.update(deletes, true);
+        }
+      }
+
+      if (mergedDeletes != null) {
+        numTerms.addAndGet(mergedDeletes.numTermDeletes.get());
+        bytesUsed.addAndGet(mergedDeletes.bytesUsed.get());
+      }
+
+      if (infoStream != null) {
+        if (mergedDeletes != null) {
+          message("applyDeletes: merge all deletes into seg=" + segmentInfos.info(firstIdx-1) + ": " + mergedDeletes);
+        } else {
+          message("applyDeletes: no deletes to merge");
+        }
+      }
+    } else {
+      // We drop the deletes in this case, because we've
+      // applied them to segment infos starting w/ the first
+      // segment.  There are no prior segments so there's no
+      // reason to keep them around.  When the applyInfos ==
+      // segmentInfos this means all deletes have been
+      // removed:
+    }
+    remove(applyInfos);
+
+    assert checkDeleteStats();
+    assert applyInfos != segmentInfos || !any();
+    
+    if (infoStream != null) {
+      message("applyDeletes took " + (System.currentTimeMillis()-t0) + " msec");
+    }
+    return any;
+  }
+

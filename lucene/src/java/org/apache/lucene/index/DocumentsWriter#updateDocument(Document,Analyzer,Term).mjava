@@ -1,6 +1,9 @@
   boolean updateDocument(Document doc, Analyzer analyzer, Term delTerm)
     throws CorruptIndexException, IOException {
-    
+
+    // Possibly trigger a flush, or wait until any running flush completes:
+    boolean doFlush = flushControl.waitUpdate(1, delTerm != null ? 1 : 0);
+
     // This call is synchronized but fast
     final DocumentsWriterThreadState state = getThreadState(doc, delTerm);
 
@@ -25,11 +28,23 @@
       success = true;
     } finally {
       if (!success) {
+
+        // If this thread state had decided to flush, we
+        // must clear it so another thread can flush
+        if (doFlush) {
+          flushControl.clearFlushPending();
+        }
+
+        if (infoStream != null) {
+          message("exception in updateDocument aborting=" + aborting);
+        }
+
         synchronized(this) {
 
+          state.isIdle = true;
+          notifyAll();
+            
           if (aborting) {
-            state.isIdle = true;
-            notifyAll();
             abort();
           } else {
             skipDocWriter.docID = docState.docID;
@@ -39,34 +54,23 @@
               success2 = true;
             } finally {
               if (!success2) {
-                state.isIdle = true;
-                notifyAll();
                 abort();
                 return false;
               }
-            }
-
-            state.isIdle = true;
-            notifyAll();
-
-            // If this thread state had decided to flush, we
-            // must clear it so another thread can flush
-            if (state.doFlushAfter) {
-              state.doFlushAfter = false;
-              flushPending = false;
-              notifyAll();
             }
 
             // Immediately mark this document as deleted
             // since likely it was partially added.  This
             // keeps indexing as "all or none" (atomic) when
             // adding a document:
-            addDeleteDocID(state.docState.docID);
+            deleteDocID(state.docState.docID);
           }
         }
       }
     }
 
-    return state.doFlushAfter || timeToFlushDeletes();
+    doFlush |= flushControl.flushByRAMUsage("new document");
+
+    return doFlush;
   }
 

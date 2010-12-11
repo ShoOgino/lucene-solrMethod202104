@@ -1,0 +1,132 @@
+  /** Flush all pending docs to a new segment */
+  // Lock order: IW -> DW
+  synchronized SegmentInfo flush(IndexWriter writer, boolean closeDocStore, IndexFileDeleter deleter, MergePolicy mergePolicy, SegmentInfos segmentInfos) throws IOException {
+
+    // We change writer's segmentInfos:
+    assert Thread.holdsLock(writer);
+
+    waitIdle();
+
+    if (numDocsInRAM == 0 && numDocsInStore == 0) {
+      // nothing to do!
+      if (infoStream != null) {
+        message("flush: no docs; skipping");
+      }
+      // Lock order: IW -> DW -> BD
+      pushDeletes(null, segmentInfos);
+      return null;
+    }
+
+    if (aborting) {
+      if (infoStream != null) {
+        message("flush: skip because aborting is set");
+      }
+      return null;
+    }
+
+    boolean success = false;
+
+    SegmentInfo newSegment;
+
+    try {
+
+      assert waitQueue.waitingBytes == 0;
+
+      assert docStoreSegment != null || numDocsInRAM == 0: "dss=" + docStoreSegment + " numDocsInRAM=" + numDocsInRAM;
+
+      assert numDocsInStore >= numDocsInRAM: "numDocsInStore=" + numDocsInStore + " numDocsInRAM=" + numDocsInRAM;
+
+      final SegmentWriteState flushState = new SegmentWriteState(infoStream, directory, segment, fieldInfos,
+                                                                 docStoreSegment, numDocsInRAM, numDocsInStore, writer.getConfig().getTermIndexInterval(),
+                                                                 SegmentCodecs.build(fieldInfos, writer.codecs));
+
+      newSegment = new SegmentInfo(segment, numDocsInRAM, directory, false, -1, null, false, hasProx(), flushState.segmentCodecs);
+
+      if (!closeDocStore || docStoreOffset != 0) {
+        newSegment.setDocStoreSegment(docStoreSegment);
+        newSegment.setDocStoreOffset(docStoreOffset);
+      }
+
+      if (closeDocStore) {
+        closeDocStore(flushState, writer, deleter, newSegment, mergePolicy, segmentInfos);
+      }
+
+      if (numDocsInRAM > 0) {
+
+        assert nextDocID == numDocsInRAM;
+        assert waitQueue.numWaiting == 0;
+        assert waitQueue.waitingBytes == 0;
+
+        if (infoStream != null) {
+          message("flush postings as segment " + segment + " numDocs=" + numDocsInRAM);
+        }
+    
+        final Collection<DocConsumerPerThread> threads = new HashSet<DocConsumerPerThread>();
+        for(int i=0;i<threadStates.length;i++) {
+          threads.add(threadStates[i].consumer);
+        }
+
+        final long startNumBytesUsed = bytesUsed();
+        consumer.flush(threads, flushState);
+
+        if (infoStream != null) {
+          message("flushedFiles=" + flushState.flushedFiles);
+          message("flushed codecs=" + newSegment.getSegmentCodecs());
+        }
+
+        if (mergePolicy.useCompoundFile(segmentInfos, newSegment)) {
+
+          final String cfsFileName = IndexFileNames.segmentFileName(segment, "", IndexFileNames.COMPOUND_FILE_EXTENSION);
+
+          if (infoStream != null) {
+            message("flush: create compound file \"" + cfsFileName + "\"");
+          }
+
+          CompoundFileWriter cfsWriter = new CompoundFileWriter(directory, cfsFileName);
+          for(String fileName : flushState.flushedFiles) {
+            cfsWriter.addFile(fileName);
+          }
+          cfsWriter.close();
+          deleter.deleteNewFiles(flushState.flushedFiles);
+
+          newSegment.setUseCompoundFile(true);
+        }
+
+        if (infoStream != null) {
+          message("flush: segment=" + newSegment);
+          final long newSegmentSize = newSegment.sizeInBytes();
+          String message = "  ramUsed=" + nf.format(startNumBytesUsed/1024./1024.) + " MB" +
+            " newFlushedSize=" + nf.format(newSegmentSize/1024/1024) + " MB" +
+            " docs/MB=" + nf.format(numDocsInRAM/(newSegmentSize/1024./1024.)) +
+            " new/old=" + nf.format(100.0*newSegmentSize/startNumBytesUsed) + "%";
+          message(message);
+        }
+
+      } else {
+        if (infoStream != null) {
+          message("skip flushing segment: no docs");
+        }
+        newSegment = null;
+      }
+
+      success = true;
+    } finally {
+      notifyAll();
+      if (!success) {
+        if (segment != null) {
+          deleter.refresh(segment);
+        }
+        abort();
+      }
+    }
+
+    doAfterFlush();
+
+    // Lock order: IW -> DW -> BD
+    pushDeletes(newSegment, segmentInfos);
+
+    docStoreOffset = numDocsInStore;
+
+    return newSegment;
+  }
+

@@ -1,25 +1,28 @@
   @Override
   synchronized void flush(Map<TermsHashConsumerPerThread,Collection<TermsHashConsumerPerField>> threadsAndFields, final SegmentWriteState state) throws IOException {
-
-    // NOTE: it's possible that all documents seen in this segment
-    // hit non-aborting exceptions, in which case we will
-    // not have yet init'd the TermVectorsWriter.  This is
-    // actually OK (unlike in the stored fields case)
-    // because, although FieldInfos.hasVectors() will return
-    // true, the TermVectorsReader gracefully handles
-    // non-existence of the term vectors files.
-    state.hasVectors = hasVectors;
-
     if (tvx != null) {
+      // At least one doc in this run had term vectors enabled
+      fill(state.numDocs);
+      tvx.close();
+      tvf.close();
+      tvd.close();
+      tvx = tvd = tvf = null;
+      assert state.segmentName != null;
+      String idxName = IndexFileNames.segmentFileName(state.segmentName, "", IndexFileNames.VECTORS_INDEX_EXTENSION);
+      String fldName = IndexFileNames.segmentFileName(state.segmentName, "", IndexFileNames.VECTORS_FIELDS_EXTENSION);
+      String docName = IndexFileNames.segmentFileName(state.segmentName, "", IndexFileNames.VECTORS_DOCUMENTS_EXTENSION);
 
-      if (state.numDocsInStore > 0)
-        // In case there are some final documents that we
-        // didn't see (because they hit a non-aborting exception):
-        fill(state.numDocsInStore - docWriter.getDocStoreOffset());
+      if (4 + ((long) state.numDocs) * 16 != state.directory.fileLength(idxName)) {
+        throw new RuntimeException("after flush: tvx size mismatch: " + state.numDocs + " docs vs " + state.directory.fileLength(idxName) + " length in bytes of " + idxName + " file exists?=" + state.directory.fileExists(idxName));
+      }
 
-      tvx.flush();
-      tvd.flush();
-      tvf.flush();
+      state.flushedFiles.add(idxName);
+      state.flushedFiles.add(fldName);
+      state.flushedFiles.add(docName);
+
+      lastDocID = 0;
+      state.hasVectors = hasVectors;
+      hasVectors = false;
     }
 
     for (Map.Entry<TermsHashConsumerPerThread,Collection<TermsHashConsumerPerField>> entry : threadsAndFields.entrySet()) {

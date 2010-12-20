@@ -8,30 +8,23 @@
 
     final String mergedName = merge.info.name;
     
-    SegmentMerger merger = null;
-
     int mergedDocCount = 0;
 
     SegmentInfos sourceSegments = merge.segments;
     final int numSegments = sourceSegments.size();
 
-    if (infoStream != null)
-      message("merging " + merge.segString(directory));
+    SegmentMerger merger = new SegmentMerger(directory, termIndexInterval, mergedName, merge,
+                                             codecs, payloadProcessorProvider,
+                                             ((FieldInfos) docWriter.getFieldInfos().clone()));
 
-    merger = new SegmentMerger(directory, termIndexInterval, mergedName, merge, codecs, payloadProcessorProvider);
+    if (infoStream != null) {
+      message("merging " + merge.segString(directory) + " mergeVectors=" + merger.fieldInfos().hasVectors());
+    }
 
+    merge.info.setHasVectors(merger.fieldInfos().hasVectors());
     merge.readers = new SegmentReader[numSegments];
     merge.readersClone = new SegmentReader[numSegments];
 
-    boolean mergeDocStores = false;
-
-    final String currentDocStoreSegment;
-    synchronized(this) {
-      currentDocStoreSegment = docWriter.getDocStoreSegment();
-    }
-
-    boolean currentDSSMerged = false;
-      
     // This is try/finally to make sure merger's readers are
     // closed:
     boolean success = false;
@@ -43,7 +36,7 @@
 
         // Hold onto the "live" reader; we will use this to
         // commit merged deletes
-        SegmentReader reader = merge.readers[i] = readerPool.get(info, merge.mergeDocStores,
+        SegmentReader reader = merge.readers[i] = readerPool.get(info, true,
                                                                  MERGE_READ_BUFFER_SIZE,
                                                                  -config.getReaderTermsIndexDivisor());
 
@@ -52,14 +45,6 @@
         // need readers that will not change
         SegmentReader clone = merge.readersClone[i] = (SegmentReader) reader.clone(true);
         merger.add(clone);
-
-        if (clone.hasDeletions()) {
-          mergeDocStores = true;
-        }
-        
-        if (info.getDocStoreOffset() != -1 && currentDocStoreSegment != null) {
-          currentDSSMerged |= currentDocStoreSegment.equals(info.getDocStoreSegment());
-        }
 
         totDocCount += clone.numDocs();
       }
@@ -70,45 +55,15 @@
 
       merge.checkAborted(directory);
 
-      // If deletions have arrived and it has now become
-      // necessary to merge doc stores, go and open them:
-      if (mergeDocStores && !merge.mergeDocStores) {
-        merge.mergeDocStores = true;
-        synchronized(this) {
-
-          // If 1) we must now merge doc stores, and 2) at
-          // least one of the segments we are merging uses
-          // the doc store we are now writing to, we must at
-          // this point force this doc store closed (by
-          // calling flush).  If we didn't do this then the
-          // readers will attempt to open an IndexInput
-          // on files that have still-open IndexOutputs
-          // against them:
-          if (currentDSSMerged) {
-            if (infoStream != null) {
-              message("now flush at mergeMiddle");
-            }
-            doFlush(true, false);
-            updatePendingMerges(1, false);
-          }
-        }
-
-        for(int i=0;i<numSegments;i++) {
-          merge.readersClone[i].openDocStores();
-        }
-
-        // Clear DSS
-        merge.info.setDocStore(-1, null, false);
-      }
-
       // This is where all the work happens:
-      mergedDocCount = merge.info.docCount = merger.merge(merge.mergeDocStores);
+      mergedDocCount = merge.info.docCount = merger.merge();
 
       // Record which codec was used to write the segment
       merge.info.setSegmentCodecs(merger.getSegmentCodecs());
 
       if (infoStream != null) {
         message("merge segmentCodecs=" + merger.getSegmentCodecs());
+        message("merge store matchedCount=" + merger.getMatchedSubReaderCount() + " vs " + numSegments);
       }
       
       assert mergedDocCount == totDocCount;
@@ -117,7 +72,7 @@
       // because codec must know if prox was written for
       // this segment:
       //System.out.println("merger set hasProx=" + merger.hasProx() + " seg=" + merge.info.name);
-      merge.info.setHasProx(merger.hasProx());
+      merge.info.setHasProx(merger.fieldInfos().hasProx());
 
       boolean useCompoundFile;
       synchronized (this) { // Guard segmentInfos
@@ -182,12 +137,7 @@
       final int termsIndexDivisor;
       final boolean loadDocStores;
 
-      // if the merged segment warmer was not installed when
-      // this merge was started, causing us to not force
-      // the docStores to close, we can't warm it now
-      final boolean canWarm = merge.info.getDocStoreSegment() == null || currentDocStoreSegment == null || !merge.info.getDocStoreSegment().equals(currentDocStoreSegment);
-
-      if (poolReaders && mergedSegmentWarmer != null && canWarm) {
+      if (poolReaders && mergedSegmentWarmer != null) {
         // Load terms index & doc stores so the segment
         // warmer can run searches, load documents/term
         // vectors
@@ -208,15 +158,21 @@
           mergedSegmentWarmer.warm(mergedReader);
         }
 
-        if (!commitMerge(merge, merger, mergedDocCount, mergedReader)) {
+        if (!commitMerge(merge, mergedReader)) {
           // commitMerge will return false if this merge was aborted
           return 0;
         }
       } finally {
         synchronized(this) {
-          readerPool.release(mergedReader);
+          if (readerPool.release(mergedReader)) {
+            // Must checkpoint after releasing the
+            // mergedReader since it may have written a new
+            // deletes file:
+            checkpoint();
+          }
         }
       }
+
       success = true;
 
     } finally {

@@ -1,0 +1,151 @@
+  // serializes new node by appending its bytes to the end
+  // of the current byte[]
+  int addNode(Builder.UnCompiledNode<T> node) throws IOException {
+    //System.out.println("FST.addNode pos=" + posWrite + " numArcs=" + node.numArcs);
+    if (node.numArcs == 0) {
+      if (node.isFinal) {
+        return FINAL_END_NODE;
+      } else {
+        return NON_FINAL_END_NODE;
+      }
+    }
+
+    int startAddress = writer.posWrite;
+    //System.out.println("  startAddr=" + startAddress);
+
+    final boolean doFixedArray = node.numArcs >= NUM_ARCS_FIXED_ARRAY;
+    final int fixedArrayStart;
+    if (doFixedArray) {
+      if (bytesPerArc.length < node.numArcs) {
+        bytesPerArc = new int[ArrayUtil.oversize(node.numArcs, 1)];
+      }
+      // write a "false" first arc:
+      writer.writeByte((byte) BIT_ARCS_AS_FIXED_ARRAY);
+      writer.writeVInt(node.numArcs);
+      // placeholder -- we'll come back and write the number
+      // of bytes per arc here:
+      writer.writeByte((byte) 0);
+      fixedArrayStart = writer.posWrite;
+      //System.out.println("  do fixed arcs array arcsStart=" + fixedArrayStart);
+    } else {
+      fixedArrayStart = 0;
+    }
+
+    nodeCount++;
+    arcCount += node.numArcs;
+    
+    final int lastArc = node.numArcs-1;
+
+    int lastArcStart = writer.posWrite;
+    int maxBytesPerArc = 0;
+    for(int arcIdx=0;arcIdx<node.numArcs;arcIdx++) {
+      final Builder.Arc<T> arc = node.arcs[arcIdx];
+      final Builder.CompiledNode target = (Builder.CompiledNode) arc.target;
+      int flags = 0;
+
+      if (arcIdx == lastArc) {
+        flags += BIT_LAST_ARC;
+      }
+
+      if (lastFrozenNode == target.address && !doFixedArray) {
+        flags += BIT_TARGET_NEXT;
+      }
+
+      if (arc.isFinal) {
+        flags += BIT_FINAL_ARC;
+        if (arc.nextFinalOutput != NO_OUTPUT) {
+          flags += BIT_ARC_HAS_FINAL_OUTPUT;
+        }
+      } else {
+        assert arc.nextFinalOutput == NO_OUTPUT;
+      }
+
+      boolean targetHasArcs = hasArcs(target.address);
+
+      if (!targetHasArcs) {
+        flags += BIT_STOP_NODE;
+      }
+
+      if (arc.output != NO_OUTPUT) {
+        flags += BIT_ARC_HAS_OUTPUT;
+      }
+
+      writer.writeByte((byte) flags);
+      writeLabel(arc.label);
+
+      //System.out.println("  write arc: label=" + arc.label + " flags=" + flags);
+
+      if (arc.output != NO_OUTPUT) {
+        outputs.write(arc.output, writer);
+        arcWithOutputCount++;
+      }
+      if (arc.nextFinalOutput != NO_OUTPUT) {
+        outputs.write(arc.nextFinalOutput, writer);
+      }
+
+      if (targetHasArcs && (doFixedArray || lastFrozenNode != target.address)) {
+        assert target.address > 0;
+        writer.writeInt(target.address);
+      }
+
+      // just write the arcs "like normal" on first pass,
+      // but record how many bytes each one took, and max
+      // byte size:
+      if (doFixedArray) {
+        bytesPerArc[arcIdx] = writer.posWrite - lastArcStart;
+        lastArcStart = writer.posWrite;
+        maxBytesPerArc = Math.max(maxBytesPerArc, bytesPerArc[arcIdx]);
+        //System.out.println("    bytes=" + bytesPerArc[arcIdx]);
+      }
+    }
+
+    if (doFixedArray) {
+      assert maxBytesPerArc > 0;
+      // 2nd pass just "expands" all arcs to take up a fixed
+      // byte size
+      final int sizeNeeded = fixedArrayStart + node.numArcs * maxBytesPerArc;
+      bytes = ArrayUtil.grow(bytes, sizeNeeded);
+      if (maxBytesPerArc > 255) {
+        throw new IllegalStateException("max arc size is too large (" + maxBytesPerArc + ")");
+      }
+      bytes[fixedArrayStart-1] = (byte) maxBytesPerArc;
+
+      // expand the arcs in place, backwards
+      int srcPos = writer.posWrite;
+      int destPos = fixedArrayStart + node.numArcs*maxBytesPerArc;
+      writer.posWrite = destPos;
+      for(int arcIdx=node.numArcs-1;arcIdx>=0;arcIdx--) {
+        //System.out.println("  repack arcIdx=" + arcIdx + " srcPos=" + srcPos + " destPos=" + destPos);
+        destPos -= maxBytesPerArc;
+        srcPos -= bytesPerArc[arcIdx];
+        if (srcPos != destPos) {
+          assert destPos > srcPos;
+          System.arraycopy(bytes, srcPos, bytes, destPos, bytesPerArc[arcIdx]);
+        }
+      }
+    }
+
+    // reverse bytes in-place; we do this so that the
+    // "BIT_TARGET_NEXT" opto can work, ie, it reads the
+    // node just before the current one
+    final int endAddress = writer.posWrite;
+    final int stopAt = (endAddress - startAddress)/2;
+    int upto = 0;
+    while (upto < stopAt) {
+      final byte b = bytes[startAddress+upto];
+      bytes[startAddress+upto] = bytes[endAddress-upto-1];
+      bytes[endAddress-upto-1] = b;
+      upto++;
+    }
+
+    lastFrozenNode = endAddress - 1;
+    /*
+    System.out.println("  return node addr=" + (endAddress-1));
+    for(int i=endAddress-1;i>=startAddress;i--) {
+      System.out.println("    bytes[" + i + "]=" + bytes[i]);
+    }
+    */
+
+    return endAddress-1;
+  }
+

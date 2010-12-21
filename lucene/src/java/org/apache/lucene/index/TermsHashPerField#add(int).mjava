@@ -2,53 +2,15 @@
   // because token text has already been "interned" into
   // textStart, so we hash by textStart
   public void add(int textStart) throws IOException {
-    int code = textStart;
-
-    int hashPos = code & postingsHashMask;
-
-    assert !postingsCompacted;
-
-    // Locate RawPostingList in hash
-    int termID = postingsHash[hashPos];
-
-    if (termID != -1 && postingsArray.textStarts[termID] != textStart) {
-      // Conflict: keep searching different locations in
-      // the hash table.
-      final int inc = ((code>>8)+code)|1;
-      do {
-        code += inc;
-        hashPos = code & postingsHashMask;
-        termID = postingsHash[hashPos];
-      } while (termID != -1 && postingsArray.textStarts[termID] != textStart);
-    }
-
-    if (termID == -1) {
-
+    int termID = bytesHash.addByPoolOffset(textStart);
+    if (termID >= 0) {      // New posting
       // First time we are seeing this token since we last
       // flushed the hash.
-
-      // New posting
-      termID = numPostings++;
-      if (termID >= postingsArray.size) {
-        growParallelPostingsArray();
-      }
-
-      assert termID >= 0;
-
-      postingsArray.textStarts[termID] = textStart;
-          
-      assert postingsHash[hashPos] == -1;
-      postingsHash[hashPos] = termID;
-
-      if (numPostings == postingsHashHalfSize)
-        rehashPostings(2*postingsHashSize);
-
       // Init stream slices
-      if (numPostingInt + intPool.intUpto > DocumentsWriterRAMAllocator.INT_BLOCK_SIZE)
+      if (numPostingInt + intPool.intUpto > DocumentsWriterPerThread.INT_BLOCK_SIZE)
         intPool.nextBuffer();
 
-      if (DocumentsWriterRAMAllocator.BYTE_BLOCK_SIZE - bytePool.byteUpto < numPostingInt*ByteBlockPool.FIRST_LEVEL_SIZE)
-        bytePool.nextBuffer();
+      if (ByteBlockPool.BYTE_BLOCK_SIZE - bytePool.byteUpto < numPostingInt*ByteBlockPool.FIRST_LEVEL_SIZE)        bytePool.nextBuffer();
 
       intUptos = intPool.buffer;
       intUptoStart = intPool.intUpto;
@@ -65,9 +27,10 @@
       consumer.newTerm(termID);
 
     } else {
+      termID = (-termID)-1;
       int intStart = postingsArray.intStarts[termID];
-      intUptos = intPool.buffers[intStart >> DocumentsWriterRAMAllocator.INT_BLOCK_SHIFT];
-      intUptoStart = intStart & DocumentsWriterRAMAllocator.INT_BLOCK_MASK;
+      intUptos = intPool.buffers[intStart >> DocumentsWriterPerThread.INT_BLOCK_SHIFT];
+      intUptoStart = intStart & DocumentsWriterPerThread.INT_BLOCK_MASK;
       consumer.addTerm(termID);
     }
   }

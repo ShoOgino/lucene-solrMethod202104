@@ -8,7 +8,7 @@
    * <b>NOTE:</b> by default, {@link IndexWriterConfig#getMaxFieldLength()}
    * returns {@link IndexWriterConfig#UNLIMITED_FIELD_LENGTH}. Pay attention to
    * whether this setting fits your application.
-   * 
+   *
    * @param d
    *          the index directory. The index is either created or appended
    *          according <code>conf.getOpenMode()</code>.
@@ -31,20 +31,19 @@
     config = (IndexWriterConfig) conf.clone();
     directory = d;
     analyzer = conf.getAnalyzer();
-    setMessageID(defaultInfoStream);
+    infoStream = defaultInfoStream;
+    maxFieldLength = conf.getMaxFieldLength();
     termIndexInterval = conf.getTermIndexInterval();
-    writeLockTimeout = conf.getWriteLockTimeout();
-    similarity = conf.getSimilarity();
     mergePolicy = conf.getMergePolicy();
     mergePolicy.setIndexWriter(this);
     mergeScheduler = conf.getMergeScheduler();
     mergedSegmentWarmer = conf.getMergedSegmentWarmer();
     codecs = conf.getCodecProvider();
-    
+
+    bufferedDeletes = new BufferedDeletes(messageID);
+    bufferedDeletes.setInfoStream(infoStream);
     poolReaders = conf.getReaderPooling();
 
-    this.readerPool = new IndexReaderPool(this, directory, config);
-    
     OpenMode mode = conf.getOpenMode();
     boolean create;
     if (mode == OpenMode.CREATE) {
@@ -56,18 +55,19 @@
       create = !IndexReader.indexExists(directory);
     }
 
-    if (create) {
-      // Clear the write lock in case it's leftover:
-      directory.clearLock(WRITE_LOCK_NAME);
-    }
-
     writeLock = directory.makeLock(WRITE_LOCK_NAME);
 
-    if (!writeLock.obtain(writeLockTimeout)) // obtain write lock
+    if (!writeLock.obtain(conf.getWriteLockTimeout())) // obtain write lock
       throw new LockObtainFailedException("Index locked for write: " + writeLock);
 
     boolean success = false;
 
+    // TODO: we should check whether this index is too old,
+    // and throw an IndexFormatTooOldExc up front, here,
+    // instead of later when merge, applyDeletes, getReader
+    // is attempted.  I think to do this we should store the
+    // oldest segment's version in segments_N.
+    segmentInfos = new SegmentInfos(codecs);
     try {
       if (create) {
         // Try to read first.  This is to allow create
@@ -84,6 +84,7 @@
         // Record that we have a change (zero out all
         // segments) pending:
         changeCount++;
+        segmentInfos.changed();
       } else {
         segmentInfos.read(directory, codecs);
 
@@ -96,10 +97,11 @@
           // points.
           if (commit.getDirectory() != directory)
             throw new IllegalArgumentException("IndexCommit's directory doesn't match my directory");
-          SegmentInfos oldInfos = new SegmentInfos();
+          SegmentInfos oldInfos = new SegmentInfos(codecs);
           oldInfos.read(directory, commit.getSegmentsFileName(), codecs);
           segmentInfos.replace(oldInfos);
           changeCount++;
+          segmentInfos.changed();
           if (infoStream != null)
             message("init: loaded commit \"" + commit.getSegmentsFileName() + "\"");
         }
@@ -107,25 +109,25 @@
 
       setRollbackSegmentInfos(segmentInfos);
 
-      docWriter = new DocumentsWriter(directory, this, conf);
-      // nocommit
-      //docWriter.setInfoStream(infoStream);
-      //docWriter.setMaxFieldLength(maxFieldLength);
+      docWriter = new DocumentsWriter(directory, this, conf.getIndexingChain(), conf.getIndexerThreadPool(), getCurrentFieldInfos(), bufferedDeletes);
+      docWriter.setInfoStream(infoStream);
+      docWriter.setMaxFieldLength(maxFieldLength);
 
       // Default deleter (for backwards compatibility) is
       // KeepOnlyLastCommitDeleter:
       deleter = new IndexFileDeleter(directory,
                                      conf.getIndexDeletionPolicy(),
-                                     segmentInfos, infoStream, docWriter, this.codecs);
+                                     segmentInfos, infoStream, codecs);
 
-      if (deleter.startingCommitDeleted)
+      if (deleter.startingCommitDeleted) {
         // Deletion policy deleted the "head" commit point.
         // We have to mark ourself as changed so that if we
         // are closed w/o any further changes we write a new
         // segments_N file.
         changeCount++;
+        segmentInfos.changed();
+      }
 
-      docWriter.setMaxBufferedDeleteTerms(conf.getMaxBufferedDeleteTerms());
       docWriter.setRAMBufferSizeMB(conf.getRAMBufferSizeMB());
       docWriter.setMaxBufferedDocs(conf.getMaxBufferedDocs());
       pushMaxBufferedDocs();

@@ -1,0 +1,57 @@
+  /**
+   * Called when hash is too small (> 50% occupied) or too large (< 20%
+   * occupied).
+   */
+  private void rehash(final int newSize, boolean hashOnData) {
+    final int newMask = newSize - 1;
+    bytesUsed.addAndGet(RamUsageEstimator.NUM_BYTES_INT * (newSize));
+    final int[] newHash = new int[newSize];
+    Arrays.fill(newHash, -1);
+    for (int i = 0; i < hashSize; i++) {
+      final int e0 = ords[i];
+      if (e0 != -1) {
+        int code;
+        if (hashOnData) {
+          final int off = bytesStart[e0];
+          final int start = off & BYTE_BLOCK_MASK;
+          final byte[] bytes = pool.buffers[off >> BYTE_BLOCK_SHIFT];
+          code = 0;
+          final int len;
+          int pos;
+          if ((bytes[start] & 0x80) == 0) {
+            // length is 1 byte
+            len = bytes[start];
+            pos = start + 1;
+          } else {
+            len = (bytes[start] & 0x7f) + ((bytes[start + 1] & 0xff) << 7);
+            pos = start + 2;
+          }
+
+          final int endPos = pos + len;
+          while (pos < endPos) {
+            code = BytesRef.HASH_PRIME * code + bytes[pos++];
+          }
+        } else {
+          code = bytesStart[e0];
+        }
+
+        int hashPos = code & newMask;
+        assert hashPos >= 0;
+        if (newHash[hashPos] != -1) {
+          final int inc = ((code >> 8) + code) | 1;
+          do {
+            code += inc;
+            hashPos = code & newMask;
+          } while (newHash[hashPos] != -1);
+        }
+        newHash[hashPos] = e0;
+      }
+    }
+
+    hashMask = newMask;
+    bytesUsed.addAndGet(RamUsageEstimator.NUM_BYTES_INT * (-ords.length));
+    ords = newHash;
+    hashSize = newSize;
+    hashHalfSize = newSize / 2;
+  }
+

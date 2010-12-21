@@ -1,8 +1,8 @@
     @Override
     public void run() {
-      RAMDirectory dir = new RAMDirectory();
+      // LUCENE-2239: won't work with NIOFS/MMAP
+      Directory dir = new MockDirectoryWrapper(random, new RAMDirectory());
       IndexWriter w = null;
-      boolean first = true;
       while(!finish) {
         try {
 
@@ -10,41 +10,33 @@
             if (w != null) {
               w.close();
             }
-            IndexWriterConfig conf = new IndexWriterConfig(
-                TEST_VERSION_CURRENT, new MockAnalyzer()).setMaxBufferedDocs(2);
+            IndexWriterConfig conf = newIndexWriterConfig(
+                                                          TEST_VERSION_CURRENT, new MockAnalyzer()).setMaxBufferedDocs(2);
             ((LogMergePolicy) conf.getMergePolicy()).setMergeFactor(2);
             w = new IndexWriter(dir, conf);
 
-            //((ConcurrentMergeScheduler) w.getMergeScheduler()).setSuppressExceptions();
-            if (!first && !allowInterrupt) {
-              // tell main thread it can interrupt us any time,
-              // starting now
-              allowInterrupt = true;
-            }
-
             Document doc = new Document();
-            doc.add(new Field("field", "some text contents", Field.Store.YES, Field.Index.ANALYZED));
+            doc.add(newField("field", "some text contents", Field.Store.YES, Field.Index.ANALYZED));
             for(int i=0;i<100;i++) {
               w.addDocument(doc);
-              w.commit();
+              if (i%10 == 0) {
+                w.commit();
+              }
             }
             w.close();
             _TestUtil.checkIndex(dir);
             IndexReader.open(dir, true).close();
 
-            if (first && !allowInterrupt) {
-              // Strangely, if we interrupt a thread before
-              // all classes are loaded, the class loader
-              // seems to do scary things with the interrupt
-              // status.  In java 1.5, it'll throw an
-              // incorrect ClassNotFoundException.  In java
-              // 1.6, it'll silently clear the interrupt.
-              // So, on first iteration through here we
-              // don't open ourselves up for interrupts
-              // until we've done the above loop.
-              allowInterrupt = true;
-              first = false;
-            }
+            // Strangely, if we interrupt a thread before
+            // all classes are loaded, the class loader
+            // seems to do scary things with the interrupt
+            // status.  In java 1.5, it'll throw an
+            // incorrect ClassNotFoundException.  In java
+            // 1.6, it'll silently clear the interrupt.
+            // So, on first iteration through here we
+            // don't open ourselves up for interrupts
+            // until we've done the above loop.
+            allowInterrupt = true;
           }
         } catch (ThreadInterruptedException re) {
           Throwable e = re.getCause();
@@ -52,16 +44,6 @@
           if (finish) {
             break;
           }
-          
-          // Make sure IW cleared the interrupted bit
-          // TODO: remove that false once test is fixed for real
-          if (false && interrupted()) {
-            System.out.println("FAILED; InterruptedException hit but thread.interrupted() was true");
-            e.printStackTrace(System.out);
-            failed = true;
-            break;
-          }
-
         } catch (Throwable t) {
           System.out.println("FAILED; unexpected exception");
           t.printStackTrace(System.out);
@@ -71,6 +53,14 @@
       }
 
       if (!failed) {
+        // clear interrupt state:
+        Thread.interrupted();
+        try {
+          w.rollback();
+        } catch (IOException ioe) {
+          throw new RuntimeException(ioe);
+        }
+
         try {
           _TestUtil.checkIndex(dir);
         } catch (Exception e) {
@@ -87,6 +77,11 @@
           System.out.println("IndexReader.open FAILED: unexpected exception");
           e.printStackTrace(System.out);
         }
+      }
+      try {
+        dir.close();
+      } catch (IOException e) {
+        throw new RuntimeException(e);
       }
     }
 

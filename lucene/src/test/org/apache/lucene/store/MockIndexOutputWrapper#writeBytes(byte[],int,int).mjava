@@ -1,0 +1,57 @@
+  @Override
+  public void writeBytes(byte[] b, int offset, int len) throws IOException {
+    long freeSpace = dir.maxSize == 0 ? 0 : dir.maxSize - dir.sizeInBytes();
+    long realUsage = 0;
+
+    // If MockRAMDir crashed since we were opened, then
+    // don't write anything:
+    if (dir.crashed)
+      throw new IOException("MockRAMDirectory was crashed; cannot write to " + name);
+
+    // Enforce disk full:
+    if (dir.maxSize != 0 && freeSpace <= len) {
+      // Compute the real disk free.  This will greatly slow
+      // down our test but makes it more accurate:
+      realUsage = dir.getRecomputedActualSizeInBytes();
+      freeSpace = dir.maxSize - realUsage;
+    }
+
+    if (dir.maxSize != 0 && freeSpace <= len) {
+      if (freeSpace > 0) {
+        realUsage += freeSpace;
+        delegate.writeBytes(b, offset, (int) freeSpace);
+      }
+      if (realUsage > dir.maxUsedSize) {
+        dir.maxUsedSize = realUsage;
+      }
+      String message = "fake disk full at " + dir.getRecomputedActualSizeInBytes() + " bytes when writing " + name + " (file length=" + delegate.length();
+      if (freeSpace > 0) {
+        message += "; wrote " + freeSpace + " of " + len + " bytes";
+      }
+      message += ")";
+      if (LuceneTestCase.VERBOSE) {
+        System.out.println(Thread.currentThread().getName() + ": MDW: now throw fake disk full");
+        new Throwable().printStackTrace(System.out);
+      }
+      throw new IOException(message);
+    } else {
+      if (dir.randomState.nextBoolean()) {
+        final int half = len/2;
+        delegate.writeBytes(b, offset, half);
+        Thread.yield();
+        delegate.writeBytes(b, offset+half, len-half);
+      } else {
+        delegate.writeBytes(b, offset, len);
+      }
+    }
+
+    dir.maybeThrowDeterministicException();
+
+    if (first) {
+      // Maybe throw random exception; only do this on first
+      // write to a new file:
+      first = false;
+      dir.maybeThrowIOException();
+    }
+  }
+

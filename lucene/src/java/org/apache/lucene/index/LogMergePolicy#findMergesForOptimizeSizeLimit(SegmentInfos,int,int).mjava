@@ -1,0 +1,39 @@
+  /**
+   * Returns the merges necessary to optimize the index, taking the max merge
+   * size or max merge docs into consideration. This method attempts to respect
+   * the {@code maxNumSegments} parameter, however it might be, due to size
+   * constraints, that more than that number of segments will remain in the
+   * index. Also, this method does not guarantee that exactly {@code
+   * maxNumSegments} will remain, but &lt;= that number.
+   */
+  private MergeSpecification findMergesForOptimizeSizeLimit(
+      SegmentInfos infos, int maxNumSegments, int last) throws IOException {
+    MergeSpecification spec = new MergeSpecification();
+
+    int start = last - 1;
+    while (start >= 0) {
+      SegmentInfo info = infos.info(start);
+      if (size(info) > maxMergeSize || sizeDocs(info) > maxMergeDocs) {
+        // need to skip that segment + add a merge for the 'right' segments,
+        // unless there is only 1 which is optimized.
+        if (last - start - 1 > 1 || (start != last - 1 && !isOptimized(infos.info(start + 1)))) {
+          // there is more than 1 segment to the right of this one, or an unoptimized single segment.
+          spec.add(new OneMerge(infos.range(start + 1, last)));
+        }
+        last = start;
+      } else if (last - start == mergeFactor) {
+        // mergeFactor eligible segments were found, add them as a merge.
+        spec.add(new OneMerge(infos.range(start, last)));
+        last = start;
+      }
+      --start;
+    }
+
+    // Add any left-over segments, unless there is just 1 already optimized.
+    if (last > 0 && (++start + 1 < last || !isOptimized(infos.info(start)))) {
+      spec.add(new OneMerge(infos.range(start, last)));
+    }
+
+    return spec.merges.size() == 0 ? null : spec;
+  }
+

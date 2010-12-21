@@ -12,7 +12,6 @@
     this.dir = dir;
     name = input.readString();
     docCount = input.readInt();
-    final String codecName;
     delGen = input.readLong();
     docStoreOffset = input.readInt();
     if (docStoreOffset != -1) {
@@ -44,15 +43,46 @@
     assert delCount <= docCount;
 
     hasProx = input.readByte() == YES;
-    
+
     // System.out.println(Thread.currentThread().getName() + ": si.read hasProx=" + hasProx + " seg=" + name);
-    
-    if (format <= DefaultSegmentInfosWriter.FORMAT_4_0)
-      codecName = input.readString();
-    else
-      codecName = "PreFlex";
-    
+    segmentCodecs = new SegmentCodecs(codecs);
+    if (format <= DefaultSegmentInfosWriter.FORMAT_4_0) {
+      segmentCodecs.read(input);
+    } else {
+      // codec ID on FieldInfo is 0 so it will simply use the first codec available
+      // TODO what todo if preflex is not available in the provider? register it or fail?
+      segmentCodecs.codecs = new Codec[] { codecs.lookup("PreFlex")};
+    }
     diagnostics = input.readStringStringMap();
-    codec = codecs.lookup(codecName);
+
+    if (format <= DefaultSegmentInfosWriter.FORMAT_HAS_VECTORS) {
+      hasVectors = input.readByte() == 1;
+    } else {
+      final String storesSegment;
+      final String ext;
+      final boolean isCompoundFile;
+      if (docStoreOffset != -1) {
+        storesSegment = docStoreSegment;
+        isCompoundFile = docStoreIsCompoundFile;
+        ext = IndexFileNames.COMPOUND_FILE_STORE_EXTENSION;
+      } else {
+        storesSegment = name;
+        isCompoundFile = getUseCompoundFile();
+        ext = IndexFileNames.COMPOUND_FILE_EXTENSION;
+      }
+      final Directory dirToTest;
+      if (isCompoundFile) {
+        dirToTest = new CompoundFileReader(dir, IndexFileNames.segmentFileName(storesSegment, "", ext));
+      } else {
+        dirToTest = dir;
+      }
+      try {
+        hasVectors = dirToTest.fileExists(IndexFileNames.segmentFileName(storesSegment, "", IndexFileNames.VECTORS_INDEX_EXTENSION));
+      } finally {
+        if (isCompoundFile) {
+          dirToTest.close();
+        }
+      }
+    }
   }
 

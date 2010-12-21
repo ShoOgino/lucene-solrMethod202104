@@ -1,17 +1,25 @@
     @Override
     public FieldsConsumer fieldsConsumer(SegmentWriteState state) throws IOException {
-      StandardPostingsWriter docsWriter = new StandardPostingsWriterImpl(state);
+      PostingsWriterBase docsWriter = new StandardPostingsWriter(state);
 
       // Terms that have <= freqCutoff number of docs are
       // "pulsed" (inlined):
       final int freqCutoff = 1;
-      StandardPostingsWriter pulsingWriter = new PulsingPostingsWriterImpl(freqCutoff, docsWriter);
+      PostingsWriterBase pulsingWriter = new PulsingPostingsWriterImpl(freqCutoff, docsWriter);
 
       // Terms dict index
-      StandardTermsIndexWriter indexWriter;
+      TermsIndexWriterBase indexWriter;
       boolean success = false;
       try {
-        indexWriter = new SimpleStandardTermsIndexWriter(state);
+        indexWriter = new FixedGapTermsIndexWriter(state) {
+            // We sort in reverse unicode order, so, we must
+            // disable the suffix-stripping opto that
+            // FixedGapTermsIndexWriter does by default!
+            @Override
+            protected int indexedTermPrefixLength(BytesRef priorTerm, BytesRef indexedTerm) {
+              return indexedTerm.length;
+            }
+          };
         success = true;
       } finally {
         if (!success) {
@@ -22,7 +30,7 @@
       // Terms dict
       success = false;
       try {
-        FieldsConsumer ret = new StandardTermsDictWriter(indexWriter, state, pulsingWriter, reverseUnicodeComparator);
+        FieldsConsumer ret = new PrefixCodedTermsWriter(indexWriter, state, pulsingWriter, reverseUnicodeComparator);
         success = true;
         return ret;
       } finally {

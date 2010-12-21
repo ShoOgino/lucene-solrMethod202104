@@ -3,43 +3,20 @@
    * to the Directory.
    * @param triggerMerge if true, we may merge segments (if
    *  deletes or docs were flushed) if necessary
-   * @param flushDocStores if false we are allowed to keep
-   *  doc stores open to share with the next segment
    * @param flushDeletes whether pending deletes should also
-   *  be flushed
    */
   protected final void flush(boolean triggerMerge, boolean flushDeletes) throws CorruptIndexException, IOException {
+
+    // NOTE: this method cannot be sync'd because
+    // maybeMerge() in turn calls mergeScheduler.merge which
+    // in turn can take a long time to run and we don't want
+    // to hold the lock for that.  In the case of
+    // ConcurrentMergeScheduler this can lead to deadlock
+    // when it stalls due to too many running merges.
+
     // We can be called during close, when closing==true, so we must pass false to ensureOpen:
     ensureOpen(false);
-    
-    doBeforeFlush();
-    
-    if (flushDeletes) {
-      if (applyDeletes()) {
-        checkpoint();
-      }
-    }
-    boolean maybeMerge = false;
-    boolean success = false;
-    try {
-      maybeMerge = docWriter.flushAllThreads(flushDeletes) && triggerMerge;
-      success = true;
-    } finally {
-      if (!success) {
-        synchronized (this) {
-          // If docWriter has some aborted files that were
-          // never incref'd, then we clean them up here
-          final Collection<String> files = docWriter.abortedFiles();
-          if (files != null) {
-            deleter.deleteNewFiles(files);
-          }
-        }
-      }
-    }
-    
-    doAfterFlush();
-    
-    if (maybeMerge) {
+    if (doFlush(flushDeletes) && triggerMerge) {
       maybeMerge();
     }
   }

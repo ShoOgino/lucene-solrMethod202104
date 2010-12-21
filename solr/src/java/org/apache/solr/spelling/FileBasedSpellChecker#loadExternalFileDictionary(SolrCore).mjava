@@ -1,0 +1,49 @@
+  @SuppressWarnings("unchecked")
+  private void loadExternalFileDictionary(SolrCore core) {
+    try {
+
+      // Get the field's analyzer
+      if (fieldTypeName != null && core.getSchema().getFieldTypeNoEx(fieldTypeName) != null) {
+        FieldType fieldType = core.getSchema().getFieldTypes().get(fieldTypeName);
+        // Do index-time analysis using the given fieldType's analyzer
+        RAMDirectory ramDir = new RAMDirectory();
+
+        LogMergePolicy mp = new LogByteSizeMergePolicy();
+        mp.setMergeFactor(300);
+
+        IndexWriter writer = new IndexWriter(
+            ramDir,
+            new IndexWriterConfig(core.getSolrConfig().luceneMatchVersion, fieldType.getAnalyzer()).
+                setMaxBufferedDocs(150).
+                setMergePolicy(mp).
+                setMaxFieldLength(IndexWriterConfig.UNLIMITED_FIELD_LENGTH).
+                setOpenMode(IndexWriterConfig.OpenMode.CREATE)
+        );
+
+        List<String> lines = core.getResourceLoader().getLines(sourceLocation, characterEncoding);
+
+        for (String s : lines) {
+          Document d = new Document();
+          d.add(new Field(WORD_FIELD_NAME, s, Field.Store.NO, Field.Index.ANALYZED));
+          writer.addDocument(d);
+        }
+        writer.optimize();
+        writer.close();
+
+        dictionary = new HighFrequencyDictionary(IndexReader.open(ramDir),
+                WORD_FIELD_NAME, 0.0f);
+      } else {
+        // check if character encoding is defined
+        if (characterEncoding == null) {
+          dictionary = new PlainTextDictionary(core.getResourceLoader().openResource(sourceLocation));
+        } else {
+          dictionary = new PlainTextDictionary(new InputStreamReader(core.getResourceLoader().openResource(sourceLocation), characterEncoding));
+        }
+      }
+
+
+    } catch (IOException e) {
+      log.error( "Unable to load spellings", e);
+    }
+  }
+

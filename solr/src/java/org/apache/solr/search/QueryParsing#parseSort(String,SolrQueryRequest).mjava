@@ -1,0 +1,153 @@
+  /**
+   * Returns null if the sortSpec is the standard sort desc.
+   * <p/>
+   * <p>
+   * The form of the sort specification string currently parsed is:
+   * </p>
+   * <pre>>
+   * SortSpec ::= SingleSort [, SingleSort]*
+   * SingleSort ::= <fieldname> SortDirection
+   * SortDirection ::= top | desc | bottom | asc
+   * </pre>
+   * Examples:
+   * <pre>
+   *   score desc               #normal sort by score (will return null)
+   *   weight bottom            #sort by weight ascending
+   *   weight desc              #sort by weight descending
+   *   height desc,weight desc  #sort by height descending, and use weight descending to break any ties
+   *   height desc,weight asc   #sort by height descending, using weight ascending as a tiebreaker
+   * </pre>
+   */
+  public static Sort parseSort(String sortSpec, SolrQueryRequest req) {
+    if (sortSpec == null || sortSpec.length() == 0) return null;
+    List<SortField> lst = new ArrayList<SortField>(4);
+
+    try {
+
+      StrParser sp = new StrParser(sortSpec);
+      while (sp.pos < sp.end) {
+        sp.eatws();
+
+        final int start = sp.pos;
+
+        // short circuit test for a really simple field name
+        String field = sp.getId(null);
+        ParseException qParserException = null;
+
+        if (field == null || sp.ch() != ' ') {
+          // let's try it as a function instead
+          String funcStr = sp.val.substring(start);
+
+          QParser parser = QParser.getParser(funcStr, FunctionQParserPlugin.NAME, req);
+          Query q = null;
+          try {
+            if (parser instanceof FunctionQParser) {
+              FunctionQParser fparser = (FunctionQParser)parser;
+              fparser.setParseMultipleSources(false);
+              fparser.setParseToEnd(false);
+              
+              q = fparser.getQuery();
+              
+              if (fparser.localParams != null) {
+                if (fparser.valFollowedParams) {
+                  // need to find the end of the function query via the string parser
+                  int leftOver = fparser.sp.end - fparser.sp.pos;
+                  sp.pos = sp.end - leftOver;   // reset our parser to the same amount of leftover
+                } else {
+                  // the value was via the "v" param in localParams, so we need to find
+                  // the end of the local params themselves to pick up where we left off
+                  sp.pos = start + fparser.localParamsEnd;
+                }
+              } else {
+                // need to find the end of the function query via the string parser
+                int leftOver = fparser.sp.end - fparser.sp.pos;
+                sp.pos = sp.end - leftOver;   // reset our parser to the same amount of leftover
+              }
+            } else {
+              // A QParser that's not for function queries.
+              // It must have been specified via local params.
+              q = parser.getQuery();
+
+              assert parser.getLocalParams() != null;
+              sp.pos = start + parser.localParamsEnd;
+            }
+
+            Boolean top = sp.getSortDirection();
+            if (null != top) {
+              // we have a Query and a valid direction
+              if (q instanceof FunctionQuery) {
+                lst.add(((FunctionQuery)q).getValueSource().getSortField(top));
+              } else {
+                lst.add((new QueryValueSource(q, 0.0f)).getSortField(top));
+              }
+              continue;
+            }
+          } catch (ParseException e) {
+            // hang onto this in case the string isn't a full field name either
+            qParserException = e;
+          }
+        }
+
+        // if we made it here, we either have a "simple" field name,
+        // or there was a problem parsing the string as a complex func/quer
+
+        if (field == null) {
+          // try again, simple rules for a field name with no whitespace
+          sp.pos = start;
+          field = sp.getSimpleString();
+        }
+        Boolean top = sp.getSortDirection();
+        if (null == top) {
+            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, 
+                                    "Can't determine Sort Order: " + sp);
+        }
+        
+        if (SCORE.equals(field)) {
+          if (top) {
+            lst.add(SortField.FIELD_SCORE);
+          } else {
+            lst.add(new SortField(null, SortField.SCORE, true));
+          }
+        } else if (DOCID.equals(field)) {
+          lst.add(new SortField(null, SortField.DOC, top));
+        } else {
+          // try to find the field
+          SchemaField sf = req.getSchema().getFieldOrNull(field);
+          if (null == sf) {
+            if (null != qParserException) {
+              throw new SolrException
+                (SolrException.ErrorCode.BAD_REQUEST,
+                 "sort param could not be parsed as a query, and is not a "+
+                 "field that exists in the index: " + field,
+                 qParserException);
+            }
+            throw new SolrException
+              (SolrException.ErrorCode.BAD_REQUEST,
+               "sort param fiedl can't be found: " + field);
+          }
+              
+          // TODO: remove this - it should be up to the FieldType
+          if (!sf.indexed()) {
+            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, 
+                                    "can not sort on unindexed field: " 
+                                    + field);
+          }
+          lst.add(sf.getType().getSortField(sf, top));
+        }
+      }
+
+    } catch (ParseException e) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "error in sort: " + sortSpec, e);
+    } catch (IOException e) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "error in sort: " + sortSpec, e);
+    }
+
+
+    // normalize a sort on score desc to null
+    if (lst.size()==1 && lst.get(0) == SortField.FIELD_SCORE) {
+      return null;
+    }
+
+    return new Sort(lst.toArray(new SortField[lst.size()]));
+  }
+

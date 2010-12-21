@@ -1,12 +1,24 @@
   public void testEnforceDeletions() throws Exception {
-    Directory dir = new MockRAMDirectory();
-    IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig(TEST_VERSION_CURRENT, new MockAnalyzer()));
-    IndexReader reader = writer.getReader();
+    Directory dir = newDirectory();
+    RandomIndexWriter writer = new RandomIndexWriter(
+        random,
+        dir,
+        newIndexWriterConfig(TEST_VERSION_CURRENT, new MockAnalyzer()).
+            setMergeScheduler(new SerialMergeScheduler()).
+            // asserts below requires no unexpected merges:
+            setMergePolicy(newLogMergePolicy(10))
+    );
+
+    // NOTE: cannot use writer.getReader because RIW (on
+    // flipping a coin) may give us a newly opened reader,
+    // but we use .reopen on this reader below and expect to
+    // (must) get an NRT reader:
+    IndexReader reader = IndexReader.open(writer.w);
     IndexSearcher searcher = new IndexSearcher(reader);
 
     // add a doc, refresh the reader, and check that its there
     Document doc = new Document();
-    doc.add(new Field("id", "1", Field.Store.YES, Field.Index.NOT_ANALYZED));
+    doc.add(newField("id", "1", Field.Store.YES, Field.Index.NOT_ANALYZED));
     writer.addDocument(doc);
 
     reader = refreshReader(reader);
@@ -43,21 +55,27 @@
     filter = new CachingWrapperFilter(startFilter, CachingWrapperFilter.DeletesMode.RECACHE);
 
     writer.addDocument(doc);
+
     reader = refreshReader(reader);
     searcher = new IndexSearcher(reader);
         
     docs = searcher.search(new MatchAllDocsQuery(), filter, 1);
+
     assertEquals("[query + filter] Should find a hit...", 1, docs.totalHits);
 
     constantScore = new ConstantScoreQuery(filter);
     docs = searcher.search(constantScore, 1);
     assertEquals("[just filter] Should find a hit...", 1, docs.totalHits);
 
+    // NOTE: important to hold ref here so GC doesn't clear
+    // the cache entry!  Else the assert below may sometimes
+    // fail:
+    IndexReader oldReader = reader;
+
     // make sure we get a cache hit when we reopen reader
     // that had no change to deletions
-    IndexReader newReader = refreshReader(reader);
-    assertTrue(reader != newReader);
-    reader = newReader;
+    reader = refreshReader(reader);
+    assertTrue(reader != oldReader);
     searcher = new IndexSearcher(reader);
     int missCount = filter.missCount;
     docs = searcher.search(constantScore, 1);
@@ -106,5 +124,15 @@
 
     // doesn't count as a miss
     assertEquals(missCount, filter.missCount);
+
+    // NOTE: silliness to make sure JRE does not optimize
+    // away our holding onto oldReader to prevent
+    // CachingWrapperFilter's WeakHashMap from dropping the
+    // entry:
+    assertTrue(oldReader != null);
+
+    reader.close();
+    writer.close();
+    dir.close();
   }
 

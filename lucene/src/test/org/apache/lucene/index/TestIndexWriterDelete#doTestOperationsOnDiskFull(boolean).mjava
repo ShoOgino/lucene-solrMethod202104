@@ -9,13 +9,15 @@
     int END_COUNT = 144;
 
     // First build up a starting index:
-    MockRAMDirectory startDir = new MockRAMDirectory();
-    IndexWriter writer = new IndexWriter(startDir, new IndexWriterConfig(TEST_VERSION_CURRENT, new MockAnalyzer(MockTokenizer.WHITESPACE, false)));
+    MockDirectoryWrapper startDir = newDirectory();
+    // TODO: find the resource leak that only occurs sometimes here.
+    startDir.setNoDeleteOpenFile(false);
+    IndexWriter writer = new IndexWriter(startDir, newIndexWriterConfig( TEST_VERSION_CURRENT, new MockAnalyzer(MockTokenizer.WHITESPACE, false)));
     for (int i = 0; i < 157; i++) {
       Document d = new Document();
-      d.add(new Field("id", Integer.toString(i), Field.Store.YES,
+      d.add(newField("id", Integer.toString(i), Field.Store.YES,
                       Field.Index.NOT_ANALYZED));
-      d.add(new Field("content", "aaa " + i, Field.Store.NO,
+      d.add(newField("content", "aaa " + i, Field.Store.NO,
                       Field.Index.ANALYZED));
       writer.addDocument(d);
     }
@@ -30,11 +32,19 @@
 
     // Iterate w/ ever increasing free disk space:
     while (!done) {
-      MockRAMDirectory dir = new MockRAMDirectory(startDir);
+      if (VERBOSE) {
+        System.out.println("TEST: cycle");
+      }
+      MockDirectoryWrapper dir = new MockDirectoryWrapper(random, new RAMDirectory(startDir));
       dir.setPreventDoubleWrite(false);
-      IndexWriter modifier = new IndexWriter(dir, new IndexWriterConfig(
-          TEST_VERSION_CURRENT, new MockAnalyzer(MockTokenizer.WHITESPACE, false)).setMaxBufferedDocs(1000)
-          .setMaxBufferedDeleteTerms(1000));
+      IndexWriter modifier = new IndexWriter(dir,
+                                             newIndexWriterConfig(
+                                                                  TEST_VERSION_CURRENT, new MockAnalyzer(MockTokenizer.WHITESPACE, false))
+                                             .setMaxBufferedDocs(1000)
+                                             .setMaxBufferedDeleteTerms(1000)
+                                             .setMergeScheduler(new ConcurrentMergeScheduler()));
+      ((ConcurrentMergeScheduler) modifier.getConfig().getMergeScheduler()).setSuppressExceptions();
+      modifier.setInfoStream(VERBOSE ? System.out : null);
 
       // For each disk size, first try to commit against
       // dir that will hit random IOExceptions & disk
@@ -43,6 +53,9 @@
       boolean success = false;
 
       for (int x = 0; x < 2; x++) {
+        if (VERBOSE) {
+          System.out.println("TEST: x=" + x);
+        }
 
         double rate = 0.1;
         double diskRatio = ((double)diskFree) / diskUsage;
@@ -75,7 +88,7 @@
         }
 
         dir.setMaxSizeInBytes(thisDiskFree);
-        dir.setRandomIOExceptionRate(rate, diskFree);
+        dir.setRandomIOExceptionRate(rate);
 
         try {
           if (0 == x) {
@@ -83,9 +96,9 @@
             for (int i = 0; i < 13; i++) {
               if (updates) {
                 Document d = new Document();
-                d.add(new Field("id", Integer.toString(i), Field.Store.YES,
+                d.add(newField("id", Integer.toString(i), Field.Store.YES,
                                 Field.Index.NOT_ANALYZED));
-                d.add(new Field("content", "bbb " + i, Field.Store.NO,
+                d.add(newField("content", "bbb " + i, Field.Store.NO,
                                 Field.Index.ANALYZED));
                 modifier.updateDocument(new Term("id", Integer.toString(docId)), d);
               } else { // deletes
@@ -113,10 +126,18 @@
           }
         }
 
+        if (!success) {
+          // Must force the close else the writer can have
+          // open files which cause exc in MockRAMDir.close
+          modifier.rollback();
+        }
+
         // If the close() succeeded, make sure there are
         // no unreferenced files.
-        if (success)
+        if (success) {
+          _TestUtil.checkIndex(dir);
           TestIndexWriter.assertNoUnreferencedFiles(dir, "after writer.close");
+        }
 
         // Finally, verify index is not corrupt, and, if
         // we succeeded, we see all docs changed, and if
@@ -169,19 +190,18 @@
                  + result2 + " instead of expected " + START_COUNT + " or " + END_COUNT);
           }
         }
-
         searcher.close();
         newReader.close();
-
         if (result2 == END_COUNT) {
           break;
         }
       }
-
       dir.close();
+      modifier.close();
 
       // Try again with 10 more bytes of free space:
       diskFree += 10;
     }
+    startDir.close();
   }
 

@@ -18,11 +18,19 @@
 
       assertNotNull(fst);
 
-      // make sure all words are accepted
+      // visit valid paris in order -- make sure all words
+      // are accepted, and FSTEnum's next() steps through
+      // them correctly
+      if (VERBOSE) {
+        System.out.println("TEST: check valid terms/next()");
+      }
       {
         IntsRefFSTEnum<T> fstEnum = new IntsRefFSTEnum<T>(fst);
         for(InputOutput<T> pair : pairs) {
           IntsRef term = pair.input;
+          if (VERBOSE) {
+            System.out.println("TEST: check term=" + inputToString(inputMode, term) + " output=" + fst.outputs.outputToString(pair.output));
+          }
           Object output = run(fst, term, null);
 
           assertNotNull("term " + inputToString(inputMode, term) + " is not accepted", output);
@@ -30,8 +38,8 @@
 
           // verify enum's next
           IntsRefFSTEnum.InputOutput<T> t = fstEnum.next();
-
-          assertEquals(term, t.input);
+          assertNotNull(t);
+          assertEquals("expected input=" + inputToString(inputMode, term) + " but fstEnum returned " + inputToString(inputMode, t.input), term, t.input);
           assertEquals(pair.output, t.output);
         }
         assertNull(fstEnum.next());
@@ -43,6 +51,9 @@
       }
 
       // find random matching word and make sure it's valid
+      if (VERBOSE) {
+        System.out.println("TEST: verify random accepted terms");
+      }
       final IntsRef scratch = new IntsRef(10);
       for(int iter=0;iter<500*RANDOM_MULTIPLIER;iter++) {
         T output = randomAcceptedWord(fst, scratch);
@@ -50,10 +61,15 @@
         assertEquals(termsMap.get(scratch), output);
       }
     
-      // test single IntsRefFSTEnum.advance:
-      //System.out.println("TEST: verify advance");
+      // test IntsRefFSTEnum.seek:
+      if (VERBOSE) {
+        System.out.println("TEST: verify seek");
+      }
+      IntsRefFSTEnum<T> fstEnum = new IntsRefFSTEnum<T>(fst);
       for(int iter=0;iter<100*RANDOM_MULTIPLIER;iter++) {
-        final IntsRefFSTEnum<T> fstEnum = new IntsRefFSTEnum<T>(fst);
+        if (VERBOSE) {
+          System.out.println("TEST: iter=" + iter);
+        }
         if (random.nextBoolean()) {
           // seek to term that doesn't exist:
           while(true) {
@@ -63,15 +79,35 @@
               pos = -(pos+1);
               // ok doesn't exist
               //System.out.println("  seek " + inputToString(inputMode, term));
-              final IntsRefFSTEnum.InputOutput<T> seekResult = fstEnum.advance(term);
-              if (pos < pairs.size()) {
+              final IntsRefFSTEnum.InputOutput<T> seekResult;
+              if (random.nextBoolean()) {
+                if (VERBOSE) {
+                  System.out.println("  do non-exist seekFloor term=" + inputToString(inputMode, term));
+                }
+                seekResult = fstEnum.seekFloor(term);
+                pos--;
+              } else {
+                if (VERBOSE) {
+                  System.out.println("  do non-exist seekCeil term=" + inputToString(inputMode, term));
+                }
+                seekResult = fstEnum.seekCeil(term);
+              }
+
+              if (pos != -1 && pos < pairs.size()) {
                 //System.out.println("    got " + inputToString(inputMode,seekResult.input) + " output=" + fst.outputs.outputToString(seekResult.output));
-                assertEquals(pairs.get(pos).input, seekResult.input);
+                assertNotNull("got null but expected term=" + inputToString(inputMode, pairs.get(pos).input), seekResult);
+                if (VERBOSE) {
+                  System.out.println("    got " + inputToString(inputMode, seekResult.input));
+                }
+                assertEquals("expected " + inputToString(inputMode, pairs.get(pos).input) + " but got " + inputToString(inputMode, seekResult.input), pairs.get(pos).input, seekResult.input);
                 assertEquals(pairs.get(pos).output, seekResult.output);
               } else {
-                // seeked beyond end
+                // seeked before start or beyond end
                 //System.out.println("seek=" + seekTerm);
                 assertNull("expected null but got " + (seekResult==null ? "null" : inputToString(inputMode, seekResult.input)), seekResult);
+                if (VERBOSE) {
+                  System.out.println("    got null");
+                }
               }
 
               break;
@@ -79,24 +115,36 @@
           }
         } else {
           // seek to term that does exist:
-          InputOutput pair = pairs.get(random.nextInt(pairs.size()));
-          //System.out.println("  seek " + inputToString(inputMode, pair.input));
-          final IntsRefFSTEnum.InputOutput<T> seekResult = fstEnum.advance(pair.input);
-          assertEquals(pair.input, seekResult.input);
+          InputOutput<T> pair = pairs.get(random.nextInt(pairs.size()));
+          final IntsRefFSTEnum.InputOutput<T> seekResult;
+          if (random.nextBoolean()) {
+            if (VERBOSE) {
+              System.out.println("  do exists seekFloor " + inputToString(inputMode, pair.input));
+            }
+            seekResult = fstEnum.seekFloor(pair.input);
+          } else {
+            if (VERBOSE) {
+              System.out.println("  do exists seekCeil " + inputToString(inputMode, pair.input));
+            }
+            seekResult = fstEnum.seekCeil(pair.input);
+          }
+          assertNotNull(seekResult);
+          assertEquals("got " + inputToString(inputMode, seekResult.input) + " but expected " + inputToString(inputMode, pair.input), pair.input, seekResult.input);
           assertEquals(pair.output, seekResult.output);
         }
       }
 
       if (VERBOSE) {
-        System.out.println("TEST: mixed next/advance");
+        System.out.println("TEST: mixed next/seek");
       }
 
-      // test mixed next/advance
+      // test mixed next/seek
       for(int iter=0;iter<100*RANDOM_MULTIPLIER;iter++) {
         if (VERBOSE) {
           System.out.println("TEST: iter " + iter);
         }
-        final IntsRefFSTEnum<T> fstEnum = new IntsRefFSTEnum<T>(fst);
+        // reset:
+        fstEnum = new IntsRefFSTEnum<T>(fst);
         int upto = -1;
         while(true) {
           boolean isDone = false;
@@ -112,13 +160,24 @@
             for(;attempt<10;attempt++) {
               IntsRef term = toIntsRef(getRandomString(), inputMode);
               if (!termsMap.containsKey(term) && term.compareTo(pairs.get(upto).input) > 0) {
-                if (VERBOSE) {
-                  System.out.println("  do non-exist advance(" + inputToString(inputMode, term) + "]");
-                }
                 int pos = Collections.binarySearch(pairs, new InputOutput<T>(term, null));
                 assert pos < 0;
                 upto = -(pos+1);
-                isDone = fstEnum.advance(term) == null;
+
+                if (random.nextBoolean()) {
+                  upto--;
+                  assertTrue(upto != -1);
+                  if (VERBOSE) {
+                    System.out.println("  do non-exist seekFloor(" + inputToString(inputMode, term) + ")");
+                  }
+                  isDone = fstEnum.seekFloor(term) == null;
+                } else {
+                  if (VERBOSE) {
+                    System.out.println("  do non-exist seekCeil(" + inputToString(inputMode, term) + ")");
+                  }
+                  isDone = fstEnum.seekCeil(term) == null;
+                }
+
                 break;
               }
             }
@@ -133,10 +192,17 @@
               upto = 0;
             }
 
-            if (VERBOSE) {
-              System.out.println("  do advance(" + inputToString(inputMode, pairs.get(upto).input) + "]");
+            if (random.nextBoolean()) {
+              if (VERBOSE) {
+                System.out.println("  do advanceCeil(" + inputToString(inputMode, pairs.get(upto).input) + ")");
+              }
+              isDone = fstEnum.seekCeil(pairs.get(upto).input) == null;
+            } else {
+              if (VERBOSE) {
+                System.out.println("  do advanceFloor(" + inputToString(inputMode, pairs.get(upto).input) + ")");
+              }
+              isDone = fstEnum.seekFloor(pairs.get(upto).input) == null;
             }
-            isDone = fstEnum.advance(pairs.get(upto).input) == null;
           }
           if (VERBOSE) {
             if (!isDone) {
@@ -153,6 +219,24 @@
             assertFalse(isDone);
             assertEquals(pairs.get(upto).input, fstEnum.current().input);
             assertEquals(pairs.get(upto).output, fstEnum.current().output);
+
+            /*
+            if (upto < pairs.size()-1) {
+              int tryCount = 0;
+              while(tryCount < 10) {
+                final IntsRef t = toIntsRef(getRandomString(), inputMode);
+                if (pairs.get(upto).input.compareTo(t) < 0) {
+                  final boolean expected = t.compareTo(pairs.get(upto+1).input) < 0;
+                  if (VERBOSE) {
+                    System.out.println("TEST: call beforeNext(" + inputToString(inputMode, t) + "); current=" + inputToString(inputMode, pairs.get(upto).input) + " next=" + inputToString(inputMode, pairs.get(upto+1).input) + " expected=" + expected);
+                  }
+                  assertEquals(expected, fstEnum.beforeNext(t));
+                  break;
+                }
+                tryCount++;
+              }
+            }
+            */
           }
         }
       }

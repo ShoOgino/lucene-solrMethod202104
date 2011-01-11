@@ -1,67 +1,88 @@
   /** Called when we are done adding docs to this term */
   @Override
   public void finishTerm(int docCount, boolean isIndexTerm) throws IOException {
+    //System.out.println("PW   finishTerm docCount=" + docCount);
 
-    assert docCount > 0;
+    assert pendingCount > 0 || pendingCount == -1;
 
     pendingIsIndexTerm |= isIndexTerm;
 
-    if (pulsed) {
+    if (pendingCount == -1) {
+      termsOut.writeByte((byte) 0);
       wrappedPostingsWriter.finishTerm(docCount, pendingIsIndexTerm);
       pendingIsIndexTerm = false;
-      pulsedCount++;
     } else {
-      nonPulsedCount++;
-      // OK, there were few enough occurrences for this
+
+      // There were few enough total occurrences for this
       // term, so we fully inline our postings data into
       // terms dict, now:
-      int lastDocID = 0;
-      for(int i=0;i<pendingDocCount;i++) {
-        final Document doc = pendingDocs[i];
-        final int delta = doc.docID - lastDocID;
-        lastDocID = doc.docID;
-        if (omitTF) {
-          termsOut.writeVInt(delta);
-        } else {
-          assert doc.numPositions == doc.termDocFreq;
-          if (doc.numPositions == 1)
-            termsOut.writeVInt((delta<<1)|1);
-          else {
-            termsOut.writeVInt(delta<<1);
-            termsOut.writeVInt(doc.numPositions);
+
+      termsOut.writeByte((byte) 1);
+
+      // TODO: it'd be better to share this encoding logic
+      // in some inner codec that knows how to write a
+      // single doc / single position, etc.  This way if a
+      // given codec wants to store other interesting
+      // stuff, it could use this pulsing codec to do so
+
+      if (!omitTF) {
+        int lastDocID = 0;
+        int pendingIDX = 0;
+        while(pendingIDX < pendingCount) {
+          final Position doc = pending[pendingIDX];
+
+          final int delta = doc.docID - lastDocID;
+          lastDocID = doc.docID;
+
+          //System.out.println("  write doc=" + doc.docID + " freq=" + doc.termFreq);
+
+          if (doc.termFreq == 1) {
+            buffer.writeVInt((delta<<1)|1);
+          } else {
+            buffer.writeVInt(delta<<1);
+            buffer.writeVInt(doc.termFreq);
           }
 
-          // TODO: we could do better in encoding
-          // payloadLength, eg, if it's always the same
-          // across all terms
-          int lastPosition = 0;
+          int lastPos = 0;
           int lastPayloadLength = -1;
-
-          for(int j=0;j<doc.numPositions;j++) {
-            final Position pos = doc.positions[j];
-            final int delta2 = pos.pos - lastPosition;
-            lastPosition = pos.pos;
+          for(int posIDX=0;posIDX<doc.termFreq;posIDX++) {
+            final Position pos = pending[pendingIDX++];
+            assert pos.docID == doc.docID;
+            final int posDelta = pos.pos - lastPos;
+            lastPos = pos.pos;
+            //System.out.println("    write pos=" + pos.pos);
             if (storePayloads) {
               final int payloadLength = pos.payload == null ? 0 : pos.payload.length;
               if (payloadLength != lastPayloadLength) {
-                termsOut.writeVInt((delta2 << 1)|1);
-                termsOut.writeVInt(payloadLength);
+                buffer.writeVInt((posDelta << 1)|1);
+                buffer.writeVInt(payloadLength);
                 lastPayloadLength = payloadLength;
               } else {
-                termsOut.writeVInt(delta2 << 1);
+                buffer.writeVInt(posDelta << 1);
               }
-
               if (payloadLength > 0) {
-                termsOut.writeBytes(pos.payload.bytes, 0, pos.payload.length);
+                buffer.writeBytes(pos.payload.bytes, 0, pos.payload.length);
               }
             } else {
-              termsOut.writeVInt(delta2);
+              buffer.writeVInt(posDelta);
             }
           }
         }
+      } else {
+        int lastDocID = 0;
+        for(int posIDX=0;posIDX<pendingCount;posIDX++) {
+          final Position doc = pending[posIDX];
+          buffer.writeVInt(doc.docID - lastDocID);
+          lastDocID = doc.docID;
+        }
       }
+      
+      //System.out.println("  bytes=" + buffer.getFilePointer());
+      termsOut.writeVInt((int) buffer.getFilePointer());
+      buffer.writeTo(termsOut);
+      buffer.reset();
     }
 
-    pendingDocCount = 0;
+    pendingCount = 0;
   }
 

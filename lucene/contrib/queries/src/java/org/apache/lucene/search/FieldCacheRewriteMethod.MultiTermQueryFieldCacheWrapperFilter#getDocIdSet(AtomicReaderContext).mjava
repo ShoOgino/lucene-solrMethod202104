@@ -1,0 +1,47 @@
+    /**
+     * Returns a DocIdSet with documents that should be permitted in search
+     * results.
+     */
+    @Override
+    public DocIdSet getDocIdSet(AtomicReaderContext context) throws IOException {
+      final FieldCache.DocTermsIndex fcsi = FieldCache.DEFAULT.getTermsIndex(context.reader, query.field);
+      final OpenBitSet termSet = new OpenBitSet(fcsi.numOrd());
+      TermsEnum termsEnum = query.getTermsEnum(new Terms() {
+        
+        @Override
+        public Comparator<BytesRef> getComparator() throws IOException {
+          return BytesRef.getUTF8SortedAsUnicodeComparator();
+        }
+        
+        @Override
+        public TermsEnum iterator() throws IOException {
+          return fcsi.getTermsEnum();
+        }
+        
+      });
+      
+      assert termsEnum != null;
+      if (termsEnum.next() != null) {
+        // fill into a OpenBitSet
+        int termCount = 0;
+        do {
+          long ord = termsEnum.ord();
+          if (ord > 0) {
+            termSet.fastSet(ord);
+            termCount++;
+          }
+        } while (termsEnum.next() != null);
+        
+        query.incTotalNumberOfTerms(termCount);
+      } else {
+        return DocIdSet.EMPTY_DOCIDSET;
+      }
+      
+      return new FieldCacheRangeFilter.FieldCacheDocIdSet(context.reader, true) {
+        @Override
+        boolean matchDoc(int doc) throws ArrayIndexOutOfBoundsException {
+          return termSet.fastGet(fcsi.getOrd(doc));
+        }
+      };
+    }
+

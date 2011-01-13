@@ -1,32 +1,37 @@
   boolean updateDocument(final Document doc, final Analyzer analyzer, final Term delTerm)
       throws CorruptIndexException, IOException {
+    ensureOpen();
 
-    boolean flushed = threadPool.executePerThread(this, doc,
-        new DocumentsWriterThreadPool.PerThreadTask<Boolean>() {
-          @Override
-          public Boolean process(final DocumentsWriterPerThread perThread) throws IOException {
-            long perThreadRAMUsedBeforeAdd = perThread.bytesUsed();
-            perThread.addDocument(doc, analyzer);
+    Collection<String> flushedFiles = null;
+    SegmentInfo newSegment = null;
 
-            synchronized(DocumentsWriter.this) {
-              ensureOpen();
-              if (delTerm != null) {
-                deleteTerm(delTerm, true);
-              }
-              perThread.commitDocument();
-              numDocsInRAM.incrementAndGet();
-            }
+    ThreadState perThread = perThreadPool.getAndLock(Thread.currentThread(), this, doc);
+    try {
+      DocumentsWriterPerThread dwpt = perThread.perThread;
+      long perThreadRAMUsedBeforeAdd = dwpt.bytesUsed();
+      dwpt.addDocument(doc, analyzer);
 
-            if (finishAddDocument(perThread, perThreadRAMUsedBeforeAdd)) {
-              super.clearThreadBindings();
-              return true;
-            }
-            return false;
-          }
-        });
+      synchronized(DocumentsWriter.this) {
+        if (delTerm != null) {
+          deleteTerm(delTerm);
+        }
+        dwpt.commitDocument();
+        numDocsInRAM.incrementAndGet();
+      }
 
-    if (flushed) {
-      indexWriter.maybeMerge();
+      newSegment = finishAddDocument(dwpt, perThreadRAMUsedBeforeAdd);
+      if (newSegment != null) {
+        perThreadPool.clearThreadBindings(perThread);
+        flushedFiles = new HashSet<String>();
+        flushedFiles.addAll(dwpt.flushState.flushedFiles);
+      }
+
+    } finally {
+      perThread.unlock();
+    }
+
+    if (newSegment != null) {
+      finishFlushedSegment(newSegment, flushedFiles);
       return true;
     }
 

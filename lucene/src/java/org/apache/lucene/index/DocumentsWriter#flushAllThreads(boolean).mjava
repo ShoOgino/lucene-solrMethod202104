@@ -1,45 +1,60 @@
   final boolean flushAllThreads(final boolean flushDeletes)
     throws IOException {
 
-    return threadPool.executeAllThreads(this, new DocumentsWriterThreadPool.AllThreadsTask<Boolean>() {
-      @Override
-      public Boolean process(Iterator<DocumentsWriterPerThread> threadsIterator) throws IOException {
-        boolean anythingFlushed = false;
-
-        while (threadsIterator.hasNext()) {
-          DocumentsWriterPerThread perThread = threadsIterator.next();
-          final int numDocs = perThread.getNumDocsInRAM();
-
-          // Always flush docs if there are any
-          boolean flushDocs = numDocs > 0;
-
-          String segment = perThread.getSegment();
-
-          // If we are flushing docs, segment must not be null:
-          assert segment != null || !flushDocs;
-
-          if (flushDocs) {
-            SegmentInfo newSegment = perThread.flush();
-            newSegment.dir = indexWriter.getDirectory();
-
-            if (newSegment != null) {
-              anythingFlushed = true;
-
-              IndexWriter.setDiagnostics(newSegment, "flush");
-              finishFlushedSegment(newSegment, perThread);
-            }
-          } else if (flushDeletes) {
-            perThread.pushDeletes(null, indexWriter.segmentInfos);
-          }
-        }
-
-        if (anythingFlushed) {
-          clearThreadBindings();
-          numDocsInRAM.set(0);
-        }
-
-        return anythingFlushed;
+    if (flushDeletes) {
+      if (indexWriter.segmentInfos.size() > 0 && pendingDeletes.any()) {
+        bufferedDeletes.pushDeletes(pendingDeletes, indexWriter.segmentInfos.lastElement(), true);
+        pendingDeletes.clear();
       }
-    });
+    }
+
+    Iterator<ThreadState> threadsIterator = perThreadPool.getActivePerThreadsIterator();
+    boolean anythingFlushed = false;
+
+    while (threadsIterator.hasNext()) {
+      Collection<String> flushedFiles = null;
+      SegmentInfo newSegment = null;
+
+      ThreadState perThread = threadsIterator.next();
+      perThread.lock();
+      try {
+        DocumentsWriterPerThread dwpt = perThread.perThread;
+        final int numDocs = dwpt.getNumDocsInRAM();
+
+        // Always flush docs if there are any
+        boolean flushDocs = numDocs > 0;
+
+        String segment = dwpt.getSegment();
+
+        // If we are flushing docs, segment must not be null:
+        assert segment != null || !flushDocs;
+
+        if (flushDocs) {
+          newSegment = dwpt.flush();
+
+          if (newSegment != null) {
+            IndexWriter.setDiagnostics(newSegment, "flush");
+            flushedFiles = new HashSet<String>();
+            flushedFiles.addAll(dwpt.flushState.flushedFiles);
+            dwpt.pushDeletes(newSegment, indexWriter.segmentInfos);
+            anythingFlushed = true;
+            perThreadPool.clearThreadBindings(perThread);
+          }
+        } else if (flushDeletes) {
+          dwpt.pushDeletes(null, indexWriter.segmentInfos);
+        }
+      } finally {
+        perThread.unlock();
+      }
+
+      if (newSegment != null) {
+        // important do unlock the perThread before finishFlushedSegment
+        // is called to prevent deadlock on IndexWriter mutex
+        finishFlushedSegment(newSegment, flushedFiles);
+      }
+    }
+
+    numDocsInRAM.set(0);
+    return anythingFlushed;
   }
 

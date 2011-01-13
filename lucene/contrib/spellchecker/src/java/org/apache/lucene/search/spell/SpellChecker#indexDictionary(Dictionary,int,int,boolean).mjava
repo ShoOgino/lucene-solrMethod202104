@@ -1,0 +1,70 @@
+  /**
+   * Indexes the data from the given {@link Dictionary}.
+   * @param dict Dictionary to index
+   * @param mergeFactor mergeFactor to use when indexing
+   * @param ramMB the max amount or memory in MB to use
+   * @param optimize whether or not the spellcheck index should be optimized
+   * @throws AlreadyClosedException if the Spellchecker is already closed
+   * @throws IOException
+   */
+  public final void indexDictionary(Dictionary dict, int mergeFactor, int ramMB, boolean optimize) throws IOException {
+    synchronized (modifyCurrentIndexLock) {
+      ensureOpen();
+      final Directory dir = this.spellIndex;
+      final IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig(Version.LUCENE_CURRENT, new WhitespaceAnalyzer(Version.LUCENE_CURRENT)).setRAMBufferSizeMB(ramMB));
+      ((LogMergePolicy) writer.getConfig().getMergePolicy()).setMergeFactor(mergeFactor);
+      IndexSearcher indexSearcher = obtainSearcher();
+      final List<TermsEnum> termsEnums = new ArrayList<TermsEnum>();
+
+      if (searcher.maxDoc() > 0) {
+        new ReaderUtil.Gather(searcher.getIndexReader()) {
+          @Override
+          protected void add(int base, IndexReader r) throws IOException {
+            Terms terms = r.terms(F_WORD);
+            if (terms != null)
+              termsEnums.add(terms.iterator());
+          }
+        }.run();
+      }
+      
+      boolean isEmpty = termsEnums.isEmpty();
+
+      try { 
+        Iterator<String> iter = dict.getWordsIterator();
+        BytesRef currentTerm = new BytesRef();
+        
+        terms: while (iter.hasNext()) {
+          String word = iter.next();
+  
+          int len = word.length();
+          if (len < 3) {
+            continue; // too short we bail but "too long" is fine...
+          }
+  
+          if (!isEmpty) {
+            // we have a non-empty index, check if the term exists
+            currentTerm.copy(word);
+            for (TermsEnum te : termsEnums) {
+              if (te.seek(currentTerm, false) == TermsEnum.SeekStatus.FOUND) {
+                continue terms;
+              }
+            }
+          }
+  
+          // ok index the word
+          Document doc = createDocument(word, getMin(len), getMax(len));
+          writer.addDocument(doc);
+        }
+      } finally {
+        releaseSearcher(indexSearcher);
+      }
+      // close writer
+      if (optimize)
+        writer.optimize();
+      writer.close();
+      // also re-open the spell index to see our own changes when the next suggestion
+      // is fetched:
+      swapSearcher(dir);
+    }
+  }
+

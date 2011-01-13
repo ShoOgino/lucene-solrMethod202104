@@ -1,0 +1,62 @@
+  /** Finds an arc leaving the incoming arc, replacing the arc in place.
+   *  This returns null if the arc was not found, else the incoming arc. */
+  public Arc<T> findTargetArc(int labelToMatch, Arc<T> follow, Arc<T> arc) throws IOException {
+
+    if (labelToMatch == END_LABEL) {
+      if (follow.isFinal()) {
+        arc.output = follow.nextFinalOutput;
+        arc.label = END_LABEL;
+        return arc;
+      } else {
+        return null;
+      }
+    }
+
+    if (!targetHasArcs(follow)) {
+      return null;
+    }
+
+    // TODO: maybe make an explicit thread state that holds
+    // reusable stuff eg BytesReader:
+    final BytesReader in = getBytesReader(follow.target);
+
+    if ((in.readByte() & BIT_ARCS_AS_FIXED_ARRAY) != 0) {
+      // Arcs are full array; do binary search:
+      arc.numArcs = in.readVInt();
+      arc.bytesPerArc = in.readByte() & 0xFF;
+      arc.posArcsStart = in.pos;
+      int low = 0;
+      int high = arc.numArcs-1;
+      while (low <= high) {
+        int mid = (low + high) >>> 1;
+        in.pos = arc.posArcsStart - arc.bytesPerArc*mid - 1;
+        int midLabel = readLabel(in);
+        final int cmp = midLabel - labelToMatch;
+        if (cmp < 0)
+          low = mid + 1;
+        else if (cmp > 0)
+          high = mid - 1;
+        else {
+          arc.arcIdx = mid-1;
+          return readNextRealArc(arc);
+        }
+      }
+
+      return null;
+    }
+
+    // Linear scan
+    readFirstTargetArc(follow, arc);
+    while(true) {
+      if (arc.label == labelToMatch) {
+        return arc;
+      } else if (arc.label > labelToMatch) {
+        return null;
+      } else if (arc.isLast()) {
+        return null;
+      } else {
+        readNextArc(arc);
+      }
+    }
+  }
+

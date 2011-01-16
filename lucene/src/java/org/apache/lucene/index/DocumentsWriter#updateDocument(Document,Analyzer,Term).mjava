@@ -11,23 +11,30 @@
       dwpt.addDocument(doc, analyzer);
 
       if (delTerm != null) {
-        deleteTerm(delTerm);
+        dwpt.deleteTerm(delTerm);
       }
       dwpt.commitDocument();
       numDocsInRAM.incrementAndGet();
 
       newSegment = finishAddDocument(dwpt, perThreadRAMUsedBeforeAdd);
-      if (newSegment != null) {
-        perThreadPool.clearThreadBindings(perThread);
+      if (newSegment != null && dwpt.pendingDeletes.any()) {
+        bufferedDeletes.pushDeletes(dwpt.pendingDeletes, newSegment);
+        dwpt.pendingDeletes = new SegmentDeletes();
       }
-
     } finally {
       perThread.unlock();
     }
 
     if (newSegment != null) {
+      perThreadPool.clearThreadBindings(perThread);
       finishFlushedSegment(newSegment);
       return true;
+    }
+
+    // delete term from other DWPTs later, so that this thread
+    // doesn't have to lock multiple DWPTs at the same time
+    if (delTerm != null) {
+      deleteTerm(delTerm, perThread);
     }
 
     return false;

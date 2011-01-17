@@ -2,7 +2,10 @@
     throws IOException {
 
     if (flushDeletes) {
-      pushToLastSegment(pendingDeletes);
+      synchronized (this) {
+        pushDeletes(null, pendingDeletes);
+        pendingDeletes = new SegmentDeletes();
+      }
     }
 
     Iterator<ThreadState> threadsIterator = perThreadPool.getActivePerThreadsIterator();
@@ -10,6 +13,7 @@
 
     while (threadsIterator.hasNext()) {
       SegmentInfo newSegment = null;
+      SegmentDeletes segmentDeletes = null;
 
       ThreadState perThread = threadsIterator.next();
       perThread.lock();
@@ -29,29 +33,34 @@
           newSegment = dwpt.flush();
 
           if (newSegment != null) {
+            fieldInfos.update(dwpt.getFieldInfos());
             anythingFlushed = true;
             perThreadPool.clearThreadBindings(perThread);
             if (dwpt.pendingDeletes.any()) {
-              bufferedDeletes.pushDeletes(dwpt.pendingDeletes, newSegment);
+              segmentDeletes = dwpt.pendingDeletes;
               dwpt.pendingDeletes = new SegmentDeletes();
             }
           }
-        }
-        else if (flushDeletes && dwpt.pendingDeletes.any()) {
-          pushToLastSegment(dwpt.pendingDeletes);
+        } else if (flushDeletes && dwpt.pendingDeletes.any()) {
+          segmentDeletes = dwpt.pendingDeletes;
+          dwpt.pendingDeletes = new SegmentDeletes();
         }
       } finally {
         perThread.unlock();
       }
 
+      if (segmentDeletes != null) {
+          pushDeletes(newSegment, segmentDeletes);
+      }
+
+
       if (newSegment != null) {
         // important do unlock the perThread before finishFlushedSegment
         // is called to prevent deadlock on IndexWriter mutex
-        finishFlushedSegment(newSegment);
+        indexWriter.addFlushedSegment(newSegment);
       }
     }
 
-    numDocsInRAM.set(0);
     return anythingFlushed;
   }
 

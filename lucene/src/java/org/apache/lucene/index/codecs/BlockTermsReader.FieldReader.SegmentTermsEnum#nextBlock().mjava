@@ -1,0 +1,55 @@
+      /* Does initial decode of next block of terms; this
+         doesn't actually decode the docFreq, totalTermFreq,
+         postings details (frq/prx offset, etc.) metadata;
+         it just loads them as byte[] blobs which are then      
+         decoded on-demand if the metadata is ever requested
+         for any term in this block.  This enables terms-only
+         intensive consumes (eg certain MTQs, respelling) to
+         not pay the price of decoding metadata they won't
+         use. */
+      private boolean nextBlock() throws IOException {
+
+        // TODO: we still lazy-decode the byte[] for each
+        // term (the suffix), but, if we decoded
+        // all N terms up front then seeking could do a fast
+        // bsearch w/in the block...
+
+        //System.out.println("BTR.nextBlock() fp=" + in.getFilePointer() + " this=" + this);
+        state.blockFilePointer = in.getFilePointer();
+        state.blockTermCount = in.readVInt();
+        //System.out.println("  blockTermCount=" + state.blockTermCount);
+        if (state.blockTermCount == 0) {
+          return false;
+        }
+        termBlockPrefix = in.readVInt();
+
+        // term suffixes:
+        int len = in.readVInt();
+        if (termSuffixes.length < len) {
+          termSuffixes = new byte[ArrayUtil.oversize(len, 1)];
+        }
+        //System.out.println("  termSuffixes len=" + len);
+        in.readBytes(termSuffixes, 0, len);
+        termSuffixesReader.reset(termSuffixes);
+
+        // docFreq, totalTermFreq
+        len = in.readVInt();
+        if (docFreqBytes.length < len) {
+          docFreqBytes = new byte[ArrayUtil.oversize(len, 1)];
+        }
+        //System.out.println("  freq bytes len=" + len);
+        in.readBytes(docFreqBytes, 0, len);
+        freqReader.reset(docFreqBytes);
+        metaDataUpto = 0;
+
+        state.termCount = 0;
+
+        postingsReader.readTermsBlock(in, fieldInfo, state);
+
+        blocksSinceSeek++;
+        indexIsCurrent &= (blocksSinceSeek < indexReader.getDivisor());
+        //System.out.println("  indexIsCurrent=" + indexIsCurrent);
+
+        return true;
+      }
+

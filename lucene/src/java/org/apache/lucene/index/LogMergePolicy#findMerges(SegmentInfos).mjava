@@ -14,7 +14,7 @@
 
     // Compute levels, which is just log (base mergeFactor)
     // of the size of each segment
-    float[] levels = new float[numSegments];
+    SegmentInfoAndLevel[] levels = new SegmentInfoAndLevel[numSegments];
     final float norm = (float) Math.log(mergeFactor);
 
     for(int i=0;i<numSegments;i++) {
@@ -24,8 +24,12 @@
       // Floor tiny segments
       if (size < 1)
         size = 1;
-      levels[i] = (float) Math.log(size)/norm;
-      message("seg " + info.name + " level=" + levels[i]);
+      levels[i] = new SegmentInfoAndLevel(info, (float) Math.log(size)/norm, i);
+      message("seg " + info.name + " level=" + levels[i].level + " size=" + size);
+    }
+
+    if (!requireContiguousMerge) {
+      Arrays.sort(levels);
     }
 
     final float levelFloor;
@@ -48,9 +52,9 @@
 
       // Find max level of all segments not already
       // quantized.
-      float maxLevel = levels[start];
+      float maxLevel = levels[start].level;
       for(int i=1+start;i<numSegments;i++) {
-        final float level = levels[i];
+        final float level = levels[i].level;
         if (level > maxLevel)
           maxLevel = level;
       }
@@ -71,7 +75,7 @@
 
       int upto = numSegments-1;
       while(upto >= start) {
-        if (levels[upto] >= levelBottom) {
+        if (levels[upto].level >= levelBottom) {
           break;
         }
         upto--;
@@ -84,18 +88,26 @@
       while(end <= 1+upto) {
         boolean anyTooLarge = false;
         for(int i=start;i<end;i++) {
-          final SegmentInfo info = infos.info(i);
+          final SegmentInfo info = levels[i].info;
           anyTooLarge |= (size(info) >= maxMergeSize || sizeDocs(info) >= maxMergeDocs);
         }
 
         if (!anyTooLarge) {
           if (spec == null)
             spec = new MergeSpecification();
-          if (verbose())
+          if (verbose()) {
             message("    " + start + " to " + end + ": add this merge");
-          spec.add(new OneMerge(infos.range(start, end)));
-        } else if (verbose())
+          }
+          Arrays.sort(levels, start, end, sortByIndex);
+          final SegmentInfos mergeInfos = new SegmentInfos();
+          for(int i=start;i<end;i++) {
+            mergeInfos.add(levels[i].info);
+            assert infos.contains(levels[i].info);
+          }
+          spec.add(new OneMerge(mergeInfos));
+        } else if (verbose()) {
           message("    " + start + " to " + end + ": contains segment over maxMergeSize or maxMergeDocs; skipping");
+        }
 
         start = end;
         end = start + mergeFactor;

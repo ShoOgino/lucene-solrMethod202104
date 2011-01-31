@@ -41,7 +41,19 @@
 
       final SegmentWriteState flushState = new SegmentWriteState(infoStream, directory, segment, fieldInfos,
                                                                  numDocs, writer.getConfig().getTermIndexInterval(),
-                                                                 SegmentCodecs.build(fieldInfos, writer.codecs));
+                                                                 SegmentCodecs.build(fieldInfos, writer.codecs),
+                                                                 pendingDeletes);
+      // Apply delete-by-docID now (delete-byDocID only
+      // happens when an exception is hit processing that
+      // doc, eg if analyzer has some problem w/ the text):
+      if (pendingDeletes.docIDs.size() > 0) {
+        flushState.deletedDocs = new BitVector(numDocs);
+        for(int delDocID : pendingDeletes.docIDs) {
+          flushState.deletedDocs.set(delDocID);
+        }
+        pendingDeletes.bytesUsed.addAndGet(-pendingDeletes.docIDs.size() * BufferedDeletes.BYTES_PER_DEL_DOCID);
+        pendingDeletes.docIDs.clear();
+      }
 
       newSegment = new SegmentInfo(segment, numDocs, directory, false, fieldInfos.hasProx(), flushState.segmentCodecs, false);
 
@@ -53,10 +65,14 @@
       double startMBUsed = bytesUsed()/1024./1024.;
 
       consumer.flush(threads, flushState);
+
       newSegment.setHasVectors(flushState.hasVectors);
 
       if (infoStream != null) {
         message("new segment has " + (flushState.hasVectors ? "vectors" : "no vectors"));
+        if (flushState.deletedDocs != null) {
+          message("new segment has " + flushState.deletedDocs.count() + " deleted docs");
+        }
         message("flushedFiles=" + newSegment.files());
         message("flushed codecs=" + newSegment.getSegmentCodecs());
       }
@@ -75,6 +91,30 @@
         cfsWriter.close();
         deleter.deleteNewFiles(newSegment.files());
         newSegment.setUseCompoundFile(true);
+      }
+
+      // Must write deleted docs after the CFS so we don't
+      // slurp the del file into CFS:
+      if (flushState.deletedDocs != null) {
+        final int delCount = flushState.deletedDocs.count();
+        assert delCount > 0;
+        newSegment.setDelCount(delCount);
+        newSegment.advanceDelGen();
+        final String delFileName = newSegment.getDelFileName();
+        boolean success2 = false;
+        try {
+          flushState.deletedDocs.write(directory, delFileName);
+          success2 = true;
+        } finally {
+          if (!success2) {
+            try {
+              directory.deleteFile(delFileName);
+            } catch (Throwable t) {
+              // suppress this so we keep throwing the
+              // original exception
+            }
+          }
+        }
       }
 
       if (infoStream != null) {

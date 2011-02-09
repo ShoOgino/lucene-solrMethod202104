@@ -1,0 +1,133 @@
+      @Override
+      public SeekStatus seek(final BytesRef target, final boolean useCache) throws IOException {
+
+        if (indexEnum == null) {
+          throw new IllegalStateException("terms index was not loaded");
+        }
+        
+        //System.out.println("BTR.seek seg=" + segment + " target=" + fieldInfo.name + ":" + target.utf8ToString() + " " + target + " current=" + term().utf8ToString() + " " + term() + " useCache=" + useCache + " indexIsCurrent=" + indexIsCurrent + " didIndexNext=" + didIndexNext + " seekPending=" + seekPending + " divisor=" + indexReader.getDivisor() + " this="  + this);
+        /*
+        if (didIndexNext) {
+          if (nextIndexTerm == null) {
+            //System.out.println("  nextIndexTerm=null");
+          } else {
+            //System.out.println("  nextIndexTerm=" + nextIndexTerm.utf8ToString());
+          }
+        }
+        */
+
+        // Check cache
+        if (useCache) {
+          fieldTerm.term = target;
+          // TODO: should we differentiate "frozen"
+          // TermState (ie one that was cloned and
+          // cached/returned by termState()) from the
+          // malleable (primary) one?
+          final TermState cachedState = termsCache.get(fieldTerm);
+          if (cachedState != null) {
+            seekPending = true;
+            //System.out.println("  cached!");
+            seek(target, cachedState);
+            //System.out.println("  term=" + term.utf8ToString());
+            return SeekStatus.FOUND;
+          }
+        }
+
+        boolean doSeek = true;
+
+        // See if we can avoid seeking, because target term
+        // is after current term but before next index term:
+        if (indexIsCurrent) {
+
+          final int cmp = termComp.compare(term, target);
+
+          if (cmp == 0) {
+            // Already at the requested term
+            return SeekStatus.FOUND;
+          } else if (cmp < 0) {
+
+            // Target term is after current term
+            if (!didIndexNext) {
+              if (indexEnum.next() == -1) {
+                nextIndexTerm = null;
+              } else {
+                nextIndexTerm = indexEnum.term();
+              }
+              //System.out.println("  now do index next() nextIndexTerm=" + (nextIndexTerm == null ? "null" : nextIndexTerm.utf8ToString()));
+              didIndexNext = true;
+            }
+
+            if (nextIndexTerm == null || termComp.compare(target, nextIndexTerm) < 0) {
+              // Optimization: requested term is within the
+              // same term block we are now in; skip seeking
+              // (but do scanning):
+              doSeek = false;
+              //System.out.println("  skip seek: nextIndexTerm=" + (nextIndexTerm == null ? "null" : nextIndexTerm.utf8ToString()));
+            }
+          }
+        }
+
+        if (doSeek) {
+          //System.out.println("  seek");
+
+          // Ask terms index to find biggest indexed term (=
+          // first term in a block) that's <= our text:
+          in.seek(indexEnum.seek(target));
+          boolean result = nextBlock();
+
+          // Block must exist since, at least, the indexed term
+          // is in the block:
+          assert result;
+
+          indexIsCurrent = true;
+          didIndexNext = false;
+          blocksSinceSeek = 0;          
+
+          if (doOrd) {
+            state.ord = indexEnum.ord()-1;
+          }
+
+          // NOTE: the first _next() after an index seek is
+          // a bit wasteful, since it redundantly reads some
+          // suffix bytes into the buffer.  We could avoid storing
+          // those bytes in the primary file, but then when
+          // next()ing over an index term we'd have to
+          // special case it:
+          term.copy(indexEnum.term());
+          //System.out.println("  seek: term=" + term.utf8ToString());
+        } else {
+          ////System.out.println("  skip seek");
+        }
+
+        seekPending = false;
+
+        // Now scan:
+        while (_next() != null) {
+          final int cmp = termComp.compare(term, target);
+          if (cmp == 0) {
+            // Match!
+            if (useCache) {
+              // Store in cache
+              decodeMetaData();
+              termsCache.put(new FieldAndTerm(fieldTerm), (BlockTermState) state.clone());
+            }
+            //System.out.println("  FOUND");
+            return SeekStatus.FOUND;
+          } else if (cmp > 0) {
+            //System.out.println("  NOT_FOUND term=" + term.utf8ToString());
+            return SeekStatus.NOT_FOUND;
+          }
+          
+          // The purpose of the terms dict index is to seek
+          // the enum to the closest index term before the
+          // term we are looking for.  So, we should never
+          // cross another index term (besides the first
+          // one) while we are scanning:
+          assert indexIsCurrent;
+        }
+
+        indexIsCurrent = false;
+        //System.out.println("  END");
+        return SeekStatus.END;
+      }
+

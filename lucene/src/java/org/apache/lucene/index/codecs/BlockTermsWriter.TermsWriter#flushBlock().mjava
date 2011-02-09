@@ -1,0 +1,49 @@
+    private void flushBlock() throws IOException {
+      //System.out.println("BTW.flushBlock pendingCount=" + pendingCount);
+
+      // First pass: compute common prefix for all terms
+      // in the block, against term before first term in
+      // this block:
+      int commonPrefix = sharedPrefix(lastPrevTerm, pendingTerms[0].term);
+      for(int termCount=1;termCount<pendingCount;termCount++) {
+        commonPrefix = Math.min(commonPrefix,
+                                sharedPrefix(lastPrevTerm,
+                                             pendingTerms[termCount].term));
+      }        
+
+      out.writeVInt(pendingCount);
+      out.writeVInt(commonPrefix);
+
+      // 2nd pass: write suffixes, as separate byte[] blob
+      for(int termCount=0;termCount<pendingCount;termCount++) {
+        final int suffix = pendingTerms[termCount].term.length - commonPrefix;
+        // TODO: cutover to better intblock codec, instead
+        // of interleaving here:
+        bytesWriter.writeVInt(suffix);
+        bytesWriter.writeBytes(pendingTerms[termCount].term.bytes, commonPrefix, suffix);
+      }
+      out.writeVInt((int) bytesWriter.getFilePointer());
+      bytesWriter.writeTo(out);
+      bytesWriter.reset();
+
+      // 3rd pass: write the freqs as byte[] blob
+      // TODO: cutover to better intblock codec.  simple64?
+      // write prefix, suffix first:
+      for(int termCount=0;termCount<pendingCount;termCount++) {
+        final TermStats stats = pendingTerms[termCount].stats;
+        assert stats != null;
+        bytesWriter.writeVInt(stats.docFreq);
+        if (!fieldInfo.omitTermFreqAndPositions) {
+          bytesWriter.writeVLong(stats.totalTermFreq-stats.docFreq);
+        }
+      }
+
+      out.writeVInt((int) bytesWriter.getFilePointer());
+      bytesWriter.writeTo(out);
+      bytesWriter.reset();
+
+      postingsWriter.flushTermsBlock();
+      lastPrevTerm.copy(pendingTerms[pendingCount-1].term);
+      pendingCount = 0;
+    }
+

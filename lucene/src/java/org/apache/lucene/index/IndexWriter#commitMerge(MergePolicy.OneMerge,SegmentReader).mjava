@@ -1,4 +1,3 @@
-  /* FIXME if we want to support non-contiguous segment merges */
   synchronized private boolean commitMerge(MergePolicy.OneMerge merge, SegmentReader mergedReader) throws IOException {
 
     assert testPoint("startCommitMerge");
@@ -24,7 +23,7 @@
       return false;
     }
 
-    final int start = ensureContiguousMerge(merge);
+    ensureValidMerge(merge);
 
     commitMergedDeletes(merge, mergedReader);
       
@@ -34,10 +33,32 @@
     // format as well:
     setMergeDocStoreIsCompoundFile(merge);
 
-    segmentInfos.subList(start, start + merge.segments.size()).clear();
     assert !segmentInfos.contains(merge.info);
-    segmentInfos.add(start, merge.info);
-    
+
+    final Set mergedAway = new HashSet<SegmentInfo>(merge.segments);
+    int segIdx = 0;
+    int newSegIdx = 0;
+    boolean inserted = false;
+    final int curSegCount = segmentInfos.size();
+    while(segIdx < curSegCount) {
+      final SegmentInfo info = segmentInfos.info(segIdx++);
+      if (mergedAway.contains(info)) {
+        if (!inserted) {
+          segmentInfos.set(segIdx-1, merge.info);
+          inserted = true;
+          newSegIdx++;
+        }
+      } else {
+        segmentInfos.set(newSegIdx++, info);
+      }
+    }
+    assert newSegIdx == curSegCount - merge.segments.size() + 1;
+    segmentInfos.subList(newSegIdx, segmentInfos.size()).clear();
+
+    if (infoStream != null) {
+      message("after commit: " + segString());
+    }
+
     closeMergeReaders(merge, false);
 
     // Must note the change to segmentInfos so any commits
@@ -49,16 +70,12 @@
     // disk, updating SegmentInfo, etc.:
     readerPool.clear(merge.segments);
     
-    // remove pending deletes of the segments 
-    // that were merged, moving them onto the segment just
-    // before the merged segment
-    // Lock order: IW -> BD
-    bufferedDeletes.commitMerge(merge);
-
     if (merge.optimize) {
       // cascade the optimize:
       segmentsToOptimize.add(merge.info);
     }
+
+    
     return true;
   }
 

@@ -1,0 +1,49 @@
+  // Used by near real-time search
+  DirectoryReader(IndexWriter writer, SegmentInfos infos, int termInfosIndexDivisor, CodecProvider codecs, boolean applyAllDeletes) throws IOException {
+    this.directory = writer.getDirectory();
+    this.readOnly = true;
+    this.applyAllDeletes = applyAllDeletes;       // saved for reopen
+
+    segmentInfos = (SegmentInfos) infos.clone();// make sure we clone otherwise we share mutable state with IW
+    this.termInfosIndexDivisor = termInfosIndexDivisor;
+    if (codecs == null) {
+      this.codecs = CodecProvider.getDefault();
+    } else {
+      this.codecs = codecs;
+    }
+    readerFinishedListeners = writer.getReaderFinishedListeners();
+
+    // IndexWriter synchronizes externally before calling
+    // us, which ensures infos will not change; so there's
+    // no need to process segments in reverse order
+    final int numSegments = infos.size();
+    SegmentReader[] readers = new SegmentReader[numSegments];
+    final Directory dir = writer.getDirectory();
+
+    for (int i=0;i<numSegments;i++) {
+      boolean success = false;
+      try {
+        final SegmentInfo info = infos.info(i);
+        assert info.dir == dir;
+        readers[i] = writer.readerPool.getReadOnlyClone(info, true, termInfosIndexDivisor);
+        readers[i].readerFinishedListeners = readerFinishedListeners;
+        success = true;
+      } finally {
+        if (!success) {
+          // Close all readers we had opened:
+          for(i--;i>=0;i--) {
+            try {
+              readers[i].close();
+            } catch (Throwable ignore) {
+              // keep going - we want to clean up as much as possible
+            }
+          }
+        }
+      }
+    }
+
+    this.writer = writer;
+
+    initialize(readers);
+  }
+

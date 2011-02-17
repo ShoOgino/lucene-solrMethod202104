@@ -23,17 +23,20 @@
       return false;
     }
 
-    ensureValidMerge(merge);
-
     commitMergedDeletes(merge, mergedReader);
       
     // If the doc store we are using has been closed and
     // is in now compound format (but wasn't when we
     // started), then we will switch to the compound
     // format as well:
-    setMergeDocStoreIsCompoundFile(merge);
 
     assert !segmentInfos.contains(merge.info);
+
+    final boolean allDeleted = mergedReader.numDocs() == 0;
+
+    if (infoStream != null && allDeleted) {
+      message("merged segment " + merge.info + " is 100% deleted" +  (keepFullyDeletedSegments ? "" : "; skipping insert"));
+    }
 
     final Set mergedAway = new HashSet<SegmentInfo>(merge.segments);
     int segIdx = 0;
@@ -43,7 +46,7 @@
     while(segIdx < curSegCount) {
       final SegmentInfo info = segmentInfos.info(segIdx++);
       if (mergedAway.contains(info)) {
-        if (!inserted) {
+        if (!inserted && (!allDeleted || keepFullyDeletedSegments)) {
           segmentInfos.set(segIdx-1, merge.info);
           inserted = true;
           newSegIdx++;
@@ -52,7 +55,20 @@
         segmentInfos.set(newSegIdx++, info);
       }
     }
-    assert newSegIdx == curSegCount - merge.segments.size() + 1;
+
+    // Either we found place to insert segment, or, we did
+    // not, but only because all segments we merged became
+    // deleted while we are merging, in which case it should
+    // be the case that the new segment is also all deleted:
+    if (!inserted) {
+      assert allDeleted;
+      if (keepFullyDeletedSegments) {
+        segmentInfos.add(0, merge.info);
+      } else {
+        readerPool.drop(merge.info);
+      }
+    }
+
     segmentInfos.subList(newSegIdx, segmentInfos.size()).clear();
 
     if (infoStream != null) {
@@ -74,7 +90,6 @@
       // cascade the optimize:
       segmentsToOptimize.add(merge.info);
     }
-
     
     return true;
   }

@@ -1,0 +1,43 @@
+  public BlockTermsReader(TermsIndexReaderBase indexReader, Directory dir, FieldInfos fieldInfos, String segment, PostingsReaderBase postingsReader, int readBufferSize,
+                          int termsCacheSize, String codecId)
+    throws IOException {
+    
+    this.postingsReader = postingsReader;
+    termsCache = new DoubleBarrelLRUCache<FieldAndTerm,BlockTermState>(termsCacheSize);
+
+    //this.segment = segment;
+    in = dir.openInput(IndexFileNames.segmentFileName(segment, codecId, BlockTermsWriter.TERMS_EXTENSION),
+                       readBufferSize);
+
+    boolean success = false;
+    try {
+      readHeader(in);
+
+      // Have PostingsReader init itself
+      postingsReader.init(in);
+
+      // Read per-field details
+      seekDir(in, dirOffset);
+
+      final int numFields = in.readVInt();
+
+      for(int i=0;i<numFields;i++) {
+        final int field = in.readVInt();
+        final long numTerms = in.readVLong();
+        assert numTerms >= 0;
+        final long termsStartPointer = in.readVLong();
+        final FieldInfo fieldInfo = fieldInfos.fieldInfo(field);
+        final long sumTotalTermFreq = fieldInfo.omitTermFreqAndPositions ? -1 : in.readVLong();
+        assert !fields.containsKey(fieldInfo.name);
+        fields.put(fieldInfo.name, new FieldReader(fieldInfo, numTerms, termsStartPointer, sumTotalTermFreq));
+      }
+      success = true;
+    } finally {
+      if (!success) {
+        in.close();
+      }
+    }
+
+    this.indexReader = indexReader;
+  }
+

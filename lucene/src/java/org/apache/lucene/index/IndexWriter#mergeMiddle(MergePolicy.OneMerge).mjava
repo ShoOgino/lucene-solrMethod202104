@@ -11,7 +11,6 @@
     int mergedDocCount = 0;
 
     SegmentInfos sourceSegments = merge.segments;
-    final int numSegments = sourceSegments.size();
 
     SegmentMerger merger = new SegmentMerger(directory, termIndexInterval, mergedName, merge,
                                              codecs, payloadProcessorProvider,
@@ -21,36 +20,43 @@
       message("merging " + merge.segString(directory) + " mergeVectors=" + merger.fieldInfos().hasVectors());
     }
 
+    merge.readers = new ArrayList<SegmentReader>();
+    merge.readerClones = new ArrayList<SegmentReader>();
+
     merge.info.setHasVectors(merger.fieldInfos().hasVectors());
-    merge.readers = new SegmentReader[numSegments];
-    merge.readersClone = new SegmentReader[numSegments];
 
     // This is try/finally to make sure merger's readers are
     // closed:
     boolean success = false;
     try {
       int totDocCount = 0;
+      int segUpto = 0;
+      while(segUpto < sourceSegments.size()) {
 
-      for (int i = 0; i < numSegments; i++) {
-        final SegmentInfo info = sourceSegments.info(i);
+        final SegmentInfo info = sourceSegments.info(segUpto);
 
         // Hold onto the "live" reader; we will use this to
         // commit merged deletes
-        SegmentReader reader = merge.readers[i] = readerPool.get(info, true,
-                                                                 MERGE_READ_BUFFER_SIZE,
-                                                                 -config.getReaderTermsIndexDivisor());
+        final SegmentReader reader = readerPool.get(info, true,
+                                                    MERGE_READ_BUFFER_SIZE,
+                                                    -config.getReaderTermsIndexDivisor());
+        merge.readers.add(reader);
 
         // We clone the segment readers because other
         // deletes may come in while we're merging so we
         // need readers that will not change
-        SegmentReader clone = merge.readersClone[i] = (SegmentReader) reader.clone(true);
-        merger.add(clone);
+        final SegmentReader clone = (SegmentReader) reader.clone(true);
+        merge.readerClones.add(clone);
 
+        if (reader.numDocs() > 0) {
+          merger.add(clone);
+        }
         totDocCount += clone.numDocs();
+        segUpto++;
       }
 
       if (infoStream != null) {
-        message("merge: total "+totDocCount+" docs");
+        message("merge: total " + totDocCount + " docs");
       }
 
       merge.checkAborted(directory);
@@ -63,11 +69,11 @@
 
       if (infoStream != null) {
         message("merge segmentCodecs=" + merger.getSegmentCodecs());
-        message("merge store matchedCount=" + merger.getMatchedSubReaderCount() + " vs " + numSegments);
+        message("merge store matchedCount=" + merger.getMatchedSubReaderCount() + " vs " + merge.readers.size());
       }
-      anyNonBulkMerges |= merger.getMatchedSubReaderCount() != numSegments;
+      anyNonBulkMerges |= merger.getMatchedSubReaderCount() != merge.readers.size();
       
-      assert mergedDocCount == totDocCount;
+      assert mergedDocCount == totDocCount: "mergedDocCount=" + mergedDocCount + " vs " + totDocCount;
 
       // Very important to do this before opening the reader
       // because codec must know if prox was written for

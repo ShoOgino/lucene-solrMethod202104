@@ -20,13 +20,19 @@
     // started merging:
     int docUpto = 0;
     int delCount = 0;
+    long minGen = Long.MAX_VALUE;
 
     for(int i=0; i < sourceSegments.size(); i++) {
       SegmentInfo info = sourceSegments.info(i);
+      minGen = Math.min(info.getBufferedDeletesGen(), minGen);
       int docCount = info.docCount;
-      SegmentReader previousReader = merge.readersClone[i];
+      final SegmentReader previousReader = merge.readerClones.get(i);
+      if (previousReader == null) {
+        // Reader was skipped because it was 100% deletions
+        continue;
+      }
       final Bits prevDelDocs = previousReader.getDeletedDocs();
-      SegmentReader currentReader = merge.readers[i];
+      final SegmentReader currentReader = merge.readers.get(i);
       final Bits currentDelDocs = currentReader.getDeletedDocs();
       if (previousReader.hasDeletions()) {
 
@@ -73,5 +79,14 @@
     assert mergedReader.numDeletedDocs() == delCount;
 
     mergedReader.hasChanges = delCount > 0;
+
+    // If new deletes were applied while we were merging
+    // (which happens if eg commit() or getReader() is
+    // called during our merge), then it better be the case
+    // that the delGen has increased for all our merged
+    // segments:
+    assert !mergedReader.hasChanges || minGen > mergedReader.getSegmentInfo().getBufferedDeletesGen();
+
+    mergedReader.getSegmentInfo().setBufferedDeletesGen(minGen);
   }
 

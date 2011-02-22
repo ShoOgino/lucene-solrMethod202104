@@ -37,10 +37,10 @@
           // tiny segments:
           if (flushControl.getFlushDeletes() ||
               (config.getRAMBufferSizeMB() != IndexWriterConfig.DISABLE_AUTO_FLUSH &&
-               bufferedDeletes.bytesUsed() > (1024*1024*config.getRAMBufferSizeMB()/2))) {
+               bufferedDeletesStream.bytesUsed() > (1024*1024*config.getRAMBufferSizeMB()/2))) {
             applyAllDeletes = true;
             if (infoStream != null) {
-              message("force apply deletes bytesUsed=" + bufferedDeletes.bytesUsed() + " vs ramBuffer=" + (1024*1024*config.getRAMBufferSizeMB()));
+              message("force apply deletes bytesUsed=" + bufferedDeletesStream.bytesUsed() + " vs ramBuffer=" + (1024*1024*config.getRAMBufferSizeMB()));
             }
           }
         }
@@ -50,12 +50,34 @@
             message("apply all deletes during flush");
           }
           flushDeletesCount.incrementAndGet();
-          if (bufferedDeletes.applyDeletes(readerPool, segmentInfos, segmentInfos)) {
+          final BufferedDeletesStream.ApplyDeletesResult result = bufferedDeletesStream.applyDeletes(readerPool, segmentInfos);
+          if (result.anyDeletes) {
             checkpoint();
           }
+          if (!keepFullyDeletedSegments && result.allDeleted != null) {
+            if (infoStream != null) {
+              message("drop 100% deleted segments: " + result.allDeleted);
+            }
+            for(SegmentInfo info : result.allDeleted) {
+              // If a merge has already registered for this
+              // segment, we leave it in the readerPool; the
+              // merge will skip merging it and will then drop
+              // it once it's done:
+              if (!mergingSegments.contains(info)) {
+                segmentInfos.remove(info);
+                if (readerPool != null) {
+                  readerPool.drop(info);
+                }
+              }
+            }
+            checkpoint();
+          }
+          bufferedDeletesStream.prune(segmentInfos);
+          assert !bufferedDeletesStream.any();
+
           flushControl.clearDeletes();
         } else if (infoStream != null) {
-          message("don't apply deletes now delTermCount=" + bufferedDeletes.numTerms() + " bytesUsed=" + bufferedDeletes.bytesUsed());
+          message("don't apply deletes now delTermCount=" + bufferedDeletesStream.numTerms() + " bytesUsed=" + bufferedDeletesStream.bytesUsed());
         }
 
         doAfterFlush();

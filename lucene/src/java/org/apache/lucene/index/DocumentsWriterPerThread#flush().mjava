@@ -4,7 +4,19 @@
 
     flushState = new SegmentWriteState(infoStream, directory, segment, fieldInfos,
         numDocsInRAM, writer.getConfig().getTermIndexInterval(),
-        SegmentCodecs.build(fieldInfos, writer.codecs));
+        SegmentCodecs.build(fieldInfos, writer.codecs), pendingDeletes);
+
+    // Apply delete-by-docID now (delete-byDocID only
+    // happens when an exception is hit processing that
+    // doc, eg if analyzer has some problem w/ the text):
+    if (pendingDeletes.docIDs.size() > 0) {
+      flushState.deletedDocs = new BitVector(numDocsInRAM);
+      for(int delDocID : pendingDeletes.docIDs) {
+        flushState.deletedDocs.set(delDocID);
+      }
+      pendingDeletes.bytesUsed.addAndGet(-pendingDeletes.docIDs.size() * BufferedDeletes.BYTES_PER_DEL_DOCID);
+      pendingDeletes.docIDs.clear();
+    }
 
     if (infoStream != null) {
       message("flush postings as segment " + flushState.segmentName + " numDocs=" + numDocsInRAM);
@@ -21,11 +33,12 @@
 
     try {
 
-      SegmentInfo newSegment = new SegmentInfo(segment, flushState.numDocs, directory, false, fieldInfos.hasProx(), flushState.segmentCodecs, false);
+      SegmentInfo newSegment = new SegmentInfo(segment, flushState.numDocs, directory, false, flushState.segmentCodecs, fieldInfos);
       consumer.flush(flushState);
-      newSegment.setHasVectors(flushState.hasVectors);
+      newSegment.clearFilesCache();
 
       if (infoStream != null) {
+        message("new segment has " + flushState.deletedDocs.count() + " deleted docs");
         message("new segment has " + (flushState.hasVectors ? "vectors" : "no vectors"));
         message("flushedFiles=" + newSegment.files());
         message("flushed codecs=" + newSegment.getSegmentCodecs());

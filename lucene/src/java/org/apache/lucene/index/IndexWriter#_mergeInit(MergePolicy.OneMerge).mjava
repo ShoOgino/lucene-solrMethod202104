@@ -9,6 +9,9 @@
       throw new IllegalStateException("this writer hit an OutOfMemoryError; cannot merge");
     }
 
+    // TODO: is there any perf benefit to sorting
+    // merged segments?  eg biggest to smallest?
+
     if (merge.info != null)
       // mergeInit already done
       return;
@@ -19,7 +22,36 @@
     // Bind a new segment name here so even with
     // ConcurrentMergePolicy we keep deterministic segment
     // names.
-    merge.info = new SegmentInfo(newSegmentName(), 0, directory, false, false, null, false);
+    merge.info = new SegmentInfo(newSegmentName(), 0, directory, false, null, fieldInfos.newFieldInfosWithGlobalFieldNumberMap());
+
+    // Lock order: IW -> BD
+    final BufferedDeletesStream.ApplyDeletesResult result = bufferedDeletesStream.applyDeletes(readerPool, merge.segments);
+
+    if (result.anyDeletes) {
+      checkpoint();
+    }
+
+    if (!keepFullyDeletedSegments && result.allDeleted != null) {
+      if (infoStream != null) {
+        message("drop 100% deleted segments: " + result.allDeleted);
+      }
+      for(SegmentInfo info : result.allDeleted) {
+        segmentInfos.remove(info);
+        if (merge.segments.contains(info)) {
+          mergingSegments.remove(info);
+          merge.segments.remove(info);
+        }
+      }
+      if (readerPool != null) {
+        readerPool.drop(result.allDeleted);
+      }
+      checkpoint();
+    }
+
+    merge.info.setBufferedDeletesGen(result.gen);
+
+    // Lock order: IW -> BD
+    bufferedDeletesStream.prune(segmentInfos);
 
     Map<String,String> details = new HashMap<String,String>();
     details.put("optimize", Boolean.toString(merge.optimize));

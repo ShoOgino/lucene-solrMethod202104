@@ -1,0 +1,134 @@
+  /** Resolves the buffered deleted Term/Query/docIDs, into
+   *  actual deleted docIDs in the deletedDocs BitVector for
+   *  each SegmentReader. */
+  public synchronized ApplyDeletesResult applyDeletes(IndexWriter.ReaderPool readerPool, SegmentInfos infos) throws IOException {
+    final long t0 = System.currentTimeMillis();
+
+    if (infos.size() == 0) {
+      return new ApplyDeletesResult(false, nextGen++, null);
+    }
+
+    assert checkDeleteStats();
+
+    if (!any()) {
+      message("applyDeletes: no deletes; skipping");
+      return new ApplyDeletesResult(false, nextGen++, null);
+    }
+
+    if (infoStream != null) {
+      message("applyDeletes: infos=" + infos + " packetCount=" + deletes.size());
+    }
+
+    SegmentInfos infos2 = new SegmentInfos();
+    infos2.addAll(infos);
+    Collections.sort(infos2, sortByDelGen);
+
+    BufferedDeletes coalescedDeletes = null;
+    boolean anyNewDeletes = false;
+
+    int infosIDX = infos2.size()-1;
+    int delIDX = deletes.size()-1;
+
+    SegmentInfos allDeleted = null;
+
+    while (infosIDX >= 0) {
+      //System.out.println("BD: cycle delIDX=" + delIDX + " infoIDX=" + infosIDX);
+
+      final FrozenBufferedDeletes packet = delIDX >= 0 ? deletes.get(delIDX) : null;
+      final SegmentInfo info = infos2.get(infosIDX);
+      final long segGen = info.getBufferedDeletesGen();
+
+      if (packet != null && segGen < packet.gen) {
+        //System.out.println("  coalesce");
+        if (coalescedDeletes == null) {
+          coalescedDeletes = new BufferedDeletes(true);
+        }
+        coalescedDeletes.update(packet);
+        delIDX--;
+      } else if (packet != null && segGen == packet.gen) {
+        //System.out.println("  eq");
+
+        // Lock order: IW -> BD -> RP
+        assert readerPool.infoIsLive(info);
+        SegmentReader reader = readerPool.get(info, false);
+        int delCount = 0;
+        final boolean segAllDeletes;
+        try {
+          if (coalescedDeletes != null) {
+            //System.out.println("    del coalesced");
+            delCount += applyTermDeletes(coalescedDeletes.termsIterable(), reader);
+            delCount += applyQueryDeletes(coalescedDeletes.queriesIterable(), reader);
+          }
+          //System.out.println("    del exact");
+          // Don't delete by Term here; DocumentsWriter
+          // already did that on flush:
+          delCount += applyQueryDeletes(packet.queriesIterable(), reader);
+          segAllDeletes = reader.numDocs() == 0;
+        } finally {
+          readerPool.release(reader);
+        }
+        anyNewDeletes |= delCount > 0;
+
+        if (segAllDeletes) {
+          if (allDeleted == null) {
+            allDeleted = new SegmentInfos();
+          }
+          allDeleted.add(info);
+        }
+
+        if (infoStream != null) {
+          message("seg=" + info + " segGen=" + segGen + " segDeletes=[" + packet + "]; coalesced deletes=[" + (coalescedDeletes == null ? "null" : coalescedDeletes) + "] delCount=" + delCount + (segAllDeletes ? " 100% deleted" : ""));
+        }
+
+        if (coalescedDeletes == null) {
+          coalescedDeletes = new BufferedDeletes(true);
+        }
+        coalescedDeletes.update(packet);
+        delIDX--;
+        infosIDX--;
+        info.setBufferedDeletesGen(nextGen);
+
+      } else {
+        //System.out.println("  gt");
+
+        if (coalescedDeletes != null) {
+          // Lock order: IW -> BD -> RP
+          assert readerPool.infoIsLive(info);
+          SegmentReader reader = readerPool.get(info, false);
+          int delCount = 0;
+          final boolean segAllDeletes;
+          try {
+            delCount += applyTermDeletes(coalescedDeletes.termsIterable(), reader);
+            delCount += applyQueryDeletes(coalescedDeletes.queriesIterable(), reader);
+            segAllDeletes = reader.numDocs() == 0;
+          } finally {
+            readerPool.release(reader);
+          }
+          anyNewDeletes |= delCount > 0;
+
+          if (segAllDeletes) {
+            if (allDeleted == null) {
+              allDeleted = new SegmentInfos();
+            }
+            allDeleted.add(info);
+          }
+
+          if (infoStream != null) {
+            message("seg=" + info + " segGen=" + segGen + " coalesced deletes=[" + (coalescedDeletes == null ? "null" : coalescedDeletes) + "] delCount=" + delCount + (segAllDeletes ? " 100% deleted" : ""));
+          }
+        }
+        info.setBufferedDeletesGen(nextGen);
+
+        infosIDX--;
+      }
+    }
+
+    assert checkDeleteStats();
+    if (infoStream != null) {
+      message("applyDeletes took " + (System.currentTimeMillis()-t0) + " msec");
+    }
+    // assert infos != segmentInfos || !any() : "infos=" + infos + " segmentInfos=" + segmentInfos + " any=" + any;
+
+    return new ApplyDeletesResult(anyNewDeletes, nextGen++, allDeleted);
+  }
+

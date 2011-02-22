@@ -1,0 +1,62 @@
+  // Delete by Term
+  private synchronized long applyTermDeletes(Iterable<Term> termsIter, SegmentReader reader) throws IOException {
+    long delCount = 0;
+    Fields fields = reader.fields();
+    if (fields == null) {
+      // This reader has no postings
+      return 0;
+    }
+
+    TermsEnum termsEnum = null;
+
+    String currentField = null;
+    DocsEnum docs = null;
+
+    assert checkDeleteTerm(null);
+
+    for (Term term : termsIter) {
+      // Since we visit terms sorted, we gain performance
+      // by re-using the same TermsEnum and seeking only
+      // forwards
+      if (term.field() != currentField) {
+        assert currentField == null || currentField.compareTo(term.field()) < 0;
+        currentField = term.field();
+        Terms terms = fields.terms(currentField);
+        if (terms != null) {
+          termsEnum = terms.iterator();
+        } else {
+          termsEnum = null;
+        }
+      }
+
+      if (termsEnum == null) {
+        continue;
+      }
+      assert checkDeleteTerm(term);
+
+      // System.out.println("  term=" + term);
+
+      if (termsEnum.seek(term.bytes(), false) == TermsEnum.SeekStatus.FOUND) {
+        DocsEnum docsEnum = termsEnum.docs(reader.getDeletedDocs(), docs);
+
+        if (docsEnum != null) {
+          while (true) {
+            final int docID = docsEnum.nextDoc();
+            if (docID == DocsEnum.NO_MORE_DOCS) {
+              break;
+            }
+            reader.deleteDocument(docID);
+            // TODO: we could/should change
+            // reader.deleteDocument to return boolean
+            // true if it did in fact delete, because here
+            // we could be deleting an already-deleted doc
+            // which makes this an upper bound:
+            delCount++;
+          }
+        }
+      }
+    }
+
+    return delCount;
+  }
+

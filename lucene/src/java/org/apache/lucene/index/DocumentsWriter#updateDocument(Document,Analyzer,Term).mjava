@@ -2,9 +2,7 @@
       throws CorruptIndexException, IOException {
     ensureOpen();
 
-    SegmentInfo newSegment = null;
-    BufferedDeletes segmentDeletes = null;
-    BitVector deletedDocs = null;
+    FlushedSegment newSegment = null;
 
     ThreadState perThread = perThreadPool.getAndLock(Thread.currentThread(), this, doc);
     try {
@@ -14,25 +12,8 @@
       numDocsInRAM.incrementAndGet();
 
       newSegment = finishAddDocument(dwpt, perThreadRAMUsedBeforeAdd);
-      if (newSegment != null) {
-        deletedDocs = dwpt.flushState.deletedDocs;
-        if (dwpt.pendingDeletes.any()) {
-          segmentDeletes = dwpt.pendingDeletes;
-          dwpt.pendingDeletes = new BufferedDeletes(false);
-        }
-      }
     } finally {
       perThread.unlock();
-    }
-
-    if (segmentDeletes != null) {
-      pushDeletes(newSegment, segmentDeletes);
-    }
-
-    if (newSegment != null) {
-      perThreadPool.clearThreadBindings(perThread);
-      indexWriter.addFlushedSegment(newSegment, deletedDocs);
-      return true;
     }
 
     // delete term from other DWPTs later, so that this thread
@@ -41,6 +22,15 @@
       deleteTerm(delTerm, perThread);
     }
 
+    if (newSegment != null) {
+      finishFlushedSegment(newSegment);
+    }
+
+    if (newSegment != null) {
+      perThreadPool.clearThreadBindings(perThread);
+      return true;
+    }
+
     return false;
-  }
+    }
 

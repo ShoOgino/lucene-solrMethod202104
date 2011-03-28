@@ -1,0 +1,94 @@
+    public void run(int limit, boolean verify) throws IOException {
+      BufferedReader is = new BufferedReader(new InputStreamReader(new FileInputStream(wordsFileIn), "UTF-8"), 65536);
+      try {
+        final IntsRef intsRef = new IntsRef(10);
+        long tStart = System.currentTimeMillis();
+        int ord = 0;
+        while(true) {
+          String w = is.readLine();
+          if (w == null) {
+            break;
+          }
+          toIntsRef(w, inputMode, intsRef);
+          builder.add(intsRef,
+                      getOutput(intsRef, ord));
+
+          ord++;
+          if (ord % 500000 == 0) {
+            System.out.println(
+                String.format(Locale.ENGLISH, 
+                    "%6.2fs: %9d...", ((System.currentTimeMillis() - tStart) / 1000.0), ord));
+          }
+          if (ord >= limit) {
+            break;
+          }
+        }
+
+        assert builder.getTermCount() == ord;
+        final FST<T> fst = builder.finish();
+        if (fst == null) {
+          System.out.println("FST was fully pruned!");
+          System.exit(0);
+        }
+
+        if (dirOut == null)
+          return;
+
+        System.out.println(ord + " terms; " + fst.getNodeCount() + " nodes; " + fst.getArcCount() + " arcs; " + fst.getArcWithOutputCount() + " arcs w/ output; tot size " + fst.sizeInBytes());
+        if (fst.getNodeCount() < 100) {
+          Writer w = new OutputStreamWriter(new FileOutputStream("out.dot"), "UTF-8");
+          Util.toDot(fst, w, false, false);
+          w.close();
+          System.out.println("Wrote FST to out.dot");
+        }
+
+        Directory dir = FSDirectory.open(new File(dirOut));
+        IndexOutput out = dir.createOutput("fst.bin");
+        fst.save(out);
+        out.close();
+
+        System.out.println("Saved FST to fst.bin.");
+
+        if (!verify) {
+          return;
+        }
+
+        System.out.println("\nNow verify...");
+
+        is.close();
+        is = new BufferedReader(new InputStreamReader(new FileInputStream(wordsFileIn), "UTF-8"), 65536);
+
+        ord = 0;
+        tStart = System.currentTimeMillis();
+        while(true) {
+          String w = is.readLine();
+          if (w == null) {
+            break;
+          }
+          toIntsRef(w, inputMode, intsRef);
+          T expected = getOutput(intsRef, ord);
+          T actual = Util.get(fst, intsRef);
+          if (actual == null) {
+            throw new RuntimeException("unexpected null output on input=" + w);
+          }
+          if (!actual.equals(expected)) {
+            throw new RuntimeException("wrong output (got " + outputs.outputToString(actual) + " but expected " + outputs.outputToString(expected) + ") on input=" + w);
+          }
+
+          ord++;
+          if (ord % 500000 == 0) {
+            System.out.println(((System.currentTimeMillis()-tStart)/1000.0) + "s: " + ord + "...");
+          }
+          if (ord >= limit) {
+            break;
+          }
+        }
+
+        double totSec = ((System.currentTimeMillis() - tStart)/1000.0);
+        System.out.println("Verify took " + totSec + " sec + (" + (int) ((totSec*1000000000/ord)) + " nsec per lookup)");
+
+      } finally {
+        is.close();
+      }
+    }
+

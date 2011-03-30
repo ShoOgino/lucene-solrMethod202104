@@ -1,30 +1,40 @@
   public WriteLineDocTask(PerfRunData runData) throws Exception {
     super(runData);
     Config config = runData.getConfig();
-    String fileName = config.get("line.file.out", null);
-    if (fileName == null) {
+    String fname = config.get("line.file.out", null);
+    if (fname == null) {
       throw new IllegalArgumentException("line.file.out must be set");
     }
-
-    OutputStream out = new FileOutputStream(fileName);
-    boolean doBzipCompression = false;
-    String doBZCompress = config.get("bzip.compression", null);
-    if (doBZCompress != null) {
-      // Property was set, use the value.
-      doBzipCompression = Boolean.valueOf(doBZCompress).booleanValue();
-    } else {
-      // Property was not set, attempt to detect based on file's extension
-      doBzipCompression = fileName.endsWith("bz2");
-    }
-
-    if (doBzipCompression) {
-      // Wrap with BOS since BZip2CompressorOutputStream calls out.write(int) 
-      // and does not use the write(byte[]) version. This proved to speed the 
-      // compression process by 70% !
-      out = new BufferedOutputStream(out, 1 << 16);
-      out = new CompressorStreamFactory().createCompressorOutputStream("bzip2", out);
-    }
-    lineFileOut = new PrintWriter(new BufferedWriter(new OutputStreamWriter(out, "UTF-8"), 1 << 16));
+    OutputStream out = StreamUtils.outputStream(new File(fname));
+    lineFileOut = new PrintWriter(new BufferedWriter(new OutputStreamWriter(out, "UTF-8"), StreamUtils.BUFFER_SIZE));
     docMaker = runData.getDocMaker();
+    
+    // init fields 
+    String f2r = config.get("line.fields",null);
+    if (f2r == null) {
+      fieldsToWrite = DEFAULT_FIELDS;
+    } else {
+      if (f2r.indexOf(SEP)>=0) {
+        throw new IllegalArgumentException("line.fields "+f2r+" should not contain the separator char: "+SEP);
+      }
+      fieldsToWrite = f2r.split(","); 
+    }
+    
+    // init sufficient fields
+    sufficientFields = new boolean[fieldsToWrite.length];
+    String suff = config.get("sufficient.fields",DEFAULT_SUFFICIENT_FIELDS);
+    if (",".equals(suff)) {
+      checkSufficientFields = false;
+    } else {
+      checkSufficientFields = true;
+      HashSet<String> sf = new HashSet<String>(Arrays.asList(suff.split(",")));
+      for (int i=0; i<fieldsToWrite.length; i++) {
+        if (sf.contains(fieldsToWrite[i])) {
+          sufficientFields[i] = true;
+        }
+      }
+    }
+    
+    writeHeader();
   }
 

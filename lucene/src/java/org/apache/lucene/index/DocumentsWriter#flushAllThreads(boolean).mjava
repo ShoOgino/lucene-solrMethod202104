@@ -1,41 +1,52 @@
   final boolean flushAllThreads(final boolean flushDeletes)
     throws IOException {
 
-    Iterator<ThreadState> threadsIterator = perThreadPool.getActivePerThreadsIterator();
+    final Iterator<ThreadState> threadsIterator = perThreadPool.getActivePerThreadsIterator();
     boolean anythingFlushed = false;
 
     while (threadsIterator.hasNext()) {
-      FlushedSegment newSegment = null;
-
-      ThreadState perThread = threadsIterator.next();
-      perThread.lock();
+      final ThreadState perThread = threadsIterator.next();
+      final DocumentsWriterPerThread flushingDWPT;
+      /*
+       * TODO: maybe we can leverage incoming / indexing threads here if we mark
+       * all active threads pending so that we don't need to block until we got
+       * the handle. Yet, we need to figure out how to identify that a certain
+       * DWPT has been flushed since they are simply replaced once checked out
+       * for flushing. This would give us another level of concurrency during
+       * commit.
+       * 
+       * Maybe we simply iterate them and store the ThreadStates and mark
+       * all as flushPending and at the same time record the DWPT instance as a
+       * key for the pending ThreadState. This way we can easily iterate until
+       * all DWPT have changed.
+       */
+      perThread.lock(); 
       try {
-
-        DocumentsWriterPerThread dwpt = perThread.perThread;
-        final int numDocs = dwpt.getNumDocsInRAM();
-
+        if (!perThread.isActive()) {
+          assert closed;
+          continue; //this perThread is already done maybe by a concurrently indexing thread
+        }
+        final DocumentsWriterPerThread dwpt = perThread.perThread; 
         // Always flush docs if there are any
-        boolean flushDocs = numDocs > 0;
-
-        String segment = dwpt.getSegment();
-
+        final boolean flushDocs =  dwpt.getNumDocsInRAM() > 0;
+        final String segment = dwpt.getSegment();
         // If we are flushing docs, segment must not be null:
         assert segment != null || !flushDocs;
-
         if (flushDocs) {
-          newSegment = dwpt.flush();
-
-          if (newSegment != null) {
-            perThreadPool.clearThreadBindings(perThread);
-            }
+          // check out and set pending if not already set
+          flushingDWPT = flushControl.tryCheckoutForFlush(perThread, true);
+          assert flushingDWPT != null : "DWPT must never be null here since we hold the lock and it holds documents";
+          assert dwpt == flushingDWPT : "flushControl returned different DWPT";
+          try {
+            final FlushedSegment newSegment = dwpt.flush();
+            anythingFlushed = true;
+            finishFlushedSegment(newSegment);
+          } finally {
+            flushControl.doAfterFlush(flushingDWPT);
           }
+        }
       } finally {
         perThread.unlock();
-      }
-
-      if (newSegment != null) {
-        anythingFlushed = true;
-        finishFlushedSegment(newSegment);
       }
     }
 

@@ -1,36 +1,53 @@
-  boolean updateDocument(final Document doc, final Analyzer analyzer, final Term delTerm)
-      throws CorruptIndexException, IOException {
+  boolean updateDocument(final Document doc, final Analyzer analyzer,
+      final Term delTerm) throws CorruptIndexException, IOException {
     ensureOpen();
-
-    FlushedSegment newSegment = null;
-
-    ThreadState perThread = perThreadPool.getAndLock(Thread.currentThread(), this, doc);
+    boolean maybeMerge = false;
+    final boolean isUpdate = delTerm != null;
+    if (healthiness.isStalled()) {
+      /*
+       * if we are allowed to hijack threads for flushing we try to flush out 
+       * as many pending DWPT to release memory and get back healthy status.
+       */
+      if (infoStream != null) {
+        message("WARNING DocumentsWriter is stalled try to hijack thread to flush pending segment");
+      }
+      // try pick up pending threads here if possile
+      final DocumentsWriterPerThread flushingDWPT;
+      flushingDWPT = flushControl.getFlushIfPending(null);
+       // don't push the delete here since the update could fail!
+      maybeMerge = doFlush(flushingDWPT);
+      if (infoStream != null && healthiness.isStalled()) {
+        message("WARNING DocumentsWriter is stalled might block thread until DocumentsWriter is not stalled anymore");
+      }
+      healthiness.waitIfStalled(); // block if stalled
+    }
+    ThreadState perThread = perThreadPool.getAndLock(Thread.currentThread(),
+        this, doc);
+    DocumentsWriterPerThread flushingDWPT = null;
     try {
-      DocumentsWriterPerThread dwpt = perThread.perThread;
-      long perThreadRAMUsedBeforeAdd = dwpt.bytesUsed();
-      dwpt.updateDocument(doc, analyzer, delTerm);
+      if (!perThread.isActive()) {
+        ensureOpen();
+        assert false: "perThread is not active but we are still open";
+      }
+      final DocumentsWriterPerThread dwpt = perThread.perThread;
+      try {
+        dwpt.updateDocument(doc, analyzer, delTerm);
+      } finally {
+        if(dwpt.checkAndResetHasAborted()) {
+            flushControl.doOnAbort(perThread);
+        }
+      }
+      flushingDWPT = flushControl.doAfterDocument(perThread, isUpdate);
       numDocsInRAM.incrementAndGet();
-
-      newSegment = finishAddDocument(dwpt, perThreadRAMUsedBeforeAdd);
     } finally {
       perThread.unlock();
     }
-
     // delete term from other DWPTs later, so that this thread
     // doesn't have to lock multiple DWPTs at the same time
-    if (delTerm != null) {
+    if (isUpdate) {
       deleteTerm(delTerm, perThread);
     }
-
-    if (newSegment != null) {
-      finishFlushedSegment(newSegment);
-    }
-
-    if (newSegment != null) {
-      perThreadPool.clearThreadBindings(perThread);
-      return true;
-    }
-
-    return false;
-    }
+    maybeMerge |= doFlush(flushingDWPT);
+    return maybeMerge;
+  }
 

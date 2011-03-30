@@ -9,17 +9,7 @@
     doBeforeFlush();
 
     assert testPoint("startDoFlush");
-
-    // We may be flushing because it was triggered by doc
-    // count, del count, ram usage (in which case flush
-    // pending is already set), or we may be flushing
-    // due to external event eg getReader or commit is
-    // called (in which case we now set it, and this will
-    // pause all threads):
-    flushControl.setFlushPendingNoWait("explicit flush");
-
     boolean success = false;
-
     try {
 
       if (infoStream != null) {
@@ -35,8 +25,7 @@
           // buffer, force them all to apply now. This is to
           // prevent too-frequent flushing of a long tail of
           // tiny segments:
-          if (flushControl.getFlushDeletes() ||
-              (config.getRAMBufferSizeMB() != IndexWriterConfig.DISABLE_AUTO_FLUSH &&
+          if ((config.getRAMBufferSizeMB() != IndexWriterConfig.DISABLE_AUTO_FLUSH &&
                bufferedDeletesStream.bytesUsed() > (1024*1024*config.getRAMBufferSizeMB()/2))) {
             applyAllDeletes = true;
             if (infoStream != null) {
@@ -49,39 +38,16 @@
           if (infoStream != null) {
             message("apply all deletes during flush");
           }
-          flushDeletesCount.incrementAndGet();
-          final BufferedDeletesStream.ApplyDeletesResult result = bufferedDeletesStream.applyDeletes(readerPool, segmentInfos);
-          if (result.anyDeletes) {
-            checkpoint();
-          }
-          if (!keepFullyDeletedSegments && result.allDeleted != null) {
-            if (infoStream != null) {
-              message("drop 100% deleted segments: " + result.allDeleted);
-            }
-            for(SegmentInfo info : result.allDeleted) {
-              // If a merge has already registered for this
-              // segment, we leave it in the readerPool; the
-              // merge will skip merging it and will then drop
-              // it once it's done:
-              if (!mergingSegments.contains(info)) {
-                segmentInfos.remove(info);
-                if (readerPool != null) {
-                  readerPool.drop(info);
-                }
-              }
-            }
-            checkpoint();
-          }
-          bufferedDeletesStream.prune(segmentInfos);
-          assert !bufferedDeletesStream.any();
-
-          flushControl.clearDeletes();
+          applyAllDeletes();
         } else if (infoStream != null) {
           message("don't apply deletes now delTermCount=" + bufferedDeletesStream.numTerms() + " bytesUsed=" + bufferedDeletesStream.bytesUsed());
         }
 
         doAfterFlush();
-        flushCount.incrementAndGet();
+        if (!maybeMerge) {
+          // flushCount is incremented in flushAllThreads
+          flushCount.incrementAndGet();
+        }
 
         success = true;
 
@@ -93,7 +59,6 @@
       // never hit
       return false;
     } finally {
-      flushControl.clearFlushPending();
       if (!success && infoStream != null)
         message("hit exception during flush");
     }

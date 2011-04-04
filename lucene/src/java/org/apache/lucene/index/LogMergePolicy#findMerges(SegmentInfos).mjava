@@ -23,29 +23,22 @@
       final SegmentInfo info = infos.info(i);
       long size = size(info);
 
-      // When we require contiguous merge, we still add the
-      // segment to levels to avoid merging "across" a set
-      // of segment being merged:
-      if (!requireContiguousMerge && mergingSegments.contains(info)) {
-        if (verbose()) {
-          message("seg " + info.name + " already being merged; skip");
-        }
-        continue;
-      }
-
       // Floor tiny segments
       if (size < 1) {
         size = 1;
       }
+
       final SegmentInfoAndLevel infoLevel = new SegmentInfoAndLevel(info, (float) Math.log(size)/norm, i);
       levels.add(infoLevel);
-      if (verbose()) {
-        message("seg " + info.name + " level=" + infoLevel.level + " size=" + size);
-      }
-    }
 
-    if (!requireContiguousMerge) {
-      Collections.sort(levels);
+      if (verbose()) {
+        final long segBytes = sizeBytes(info);
+        String extra = mergingSegments.contains(info) ? " [merging]" : "";
+        if (size >= maxMergeSize) {
+          extra += " [skip: too large]";
+        }
+        message("seg=" + writer.get().segString(info) + " level=" + infoLevel.level + " size=" + String.format("%.3f MB", segBytes/1024/1024.) + extra);
+      }
     }
 
     final float levelFloor;
@@ -105,22 +98,28 @@
       int end = start + mergeFactor;
       while(end <= 1+upto) {
         boolean anyTooLarge = false;
+        boolean anyMerging = false;
         for(int i=start;i<end;i++) {
           final SegmentInfo info = levels.get(i).info;
           anyTooLarge |= (size(info) >= maxMergeSize || sizeDocs(info) >= maxMergeDocs);
+          if (mergingSegments.contains(info)) {
+            anyMerging = true;
+            break;
+          }
         }
 
-        if (!anyTooLarge) {
+        if (anyMerging) {
+          // skip
+        } else if (!anyTooLarge) {
           if (spec == null)
             spec = new MergeSpecification();
-          if (verbose()) {
-            message("    " + start + " to " + end + ": add this merge");
-          }
-          Collections.sort(levels.subList(start, end), sortByIndex);
           final SegmentInfos mergeInfos = new SegmentInfos();
           for(int i=start;i<end;i++) {
             mergeInfos.add(levels.get(i).info);
             assert infos.contains(levels.get(i).info);
+          }
+          if (verbose()) {
+            message("  add merge=" + writer.get().segString(mergeInfos) + " start=" + start + " end=" + end);
           }
           spec.add(new OneMerge(mergeInfos));
         } else if (verbose()) {

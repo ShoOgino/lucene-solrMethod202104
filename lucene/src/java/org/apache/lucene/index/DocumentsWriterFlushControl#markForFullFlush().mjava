@@ -1,0 +1,36 @@
+  void markForFullFlush() {
+    synchronized (this) {
+      assert !fullFlush;
+      fullFlush = true;
+    }
+    final Iterator<ThreadState> allActiveThreads = perThreadPool
+    .getActivePerThreadsIterator();
+    final ArrayList<DocumentsWriterPerThread> toFlush = new ArrayList<DocumentsWriterPerThread>();
+    while (allActiveThreads.hasNext()) {
+      final ThreadState next = allActiveThreads.next();
+      next.lock();
+      try {
+        if (!next.isActive()) {
+          continue; 
+        }
+        if (next.perThread.getNumDocsInRAM() > 0) {
+          final DocumentsWriterPerThread dwpt = next.perThread; // just for assert
+          final DocumentsWriterPerThread flushingDWPT = internalTryCheckOutForFlush(next, true);
+          assert flushingDWPT != null : "DWPT must never be null here since we hold the lock and it holds documents";
+          assert dwpt == flushingDWPT : "flushControl returned different DWPT";
+          toFlush.add(flushingDWPT);
+        } else {
+          next.perThread.initialize();
+        }
+      } finally {
+        next.unlock();
+      }
+    }
+    synchronized (this) {
+      flushQueue.addAll(blockedFlushes);
+      blockedFlushes.clear();
+      flushQueue.addAll(toFlush);
+    }
+    
+  }
+

@@ -1,15 +1,25 @@
   // Appends a new packet of buffered deletes to the stream,
   // setting its generation:
-  public synchronized void push(FrozenBufferedDeletes packet) {
+  public synchronized long push(FrozenBufferedDeletes packet) {
+    /*
+     * The insert operation must be atomic. If we let threads increment the gen
+     * and push the packet afterwards we risk that packets are out of order.
+     * With DWPT this is possible if two or more flushes are racing for pushing
+     * updates. If the pushed packets get our of order would loose documents
+     * since deletes are applied to the wrong segments.
+     */
+    packet.setDelGen(nextGen++);
     assert packet.any();
     assert checkDeleteStats();
-    assert packet.gen < nextGen;
+    assert packet.delGen() < nextGen;
+    assert deletes.isEmpty() || deletes.get(deletes.size()-1).delGen() < packet.delGen() : "Delete packets must be in order";
     deletes.add(packet);
     numTerms.addAndGet(packet.numTermDeletes);
     bytesUsed.addAndGet(packet.bytesUsed);
     if (infoStream != null) {
-      message("push deletes " + packet + " delGen=" + packet.gen + " packetCount=" + deletes.size());
+      message("push deletes " + packet + " delGen=" + packet.delGen() + " packetCount=" + deletes.size());
     }
     assert checkDeleteStats();
+    return packet.delGen();
   }
 

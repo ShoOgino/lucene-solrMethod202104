@@ -1,17 +1,51 @@
-  private boolean doFlush(DocumentsWriterPerThread flushingDWPT) throws IOException {
+  private  boolean doFlush(DocumentsWriterPerThread flushingDWPT) throws IOException {
     boolean maybeMerge = false;
     while (flushingDWPT != null) {
       maybeMerge = true;
+      boolean success = false;
+      FlushTicket ticket = null;
       try {
+        /*
+         * Since with DWPT the flush process is concurrent and several DWPT
+         * could flush at the same time we must maintain the order of the
+         * flushes before we can apply the flushed segment and the frozen global
+         * deletes it is buffering. The reason for this is that the global
+         * deletes mark a certain point in time where we took a DWPT out of
+         * rotation and freeze the global deletes.
+         * 
+         * Example: A flush 'A' starts and freezes the global deletes, then
+         * flush 'B' starts and freezes all deletes occurred since 'A' has
+         * started. if 'B' finishes before 'A' we need to wait until 'A' is done
+         * otherwise the deletes frozen by 'B' are not applied to 'A' and we
+         * might miss to deletes documents in 'A'.
+         */
+        synchronized (ticketQueue) {
+         // each flush is assigned a ticket in the order they accquire the ticketQueue lock
+         ticket =  new FlushTicket(flushingDWPT.prepareFlush(), true);
+         ticketQueue.add(ticket);
+        }
         // flush concurrently without locking
         final FlushedSegment newSegment = flushingDWPT.flush();
-        finishFlushedSegment(newSegment);
+        success = true;
+        /*
+         * now we are done and try to flush the ticket queue if the head of the
+         * queue has already finished the flush.
+         */
+        applyFlushTickets(ticket, newSegment);
       } finally {
           flushControl.doAfterFlush(flushingDWPT);
           flushingDWPT.checkAndResetHasAborted();
           indexWriter.flushCount.incrementAndGet();
+          if (!success && ticket != null) {
+            synchronized (ticketQueue) {
+            // in the case of a failure make sure we are making progress and
+            // apply all the deletes since the segment flush failed
+              ticket.isSegmentFlush = false;
+             
+            }
+          }
       }
-        flushingDWPT =  flushControl.nextPendingFlush() ;
+      flushingDWPT =  flushControl.nextPendingFlush() ;
     }
     return maybeMerge;
   }

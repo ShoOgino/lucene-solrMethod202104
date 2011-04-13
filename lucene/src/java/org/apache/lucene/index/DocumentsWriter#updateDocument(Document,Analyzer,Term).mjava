@@ -12,41 +12,43 @@
         message("WARNING DocumentsWriter is stalled try to hijack thread to flush pending segment");
       }
       // try pick up pending threads here if possile
-      final DocumentsWriterPerThread flushingDWPT;
-      flushingDWPT = flushControl.getFlushIfPending(null);
+      DocumentsWriterPerThread flushingDWPT;
+      while ( (flushingDWPT = flushControl.nextPendingFlush()) != null){
        // don't push the delete here since the update could fail!
-      maybeMerge = doFlush(flushingDWPT);
+        maybeMerge = doFlush(flushingDWPT);
+        if (!healthiness.isStalled()) {
+          break;
+        }
+      }
       if (infoStream != null && healthiness.isStalled()) {
         message("WARNING DocumentsWriter is stalled might block thread until DocumentsWriter is not stalled anymore");
       }
       healthiness.waitIfStalled(); // block if stalled
     }
-    ThreadState perThread = perThreadPool.getAndLock(Thread.currentThread(),
+    final ThreadState perThread = perThreadPool.getAndLock(Thread.currentThread(),
         this, doc);
-    DocumentsWriterPerThread flushingDWPT = null;
+    final DocumentsWriterPerThread flushingDWPT;
+    final DocumentsWriterPerThread dwpt;
     try {
       if (!perThread.isActive()) {
         ensureOpen();
         assert false: "perThread is not active but we are still open";
       }
-      final DocumentsWriterPerThread dwpt = perThread.perThread;
+       
+      dwpt = perThread.perThread;
       try {
-        dwpt.updateDocument(doc, analyzer, delTerm);
+        dwpt.updateDocument(doc, analyzer, delTerm); 
+        numDocsInRAM.incrementAndGet();
       } finally {
         if(dwpt.checkAndResetHasAborted()) {
             flushControl.doOnAbort(perThread);
         }
       }
       flushingDWPT = flushControl.doAfterDocument(perThread, isUpdate);
-      numDocsInRAM.incrementAndGet();
     } finally {
       perThread.unlock();
     }
-    // delete term from other DWPTs later, so that this thread
-    // doesn't have to lock multiple DWPTs at the same time
-    if (isUpdate) {
-      deleteTerm(delTerm, perThread);
-    }
+    
     maybeMerge |= doFlush(flushingDWPT);
     return maybeMerge;
   }

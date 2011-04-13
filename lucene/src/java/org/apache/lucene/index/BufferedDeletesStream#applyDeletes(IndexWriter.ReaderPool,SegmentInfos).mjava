@@ -21,7 +21,7 @@
 
     SegmentInfos infos2 = new SegmentInfos();
     infos2.addAll(infos);
-    Collections.sort(infos2, sortByDelGen);
+    Collections.sort(infos2, sortSegInfoByDelGen);
 
     BufferedDeletes coalescedDeletes = null;
     boolean anyNewDeletes = false;
@@ -38,19 +38,30 @@
       final SegmentInfo info = infos2.get(infosIDX);
       final long segGen = info.getBufferedDeletesGen();
 
-      if (packet != null && segGen < packet.gen) {
+      if (packet != null && segGen < packet.delGen()) {
         //System.out.println("  coalesce");
         if (coalescedDeletes == null) {
           coalescedDeletes = new BufferedDeletes(true);
         }
-        coalescedDeletes.update(packet);
+        if (!packet.isSegmentPrivate) {
+          /*
+           * only update the coalescededDeletes if we are NOT on a segment private del packet. 
+           * the segment private del packet must only applied to segments with the same delGen. 
+           * Yet, if a segment is already deleted from the SI since it had no more documents remaining 
+           * after some del packets younger than it segPrivate packet (hihger delGen) have been applied
+           * the segPrivate packet has not been removed.
+           */
+          coalescedDeletes.update(packet);
+        }
+
         delIDX--;
-      } else if (packet != null && segGen == packet.gen) {
+      } else if (packet != null && segGen == packet.delGen()) {
+        assert packet.isSegmentPrivate : "Packet and Segments deletegen can only match on a segment private del packet";
         //System.out.println("  eq");
 
         // Lock order: IW -> BD -> RP
         assert readerPool.infoIsLive(info);
-        SegmentReader reader = readerPool.get(info, false);
+        final SegmentReader reader = readerPool.get(info, false);
         int delCount = 0;
         final boolean segAllDeletes;
         try {
@@ -60,7 +71,7 @@
             delCount += applyQueryDeletes(coalescedDeletes.queriesIterable(), reader);
           }
           //System.out.println("    del exact");
-          // Don't delete by Term here; DocumentsWriter
+          // Don't delete by Term here; DocumentsWriterPerThread
           // already did that on flush:
           delCount += applyQueryDeletes(packet.queriesIterable(), reader);
           segAllDeletes = reader.numDocs() == 0;
@@ -83,7 +94,12 @@
         if (coalescedDeletes == null) {
           coalescedDeletes = new BufferedDeletes(true);
         }
-        coalescedDeletes.update(packet);
+        
+        /*
+         * since we are on a segment private del packet we must not
+         * update the coalescedDeletes here! We can simply advance to the 
+         * next packet and seginfo.
+         */
         delIDX--;
         infosIDX--;
         info.setBufferedDeletesGen(nextGen);

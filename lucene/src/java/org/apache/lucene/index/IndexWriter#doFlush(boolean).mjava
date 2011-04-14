@@ -7,7 +7,6 @@
     }
 
     doBeforeFlush();
-
     assert testPoint("startDoFlush");
     boolean success = false;
     try {
@@ -16,43 +15,26 @@
         message("  start flush: applyAllDeletes=" + applyAllDeletes);
         message("  index before flush " + segString());
       }
-
-      boolean maybeMerge = docWriter.flushAllThreads(applyAllDeletes);
-
+      final boolean maybeMerge;
+      
+      synchronized (fullFlushLock) {
+        try {
+          maybeMerge = docWriter.flushAllThreads(applyAllDeletes);
+          success = true;
+        } finally {
+          docWriter.finishFullFlush(success);
+        }
+      }
+      success = false;
       synchronized(this) {
-        if (!applyAllDeletes) {
-          // If deletes alone are consuming > 1/2 our RAM
-          // buffer, force them all to apply now. This is to
-          // prevent too-frequent flushing of a long tail of
-          // tiny segments:
-          if ((config.getRAMBufferSizeMB() != IndexWriterConfig.DISABLE_AUTO_FLUSH &&
-               bufferedDeletesStream.bytesUsed() > (1024*1024*config.getRAMBufferSizeMB()/2))) {
-            applyAllDeletes = true;
-            if (infoStream != null) {
-              message("force apply deletes bytesUsed=" + bufferedDeletesStream.bytesUsed() + " vs ramBuffer=" + (1024*1024*config.getRAMBufferSizeMB()));
-            }
-          }
-        }
-
-        if (applyAllDeletes) {
-          if (infoStream != null) {
-            message("apply all deletes during flush");
-          }
-          applyAllDeletes();
-        } else if (infoStream != null) {
-          message("don't apply deletes now delTermCount=" + bufferedDeletesStream.numTerms() + " bytesUsed=" + bufferedDeletesStream.bytesUsed());
-        }
-
+        maybeApplyDeletes(applyAllDeletes);
         doAfterFlush();
         if (!maybeMerge) {
           // flushCount is incremented in flushAllThreads
           flushCount.incrementAndGet();
         }
-
         success = true;
-
         return maybeMerge;
-
       }
     } catch (OutOfMemoryError oom) {
       handleOOM(oom, "doFlush");

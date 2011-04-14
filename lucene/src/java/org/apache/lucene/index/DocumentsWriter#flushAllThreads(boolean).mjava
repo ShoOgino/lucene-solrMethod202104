@@ -1,45 +1,44 @@
+  /*
+   * flushAllThreads is synced by IW fullFlushLock. Flushing all threads is a
+   * two stage operations, the caller must ensure that #finishFlush is called
+   * after this method to release the flush lock in DWFlushControl - use try /
+   * finally!
+   */
   final boolean flushAllThreads(final boolean flushDeletes)
     throws IOException {
-    synchronized (flushAllLock) {
-      final DocumentsWriterDeleteQueue flushingDeleteQueue;
-      synchronized (this) {
-        flushingDeleteQueue = deleteQueue;
-        deleteQueue = new DocumentsWriterDeleteQueue(new BufferedDeletes(false));
-        assert setFlushingDeleteQueue(flushingDeleteQueue);
-      }
-      assert flushingDeleteQueue == currentFlusingSession;
-      boolean anythingFlushed = false;
-      boolean success = false;
-      try {
-        flushControl.markForFullFlush();
-        DocumentsWriterPerThread flushingDWPT;
-        // now try help out with flushing
-        while ((flushingDWPT = flushControl.nextPendingFlush()) != null) {
-          anythingFlushed |= doFlush(flushingDWPT);
-        }
-        // if a concurrent flush is still in flight wait for it
-        while (!flushControl.allFlushesDue()) {
-          flushControl.waitForFlush();  
-        }
-        if (!anythingFlushed && flushDeletes) {
-          synchronized (ticketQueue) {
-            ticketQueue.add(new FlushTicket(flushingDeleteQueue.freezeGlobalBuffer(null), false));
-           }
-          applyFlushTickets(null, null);
-        }
-        success = true;
-        
-      } finally {
-        assert flushingDeleteQueue == currentFlusingSession;
-        assert setFlushingDeleteQueue(null);
-        if (!success) {
-          flushControl.abortFullFlushes();
-        } else {
-          // release the flush lock
-          flushControl.finishFullFlush();
-        }
-      }
-      return anythingFlushed;
+    final DocumentsWriterDeleteQueue flushingDeleteQueue;
+
+    synchronized (this) {
+      flushingDeleteQueue = deleteQueue;
+      /* sets a new delete queue - this must be synced on the flush control
+       * otherwise a new DWPT could sneak into the loop with an already flushing
+       * delete queue */
+      flushControl.markForFullFlush();
+      assert setFlushingDeleteQueue(flushingDeleteQueue);
     }
+    assert currentFullFlushDelQueue != null;
+    assert currentFullFlushDelQueue != deleteQueue;
+    
+    boolean anythingFlushed = false;
+    try {
+      DocumentsWriterPerThread flushingDWPT;
+      // now try help out with flushing
+      while ((flushingDWPT = flushControl.nextPendingFlush()) != null) {
+        anythingFlushed |= doFlush(flushingDWPT);
+      }
+      // if a concurrent flush is still in flight wait for it
+      while (!flushControl.allFlushesDue()) {
+        flushControl.waitForFlush();  
+      }
+      if (!anythingFlushed && flushDeletes) {
+        synchronized (ticketQueue) {
+          ticketQueue.add(new FlushTicket(flushingDeleteQueue.freezeGlobalBuffer(null), false));
+         }
+        applyFlushTickets(null, null);
+      }
+    } finally {
+      assert flushingDeleteQueue == currentFullFlushDelQueue;
+    }
+    return anythingFlushed;
   }
 

@@ -24,38 +24,41 @@
          * otherwise the deletes frozen by 'B' are not applied to 'A' and we
          * might miss to deletes documents in 'A'.
          */
-        synchronized (ticketQueue) {
-          // Each flush is assigned a ticket in the order they accquire the ticketQueue lock
-          ticket =  new FlushTicket(flushingDWPT.prepareFlush(), true);
-          ticketQueue.add(ticket);
+        try {
+          synchronized (ticketQueue) {
+            // Each flush is assigned a ticket in the order they accquire the ticketQueue lock
+            ticket =  new FlushTicket(flushingDWPT.prepareFlush(), true);
+            ticketQueue.add(ticket);
+          }
+  
+          // flush concurrently without locking
+          final FlushedSegment newSegment = flushingDWPT.flush();
+          synchronized (ticketQueue) {
+            ticket.segment = newSegment;
+          }
+          // flush was successful once we reached this point - new seg. has been assigned to the ticket!
+          success = true;
+        } finally {
+          if (!success && ticket != null) {
+            synchronized (ticketQueue) {
+              // In the case of a failure make sure we are making progress and
+              // apply all the deletes since the segment flush failed since the flush
+              // ticket could hold global deletes see FlushTicket#canPublish()
+              ticket.isSegmentFlush = false;
+            }
+          }
         }
-
-        // flush concurrently without locking
-        final FlushedSegment newSegment = flushingDWPT.flush();
-
-        // nocommit -- should this success = true be moved
-        // under the applyFlushTickets?
-        success = true;
-
         /*
          * Now we are done and try to flush the ticket queue if the head of the
          * queue has already finished the flush.
          */
-        applyFlushTickets(ticket, newSegment);
+        applyFlushTickets();
       } finally {
         flushControl.doAfterFlush(flushingDWPT);
         flushingDWPT.checkAndResetHasAborted();
         indexWriter.flushCount.incrementAndGet();
-        if (!success && ticket != null) {
-          synchronized (ticketQueue) {
-            // nocommit -- shouldn't we drop the ticket in
-            // this case?
-            // In the case of a failure make sure we are making progress and
-            // apply all the deletes since the segment flush failed
-            ticket.isSegmentFlush = false;
-          }
-        }
       }
+     
       flushingDWPT = flushControl.nextPendingFlush();
     }
     return maybeMerge;

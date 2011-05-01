@@ -1,0 +1,55 @@
+  void markForFullFlush() {
+    final DocumentsWriterDeleteQueue flushingQueue;
+    synchronized (this) {
+      assert !fullFlush;
+      fullFlush = true;
+      flushingQueue = documentsWriter.deleteQueue;
+      // Set a new delete queue - all subsequent DWPT will use this queue until
+      // we do another full flush
+      DocumentsWriterDeleteQueue newQueue = new DocumentsWriterDeleteQueue(flushingQueue.generation+1);
+      documentsWriter.deleteQueue = newQueue;
+    }
+    final Iterator<ThreadState> allActiveThreads = perThreadPool
+    .getActivePerThreadsIterator();
+    final ArrayList<DocumentsWriterPerThread> toFlush = new ArrayList<DocumentsWriterPerThread>();
+    while (allActiveThreads.hasNext()) {
+      final ThreadState next = allActiveThreads.next();
+      next.lock();
+      try {
+        if (!next.isActive()) {
+          continue; 
+        }
+        assert next.perThread.deleteQueue == flushingQueue
+            || next.perThread.deleteQueue == documentsWriter.deleteQueue : " flushingQueue: "
+            + flushingQueue
+            + " currentqueue: "
+            + documentsWriter.deleteQueue
+            + " perThread queue: "
+            + next.perThread.deleteQueue
+            + " numDocsInRam: " + next.perThread.getNumDocsInRAM();
+        if (next.perThread.deleteQueue != flushingQueue) {
+          // this one is already a new DWPT
+          continue;
+        }
+        if (next.perThread.getNumDocsInRAM() > 0 ) {
+          final DocumentsWriterPerThread dwpt = next.perThread; // just for assert
+          final DocumentsWriterPerThread flushingDWPT = internalTryCheckOutForFlush(next, true);
+          assert flushingDWPT != null : "DWPT must never be null here since we hold the lock and it holds documents";
+          assert dwpt == flushingDWPT : "flushControl returned different DWPT";
+          toFlush.add(flushingDWPT);
+        } else {
+          // get the new delete queue from DW
+          next.perThread.initialize();
+        }
+      } finally {
+        next.unlock();
+      }
+    }
+    synchronized (this) {
+      assert assertBlockedFlushes(flushingQueue);
+      flushQueue.addAll(blockedFlushes);
+      blockedFlushes.clear();
+      flushQueue.addAll(toFlush);
+    }
+  }
+

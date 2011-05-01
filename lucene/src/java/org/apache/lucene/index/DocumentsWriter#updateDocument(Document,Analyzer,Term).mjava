@@ -1,76 +1,69 @@
-  boolean updateDocument(Document doc, Analyzer analyzer, Term delTerm)
-    throws CorruptIndexException, IOException {
+  boolean updateDocument(final Document doc, final Analyzer analyzer,
+      final Term delTerm) throws CorruptIndexException, IOException {
+    ensureOpen();
+    boolean maybeMerge = false;
+    final boolean isUpdate = delTerm != null;
+    if (healthiness.anyStalledThreads()) {
 
-    // Possibly trigger a flush, or wait until any running flush completes:
-    boolean doFlush = flushControl.waitUpdate(1, delTerm != null ? 1 : 0);
-
-    // This call is synchronized but fast
-    final DocumentsWriterThreadState state = getThreadState(doc, delTerm);
-
-    final DocState docState = state.docState;
-    docState.doc = doc;
-    docState.analyzer = analyzer;
-
-    boolean success = false;
-    try {
-      // This call is not synchronized and does all the
-      // work
-      final DocWriter perDoc;
-      try {
-        perDoc = state.consumer.processDocument(fieldInfos);
-      } finally {
-        docState.clear();
+      // Help out flushing any pending DWPTs so we can un-stall:
+      if (infoStream != null) {
+        message("WARNING DocumentsWriter has stalled threads; will hijack this thread to flush pending segment(s)");
       }
 
-      // This call is synchronized but fast
-      finishDocument(state, perDoc);
-
-      success = true;
-    } finally {
-      if (!success) {
-
-        // If this thread state had decided to flush, we
-        // must clear it so another thread can flush
-        if (doFlush) {
-          flushControl.clearFlushPending();
+      // Try pick up pending threads here if possible
+      DocumentsWriterPerThread flushingDWPT;
+      while ((flushingDWPT = flushControl.nextPendingFlush()) != null) {
+        // Don't push the delete here since the update could fail!
+        maybeMerge = doFlush(flushingDWPT);
+        if (!healthiness.anyStalledThreads()) {
+          break;
         }
+      }
 
-        if (infoStream != null) {
-          message("exception in updateDocument aborting=" + aborting);
-        }
+      if (infoStream != null && healthiness.anyStalledThreads()) {
+        message("WARNING DocumentsWriter still has stalled threads; waiting");
+      }
 
-        synchronized(this) {
+      healthiness.waitIfStalled(); // block if stalled
 
-          state.isIdle = true;
-          notifyAll();
-            
-          if (aborting) {
-            abort();
-          } else {
-            skipDocWriter.docID = docState.docID;
-            boolean success2 = false;
-            try {
-              waitQueue.add(skipDocWriter);
-              success2 = true;
-            } finally {
-              if (!success2) {
-                abort();
-                return false;
-              }
-            }
-
-            // Immediately mark this document as deleted
-            // since likely it was partially added.  This
-            // keeps indexing as "all or none" (atomic) when
-            // adding a document:
-            deleteDocID(state.docState.docID);
-          }
-        }
+      if (infoStream != null && healthiness.anyStalledThreads()) {
+        message("WARNING DocumentsWriter done waiting");
       }
     }
 
-    doFlush |= flushControl.flushByRAMUsage("new document");
+    final ThreadState perThread = perThreadPool.getAndLock(Thread.currentThread(),
+        this, doc);
+    final DocumentsWriterPerThread flushingDWPT;
+    
+    try {
 
-    return doFlush;
+      if (!perThread.isActive()) {
+        ensureOpen();
+        assert false: "perThread is not active but we are still open";
+      }
+       
+      final DocumentsWriterPerThread dwpt = perThread.perThread;
+      try {
+        dwpt.updateDocument(doc, analyzer, delTerm); 
+        numDocsInRAM.incrementAndGet();
+      } finally {
+        if (dwpt.checkAndResetHasAborted()) {
+          flushControl.doOnAbort(perThread);
+        }
+      }
+      flushingDWPT = flushControl.doAfterDocument(perThread, isUpdate);
+    } finally {
+      perThread.unlock();
+    }
+    
+    if (flushingDWPT != null) {
+      maybeMerge |= doFlush(flushingDWPT);
+    } else {
+      final DocumentsWriterPerThread nextPendingFlush = flushControl.nextPendingFlush();
+      if (nextPendingFlush != null) {
+        maybeMerge |= doFlush(nextPendingFlush);
+      }
+    }
+    return maybeMerge;
   }
 

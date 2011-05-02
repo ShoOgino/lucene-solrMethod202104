@@ -3,11 +3,11 @@
    *  instance */
   private int mergeMiddle(MergePolicy.OneMerge merge)
     throws CorruptIndexException, IOException {
-    
+
     merge.checkAborted(directory);
 
     final String mergedName = merge.info.name;
-    
+
     int mergedDocCount = 0;
 
     SegmentInfos sourceSegments = merge.segments;
@@ -22,6 +22,8 @@
 
     merge.readers = new ArrayList<SegmentReader>();
     merge.readerClones = new ArrayList<SegmentReader>();
+
+    merge.estimatedMergeBytes = 0;
 
     // This is try/finally to make sure merger's readers are
     // closed:
@@ -39,6 +41,13 @@
                                                     MERGE_READ_BUFFER_SIZE,
                                                     -config.getReaderTermsIndexDivisor());
         merge.readers.add(reader);
+
+        final int readerMaxDoc = reader.maxDoc();
+        if (readerMaxDoc > 0) {
+          final int delCount = reader.numDeletedDocs();
+          final double delRatio = ((double) delCount)/readerMaxDoc;
+          merge.estimatedMergeBytes += info.sizeInBytes(true) * (1.0 - delRatio);
+        }
 
         // We clone the segment readers because other
         // deletes may come in while we're merging so we
@@ -72,7 +81,7 @@
         message("merge store matchedCount=" + merger.getMatchedSubReaderCount() + " vs " + merge.readers.size());
       }
       anyNonBulkMerges |= merger.getAnyNonBulkMerges();
-      
+
       assert mergedDocCount == totDocCount: "mergedDocCount=" + mergedDocCount + " vs " + totDocCount;
 
       // Very important to do this before opening the reader
@@ -141,8 +150,11 @@
         merge.info.setUseCompoundFile(true);
       }
 
-      final IndexReaderWarmer mergedSegmentWarmer = config.getMergedSegmentWarmer();
+      if (infoStream != null) {
+        message(String.format("merged segment size=%.3f MB vs estimate=%.3f MB", merge.info.sizeInBytes(true)/1024./1024., merge.estimatedMergeBytes/1024/1024.));
+      }
 
+      final IndexReaderWarmer mergedSegmentWarmer = config.getMergedSegmentWarmer();
       final int termsIndexDivisor;
       final boolean loadDocStores;
 

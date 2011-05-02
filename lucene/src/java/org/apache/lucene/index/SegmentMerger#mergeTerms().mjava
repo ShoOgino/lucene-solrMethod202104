@@ -2,13 +2,20 @@
 
     // Let CodecProvider decide which codec will be used to write
     // the new segment:
-    
+
     int docBase = 0;
 
     final List<Fields> fields = new ArrayList<Fields>();
+
     final List<ReaderUtil.Slice> slices = new ArrayList<ReaderUtil.Slice>();
     final List<Bits> bits = new ArrayList<Bits>();
     final List<Integer> bitsStarts = new ArrayList<Integer>();
+    
+    // TODO: move this into its own method - this merges currently only docvalues
+    final List<PerDocValues> perDocProducers = new ArrayList<PerDocValues>();    
+    final List<ReaderUtil.Slice> perDocSlices = new ArrayList<ReaderUtil.Slice>();
+    final List<Bits> perDocBits = new ArrayList<Bits>();
+    final List<Integer> perDocBitsStarts = new ArrayList<Integer>();
 
     for(IndexReader r : readers) {
       final Fields f = r.fields();
@@ -19,10 +26,18 @@
         bits.add(r.getDeletedDocs());
         bitsStarts.add(docBase);
       }
+      final PerDocValues producer = r.perDocValues();
+      if (producer != null) {
+        perDocSlices.add(new ReaderUtil.Slice(docBase, maxDoc, fields.size()));
+        perDocProducers.add(producer);
+        perDocBits.add(r.getDeletedDocs());
+        perDocBitsStarts.add(docBase);
+      }
       docBase += maxDoc;
     }
 
     bitsStarts.add(docBase);
+    perDocBitsStarts.add(docBase);
 
     // we may gather more readers than mergeState.readerCount
     mergeState = new MergeState();
@@ -30,7 +45,7 @@
     mergeState.readerCount = readers.size();
     mergeState.fieldInfos = fieldInfos;
     mergeState.mergedDocCount = mergedDocs;
-    
+
     // Remap docIDs
     mergeState.delCounts = new int[mergeState.readerCount];
     mergeState.docMaps = new int[mergeState.readerCount][];
@@ -68,7 +83,7 @@
         }
         assert delCount == mergeState.delCounts[i]: "reader delCount=" + mergeState.delCounts[i] + " vs recomputed delCount=" + delCount;
       }
-      
+
       if (payloadProcessorProvider != null) {
         mergeState.dirPayloadProcessor[i] = payloadProcessorProvider.getDirProcessor(reader.directory());
       }
@@ -81,7 +96,7 @@
     // apart when we step through the docs enums in
     // MultiDocsEnum.
     mergeState.multiDeletedDocs = new MultiBits(bits, bitsStarts);
-    
+
     try {
       consumer.merge(mergeState,
                      new MultiFields(fields.toArray(Fields.EMPTY_ARRAY),
@@ -89,5 +104,20 @@
     } finally {
       consumer.close();
     }
+    if (!perDocSlices.isEmpty()) {
+      mergeState.multiDeletedDocs = new MultiBits(perDocBits, perDocBitsStarts);
+      final PerDocConsumer docsConsumer = codec
+          .docsConsumer(new PerDocWriteState(segmentWriteState));
+      try {
+        docsConsumer.merge(
+            mergeState,
+            new MultiPerDocValues(perDocProducers
+                .toArray(PerDocValues.EMPTY_ARRAY), perDocSlices
+                .toArray(ReaderUtil.Slice.EMPTY_ARRAY)));
+      } finally {
+        docsConsumer.close();
+      }
+    }
+    
   }
 

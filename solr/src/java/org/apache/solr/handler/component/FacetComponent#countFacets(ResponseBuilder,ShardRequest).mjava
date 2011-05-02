@@ -28,8 +28,95 @@
           dff.add(shardNum, (NamedList)facet_fields.get(dff.getKey()), dff.initialLimit);
         }
       }
-    }
 
+      // Distributed facet_dates
+      //
+      // The implementation below uses the first encountered shard's 
+      // facet_dates as the basis for subsequent shards' data to be merged.
+      // (the "NOW" param should ensure consistency)
+      @SuppressWarnings("unchecked")
+      SimpleOrderedMap<SimpleOrderedMap<Object>> facet_dates = 
+        (SimpleOrderedMap<SimpleOrderedMap<Object>>) 
+        facet_counts.get("facet_dates");
+      
+      if (facet_dates != null) {
+
+        // go through each facet_date
+        for (Map.Entry<String,SimpleOrderedMap<Object>> entry : facet_dates) {
+          final String field = entry.getKey();
+          if (fi.dateFacets.get(field) == null) { 
+            // first time we've seen this field, no merging
+            fi.dateFacets.add(field, entry.getValue());
+
+          } else { 
+            // not the first time, merge current field
+
+            SimpleOrderedMap<Object> shardFieldValues 
+              = entry.getValue();
+            SimpleOrderedMap<Object> existFieldValues 
+              = fi.dateFacets.get(field);
+
+            for (Map.Entry<String,Object> existPair : existFieldValues) {
+              final String key = existPair.getKey();
+              if (key.equals("gap") || 
+                  key.equals("end") || 
+                  key.equals("start")) {
+                // we can skip these, must all be the same across shards
+                continue; 
+              }
+              // can be null if inconsistencies in shards responses
+              Integer newValue = (Integer) shardFieldValues.get(key);
+              if  (null != newValue) {
+                Integer oldValue = ((Integer) existPair.getValue());
+                existPair.setValue(oldValue + newValue);
+              }
+            }
+          }
+        }
+      }
+
+      // Distributed facet_ranges
+      //
+      // The implementation below uses the first encountered shard's 
+      // facet_ranges as the basis for subsequent shards' data to be merged.
+      @SuppressWarnings("unchecked")
+      SimpleOrderedMap<SimpleOrderedMap<Object>> facet_ranges = 
+        (SimpleOrderedMap<SimpleOrderedMap<Object>>) 
+        facet_counts.get("facet_ranges");
+      
+      if (facet_ranges != null) {
+
+        // go through each facet_range
+        for (Map.Entry<String,SimpleOrderedMap<Object>> entry : facet_ranges) {
+          final String field = entry.getKey();
+          if (fi.rangeFacets.get(field) == null) { 
+            // first time we've seen this field, no merging
+            fi.rangeFacets.add(field, entry.getValue());
+
+          } else { 
+            // not the first time, merge current field counts
+
+            @SuppressWarnings("unchecked")
+            NamedList<Integer> shardFieldValues 
+              = (NamedList<Integer>) entry.getValue().get("counts");
+
+            @SuppressWarnings("unchecked")
+            NamedList<Integer> existFieldValues 
+              = (NamedList<Integer>) fi.rangeFacets.get(field).get("counts");
+
+            for (Map.Entry<String,Integer> existPair : existFieldValues) {
+              final String key = existPair.getKey();
+              // can be null if inconsistencies in shards responses
+              Integer newValue = shardFieldValues.get(key);
+              if  (null != newValue) {
+                Integer oldValue = existPair.getValue();
+                existPair.setValue(oldValue + newValue);
+              }
+            }
+          }
+        }
+      }
+    }
 
     //
     // This code currently assumes that there will be only a single
@@ -38,15 +125,18 @@
     //
 
     for (DistribFieldFacet dff : fi.facets.values()) {
-      if (dff.limit <= 0) continue; // no need to check these facets for refinement
-      if (dff.minCount <= 1 && dff.sort.equals(FacetParams.FACET_SORT_INDEX)) continue;
+       // no need to check these facets for refinement
+      if (dff.initialLimit <= 0 && dff.initialMincount == 0) continue;
 
-      @SuppressWarnings("unchecked") // generic array's are anoying
+      // only other case where index-sort doesn't need refinement is if minCount==0
+      if (dff.minCount == 0 && dff.sort.equals(FacetParams.FACET_SORT_INDEX)) continue;
+
+      @SuppressWarnings("unchecked") // generic array's are annoying
       List<String>[] tmp = (List<String>[]) new List[rb.shards.length];
       dff._toRefine = tmp;
 
       ShardFacetCount[] counts = dff.getCountSorted();
-      int ntop = Math.min(counts.length, dff.offset + dff.limit);
+      int ntop = Math.min(counts.length, dff.limit >= 0 ? dff.offset + dff.limit : Integer.MAX_VALUE);
       long smallestCount = counts.length == 0 ? 0 : counts[ntop-1].count;
 
       for (int i=0; i<counts.length; i++) {
@@ -55,8 +145,11 @@
 
         if (i<ntop) {
           // automatically flag the top values for refinement
+          // this should always be true for facet.sort=index
           needRefinement = true;
         } else {
+          // this logic should only be invoked for facet.sort=index (for now)
+
           // calculate the maximum value that this term may have
           // and if it is >= smallestCount, then flag for refinement
           long maxCount = sfc.count;

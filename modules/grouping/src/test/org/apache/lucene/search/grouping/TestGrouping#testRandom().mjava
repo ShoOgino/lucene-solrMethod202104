@@ -13,7 +13,7 @@
       if (VERBOSE) {
         System.out.println("TEST: numDocs=" + numDocs + " numGroups=" + numGroups);
       }
-      
+
       final List<BytesRef> groups = new ArrayList<BytesRef>();
       for(int i=0;i<numGroups;i++) {
         groups.add(new BytesRef(_TestUtil.randomRealisticUnicodeString(random)));
@@ -106,8 +106,16 @@
         //final int docOffset = 0;
 
         final boolean doCache = random.nextBoolean();
+        final boolean doAllGroups = random.nextBoolean();
         if (VERBOSE) {
-          System.out.println("TEST: groupSort=" + groupSort + " docSort=" + docSort + " searchTerm=" + searchTerm + " topNGroups=" + topNGroups + " groupOffset=" + groupOffset + " docOffset=" + docOffset + " doCache=" + doCache + " docsPerGroup=" + docsPerGroup);
+          System.out.println("TEST: groupSort=" + groupSort + " docSort=" + docSort + " searchTerm=" + searchTerm + " topNGroups=" + topNGroups + " groupOffset=" + groupOffset + " docOffset=" + docOffset + " doCache=" + doCache + " docsPerGroup=" + docsPerGroup + " doAllGroups=" + doAllGroups);
+        }
+
+        final AllGroupsCollector allGroupsCollector;
+        if (doAllGroups) {
+          allGroupsCollector = new AllGroupsCollector("group");
+        } else {
+          allGroupsCollector = null;
         }
 
         final FirstPassGroupingCollector c1 = new FirstPassGroupingCollector("group", groupSort, groupOffset+topNGroups);
@@ -118,7 +126,16 @@
           if (VERBOSE) {
             System.out.println("TEST: maxCacheMB=" + maxCacheMB);
           }
-          c = cCache = new CachingCollector(c1, true, maxCacheMB);
+
+          if (doAllGroups) {
+            cCache = new CachingCollector(c1, true, maxCacheMB);
+            c = MultiCollector.wrap(cCache, allGroupsCollector);
+          } else {
+            c = cCache = new CachingCollector(c1, true, maxCacheMB);
+          }
+        } else if (doAllGroups) {
+          c = MultiCollector.wrap(c1, allGroupsCollector);
+          cCache = null;
         } else {
           c = c1;
           cCache = null;
@@ -153,8 +170,13 @@
           } else {
             s.search(new TermQuery(new Term("content", searchTerm)), c2);
           }
-        
-          groupsResult = c2.getTopGroups(docOffset);
+
+          if (doAllGroups) {
+            TopGroups tempTopGroups = c2.getTopGroups(docOffset);
+            groupsResult = new TopGroups(tempTopGroups, allGroupsCollector.getGroupCount());
+          } else {
+            groupsResult = c2.getTopGroups(docOffset);
+          }
         } else {
           groupsResult = null;
           if (VERBOSE) {
@@ -162,7 +184,7 @@
           }
         }
 
-        final TopGroups expectedGroups = slowGrouping(groupDocs, searchTerm, fillFields, getScores, getMaxScores, groupSort, docSort, topNGroups, docsPerGroup, groupOffset, docOffset);
+        final TopGroups expectedGroups = slowGrouping(groupDocs, searchTerm, fillFields, getScores, getMaxScores, doAllGroups, groupSort, docSort, topNGroups, docsPerGroup, groupOffset, docOffset);
 
         try {
           // NOTE: intentional but temporary field cache insanity!

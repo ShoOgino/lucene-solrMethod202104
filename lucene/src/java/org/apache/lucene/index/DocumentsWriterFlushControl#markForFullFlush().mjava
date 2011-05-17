@@ -37,11 +37,11 @@
             if (!next.flushPending) {
               setFlushPending(next);
             }
+            final DocumentsWriterPerThread flushingDWPT = internalTryCheckOutForFlush(next);
+            assert flushingDWPT != null : "DWPT must never be null here since we hold the lock and it holds documents";
+            assert dwpt == flushingDWPT : "flushControl returned different DWPT";
+            toFlush.add(flushingDWPT);
           }
-          final DocumentsWriterPerThread flushingDWPT = internalTryCheckOutForFlush(next);
-          assert flushingDWPT != null : "DWPT must never be null here since we hold the lock and it holds documents";
-          assert dwpt == flushingDWPT : "flushControl returned different DWPT";
-          toFlush.add(flushingDWPT);
         } else {
           // get the new delete queue from DW
           next.perThread.initialize();
@@ -51,10 +51,14 @@
       }
     }
     synchronized (this) {
-      assert assertBlockedFlushes(flushingQueue);
-      flushQueue.addAll(blockedFlushes);
-      blockedFlushes.clear();
+      /* make sure we move all DWPT that are where concurrently marked as
+       * pending and moved to blocked are moved over to the flushQueue. There is
+       * a chance that this happens since we marking DWPT for full flush without
+       * blocking indexing.*/
+      pruneBlockedQueue(flushingQueue);   
+      assert assertBlockedFlushes(documentsWriter.deleteQueue);
       flushQueue.addAll(toFlush);
+      stallControl.updateStalled(this);
     }
   }
 

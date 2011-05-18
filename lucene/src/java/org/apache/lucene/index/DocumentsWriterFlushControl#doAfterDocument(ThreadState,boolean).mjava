@@ -1,25 +1,36 @@
   synchronized DocumentsWriterPerThread doAfterDocument(ThreadState perThread,
       boolean isUpdate) {
-    commitPerThreadBytes(perThread);
-    if (!perThread.flushPending) {
-      if (isUpdate) {
-        flushPolicy.onUpdate(this, perThread);
-      } else {
-        flushPolicy.onInsert(this, perThread);
-      }
-      if (!perThread.flushPending && perThread.bytesUsed > hardMaxBytesPerDWPT) {
-        // Safety check to prevent a single DWPT exceeding its RAM limit. This
-        // is super important since we can not address more than 2048 MB per DWPT
-        setFlushPending(perThread);
-        if (fullFlush) {
-          DocumentsWriterPerThread toBlock = internalTryCheckOutForFlush(perThread);
-          assert toBlock != null;
-          blockedFlushes.add(toBlock);
+    try {
+      commitPerThreadBytes(perThread);
+      if (!perThread.flushPending) {
+        if (isUpdate) {
+          flushPolicy.onUpdate(this, perThread);
+        } else {
+          flushPolicy.onInsert(this, perThread);
+        }
+        if (!perThread.flushPending && perThread.bytesUsed > hardMaxBytesPerDWPT) {
+          // Safety check to prevent a single DWPT exceeding its RAM limit. This
+          // is super important since we can not address more than 2048 MB per DWPT
+          setFlushPending(perThread);
         }
       }
+      final DocumentsWriterPerThread flushingDWPT;
+      if (fullFlush) {
+        if (perThread.flushPending) {
+          checkoutAndBlock(perThread);
+          flushingDWPT = nextPendingFlush();
+        } else {
+          flushingDWPT = null;
+        }
+      } else {
+       flushingDWPT = tryCheckoutForFlush(perThread);
+      }
+      return flushingDWPT;
+    } finally {
+      stallControl.updateStalled(this);
+      assert assertMemory();
     }
-    final DocumentsWriterPerThread flushingDWPT = tryCheckoutForFlush(perThread);
-    healthiness.updateStalled(this);
-    return flushingDWPT;
+    
+    
   }
 

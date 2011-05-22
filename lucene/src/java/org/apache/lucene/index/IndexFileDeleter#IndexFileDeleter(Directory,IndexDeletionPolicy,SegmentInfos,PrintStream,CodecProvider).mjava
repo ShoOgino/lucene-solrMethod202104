@@ -22,12 +22,12 @@
     // counts:
     long currentGen = segmentInfos.getGeneration();
     indexFilenameFilter = new IndexFileNameFilter(codecs);
-    
+
     CommitPoint currentCommitPoint = null;
     String[] files = null;
     try {
       files = directory.listAll();
-    } catch (NoSuchDirectoryException e) {  
+    } catch (NoSuchDirectoryException e) {
       // it means the directory is empty, so ignore it.
       files = new String[0];
     }
@@ -35,7 +35,7 @@
     for (String fileName : files) {
 
       if ((indexFilenameFilter.accept(null, fileName)) && !fileName.endsWith("write.lock") && !fileName.equals(IndexFileNames.SEGMENTS_GEN)) {
-        
+
         // Add this file to refCounts with initial count 0:
         getRefCount(fileName);
 
@@ -73,7 +73,31 @@
             }
           }
           if (sis != null) {
-            CommitPoint commitPoint = new CommitPoint(commitsToDelete, directory, sis);
+            final SegmentInfos infos = sis;
+            for (SegmentInfo segmentInfo : infos) {
+              try {
+                /*
+                 * Force FI to load for each segment since we could see a
+                 * segments file and load successfully above if the files are
+                 * still referenced when they are deleted and the os doesn't let
+                 * you delete them. Yet its likely that fnm files are removed
+                 * while seg file is still around Since LUCENE-2984 we need FI
+                 * to find out if a seg has vectors and prox so we need those
+                 * files to be opened for a commit point.
+                 */
+                segmentInfo.getFieldInfos();
+              } catch (FileNotFoundException e) {
+                refresh(segmentInfo.name);
+                sis = null;
+                if (infoStream != null) {
+                  message("init: hit FileNotFoundException when loading commit \"" + fileName + "\"; skipping this commit point");
+                }
+              }
+            }
+           
+          }
+          if (sis != null) {
+            final CommitPoint commitPoint = new CommitPoint(commitsToDelete, directory, sis);
             if (sis.getGeneration() == segmentInfos.getGeneration()) {
               currentCommitPoint = commitPoint;
             }
@@ -116,7 +140,7 @@
     // Now delete anything with ref count at 0.  These are
     // presumably abandoned files eg due to crash of
     // IndexWriter.
-    for(Map.Entry<String, RefCount> entry : refCounts.entrySet() ) {  
+    for(Map.Entry<String, RefCount> entry : refCounts.entrySet() ) {
       RefCount rc = entry.getValue();
       final String fileName = entry.getKey();
       if (0 == rc.count) {
@@ -136,7 +160,7 @@
     // Always protect the incoming segmentInfos since
     // sometime it may not be the most recent commit
     checkpoint(segmentInfos, false);
-    
+
     startingCommitDeleted = currentCommitPoint == null ? false : currentCommitPoint.isDeleted();
 
     deleteCommits();

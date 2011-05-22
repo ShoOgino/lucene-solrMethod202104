@@ -5,40 +5,39 @@
 
     Document doc = new Document();
     int numFields = fieldsStream.readVInt();
-    for (int i = 0; i < numFields; i++) {
+    out: for (int i = 0; i < numFields; i++) {
       int fieldNumber = fieldsStream.readVInt();
       FieldInfo fi = fieldInfos.fieldInfo(fieldNumber);
       FieldSelectorResult acceptField = fieldSelector == null ? FieldSelectorResult.LOAD : fieldSelector.accept(fi.name);
       
-      byte bits = fieldsStream.readByte();
-      assert bits <= FieldsWriter.FIELD_IS_TOKENIZED + FieldsWriter.FIELD_IS_BINARY;
+      int bits = fieldsStream.readByte() & 0xFF;
+      assert bits <= (FieldsWriter.FIELD_IS_NUMERIC_MASK | FieldsWriter.FIELD_IS_TOKENIZED | FieldsWriter.FIELD_IS_BINARY): "bits=" + Integer.toHexString(bits);
 
       boolean tokenize = (bits & FieldsWriter.FIELD_IS_TOKENIZED) != 0;
       boolean binary = (bits & FieldsWriter.FIELD_IS_BINARY) != 0;
-      //TODO: Find an alternative approach here if this list continues to grow beyond the
-      //list of 5 or 6 currently here.  See Lucene 762 for discussion
-      if (acceptField.equals(FieldSelectorResult.LOAD)) {
-        addField(doc, fi, binary, tokenize);
-      }
-      else if (acceptField.equals(FieldSelectorResult.LOAD_AND_BREAK)){
-        addField(doc, fi, binary, tokenize);
-        break;//Get out of this loop
-      }
-      else if (acceptField.equals(FieldSelectorResult.LAZY_LOAD)) {
-        addFieldLazy(doc, fi, binary, tokenize, true);
-      }
-      else if (acceptField.equals(FieldSelectorResult.LATENT)) {
-        addFieldLazy(doc, fi, binary, tokenize, false);
-      }
-      else if (acceptField.equals(FieldSelectorResult.SIZE)){
-        skipField(addFieldSize(doc, fi, binary));
-      }
-      else if (acceptField.equals(FieldSelectorResult.SIZE_AND_BREAK)){
-        addFieldSize(doc, fi, binary);
-        break;
-      }
-      else {
-        skipField();
+      final int numeric = bits & FieldsWriter.FIELD_IS_NUMERIC_MASK;
+
+      switch (acceptField) {
+        case LOAD:
+          addField(doc, fi, binary, tokenize, numeric);
+          break;
+        case LOAD_AND_BREAK:
+          addField(doc, fi, binary, tokenize, numeric);
+          break out; //Get out of this loop
+        case LAZY_LOAD:
+          addFieldLazy(doc, fi, binary, tokenize, true, numeric);
+          break;
+        case LATENT:
+          addFieldLazy(doc, fi, binary, tokenize, false, numeric);
+          break;
+        case SIZE:
+          skipFieldBytes(addFieldSize(doc, fi, binary, numeric));
+          break;
+        case SIZE_AND_BREAK:
+          addFieldSize(doc, fi, binary, numeric);
+          break out; //Get out of this loop
+        default:
+          skipField(numeric);
       }
     }
 

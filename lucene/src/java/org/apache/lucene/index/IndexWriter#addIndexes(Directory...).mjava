@@ -30,10 +30,10 @@
    * <p>
    * <b>NOTE:</b> this method only copies the segments of the incoming indexes
    * and does not merge them. Therefore deleted documents are not removed and
-   * the new segments are not merged with the existing ones. Also, the segments
-   * are copied as-is, meaning they are not converted to CFS if they aren't,
-   * and vice-versa. If you wish to do that, you can call {@link #maybeMerge}
-   * or {@link #optimize} afterwards.
+   * the new segments are not merged with the existing ones. Also, if the merge 
+   * policy allows compound files, then any segment that is not compound is 
+   * converted to such. However, if the segment is compound, it is copied as-is
+   * even if the merge policy does not allow compound files.
    *
    * <p>This requires this index not be among those to be added.
    *
@@ -57,6 +57,7 @@
 
       int docCount = 0;
       List<SegmentInfo> infos = new ArrayList<SegmentInfo>();
+      Comparator<String> versionComparator = StringHelper.getVersionComparator();
       for (Directory dir : dirs) {
         if (infoStream != null) {
           message("addIndexes: process directory " + dir);
@@ -76,45 +77,21 @@
             message("addIndexes: process segment origName=" + info.name + " newName=" + newSegName + " dsName=" + dsName + " info=" + info);
           }
 
-          // Determine if the doc store of this segment needs to be copied. It's
-          // only relevant for segments who share doc store with others, because
-          // the DS might have been copied already, in which case we just want
-          // to update the DS name of this SegmentInfo.
-          // NOTE: pre-3x segments include a null DSName if they don't share doc
-          // store. So the following code ensures we don't accidentally insert
-          // 'null' to the map.
-          final String newDsName;
-          if (dsName != null) {
-            if (dsNames.containsKey(dsName)) {
-              newDsName = dsNames.get(dsName);
-            } else {
-              dsNames.put(dsName, newSegName);
-              newDsName = newSegName;
-            }
+          // create CFS only if the source segment is not CFS, and MP agrees it
+          // should be CFS.
+          boolean createCFS;
+          synchronized (this) { // Guard segmentInfos
+            createCFS = !info.getUseCompoundFile()
+                && mergePolicy.useCompoundFile(segmentInfos, info)
+                // optimize case only for segments that don't share doc stores
+                && versionComparator.compare(info.getVersion(), "3.1") >= 0;
+          }
+
+          if (createCFS) {
+            copySegmentIntoCFS(info, newSegName);
           } else {
-            newDsName = newSegName;
+            copySegmentAsIs(info, newSegName, dsNames, dsFilesCopied);
           }
-
-          // Copy the segment files
-          for (String file: info.files()) {
-            final String newFileName;
-            if (IndexFileNames.isDocStoreFile(file)) {
-              newFileName = newDsName + IndexFileNames.stripSegmentName(file);
-              if (dsFilesCopied.contains(newFileName)) {
-                continue;
-              }
-              dsFilesCopied.add(newFileName);
-            } else {
-              newFileName = newSegName + IndexFileNames.stripSegmentName(file);
-            }
-            assert !directory.fileExists(newFileName): "file \"" + newFileName + "\" already exists";
-            dir.copy(directory, file, newFileName);
-          }
-
-          // Update SI appropriately
-          info.setDocStore(info.getDocStoreOffset(), newDsName, info.getDocStoreIsCompoundFile());
-          info.dir = directory;
-          info.name = newSegName;
 
           infos.add(info);
         }

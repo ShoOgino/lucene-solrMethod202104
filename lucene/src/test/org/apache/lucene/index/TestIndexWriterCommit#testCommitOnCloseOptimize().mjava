@@ -1,0 +1,72 @@
+  /*
+   * Verify that calling optimize when writer is open for
+   * "commit on close" works correctly both for rollback()
+   * and close().
+   */
+  public void testCommitOnCloseOptimize() throws IOException {
+    MockDirectoryWrapper dir = newDirectory();
+    // Must disable throwing exc on double-write: this
+    // test uses IW.rollback which easily results in
+    // writing to same file more than once
+    dir.setPreventDoubleWrite(false);
+    IndexWriter writer = new IndexWriter(
+        dir,
+        newIndexWriterConfig(TEST_VERSION_CURRENT, new MockAnalyzer(random)).
+            setMaxBufferedDocs(10).
+            setMergePolicy(newLogMergePolicy(10))
+    );
+    for(int j=0;j<17;j++) {
+      TestIndexWriter.addDocWithIndex(writer, j);
+    }
+    writer.close();
+
+    writer  = new IndexWriter(dir, newIndexWriterConfig( TEST_VERSION_CURRENT, new MockAnalyzer(random)).setOpenMode(OpenMode.APPEND));
+    writer.optimize();
+
+    if (VERBOSE) {
+      writer.setInfoStream(System.out);
+    }
+
+    // Open a reader before closing (commiting) the writer:
+    IndexReader reader = IndexReader.open(dir, true);
+
+    // Reader should see index as unoptimized at this
+    // point:
+    assertFalse("Reader incorrectly sees that the index is optimized", reader.isOptimized());
+    reader.close();
+
+    // Abort the writer:
+    writer.rollback();
+    TestIndexWriter.assertNoUnreferencedFiles(dir, "aborted writer after optimize");
+
+    // Open a reader after aborting writer:
+    reader = IndexReader.open(dir, true);
+
+    // Reader should still see index as unoptimized:
+    assertFalse("Reader incorrectly sees that the index is optimized", reader.isOptimized());
+    reader.close();
+
+    if (VERBOSE) {
+      System.out.println("TEST: do real optimize");
+    }
+    writer = new IndexWriter(dir, newIndexWriterConfig( TEST_VERSION_CURRENT, new MockAnalyzer(random)).setOpenMode(OpenMode.APPEND));
+    if (VERBOSE) {
+      writer.setInfoStream(System.out);
+    }
+    writer.optimize();
+    writer.close();
+
+    if (VERBOSE) {
+      System.out.println("TEST: writer closed");
+    }
+    TestIndexWriter.assertNoUnreferencedFiles(dir, "aborted writer after optimize");
+
+    // Open a reader after aborting writer:
+    reader = IndexReader.open(dir, true);
+
+    // Reader should still see index as unoptimized:
+    assertTrue("Reader incorrectly sees that the index is unoptimized", reader.isOptimized());
+    reader.close();
+    dir.close();
+  }
+

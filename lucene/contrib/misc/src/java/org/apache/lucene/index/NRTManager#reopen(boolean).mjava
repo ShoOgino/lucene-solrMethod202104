@@ -1,0 +1,47 @@
+  /** Call this when you need the NRT reader to reopen.
+   *
+   * @param applyDeletes If true, the newly opened reader
+   *        will reflect all deletes
+   */
+  public boolean reopen(boolean applyDeletes) throws IOException {
+
+    // Mark gen as of when reopen started:
+    final long newSearcherGen = indexingGen.getAndIncrement();
+
+    if (applyDeletes && currentSearcher.getIndexReader().isCurrent()) {
+      //System.out.println("reopen: skip: isCurrent both force gen=" + newSearcherGen + " vs current gen=" + searchingGen);
+      searchingGen.set(newSearcherGen);
+      noDeletesSearchingGen.set(newSearcherGen);
+      synchronized(this) {
+        notifyAll();
+      }
+      //System.out.println("reopen: skip: return");
+      return false;
+    } else if (!applyDeletes && noDeletesCurrentSearcher.getIndexReader().isCurrent()) {
+      //System.out.println("reopen: skip: isCurrent force gen=" + newSearcherGen + " vs current gen=" + noDeletesSearchingGen);
+      noDeletesSearchingGen.set(newSearcherGen);
+      synchronized(this) {
+        notifyAll();
+      }
+      //System.out.println("reopen: skip: return");
+      return false;
+    }
+
+    //System.out.println("indexingGen now " + indexingGen);
+
+    // .reopen() returns a new reference:
+
+    // Start from whichever searcher is most current:
+    final IndexSearcher startSearcher = noDeletesSearchingGen.get() > searchingGen.get() ? noDeletesCurrentSearcher : currentSearcher;
+    final IndexReader nextReader = startSearcher.getIndexReader().reopen(writer, applyDeletes);
+
+    warm(nextReader);
+
+    // Transfer reference to swapSearcher:
+    swapSearcher(new IndexSearcher(nextReader, es),
+                 newSearcherGen,
+                 applyDeletes);
+
+    return true;
+  }
+

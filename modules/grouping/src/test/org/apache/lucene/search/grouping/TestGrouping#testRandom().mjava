@@ -105,7 +105,8 @@
       Directory dir2 = null;
 
       try {
-        final IndexSearcher s = new IndexSearcher(r);
+        final IndexSearcher s = newSearcher(r);
+        final ShardState shards = new ShardState(s);
 
         for(int contentID=0;contentID<3;contentID++) {
           final ScoreDoc[] hits = s.search(new TermQuery(new Term("content", "real"+contentID)), numDocs).scoreDocs;
@@ -129,7 +130,8 @@
         final Filter lastDocInBlock = new CachingWrapperFilter(new QueryWrapperFilter(new TermQuery(new Term("groupend", "x"))));
         final int[] docIDToID2 = FieldCache.DEFAULT.getInts(r2, "id");
 
-        final IndexSearcher s2 = new IndexSearcher(r2);
+        final IndexSearcher s2 = newSearcher(r2);
+        final ShardState shards2 = new ShardState(s2);
 
         // Reader2 only increases maxDoc() vs reader, which
         // means a monotonic shift in scores, so we can
@@ -184,7 +186,7 @@
           }
 
           final int topNGroups = _TestUtil.nextInt(random, 1, 30);
-          //final int topNGroups = 4;
+          //final int topNGroups = 10;
           final int docsPerGroup = _TestUtil.nextInt(random, 1, 50);
 
           final int groupOffset = _TestUtil.nextInt(random, 0, (topNGroups-1)/2);
@@ -238,7 +240,9 @@
             }
           }
         
-          s.search(new TermQuery(new Term("content", searchTerm)), c);
+          // Search top reader:
+          final Query q = new TermQuery(new Term("content", searchTerm));
+          s.search(q, c);
 
           if (doCache && !useWrappingCollector) {
             if (cCache.isCached()) {
@@ -259,6 +263,18 @@
 
           final Collection<SearchGroup<BytesRef>> topGroups = c1.getTopGroups(groupOffset, fillFields);
           final TopGroups groupsResult;
+          if (VERBOSE) {
+            System.out.println("TEST: topGroups:");
+            if (topGroups == null) {
+              System.out.println("  null");
+            } else {
+              for(SearchGroup<BytesRef> groupx : topGroups) {
+                System.out.println("    " + groupToString(groupx.groupValue) + " sort=" + Arrays.toString(groupx.sortValues));
+              }
+            }
+          }
+          
+          final TopGroups<BytesRef> topGroupsShards = searchShards(s, shards.subSearchers, q, groupSort, docSort, groupOffset, topNGroups, docOffset, docsPerGroup, getScores, getMaxScores);
 
           if (topGroups != null) {
 
@@ -314,7 +330,13 @@
               }
             }
           }
-          assertEquals(docIDToID, expectedGroups, groupsResult, true, getScores);
+          assertEquals(docIDToID, expectedGroups, groupsResult, true, true, true, getScores);
+
+          // Confirm merged shards match: 
+          assertEquals(docIDToID, expectedGroups, topGroupsShards, true, false, fillFields, getScores);
+          if (topGroupsShards != null) {
+            verifyShards(shards.docStarts, topGroupsShards);
+          }
 
           final boolean needsScores = getScores || getMaxScores || docSort == null;
           final BlockGroupingCollector c3 = new BlockGroupingCollector(groupSort, groupOffset+topNGroups, needsScores, lastDocInBlock);
@@ -337,6 +359,8 @@
           } else {
             groupsResult2 = tempTopGroups2;
           }
+
+          final TopGroups<BytesRef> topGroupsBlockShards = searchShards(s2, shards2.subSearchers, q, groupSort, docSort, groupOffset, topNGroups, docOffset, docsPerGroup, getScores, getMaxScores);
 
           if (expectedGroups != null) {
             // Fixup scores for reader2
@@ -379,8 +403,11 @@
             }
           }
 
-          assertEquals(docIDToID2, expectedGroups, groupsResult2, false, getScores);
+          assertEquals(docIDToID2, expectedGroups, groupsResult2, false, true, true, getScores);
+          assertEquals(docIDToID2, expectedGroups, topGroupsBlockShards, false, false, fillFields, getScores);
         }
+        s.close();
+        s2.close();
       } finally {
         FieldCache.DEFAULT.purge(r);
         if (r2 != null) {

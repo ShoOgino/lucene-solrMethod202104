@@ -1,0 +1,73 @@
+  /** Returns the merges necessary to optimize the index.
+   *  This merge policy defines "optimized" to mean only the
+   *  requested number of segments is left in the index, and
+   *  respects the {@link #maxMergeSizeForOptimize} setting.
+   *  By default, and assuming {@code maxNumSegments=1}, only
+   *  one segment will be left in the index, where that segment
+   *  has no deletions pending nor separate norms, and it is in
+   *  compound file format if the current useCompoundFile
+   *  setting is true.  This method returns multiple merges
+   *  (mergeFactor at a time) so the {@link MergeScheduler}
+   *  in use may make use of concurrency. */
+  @Override
+  public MergeSpecification findMergesForOptimize(SegmentInfos infos,
+            int maxNumSegments, Map<SegmentInfo,Boolean> segmentsToOptimize) throws IOException {
+
+    assert maxNumSegments > 0;
+    if (verbose()) {
+      message("findMergesForOptimize: maxNumSegs=" + maxNumSegments + " segsToOptimize= "+ segmentsToOptimize);
+    }
+
+    // If the segments are already optimized (e.g. there's only 1 segment), or
+    // there are <maxNumSegements, all optimized, nothing to do.
+    if (isOptimized(infos, maxNumSegments, segmentsToOptimize)) {
+      if (verbose()) {
+        message("already optimized; skip");
+      }
+      return null;
+    }
+
+    // Find the newest (rightmost) segment that needs to
+    // be optimized (other segments may have been flushed
+    // since optimize started):
+    int last = infos.size();
+    while (last > 0) {
+      final SegmentInfo info = infos.info(--last);
+      if (segmentsToOptimize.get(info) != null) {
+        last++;
+        break;
+      }
+    }
+
+    if (last == 0) {
+      if (verbose()) {
+        message("last == 0; skip");
+      }
+      return null;
+    }
+    
+    // There is only one segment already, and it is optimized
+    if (maxNumSegments == 1 && last == 1 && isOptimized(infos.info(0))) {
+      if (verbose()) {
+        message("already 1 seg; skip");
+      }
+      return null;
+    }
+
+    // Check if there are any segments above the threshold
+    boolean anyTooLarge = false;
+    for (int i = 0; i < last; i++) {
+      SegmentInfo info = infos.info(i);
+      if (size(info) > maxMergeSizeForOptimize || sizeDocs(info) > maxMergeDocs) {
+        anyTooLarge = true;
+        break;
+      }
+    }
+    
+    if (anyTooLarge) {
+      return findMergesForOptimizeSizeLimit(infos, maxNumSegments, last);
+    } else {
+      return findMergesForOptimizeMaxNumSegments(infos, maxNumSegments, last);
+    }
+  }
+

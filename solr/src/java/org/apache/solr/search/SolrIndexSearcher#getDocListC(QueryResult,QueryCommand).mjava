@@ -10,21 +10,33 @@
     // check for overflow, and check for # docs in index
     if (maxDocRequested < 0 || maxDocRequested > maxDoc()) maxDocRequested = maxDoc();
     int supersetMaxDoc= maxDocRequested;
-    DocList superset;
+    DocList superset = null;
+
+    int flags = cmd.getFlags();
+    Query q = cmd.getQuery();
+    if (q instanceof ExtendedQuery) {
+      ExtendedQuery eq = (ExtendedQuery)q;
+      if (!eq.getCache()) {
+        flags |= (NO_CHECK_QCACHE | NO_SET_QCACHE | NO_CHECK_FILTERCACHE);
+      }
+    }
+
 
     // we can try and look up the complete query in the cache.
     // we can't do that if filter!=null though (we don't want to
     // do hashCode() and equals() for a big DocSet).
-    if (queryResultCache != null && cmd.getFilter()==null) {
+    if (queryResultCache != null && cmd.getFilter()==null
+        && (flags & (NO_CHECK_QCACHE|NO_SET_QCACHE)) != ((NO_CHECK_QCACHE|NO_SET_QCACHE)))
+    {
         // all of the current flags can be reused during warming,
         // so set all of them on the cache key.
-        key = new QueryResultKey(cmd.getQuery(), cmd.getFilterList(), cmd.getSort(), cmd.getFlags());
-        if ((cmd.getFlags() & NO_CHECK_QCACHE)==0) {
+        key = new QueryResultKey(q, cmd.getFilterList(), cmd.getSort(), flags);
+        if ((flags & NO_CHECK_QCACHE)==0) {
           superset = queryResultCache.get(key);
 
           if (superset != null) {
             // check that the cache entry has scores recorded if we need them
-            if ((cmd.getFlags() & GET_SCORES)==0 || superset.hasScores()) {
+            if ((flags & GET_SCORES)==0 || superset.hasScores()) {
               // NOTE: subset() returns null if the DocList has fewer docs than
               // requested
               out.docList = superset.subset(cmd.getOffset(),cmd.getLen());
@@ -34,12 +46,11 @@
             // found the docList in the cache... now check if we need the docset too.
             // OPT: possible future optimization - if the doclist contains all the matches,
             // use it to make the docset instead of rerunning the query.
-            if (out.docSet==null && ((cmd.getFlags() & GET_DOCSET)!=0) ) {
+            if (out.docSet==null && ((flags & GET_DOCSET)!=0) ) {
               if (cmd.getFilterList()==null) {
                 out.docSet = getDocSet(cmd.getQuery());
               } else {
-                List<Query> newList = new ArrayList<Query>(cmd.getFilterList()
-.size()+1);
+                List<Query> newList = new ArrayList<Query>(cmd.getFilterList().size()+1);
                 newList.add(cmd.getQuery());
                 newList.addAll(cmd.getFilterList());
                 out.docSet = getDocSet(newList);
@@ -49,9 +60,10 @@
           }
         }
 
-        // If we are going to generate the result, bump up to the
-        // next resultWindowSize for better caching.
+      // If we are going to generate the result, bump up to the
+      // next resultWindowSize for better caching.
 
+      if ((flags & NO_SET_QCACHE) == 0) {
         // handle 0 special case as well as avoid idiv in the common case.
         if (maxDocRequested < queryResultWindowSize) {
           supersetMaxDoc=queryResultWindowSize;
@@ -59,6 +71,9 @@
           supersetMaxDoc = ((maxDocRequested -1)/queryResultWindowSize + 1)*queryResultWindowSize;
           if (supersetMaxDoc < 0) supersetMaxDoc=maxDocRequested;
         }
+      } else {
+        key = null;  // we won't be caching the result
+      }
     }
 
 
@@ -71,7 +86,7 @@
 
     // check if we should try and use the filter cache
     boolean useFilterCache=false;
-    if ((cmd.getFlags() & (GET_SCORES|NO_CHECK_FILTERCACHE))==0 && useFilterForSortedQuery && cmd.getSort() != null && filterCache != null) {
+    if ((flags & (GET_SCORES|NO_CHECK_FILTERCACHE))==0 && useFilterForSortedQuery && cmd.getSort() != null && filterCache != null) {
       useFilterCache=true;
       SortField[] sfields = cmd.getSort().getSort();
       for (SortField sf : sfields) {
@@ -100,7 +115,7 @@
     } else {
       // do it the normal way...
       cmd.setSupersetMaxDoc(supersetMaxDoc);
-      if ((cmd.getFlags() & GET_DOCSET)!=0) {
+      if ((flags & GET_DOCSET)!=0) {
         // this currently conflates returning the docset for the base query vs
         // the base query and all filters.
         DocSet qDocSet = getDocListAndSetNC(qr,cmd);
@@ -110,8 +125,10 @@
         getDocListNC(qr,cmd);
         //Parameters: cmd.getQuery(),theFilt,cmd.getSort(),0,supersetMaxDoc,cmd.getFlags(),cmd.getTimeAllowed(),responseHeader);
       }
-      superset = out.docList;
-      out.docList = superset.subset(cmd.getOffset(),cmd.getLen());
+      if (key != null) {
+        superset = out.docList;
+        out.docList = superset.subset(cmd.getOffset(),cmd.getLen());
+      }
     }
 
     // lastly, put the superset in the cache if the size is less than or equal

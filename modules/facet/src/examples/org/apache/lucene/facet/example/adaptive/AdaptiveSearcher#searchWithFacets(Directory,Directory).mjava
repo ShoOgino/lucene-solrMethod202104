@@ -1,0 +1,54 @@
+  /**
+   * Search with facets through the {@link AdaptiveFacetsAccumulator} 
+   * @param indexDir Directory of the search index.
+   * @param taxoDir Directory of the taxonomy index.
+   * @throws Exception on error (no detailed exception handling here for sample simplicity
+   * @return facet results
+   */
+  public static List<FacetResult> searchWithFacets (Directory indexDir, Directory taxoDir) throws Exception {
+    // prepare index reader and taxonomy.
+    TaxonomyReader taxo = new LuceneTaxonomyReader(taxoDir);
+    IndexReader indexReader = IndexReader.open(indexDir);
+    
+    // prepare searcher to search against
+    IndexSearcher searcher = new IndexSearcher(indexReader);
+    
+    // faceted search is working in 2 steps: 
+    // 1. collect matching documents
+    // 2. aggregate facets for collected documents and
+    //    generate the requested faceted results from the aggregated facets
+    
+    // step 1: collect matching documents into a collector
+    Query q = new TermQuery(new Term(SimpleUtils.TEXT,"white"));
+    ExampleUtils.log("Query: "+q);
+    
+    // regular collector for scoring matched documents
+    TopScoreDocCollector topDocsCollector = TopScoreDocCollector.create(10, true); 
+    
+    // docids collector for guiding facets accumulation (scoring disabled)
+    ScoredDocIdCollector docIdsCollecor = ScoredDocIdCollector.create(indexReader.maxDoc(), false);
+    
+    // Faceted search parameters indicate which facets are we interested in 
+    FacetSearchParams facetSearchParams = new FacetSearchParams();
+    facetSearchParams.addFacetRequest(new CountFacetRequest(new CategoryPath("root","a"), 10));
+    
+    // search, into both collectors. note: in case only facets accumulation 
+    // is required, the topDocCollector part can be totally discarded
+    searcher.search(q, MultiCollector.wrap(topDocsCollector, docIdsCollecor));
+        
+    // Obtain facets results and print them
+    AdaptiveFacetsAccumulator accumulator = new AdaptiveFacetsAccumulator(facetSearchParams, indexReader, taxo);
+    List<FacetResult> res = accumulator.accumulate(docIdsCollecor.getScoredDocIDs());
+    
+    int i = 0;
+    for (FacetResult facetResult : res) {
+      ExampleUtils.log("Res "+(i++)+": "+facetResult);
+    }
+    
+    // we're done, close the index reader and the taxonomy.
+    indexReader.close();
+    taxo.close();
+    
+    return res;
+  }
+

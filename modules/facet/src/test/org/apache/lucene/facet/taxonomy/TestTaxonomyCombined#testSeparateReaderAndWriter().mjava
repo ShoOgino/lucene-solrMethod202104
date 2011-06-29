@@ -1,0 +1,81 @@
+  /**  Test that if separate reader and writer objects are opened, new
+    categories written into the writer are available to a reader only
+    after a commit().
+    Note that this test obviously doesn't cover all the different
+    concurrency scenarios, all different methods, and so on. We may
+    want to write more tests of this sort.
+
+    This test simulates what would happen when there are two separate
+    processes, one doing indexing, and the other searching, and each opens
+    its own object (with obviously no connection between the objects) using
+    the same disk files. Note, though, that this test does not test what
+    happens when the two processes do their actual work at exactly the same
+    time.
+    It also doesn't test multi-threading.
+   */
+  @Test
+  public void testSeparateReaderAndWriter() throws Exception {
+    Directory indexDir = new RAMDirectory();
+    TaxonomyWriter tw = new LuceneTaxonomyWriter(indexDir);
+    tw.commit();
+    TaxonomyReader tr = new LuceneTaxonomyReader(indexDir);
+
+    int author = 1;
+
+    // getParent() and getSize() test:
+    try {
+      tr.getParent(author);
+      fail("Initially, getParent for "+author+" should throw exception");
+    } catch (ArrayIndexOutOfBoundsException e) {
+      // ok
+    }
+    assertEquals(1, tr.getSize()); // the empty taxonomy has size 1 (the root)
+    tw.addCategory(new CategoryPath("Author"));
+    try {
+      tr.getParent(author);
+      fail("Before commit() and refresh(), getParent for "+author+" should still throw exception");
+    } catch (ArrayIndexOutOfBoundsException e) {
+      // ok
+    }
+    assertEquals(1, tr.getSize()); // still root only...
+    tr.refresh(); // this is not enough, because tw.commit() hasn't been done yet
+    try {
+      tr.getParent(author);
+      fail("Before commit() and refresh(), getParent for "+author+" should still throw exception");
+    } catch (ArrayIndexOutOfBoundsException e) {
+      // ok
+    }
+    assertEquals(1, tr.getSize()); // still root only...
+    tw.commit();
+    try {
+      tr.getParent(author);
+      fail("Before refresh(), getParent for "+author+" should still throw exception");
+    } catch (ArrayIndexOutOfBoundsException e) {
+      // ok
+    }
+    assertEquals(1, tr.getSize()); // still root only...
+    tr.refresh();
+    try {
+      assertEquals(TaxonomyReader.ROOT_ORDINAL, tr.getParent(author));
+      // ok
+    } catch (ArrayIndexOutOfBoundsException e) {
+      fail("After category addition, commit() and refresh(), getParent for "+author+" should NOT throw exception");
+    }
+    assertEquals(2, tr.getSize()); // finally, see there are two categories
+
+    // now, add another category, and verify that after commit and refresh
+    // the parent of this category is correct (this requires the reader
+    // to correctly update its prefetched parent vector), and that the
+    // old information also wasn't ruined:
+    tw.addCategory(new CategoryPath("Author", "Richard Dawkins"));
+    int dawkins = 2;
+    tw.commit();
+    tr.refresh();
+    assertEquals(author, tr.getParent(dawkins));
+    assertEquals(TaxonomyReader.ROOT_ORDINAL, tr.getParent(author));
+    assertEquals(TaxonomyReader.INVALID_ORDINAL, tr.getParent(TaxonomyReader.ROOT_ORDINAL));
+    assertEquals(3, tr.getSize()); 
+    tw.close();
+    tr.close();
+  }
+

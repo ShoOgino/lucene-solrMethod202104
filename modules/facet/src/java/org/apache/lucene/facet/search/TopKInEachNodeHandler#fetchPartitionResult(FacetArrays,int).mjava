@@ -1,0 +1,285 @@
+  /**
+   * Recursively explore all facets that can be potentially included in the
+   * {@link FacetResult} to be generated, and that belong to the given
+   * partition, so that values can be examined and collected. For each such
+   * node, gather its top K ({@link FacetRequest#getNumResults()}) children
+   * among its children that are encountered in the given particular partition
+   * (aka current counting list).
+   * 
+   * @return {@link IntermediateFacetResult} consisting of
+   *         {@link IntToObjectMap} that maps potential
+   *         {@link FacetResult} nodes to their top K children encountered in
+   *         the current partition. Note that the mapped potential tree nodes
+   *         need not belong to the given partition, only the top K children
+   *         mapped to. The aim is to identify nodes that are certainly excluded
+   *         from the {@link FacetResult} to be eventually (after going through
+   *         all the partitions) returned by this handler, because they have K
+   *         better siblings, already identified in this partition. For the
+   *         identified excluded nodes, we only count number of their
+   *         descendants in the subtree (to be included in
+   *         {@link FacetResult#getNumValidDescendants()}), but not bother with
+   *         selecting top K in these generations, which, by definition, are,
+   *         too, excluded from the FacetResult tree.
+   * @param arrays the already filled in count array, potentially only covering
+   *        one partition: the ordinals ranging from
+   * @param offset to <code>offset</code> + the length of the count arrays
+   *        within <code>arrays</code> (exclusive)
+   * @throws IOException in case
+   *         {@link TaxonomyReader#getOrdinal(org.apache.lucene.facet.taxonomy.CategoryPath)}
+   *         does.
+   * @see FacetResultsHandler#fetchPartitionResult(FacetArrays, int)
+   */
+  @Override
+  public IntermediateFacetResult fetchPartitionResult(FacetArrays arrays, int offset) throws IOException {
+
+    // get the root of the result tree to be returned, and the depth of that result tree
+    // (depth means number of node levels excluding the root). 
+    int rootNode = this.taxonomyReader.getOrdinal(this.facetRequest.getCategoryPath());
+    if (rootNode == TaxonomyReader.INVALID_ORDINAL) {
+      return null;
+    }
+
+    int K = Math.min(facetRequest.getNumResults(),taxonomyReader.getSize()); // number of best results in each node
+
+    // this will grow into the returned IntermediateFacetResult
+    IntToObjectMap<AACO> AACOsOfOnePartition = new IntToObjectMap<AACO>();
+
+    int partitionSize = arrays.getArraysLength(); // all partitions, except, possibly, the last,
+    // have the same length. Hence modulo is OK.
+
+    int depth = facetRequest.getDepth();
+
+    if (depth == 0) {
+      // Need to only have root node.
+      IntermediateFacetResultWithHash tempFRWH = new IntermediateFacetResultWithHash(
+          facetRequest, AACOsOfOnePartition);
+      if (isSelfPartition(rootNode, arrays, offset)) {
+        tempFRWH.isRootNodeIncluded = true;
+        tempFRWH.rootNodeValue = this.facetRequest.getValueOf(arrays, rootNode % partitionSize);
+      }
+      return tempFRWH;
+    }
+
+    if (depth > Short.MAX_VALUE - 3) {
+      depth = Short.MAX_VALUE -3;
+    }
+
+    int endOffset = offset + partitionSize; // one past the largest ordinal in the partition
+    ChildrenArrays childrenArray = taxonomyReader.getChildrenArrays();
+    int[] youngestChild = childrenArray.getYoungestChildArray();
+    int[] olderSibling = childrenArray.getOlderSiblingArray();
+    int totalNumOfDescendantsConsidered = 0; // total number of facets with value != 0, 
+    // in the tree. These include those selected as top K in each node, and all the others that
+    // were not. Not including rootNode
+
+    // the following priority queue will be used again and again for each node recursed into
+    // to select its best K children among its children encountered in the given partition
+    PriorityQueue<AggregatedCategory> pq = 
+      new AggregatedCategoryHeap(K, this.getSuitableACComparator());
+
+    // reusables will feed the priority queue in each use 
+    AggregatedCategory [] reusables = new AggregatedCategory[2+K];
+    for (int i = 0; i < reusables.length; i++) {
+      reusables[i] = new AggregatedCategory(1,0);
+    }
+
+    /*
+     * The returned map is built by a recursive visit of potential tree nodes. Nodes 
+     * determined to be excluded from the FacetResult are not recursively explored as others,
+     * they are only recursed in order to count the number of their descendants.
+     * Also, nodes that they and any of their descendants can not be mapped into facets encountered 
+     * in this partition, are, too, explored no further. These are facets whose ordinal 
+     * numbers are greater than the ordinals of the given partition. (recall that the Taxonomy
+     * maintains that a parent ordinal is smaller than any of its descendants' ordinals).  
+     * So, when scanning over all children of a potential tree node n: (1) all children with ordinal number
+     * greater than those in the given partition are skipped over, (2) among the children of n residing
+     * in this partition, the best K children are selected (using pq) for usual further recursion 
+     * and the rest (those rejected out from the pq) are only recursed for counting total number
+     * of descendants, and (3) all the children of ordinal numbers smaller than the given partition 
+     * are further explored in the usual way, since these may lead to descendants residing in this partition.
+     * 
+     * ordinalStack drives the recursive descent. 
+     * Top of stack holds the current node which we recurse from.
+     * ordinalStack[0] holds the root of the facetRequest, and
+     * it is always maintained that parent(ordianlStack[i]) = ordinalStack[i-1]. 
+     * localDepth points to the current top of ordinalStack.
+     * Only top of ordinalStack can be TaxonomyReader.INVALID_ORDINAL, and this if and only if
+     * the element below it explored all its relevant children.
+     */
+    int[] ordinalStack = new int[depth+2]; // for 0 and for invalid on top
+    ordinalStack[0] = rootNode;
+    int localDepth = 0;
+
+    /* 
+     * bestSignlingsStack[i] maintains the best K children of ordinalStack[i-1], namely,
+     * the best K siblings of ordinalStack[i], best K among those residing in the given partition.
+     * Note that the residents of ordinalStack need not belong
+     * to the current partition, only the residents of bestSignlingsStack.
+     * When exploring the children of ordianlStack[i-1] that reside in the current partition
+     * (after the top K of them have been determined and stored into bestSignlingsStack[i]),
+     * siblingExplored[i] points into bestSignlingsStack[i], to the child now explored, hence
+     * residing in ordinalStack[i], and firstToTheLeftOfPartition[i] holds the largest ordinal of
+     * a sibling smaller than the ordinals in the partition.  
+     * When siblingExplored[i] == max int, the top K siblings of ordinalStack[i] among those siblings
+     * that reside in this partition have not been determined yet. 
+     * if siblingExplored[i] < 0, the node in ordinalStack[i] is to the left of partition 
+     * (i.e. of a smaller ordinal than the current partition) 
+     * (step (3) above is executed for the children of ordianlStack[i-1])   
+     */
+    int[][] bestSignlingsStack = new int[depth+2][];
+    int[] siblingExplored = new int[depth+2];
+    int[] firstToTheLeftOfPartition = new int [depth+2];
+
+    int tosOrdinal; // top of stack element, the ordinal at the top of stack
+
+    /*
+     * to start the loop, complete the datastructures for root node: 
+     * push its youngest child to ordinalStack; make a note in siblingExplored[] that the children
+     * of rootNode, which reside in the current partition have not been read yet to select the top
+     * K of them.  Also, make rootNode as if, related to its parent, rootNode belongs to the children
+     * of ordinal numbers smaller than those of the current partition (this will ease on end condition -- 
+     * we can continue to the older sibling of rootNode once the localDepth goes down, before we verify that 
+     * it went that down)
+     */
+    ordinalStack[++localDepth] = youngestChild[rootNode];
+    siblingExplored[localDepth] = Integer.MAX_VALUE;  // we have not verified position wrt current partition
+    siblingExplored[0] = -1; // as if rootNode resides to the left of current position
+
+    /*
+     * now the whole recursion: loop as long as stack is not empty of elements descendants of 
+     * facetRequest's root.
+     */
+
+    while (localDepth > 0) {
+      tosOrdinal = ordinalStack[localDepth];
+      if (tosOrdinal == TaxonomyReader.INVALID_ORDINAL) {
+        // the brotherhood that has been occupying the top of stack is all exhausted.  
+        // Hence, element below tos, namely, father of tos, has all its children, 
+        // and itself, all explored. 
+        localDepth--;
+        // replace this father, now on top of stack, by this father's sibling:
+        // this parent's ordinal can not be greater than current partition, as otherwise
+        // its child, now just removed, would not have been pushed on it.
+        // so the father is either inside the partition, or smaller ordinal
+        if (siblingExplored[localDepth] < 0 ) {
+          ordinalStack[localDepth] = olderSibling[ordinalStack[localDepth]];
+          continue;
+        } 
+        // in this point, siblingExplored[localDepth] between 0 and number of bestSiblings
+        // it can not be max int
+        siblingExplored[localDepth]--;
+        if (siblingExplored[localDepth] == -1 ) {
+          //siblings residing in the partition have been all processed, we now move
+          // to those of ordinal numbers smaller than the partition
+          ordinalStack[localDepth] = firstToTheLeftOfPartition[localDepth];
+        } else {
+          // still explore siblings residing in the partition
+          // just move to the next one
+          ordinalStack[localDepth] = bestSignlingsStack[localDepth][siblingExplored[localDepth]];
+        }
+        continue;
+      } // endof tosOrdinal is invalid, and hence removed, and its parent was replaced by this 
+      // parent's sibling
+
+      // now try to push a kid, but first look at tos whether it 'deserves' its kids explored:
+      // it is not to the right of current partition, and we know whether to only count or to 
+      // select best K siblings.
+      if (siblingExplored[localDepth] == Integer.MAX_VALUE) {
+        //tosOrdinal was not examined yet for its position relative to current partition
+        // and the best K of current partition, among its siblings, have not been determined yet
+        while (tosOrdinal >= endOffset) {
+          tosOrdinal = olderSibling[tosOrdinal];
+        }
+        // now it is inside. Run it and all its siblings inside the partition through a heap
+        // and in doing so, count them, find best K, and sum into residue
+        double residue = 0f;  // the sum of all the siblings from this partition that do not make 
+        // it to top K
+        pq.clear();
+
+        //reusables are consumed as from a stack. The stack starts full and returns full.
+        int tosReuslables = reusables.length -1;  
+
+        while (tosOrdinal >= offset) { // while tosOrdinal belongs to the given partition; here, too, we use the fact
+          // that TaxonomyReader.INVALID_ORDINAL == -1 < offset
+          double value = facetRequest.getValueOf(arrays, tosOrdinal % partitionSize);
+          if (value != 0) { // the value of yc is not 0, it is to be considered.  
+            totalNumOfDescendantsConsidered++;
+
+            // consume one reusable, and push to the priority queue
+            AggregatedCategory ac = reusables[tosReuslables--];  
+            ac.ordinal = tosOrdinal;
+            ac.value = value; 
+            ac = pq.insertWithOverflow(ac);
+            if (null != ac) {
+              residue += ac.value;
+              // TODO (Facet): could it be that we need to do something
+              // else, not add, depending on the aggregator?
+
+              /* when a facet is excluded from top K, because already in this partition it has
+               * K better siblings, it is only recursed for count only.
+               */ 
+              // update totalNumOfDescendants by the now excluded node and all its descendants
+              totalNumOfDescendantsConsidered--; // reduce the 1 earned when the excluded node entered the heap
+              // and now return it and all its descendants. These will never make it to FacetResult
+              totalNumOfDescendantsConsidered += countOnly (ac.ordinal, youngestChild, 
+                  olderSibling, arrays, partitionSize, offset, endOffset, localDepth, depth);
+              reusables[++tosReuslables] = ac;
+            }
+          }
+          tosOrdinal = olderSibling[tosOrdinal];  
+        }
+        // now pq has best K children of ordinals that belong to the given partition.   
+        // Populate a new AACO with them.
+        // tosOrdinal is now first sibling smaller than partition, make a note of that
+        firstToTheLeftOfPartition[localDepth] = tosOrdinal;
+        int aaci = pq.size();
+        int[] ords = new int[aaci];
+        double [] vals = new double [aaci];
+        while (aaci > 0) {
+          AggregatedCategory ac = pq.pop();
+          ords[--aaci] = ac.ordinal;
+          vals[aaci] = ac.value;
+          reusables[++tosReuslables] = ac;
+        }
+        // if more than 0 ordinals, add this AACO to the map to be returned, 
+        // and add ords to sibling stack, and make a note in siblingExplored that these are to 
+        // be visited now
+        if (ords.length > 0) {
+          AACOsOfOnePartition.put(ordinalStack[localDepth-1], new AACO(ords,vals,residue));
+          bestSignlingsStack[localDepth] = ords;
+          siblingExplored[localDepth] = ords.length-1;
+          ordinalStack[localDepth] = ords[ords.length-1];
+        } else {
+          // no ordinals siblings of tosOrdinal in current partition, move to the left of it
+          // tosOrdinal is already there (to the left of partition).
+          // make a note of it in siblingExplored
+          ordinalStack[localDepth] = tosOrdinal;
+          siblingExplored[localDepth] = -1;
+        }
+        continue;
+      } // endof we did not check the position of a valid ordinal wrt partition
+
+      // now tosOrdinal is a valid ordinal, inside partition or to the left of it, we need 
+      // to push its kids on top of it, if not too deep. 
+      // Make a note that we did not check them yet
+      if (localDepth >= depth) { 
+        // localDepth == depth; current tos exhausted its possible children, mark this by pushing INVALID_ORDINAL
+        ordinalStack[++localDepth] = TaxonomyReader.INVALID_ORDINAL;
+        continue;
+      }
+      ordinalStack[++localDepth] = youngestChild[tosOrdinal];
+      siblingExplored[localDepth] = Integer.MAX_VALUE;
+    } // endof loop while stack is not empty
+
+    // now generate a TempFacetResult from AACOsOfOnePartition, and consider self.
+    IntermediateFacetResultWithHash tempFRWH = new IntermediateFacetResultWithHash(
+        facetRequest, AACOsOfOnePartition);
+    if (isSelfPartition(rootNode, arrays, offset)) {
+      tempFRWH.isRootNodeIncluded = true;
+      tempFRWH.rootNodeValue = this.facetRequest.getValueOf(arrays, rootNode % partitionSize);
+    }
+    tempFRWH.totalNumOfFacetsConsidered = totalNumOfDescendantsConsidered;
+    return tempFRWH;
+
+  }
+

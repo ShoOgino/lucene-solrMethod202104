@@ -1,0 +1,52 @@
+  /**
+   * This test is to address a bug in a previous version.  If a TFC cache is
+   * written to disk, and then the taxonomy grows (but the index does not change),
+   * and then the TFC cache is re-read from disk, there will be an exception
+   * thrown, as the integers are read off of the disk according to taxonomy
+   * size, which has changed.
+   */
+  @Test
+  public void testGrowingTaxonomy() throws Exception {
+    // Create temporary RAMDirectories
+    Directory[][] dirs = FacetTestUtils.createIndexTaxonomyDirs(1);
+    // Create our index/taxonomy writers
+    IndexTaxonomyWriterPair[] writers = FacetTestUtils
+    .createIndexTaxonomyWriterPair(dirs);
+    DefaultFacetIndexingParams iParams = new DefaultFacetIndexingParams() {
+      @Override
+      protected int fixedPartitionSize() {
+        return 2;
+      }
+    };
+    // Add a facet to the index
+    addFacets(iParams, writers[0].indexWriter, writers[0].taxWriter, "a", "b");
+    // Commit Changes
+    writers[0].indexWriter.commit();
+    writers[0].taxWriter.commit();
+
+    IndexTaxonomyReaderPair[] readers = FacetTestUtils.createIndexTaxonomyReaderPair(dirs);
+
+    // Create TFC and write cache to disk
+    File outputFile = _TestUtil.createTempFile("test", "tmp", TEMP_DIR);
+    TFC.store(outputFile, readers[0].indexReader, readers[0].taxReader, iParams, null);
+    
+    // Make the taxonomy grow without touching the index
+    for (int i = 0; i < 10; i++) {
+      writers[0].taxWriter.addCategory(new CategoryPath("foo", Integer.toString(i)));
+    }
+    writers[0].taxWriter.commit();
+    readers[0].taxReader.refresh();
+
+    initCache();
+
+    // With the bug, this next call should result in an exception
+    TFC.load(outputFile, readers[0].indexReader, readers[0].taxReader, iParams);
+    TotalFacetCounts totalCounts = TFC.getTotalCounts(
+        readers[0].indexReader, readers[0].taxReader, iParams, null);
+    assertReadFromDisc(totalCounts, 0, "after reading from disk.");
+    outputFile.delete();
+    writers[0].close();
+    readers[0].close();
+    IOUtils.closeSafely(false, dirs[0]);
+  }
+

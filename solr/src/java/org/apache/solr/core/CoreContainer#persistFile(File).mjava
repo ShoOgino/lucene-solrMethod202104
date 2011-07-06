@@ -1,38 +1,75 @@
   /** Persists the cores config file in a user provided file. */
   public void persistFile(File file) {
-    log.info("Persisting cores config to " + (file==null ? configFile : file));
-
-    File tmpFile = null;
-    try {
-      // write in temp first
-      if (file == null) {
-        file = tmpFile = File.createTempFile("solr", ".xml", configFile.getParentFile());
-      }
-      java.io.FileOutputStream out = new java.io.FileOutputStream(file);
-        Writer writer = new BufferedWriter(new OutputStreamWriter(out, "UTF-8"));
-        persist(writer);
-        writer.flush();
-        writer.close();
-        out.close();
-        // rename over origin or copy it this fails
-        if (tmpFile != null) {
-          if (tmpFile.renameTo(configFile))
-            tmpFile = null;
-          else
-            fileCopy(tmpFile, configFile);
+    log.info("Persisting cores config to " + (file == null ? configFile : file));
+    // <solr attrib="value">
+    Map<String,String> rootSolrAttribs = new HashMap<String,String>();
+    if (libDir != null) rootSolrAttribs.put("sharedLib", libDir);
+    rootSolrAttribs.put("persistent", Boolean.toString(isPersistent()));
+    
+    // <solr attrib="value"> <cores attrib="value">
+    Map<String,String> coresAttribs = new HashMap<String,String>();
+    coresAttribs.put("adminPath", adminPath);
+    if (adminHandler != null) coresAttribs.put("adminHandler", adminHandler);
+    if (shareSchema) coresAttribs.put("shareSchema", "true");
+    if (!defaultCoreName.equals("")) coresAttribs.put("defaultCoreName",
+        defaultCoreName);
+    if (host != null) coresAttribs.put("host", host);
+    if (hostPort != null) coresAttribs.put("hostPort", hostPort);
+    if (zkClientTimeout != null) coresAttribs.put("zkClientTimeout", Integer.toString(zkClientTimeout));
+    if (hostContext != null) coresAttribs.put("hostContext", hostContext);
+    
+    List<SolrCoreXMLDef> solrCoreXMLDefs = new ArrayList<SolrCoreXMLDef>();
+    
+    synchronized (cores) {
+      Map<String,String> coreAttribs = new HashMap<String,String>();
+      for (SolrCore solrCore : cores.values()) {
+        CoreDescriptor dcore = solrCore.getCoreDescriptor();
+        
+        coreAttribs.put("name", dcore.name.equals("") ? defaultCoreName
+            : dcore.name);
+        coreAttribs.put("instanceDir", dcore.getInstanceDir());
+        // write config (if not default)
+        String opt = dcore.getConfigName();
+        if (opt != null && !opt.equals(dcore.getDefaultConfigName())) {
+          coreAttribs.put("config", opt);
         }
-    } 
-    catch(java.io.FileNotFoundException xnf) {
-      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, xnf);
-    } 
-    catch(java.io.IOException xio) {
-      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, xio);
-    } 
-    finally {
-      if (tmpFile != null) {
-        if (!tmpFile.delete())
-          tmpFile.deleteOnExit();
+        // write schema (if not default)
+        opt = dcore.getSchemaName();
+        if (opt != null && !opt.equals(dcore.getDefaultSchemaName())) {
+          coreAttribs.put("schema", opt);
+        }
+        opt = dcore.getPropertiesName();
+        if (opt != null) {
+          coreAttribs.put("properties", opt);
+        }
+        opt = dcore.dataDir;
+        if (opt != null) coreAttribs.put("dataDir", opt);
+        
+        CloudDescriptor cd = dcore.getCloudDescriptor();
+        if (cd != null) {
+          opt = cd.getShardId();
+          if (opt != null) coreAttribs.put("shard", opt);
+          // only write out the collection name if it's not the default (the
+          // core
+          // name)
+          opt = cd.getCollectionName();
+          if (opt != null && !opt.equals(dcore.name)) coreAttribs.put(
+              "collection", opt);
+        }
+        
+        SolrCoreXMLDef solrCoreXMLDef = new SolrCoreXMLDef();
+        solrCoreXMLDef.coreAttribs = coreAttribs;
+        solrCoreXMLDef.coreProperties = dcore.getCoreProperties();
+        solrCoreXMLDefs.add(solrCoreXMLDef);
       }
+      
+      SolrXMLDef solrXMLDef = new SolrXMLDef();
+      solrXMLDef.coresDefs = solrCoreXMLDefs;
+      solrXMLDef.containerProperties = containerProperties;
+      solrXMLDef.solrAttribs = rootSolrAttribs;
+      solrXMLDef.coresAttribs = coresAttribs;
+      solrXMLSerializer.persistFile(file == null ? configFile : file,
+          solrXMLDef);
     }
   }
 

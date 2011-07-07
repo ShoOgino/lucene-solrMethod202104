@@ -1,0 +1,57 @@
+  private boolean perhapsFillCache() throws IOException {
+    // Note: we assume that we're only called when cacheIsComplete==false.
+    // TODO (Facet): parametrize this criterion:
+    if (cacheMisses < cacheMissesUntilFill) {
+      return false;
+    }
+    // If the cache was already filled (or we decided not to fill it because
+    // there was no room), there is no sense in trying it again.
+    if (alreadyCalledFillCache) {
+      return false;
+    }
+    alreadyCalledFillCache = true;
+    // TODO (Facet): we should probably completely clear the cache before starting
+    // to read it?
+    if (reader == null) {
+      reader = openReader();
+    }
+
+    if (!cache.hasRoom(reader.numDocs())) {
+      return false;
+    }
+
+    CategoryPath cp = new CategoryPath();
+    Terms terms = MultiFields.getTerms(reader, Consts.FULL);
+    // The check is done here to avoid checking it on every iteration of the
+    // below loop. A null term wlil be returned if there are no terms in the
+    // lexicon, or after the Consts.FULL term. However while the loop is
+    // executed we're safe, because we only iterate as long as there are next()
+    // terms.
+    if (terms != null) {
+      TermsEnum termsEnum = terms.iterator();
+      Bits liveDocs = MultiFields.getLiveDocs(reader);
+      DocsEnum docsEnum = null;
+      while (termsEnum.next() != null) {
+        BytesRef t = termsEnum.term();
+        // Since we guarantee uniqueness of categories, each term has exactly
+        // one document. Also, since we do not allow removing categories (and
+        // hence documents), there are no deletions in the index. Therefore, it
+        // is sufficient to call next(), and then doc(), exactly once with no
+        // 'validation' checks.
+        docsEnum = termsEnum.docs(liveDocs, docsEnum);
+        docsEnum.nextDoc();
+        cp.clear();
+        // TODO (Facet): avoid String creation/use bytes?
+        cp.add(t.utf8ToString(), delimiter);
+        cache.put(cp, docsEnum.docID());
+      }
+    }
+
+    cacheIsComplete = true;
+    // No sense to keep the reader open - we will not need to read from it
+    // if everything is in the cache.
+    reader.close();
+    reader = null;
+    return true;
+  }
+

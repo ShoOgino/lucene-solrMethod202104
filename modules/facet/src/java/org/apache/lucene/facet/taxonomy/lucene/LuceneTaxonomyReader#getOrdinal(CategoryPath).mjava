@@ -1,0 +1,43 @@
+  public int getOrdinal(CategoryPath categoryPath) throws IOException {
+    if (categoryPath.length()==0) {
+      return ROOT_ORDINAL;
+    }
+    String path = categoryPath.toString(delimiter);
+
+    // First try to find the answer in the LRU cache:
+    synchronized(getOrdinalCache) {
+      Integer res = getOrdinalCache.get(path);
+      if (res!=null) {
+        return res.intValue();
+      }
+    }
+
+    // If we're still here, we have a cache miss. We need to fetch the
+    // value from disk, and then also put it in the cache:
+    int ret = TaxonomyReader.INVALID_ORDINAL;
+    try {
+      indexReaderLock.readLock().lock();
+      // TODO (Facet): avoid Multi*?
+      Bits liveDocs = MultiFields.getLiveDocs(indexReader);
+      DocsEnum docs = MultiFields.getTermDocsEnum(indexReader, liveDocs, Consts.FULL, new BytesRef(path));
+      if (docs != null && docs.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
+        ret = docs.docID();
+      }
+    } finally {
+      indexReaderLock.readLock().unlock();
+    }
+
+    // Put the new value in the cache. Note that it is possible that while
+    // we were doing the above fetching (without the cache locked), some
+    // other thread already added the same category to the cache. We do
+    // not care about this possibilty, as LRUCache replaces previous values
+    // of the same keys (it doesn't store duplicates).
+    synchronized(getOrdinalCache) {
+      // GB: new Integer(int); creates a new object each and every time.
+      // Integer.valueOf(int) might not (See JavaDoc). 
+      getOrdinalCache.put(path, Integer.valueOf(ret));
+    }
+
+    return ret;
+  }
+

@@ -1,5 +1,6 @@
   @Override
   public int addDoc(AddUpdateCommand cmd) throws IOException {
+    IndexWriter writer = indexWriterProvider.getIndexWriter();
     addCommands.incrementAndGet();
     addCommandsCumulative.incrementAndGet();
     int rc=-1;
@@ -9,19 +10,18 @@
       cmd.overwrite = false;
     }
 
-    iwAccess.lock();
+
     try {
-
-      // We can't use iwCommit to protect internal data here, since it would
-      // block other addDoc calls.  Hence, we synchronize to protect internal
-      // state.  This is safe as all other state-changing operations are
-      // protected with iwCommit (which iwAccess excludes from this block).
-      synchronized (this) {
-        // adding document -- prep writer
-        openWriter();
-        tracker.addedDocument( cmd.commitWithin );
-      } // end synchronized block
-
+      boolean triggered = commitTracker.addedDocument( cmd.commitWithin );
+    
+      if (!triggered) {
+        // if we hard commit, don't soft commit
+        softCommitTracker.addedDocument( cmd.commitWithin );
+      } else {
+        // still inc softCommit
+        softCommitTracker.docsSinceCommit++;
+      }
+      
       // this is the only unsynchronized code in the iwAccess block, which
       // should account for most of the time
 			Term updateTerm = null;
@@ -30,13 +30,13 @@
         if (cmd.indexedId == null) {
           cmd.indexedId = getIndexedId(cmd.doc);
         }
-        Term idTerm = this.idTerm.createTerm(cmd.indexedId);
+        Term idTerm = new Term(idField.getName(), cmd.indexedId);
         boolean del = false;
         if (cmd.updateTerm == null) {
           updateTerm = idTerm;
         } else {
           del = true;
-        	updateTerm = cmd.updateTerm;
+          updateTerm = cmd.updateTerm;
         }
 
         writer.updateDocument(updateTerm, cmd.getLuceneDocument(schema));
@@ -53,7 +53,6 @@
 
       rc = 1;
     } finally {
-      iwAccess.unlock();
       if (rc!=1) {
         numErrors.incrementAndGet();
         numErrorsCumulative.incrementAndGet();

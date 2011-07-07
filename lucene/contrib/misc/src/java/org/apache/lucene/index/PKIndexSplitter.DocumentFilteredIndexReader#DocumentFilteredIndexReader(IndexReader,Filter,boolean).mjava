@@ -1,7 +1,8 @@
     public DocumentFilteredIndexReader(IndexReader reader, Filter preserveFilter, boolean negateFilter) throws IOException {
       super(new SlowMultiReaderWrapper(reader));
       
-      final OpenBitSetDISI bits = new OpenBitSetDISI(in.maxDoc());
+      final int maxDoc = in.maxDoc();
+      final OpenBitSetDISI bits = new OpenBitSetDISI(maxDoc);
       final DocIdSet docs = preserveFilter.getDocIdSet((AtomicReaderContext) in.getTopReaderContext());
       if (docs != null) {
         final DocIdSetIterator it = docs.iterator();
@@ -9,22 +10,23 @@
           bits.inPlaceOr(it);
         }
       }
-      // this is somehow inverse, if we negate the filter, we delete all documents it matches!
-      if (!negateFilter) {
-        bits.flip(0, in.maxDoc());
+      if (negateFilter) {
+        bits.flip(0, maxDoc);
       }
 
       if (in.hasDeletions()) {
-        final Bits oldDelBits = in.getDeletedDocs();
-        assert oldDelBits != null;
-        for (int i = 0; i < in.maxDoc(); i++) {
-          if (oldDelBits.get(i)) {
-            bits.set(i);
+        final Bits oldLiveDocs = in.getLiveDocs();
+        assert oldLiveDocs != null;
+        final DocIdSetIterator it = bits.iterator();
+        for (int i = it.nextDoc(); i < maxDoc; i = it.nextDoc()) {
+          if (!oldLiveDocs.get(i)) {
+            // we can safely modify the current bit, as the iterator already stepped over it:
+            bits.fastClear(i);
           }
         }
       }
       
-      this.readerDels = bits;
-      this.numDocs = in.maxDoc() - (int) bits.cardinality();
+      this.liveDocs = bits;
+      this.numDocs = (int) bits.cardinality();
     }
 

@@ -22,13 +22,19 @@
         String compoundFileName = IndexFileNames.segmentFileName(newSegment.name, "", IndexFileNames.COMPOUND_FILE_EXTENSION);
         message("creating compound file " + compoundFileName);
         // Now build compound file
-        CompoundFileWriter cfsWriter = new CompoundFileWriter(directory, compoundFileName, context);
-        for(String fileName : newSegment.files()) {
-          cfsWriter.addFile(fileName);
+        final Directory cfsDir = directory.createCompoundOutput(compoundFileName, context);
+        IOException prior = null;
+        try {
+          for(String fileName : newSegment.files()) {
+            directory.copy(cfsDir, fileName, fileName, context);
+          }
+        } catch(IOException ex) {
+          prior = ex;
+        } finally {
+          IOUtils.closeSafely(prior, cfsDir);
         }
-
         // Perform the merge
-        cfsWriter.close();
+        
         synchronized(this) {
           deleter.deleteNewFiles(newSegment.files());
         }
@@ -38,8 +44,8 @@
 
       // Must write deleted docs after the CFS so we don't
       // slurp the del file into CFS:
-      if (flushedSegment.deletedDocuments != null) {
-        final int delCount = flushedSegment.deletedDocuments.count();
+      if (flushedSegment.liveDocs != null) {
+        final int delCount = flushedSegment.segmentInfo.docCount - flushedSegment.liveDocs.count();
         assert delCount > 0;
         newSegment.setDelCount(delCount);
         newSegment.advanceDelGen();
@@ -54,7 +60,7 @@
           // shortly-to-be-opened SegmentReader and let it
           // carry the changes; there's no reason to use
           // filesystem as intermediary here.
-          flushedSegment.deletedDocuments.write(directory, delFileName, context);
+          flushedSegment.liveDocs.write(directory, delFileName, context);
           success2 = true;
         } finally {
           if (!success2) {

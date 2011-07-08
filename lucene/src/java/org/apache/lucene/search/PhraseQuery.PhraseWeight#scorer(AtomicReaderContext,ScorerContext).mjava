@@ -7,21 +7,26 @@
       PostingsAndFreq[] postingsFreqs = new PostingsAndFreq[terms.size()];
       for (int i = 0; i < terms.size(); i++) {
         final Term t = terms.get(i);
+        final TermState state = states[i].get(context.ord);
+        if (state == null) { /* term doesnt exist in this segment */
+          assert termNotInReader(reader, field, t.bytes()) : "no termstate found but term exists in reader";
+          return null;
+        }
         DocsAndPositionsEnum postingsEnum = reader.termPositionsEnum(liveDocs,
                                                                      t.field(),
-                                                                     t.bytes());
+                                                                     t.bytes(),
+                                                                     state);
         // PhraseQuery on a field that did not index
         // positions.
         if (postingsEnum == null) {
-          if (reader.termDocsEnum(liveDocs, t.field(), t.bytes()) != null) {
-            // term does exist, but has no positions
-            throw new IllegalStateException("field \"" + t.field() + "\" was indexed with Field.omitTermFreqAndPositions=true; cannot run PhraseQuery (term=" + t.text() + ")");
-          } else {
-            // term does not exist
-            return null;
-          }
+          assert (reader.termDocsEnum(liveDocs, t.field(), t.bytes(), state) != null) : "termstate found but no term exists in reader";
+          // term does exist, but has no positions
+          throw new IllegalStateException("field \"" + t.field() + "\" was indexed with Field.omitTermFreqAndPositions=true; cannot run PhraseQuery (term=" + t.text() + ")");
         }
-        postingsFreqs[i] = new PostingsAndFreq(postingsEnum, reader.docFreq(t.field(), t.bytes()), positions.get(i).intValue(), t);
+        // get the docFreq without seeking
+        TermsEnum te = reader.fields().terms(field).getThreadTermsEnum();
+        te.seekExact(t.bytes(), state);
+        postingsFreqs[i] = new PostingsAndFreq(postingsEnum, te.docFreq(), positions.get(i).intValue(), t);
       }
 
       // sort by increasing docFreq order
@@ -30,8 +35,7 @@
       }
 
       if (slop == 0) {				  // optimize exact case
-        ExactPhraseScorer s = new ExactPhraseScorer(this, postingsFreqs, similarity,
-            reader.norms(field));
+        ExactPhraseScorer s = new ExactPhraseScorer(this, postingsFreqs, similarity.exactDocScorer(stats, field, context));
         if (s.noDocs) {
           return null;
         } else {
@@ -39,8 +43,7 @@
         }
       } else {
         return
-          new SloppyPhraseScorer(this, postingsFreqs, similarity, slop,
-              reader.norms(field));
+          new SloppyPhraseScorer(this, postingsFreqs, similarity, slop, similarity.sloppyDocScorer(stats, field, context));
       }
     }
 

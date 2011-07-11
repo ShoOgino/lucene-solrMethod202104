@@ -1,7 +1,18 @@
   /** Finds an arc leaving the incoming arc, replacing the arc in place.
    *  This returns null if the arc was not found, else the incoming arc. */
   public Arc<T> findTargetArc(int labelToMatch, Arc<T> follow, Arc<T> arc) throws IOException {
-
+    assert cachedRootArcs != null;
+    // Short-circuit if this arc is in the root arc cache:
+    if (follow.target == startNode && labelToMatch != END_LABEL && labelToMatch < cachedRootArcs.length) {
+      final Arc<T> result = cachedRootArcs[labelToMatch];
+      if (result == null) {
+        return result;
+      } else {
+        arc.copyFrom(result);
+        return arc;
+      }
+    }
+ 
     if (labelToMatch == END_LABEL) {
       if (follow.isFinal()) {
         if (follow.target <= 0) {
@@ -26,14 +37,18 @@
     // reusable stuff eg BytesReader:
     final BytesReader in = getBytesReader(follow.target);
 
+    // System.out.println("fta label=" + (char) labelToMatch);
+
     if ((in.readByte() & BIT_ARCS_AS_FIXED_ARRAY) != 0) {
       // Arcs are full array; do binary search:
       arc.numArcs = in.readVInt();
-      arc.bytesPerArc = in.readByte() & 0xFF;
+      //System.out.println("  bs " + arc.numArcs);
+      arc.bytesPerArc = in.readInt();
       arc.posArcsStart = in.pos;
       int low = 0;
       int high = arc.numArcs-1;
       while (low <= high) {
+        //System.out.println("    cycle");
         int mid = (low + high) >>> 1;
         in.pos = arc.posArcsStart - arc.bytesPerArc*mid - 1;
         int midLabel = readLabel(in);
@@ -44,7 +59,8 @@
           high = mid - 1;
         else {
           arc.arcIdx = mid-1;
-          return readNextRealArc(arc);
+          //System.out.println("    found!");
+          return readNextRealArc(arc, in);
         }
       }
 
@@ -54,7 +70,12 @@
     // Linear scan
     readFirstTargetArc(follow, arc);
     while(true) {
+      //System.out.println("  non-bs cycle");
+      // TODO: we should fix this code to not have to create
+      // object for the output of every arc we scan... only
+      // for the matching arc, if found
       if (arc.label == labelToMatch) {
+        //System.out.println("    found!");
         return arc;
       } else if (arc.label > labelToMatch) {
         return null;

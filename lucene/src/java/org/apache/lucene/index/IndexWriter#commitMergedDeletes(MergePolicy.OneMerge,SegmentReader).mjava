@@ -25,16 +25,27 @@
     for(int i=0; i < sourceSegments.size(); i++) {
       SegmentInfo info = sourceSegments.get(i);
       minGen = Math.min(info.getBufferedDeletesGen(), minGen);
-      int docCount = info.docCount;
-      final SegmentReader previousReader = merge.readerClones.get(i);
-      if (previousReader == null) {
-        // Reader was skipped because it was 100% deletions
-        continue;
+      final int docCount = info.docCount;
+      final BitVector prevLiveDocs = merge.readerLiveDocs.get(i);
+      final BitVector currentLiveDocs;
+      {
+        final SegmentReader currentReader = readerPool.getIfExists(info, IOContext.Context.READ);
+        if (currentReader != null) {
+          currentLiveDocs = (BitVector) currentReader.getLiveDocs();
+          readerPool.release(currentReader, false, IOContext.Context.READ);
+        } else {
+          assert readerPool.infoIsLive(info);
+          if (info.hasDeletions()) {
+            currentLiveDocs = new BitVector(directory,
+                                            info.getDelFileName(),
+                                            new IOContext(IOContext.Context.READ));
+          } else {
+            currentLiveDocs = null;
+          }
+        }
       }
-      final Bits prevLiveDocs = previousReader.getLiveDocs();
-      final SegmentReader currentReader = merge.readers.get(i);
-      final Bits currentLiveDocs = currentReader.getLiveDocs();
-      if (previousReader.hasDeletions()) {
+
+      if (prevLiveDocs != null) {
 
         // There were deletes on this segment when the merge
         // started.  The merge has collapsed away those
@@ -43,14 +54,14 @@
         // newly flushed deletes but mapping them to the new
         // docIDs.
 
-        if (currentReader.numDeletedDocs() > previousReader.numDeletedDocs()) {
-          // This means this segment has had new deletes
-          // committed since we started the merge, so we
+        if (currentLiveDocs.count() < prevLiveDocs.count()) {
+          // This means this segment received new deletes
+          // since we started the merge, so we
           // must merge them:
           for(int j=0;j<docCount;j++) {
-            if (!prevLiveDocs.get(j))
+            if (!prevLiveDocs.get(j)) {
               assert !currentLiveDocs.get(j);
-            else {
+            } else {
               if (!currentLiveDocs.get(j)) {
                 mergedReader.doDelete(docUpto);
                 delCount++;
@@ -59,9 +70,10 @@
             }
           }
         } else {
-          docUpto += docCount - previousReader.numDeletedDocs();
+          assert currentLiveDocs.count() == prevLiveDocs.count(): "currentLiveDocs.count()==" + currentLiveDocs.count() + " vs prevLiveDocs.count()=" + prevLiveDocs.count() + " info=" + info;
+          docUpto += currentLiveDocs.count();
         }
-      } else if (currentReader.hasDeletions()) {
+      } else if (currentLiveDocs != null) {
         // This segment had no deletes before but now it
         // does:
         for(int j=0; j<docCount; j++) {
@@ -71,9 +83,10 @@
           }
           docUpto++;
         }
-      } else
+      } else {
         // No deletes before or after
         docUpto += info.docCount;
+      }
     }
 
     assert mergedReader.numDeletedDocs() == delCount;

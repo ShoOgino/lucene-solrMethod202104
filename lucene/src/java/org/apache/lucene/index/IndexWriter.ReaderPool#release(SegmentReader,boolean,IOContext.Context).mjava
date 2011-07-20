@@ -1,0 +1,64 @@
+    /**
+     * Release the segment reader (i.e. decRef it and close if there
+     * are no more references.
+     * @return true if this release altered the index (eg
+     * the SegmentReader had pending changes to del docs and
+     * was closed).  Caller must call checkpoint() if so.
+     * @param sr
+     * @throws IOException
+     */
+    public synchronized boolean release(SegmentReader sr, boolean drop, IOContext.Context context) throws IOException {
+
+      SegmentCacheKey cacheKey = new SegmentCacheKey(sr.getSegmentInfo(), context);
+      
+      final boolean pooled = readerMap.containsKey(cacheKey);
+
+      assert !pooled || readerMap.get(cacheKey) == sr;
+
+      // Drop caller's ref; for an external reader (not
+      // pooled), this decRef will close it
+      sr.decRef();
+
+      if (pooled && (drop || (!poolReaders && sr.getRefCount() == 1))) {
+
+        // We invoke deleter.checkpoint below, so we must be
+        // sync'd on IW if there are changes:
+        assert !sr.hasChanges || Thread.holdsLock(IndexWriter.this);
+
+        // Discard (don't save) changes when we are dropping
+        // the reader; this is used only on the sub-readers
+        // after a successful merge.
+        final boolean hasChanges;
+        if (drop) {
+          hasChanges = sr.hasChanges = false;
+        } else {
+          hasChanges = sr.hasChanges;
+        }
+
+        // Drop our ref -- this will commit any pending
+        // changes to the dir
+        sr.close();
+
+        // We are the last ref to this reader; since we're
+        // not pooling readers, we release it:
+        readerMap.remove(cacheKey);
+
+        if (drop && context == IOContext.Context.MERGE) {
+          // Also drop the READ reader if present: we don't
+          // need its deletes since they've been carried
+          // over to the merged segment
+          cacheKey = new SegmentCacheKey(sr.getSegmentInfo(), IOContext.Context.READ);
+          SegmentReader sr2 = readerMap.get(cacheKey);
+          if (sr2 != null) {
+            readerMap.remove(cacheKey);
+            sr2.hasChanges = false;
+            sr2.close();
+          }
+        }
+
+        return hasChanges;
+      }
+
+      return false;
+    }
+

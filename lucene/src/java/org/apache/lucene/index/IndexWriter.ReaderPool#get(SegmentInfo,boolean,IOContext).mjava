@@ -7,6 +7,31 @@
      * @throws IOException
      */
     public synchronized SegmentReader get(SegmentInfo info, boolean doOpenStores, IOContext context) throws IOException {
-      return get(info, doOpenStores, context, config.getReaderTermsIndexDivisor());
+
+      SegmentCacheKey cacheKey = new SegmentCacheKey(info, context.context);
+      SegmentReader sr = readerMap.get(cacheKey);
+      if (sr == null) {
+        // TODO: we may want to avoid doing this while
+        // synchronized
+        // Returns a ref, which we xfer to readerMap:
+        sr = SegmentReader.get(false, info.dir, info, doOpenStores, context.context == IOContext.Context.MERGE ? -1 : config.getReaderTermsIndexDivisor(), context);
+        sr.readerFinishedListeners = readerFinishedListeners;
+
+        if (info.dir == directory) {
+          // Only pool if reader is not external
+          readerMap.put(cacheKey, sr);
+        }
+      } else {
+        if (doOpenStores) {
+          sr.openDocStores();
+        }
+      }
+
+      // Return a ref to our caller
+      if (info.dir == directory) {
+        // Only incRef if we pooled (reader is not external)
+        sr.incRef();
+      }
+      return sr;
     }
 

@@ -7,22 +7,16 @@
     
     final List<Fields> fields = new ArrayList<Fields>();
     final List<ReaderUtil.Slice> slices = new ArrayList<ReaderUtil.Slice>();
-    final List<Bits> bits = new ArrayList<Bits>();
-    final List<Integer> bitsStarts = new ArrayList<Integer>();
 
-    for(IndexReader r : readers) {
-      final Fields f = r.fields();
-      final int maxDoc = r.maxDoc();
+    for(MergeState.IndexReaderAndLiveDocs r : readers) {
+      final Fields f = r.reader.fields();
+      final int maxDoc = r.reader.maxDoc();
       if (f != null) {
         slices.add(new ReaderUtil.Slice(docBase, maxDoc, fields.size()));
         fields.add(f);
-        bits.add(r.getLiveDocs());
-        bitsStarts.add(docBase);
       }
       docBase += maxDoc;
     }
-
-    bitsStarts.add(docBase);
 
     // we may gather more readers than mergeState.readerCount
     mergeState = new MergeState();
@@ -44,31 +38,32 @@
 
     for(int i=0;i<mergeState.readerCount;i++) {
 
-      final IndexReader reader = readers.get(i);
+      final MergeState.IndexReaderAndLiveDocs reader = readers.get(i);
 
       mergeState.docBase[i] = docBase;
-      docBase += reader.numDocs();
-      inputDocBase += reader.maxDoc();
-      if (reader.hasDeletions()) {
+      inputDocBase += reader.reader.maxDoc();
+      final int maxDoc = reader.reader.maxDoc();
+      if (reader.liveDocs != null) {
         int delCount = 0;
-        final Bits liveDocs = reader.getLiveDocs();
+        final Bits liveDocs = reader.liveDocs;
         assert liveDocs != null;
-        final int maxDoc = reader.maxDoc();
         final int[] docMap = mergeState.docMaps[i] = new int[maxDoc];
         int newDocID = 0;
         for(int j=0;j<maxDoc;j++) {
           if (!liveDocs.get(j)) {
             docMap[j] = -1;
-            delCount++;  // only for assert
+            delCount++;
           } else {
             docMap[j] = newDocID++;
           }
         }
-        assert delCount == reader.numDeletedDocs(): "reader delCount=" + reader.numDeletedDocs() + " vs recomputed delCount=" + delCount;
+        docBase += maxDoc - delCount;
+      } else {
+        docBase += maxDoc;
       }
 
       if (payloadProcessorProvider != null) {
-        mergeState.dirPayloadProcessor[i] = payloadProcessorProvider.getDirProcessor(reader.directory());
+        mergeState.dirPayloadProcessor[i] = payloadProcessorProvider.getDirProcessor(reader.reader.directory());
       }
     }
     codec = segmentWriteState.segmentCodecs.codec();

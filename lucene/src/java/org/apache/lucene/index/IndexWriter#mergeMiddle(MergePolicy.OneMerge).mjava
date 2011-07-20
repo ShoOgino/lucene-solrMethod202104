@@ -22,7 +22,8 @@
     }
 
     merge.readers = new ArrayList<SegmentReader>();
-    merge.readerClones = new ArrayList<SegmentReader>();
+    merge.readerLiveDocs = new ArrayList<BitVector>();
+
     // This is try/finally to make sure merger's readers are
     // closed:
     boolean success = false;
@@ -35,20 +36,17 @@
 
         // Hold onto the "live" reader; we will use this to
         // commit merged deletes
-        final SegmentReader reader = readerPool.get(info, true,
-                                                    context,
-                                                    -config.getReaderTermsIndexDivisor());
+        final SegmentReader reader = readerPool.get(info, context);
+
+        // Carefully pull the most recent live docs:
+        final BitVector liveDocs = getLiveDocsClone(info, reader);
+
+        merge.readerLiveDocs.add(liveDocs);
         merge.readers.add(reader);
 
-        // We clone the segment readers because other
-        // deletes may come in while we're merging so we
-        // need readers that will not change
-        final SegmentReader clone = (SegmentReader) reader.clone(true);
-        merge.readerClones.add(clone);
-
-        if (clone.numDocs() > 0) {
-          merger.add(clone);
-          totDocCount += clone.numDocs();
+        if (liveDocs == null || liveDocs.count() > 0) {
+          merger.add(reader, liveDocs);
+          totDocCount += liveDocs == null ? reader.maxDoc() : liveDocs.count();
         }
         segUpto++;
       }
@@ -144,25 +142,24 @@
       }
 
       final IndexReaderWarmer mergedSegmentWarmer = config.getMergedSegmentWarmer();
-      final int termsIndexDivisor;
-      final boolean loadDocStores;
-
-      if (mergedSegmentWarmer != null) {
-        // Load terms index & doc stores so the segment
-        // warmer can run searches, load documents/term
-        // vectors
-        termsIndexDivisor = config.getReaderTermsIndexDivisor();
-        loadDocStores = true;
-      } else {
-        termsIndexDivisor = -1;
-        loadDocStores = false;
-      }
 
       // TODO: in the non-realtime case, we may want to only
       // keep deletes (it's costly to open entire reader
       // when we just need deletes)
 
-      final SegmentReader mergedReader = readerPool.get(merge.info, loadDocStores, context, termsIndexDivisor);
+      final boolean loadDocStores;
+      if (mergedSegmentWarmer != null) {
+        // Load terms index & doc stores so the segment
+        // warmer can run searches, load documents/term
+        // vectors
+        loadDocStores = true;
+      } else {
+        loadDocStores = false;
+      }
+
+      // Force READ context because we merge deletes onto
+      // this reader:
+      final SegmentReader mergedReader = readerPool.get(merge.info, loadDocStores, new IOContext(IOContext.Context.READ));
       try {
         if (poolReaders && mergedSegmentWarmer != null) {
           mergedSegmentWarmer.warm(mergedReader);
@@ -174,7 +171,7 @@
         }
       } finally {
         synchronized(this) {
-          if (readerPool.release(mergedReader)) {
+          if (readerPool.release(mergedReader, IOContext.Context.READ)) {
             // Must checkpoint after releasing the
             // mergedReader since it may have written a new
             // deletes file:

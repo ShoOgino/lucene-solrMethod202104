@@ -1,8 +1,9 @@
-  @Test
-  public void testIndexAndConfigReplication() throws Exception {
-    clearIndexWithReplication();
+  private void doTestReplicateAfterStartup() throws Exception {
+    //stop slave
+    slaveJetty.stop();
 
     nDocs--;
+    masterClient.deleteByQuery("*:*");
     for (int i = 0; i < nDocs; i++)
       index(masterClient, "id", i, "name", "name = " + i);
 
@@ -11,6 +12,22 @@
     NamedList masterQueryRsp = rQuery(nDocs, "*:*", masterClient);
     SolrDocumentList masterQueryResult = (SolrDocumentList) masterQueryRsp.get("response");
     assertEquals(nDocs, masterQueryResult.getNumFound());
+
+    //change solrconfig having 'replicateAfter startup' option on master
+    master.copyConfigFile(CONF_DIR + "solrconfig-master2.xml",
+                          "solrconfig.xml");
+
+    masterJetty.stop();
+
+    masterJetty = createJetty(master);
+    masterClient = createNewSolrServer(masterJetty.getLocalPort());
+
+    slave.setTestPort(masterJetty.getLocalPort());
+    slave.copyConfigFile(slave.getSolrConfigFile(), "solrconfig.xml");
+
+    //start slave
+    slaveJetty = createJetty(slave);
+    slaveClient = createNewSolrServer(slaveJetty.getLocalPort());
 
     //get docs from slave and check if number is equal to master
     NamedList slaveQueryRsp = rQuery(nDocs, "*:*", slaveClient);
@@ -21,36 +38,19 @@
     String cmp = TestDistributedSearch.compare(masterQueryResult, slaveQueryResult, 0, null);
     assertEquals(null, cmp);
 
-    //start config files replication test
-    masterClient.deleteByQuery("*:*");
-    masterClient.commit();
-
-    //change the schema on master
-    master.copyConfigFile(CONF_DIR + "schema-replication2.xml", "schema.xml");
-
+    // NOTE: the master only replicates after startup now!
+    // revert that change.
+    master.copyConfigFile(CONF_DIR + "solrconfig-master.xml", "solrconfig.xml");
     masterJetty.stop();
-
     masterJetty = createJetty(master);
     masterClient = createNewSolrServer(masterJetty.getLocalPort());
 
     slave.setTestPort(masterJetty.getLocalPort());
     slave.copyConfigFile(slave.getSolrConfigFile(), "solrconfig.xml");
 
+    //start slave
     slaveJetty.stop();
     slaveJetty = createJetty(slave);
     slaveClient = createNewSolrServer(slaveJetty.getLocalPort());
-
-    //add a doc with new field and commit on master to trigger snappull from slave.
-    index(masterClient, "id", "2000", "name", "name = " + 2000, "newname", "newname = " + 2000);
-    masterClient.commit();
-
-    NamedList masterQueryRsp2 = rQuery(1, "*:*", masterClient);
-    SolrDocumentList masterQueryResult2 = (SolrDocumentList) masterQueryRsp2.get("response");
-    assertEquals(1, masterQueryResult2.getNumFound());
-
-    slaveQueryRsp = rQuery(1, "*:*", slaveClient);
-    SolrDocument d = ((SolrDocumentList) slaveQueryRsp.get("response")).get(0);
-    assertEquals("newname = 2000", (String) d.getFieldValue("newname"));
-
   }
 

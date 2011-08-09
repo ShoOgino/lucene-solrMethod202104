@@ -1,7 +1,8 @@
   void markForFullFlush() {
     final DocumentsWriterDeleteQueue flushingQueue;
     synchronized (this) {
-      assert !fullFlush;
+      assert !fullFlush : "called DWFC#markForFullFlush() while full flush is still running";
+      assert fullFlushBuffer.isEmpty() : "full flush buffer should be empty: "+ fullFlushBuffer;
       fullFlush = true;
       flushingQueue = documentsWriter.deleteQueue;
       // Set a new delete queue - all subsequent DWPT will use this queue until
@@ -9,9 +10,7 @@
       DocumentsWriterDeleteQueue newQueue = new DocumentsWriterDeleteQueue(flushingQueue.generation+1);
       documentsWriter.deleteQueue = newQueue;
     }
-    final Iterator<ThreadState> allActiveThreads = perThreadPool
-    .getActivePerThreadsIterator();
-    final ArrayList<DocumentsWriterPerThread> toFlush = new ArrayList<DocumentsWriterPerThread>();
+    final Iterator<ThreadState> allActiveThreads = perThreadPool.getActivePerThreadsIterator();
     while (allActiveThreads.hasNext()) {
       final ThreadState next = allActiveThreads.next();
       next.lock();
@@ -31,25 +30,7 @@
           // this one is already a new DWPT
           continue;
         }
-        if (next.perThread.getNumDocsInRAM() > 0 ) {
-          final DocumentsWriterPerThread dwpt = next.perThread; // just for assert
-          synchronized (this) {
-            if (!next.flushPending) {
-              setFlushPending(next);
-            }
-            final DocumentsWriterPerThread flushingDWPT = internalTryCheckOutForFlush(next);
-            assert flushingDWPT != null : "DWPT must never be null here since we hold the lock and it holds documents";
-            assert dwpt == flushingDWPT : "flushControl returned different DWPT";
-            toFlush.add(flushingDWPT);
-          }
-        } else {
-          if (closed) {
-            next.resetWriter(null); // make this state inactive
-          } else {
-            // get the new delete queue from DW
-            next.perThread.initialize();
-          }
-        }
+        addFlushableState(next);
       } finally {
         next.unlock();
       }
@@ -61,8 +42,10 @@
        * blocking indexing.*/
       pruneBlockedQueue(flushingQueue);   
       assert assertBlockedFlushes(documentsWriter.deleteQueue);
-      flushQueue.addAll(toFlush);
+      flushQueue.addAll(fullFlushBuffer);
+      fullFlushBuffer.clear();
       stallControl.updateStalled(this);
     }
+    assert assertActiveDeleteQueue(documentsWriter.deleteQueue);
   }
 

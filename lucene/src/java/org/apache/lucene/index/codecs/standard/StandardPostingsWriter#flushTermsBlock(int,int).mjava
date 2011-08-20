@@ -1,0 +1,50 @@
+  @Override
+  public void flushTermsBlock(int start, int count) throws IOException {
+    //if (DEBUG) System.out.println("SPW: flushTermsBlock start=" + start + " count=" + count + " left=" + (pendingTerms.size()-count) + " pendingTerms.size()=" + pendingTerms.size());
+
+    if (count == 0) {
+      termsOut.writeByte((byte) 0);
+      return;
+    }
+
+    assert start <= pendingTerms.size();
+    assert count <= start;
+
+    final int limit = pendingTerms.size() - start + count;
+    final PendingTerm firstTerm = pendingTerms.get(limit - count);
+    // First term in block is abs coded:
+    bytesWriter.writeVLong(firstTerm.freqStart);
+
+    if (firstTerm.skipOffset != -1) {
+      assert firstTerm.skipOffset > 0;
+      bytesWriter.writeVInt(firstTerm.skipOffset);
+    }
+    if (indexOptions == IndexOptions.DOCS_AND_FREQS_AND_POSITIONS) {
+      bytesWriter.writeVLong(firstTerm.proxStart);
+    }
+    long lastFreqStart = firstTerm.freqStart;
+    long lastProxStart = firstTerm.proxStart;
+    for(int idx=limit-count+1; idx<limit; idx++) {
+      final PendingTerm term = pendingTerms.get(idx);
+      //if (DEBUG) System.out.println("  write term freqStart=" + term.freqStart);
+      // The rest of the terms term are delta coded:
+      bytesWriter.writeVLong(term.freqStart - lastFreqStart);
+      lastFreqStart = term.freqStart;
+      if (term.skipOffset != -1) {
+        assert term.skipOffset > 0;
+        bytesWriter.writeVInt(term.skipOffset);
+      }
+      if (indexOptions == IndexOptions.DOCS_AND_FREQS_AND_POSITIONS) {
+        bytesWriter.writeVLong(term.proxStart - lastProxStart);
+        lastProxStart = term.proxStart;
+      }
+    }
+
+    termsOut.writeVInt((int) bytesWriter.getFilePointer());
+    bytesWriter.writeTo(termsOut);
+    bytesWriter.reset();
+
+    // Remove the terms we just wrote:
+    pendingTerms.subList(limit-count, limit).clear();
+  }
+

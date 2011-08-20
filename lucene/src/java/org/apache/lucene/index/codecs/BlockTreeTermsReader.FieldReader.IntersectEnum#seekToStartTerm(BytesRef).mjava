@@ -1,0 +1,84 @@
+      // NOTE: specialized to only doing the first-time
+      // seek, but we could generalize it to allow
+      // arbitrary seekExact/Ceil.  Note that this is a
+      // seekFloor!
+      private void seekToStartTerm(BytesRef target) throws IOException {
+        //if (DEBUG) System.out.println("seek to startTerm=" + target.utf8ToString());
+        assert currentFrame.ord == 0;
+        if (term.length < target.length) {
+          term.bytes = ArrayUtil.grow(term.bytes, target.length);
+        }
+        FST.Arc<BytesRef> arc = arcs[0];
+        assert arc == currentFrame.arc;
+
+        for(int idx=0;idx<=target.length;idx++) {
+
+          boolean lastIsSubBlock = false;
+
+          while (true) {
+            final int savePos = currentFrame.suffixesReader.getPosition();
+            final int saveStartBytePos = currentFrame.startBytePos;
+            final int saveSuffix = currentFrame.suffix;
+            final long saveLastSubFP = currentFrame.lastSubFP;
+            final int saveTermBlockOrd = currentFrame.termState.termBlockOrd;
+
+            final boolean isSubBlock = currentFrame.next();
+
+            //if (DEBUG) System.out.println("    cycle ent=" + currentFrame.nextEnt + " (of " + currentFrame.entCount + ") prefix=" + currentFrame.prefix + " suffix=" + currentFrame.suffix);
+            term.length = currentFrame.prefix + currentFrame.suffix;
+            if (term.bytes.length < term.length) {
+              term.bytes = ArrayUtil.grow(term.bytes, term.length);
+            }
+            System.arraycopy(currentFrame.suffixBytes, currentFrame.startBytePos, term.bytes, currentFrame.prefix, currentFrame.suffix);
+
+            if (isSubBlock && target.startsWith(term)) {
+              // Recurse
+              currentFrame = pushFrame(getState());
+              break;
+            } else {
+              final int cmp = term.compareTo(target);
+              if (cmp < 0) {
+                if (currentFrame.nextEnt == currentFrame.entCount) {
+                  if (!currentFrame.isLastInFloor) {
+                    //if (DEBUG) System.out.println("  load floorBlock");
+                    currentFrame.loadNextFloorBlock();
+                    continue;
+                  } else {
+                    //if (DEBUG) System.out.println("  return term=" + brToString(term));
+                    return;
+                  }
+                }
+                lastIsSubBlock = isSubBlock;
+                continue;
+              } else if (cmp == 0) {
+                //if (DEBUG) System.out.println("  return term=" + brToString(term));
+                return;
+              } else {
+                // Fallback to prior entry: the semantics of
+                // this method is that the first call to
+                // next() will return the term after the
+                // requested term
+                currentFrame.nextEnt--;
+                currentFrame.lastSubFP = saveLastSubFP;
+                currentFrame.startBytePos = saveStartBytePos;
+                currentFrame.suffix = saveSuffix;
+                currentFrame.suffixesReader.setPosition(savePos);
+                currentFrame.termState.termBlockOrd = saveTermBlockOrd;
+                System.arraycopy(currentFrame.suffixBytes, currentFrame.startBytePos, term.bytes, currentFrame.prefix, currentFrame.suffix);
+                term.length = currentFrame.prefix + currentFrame.suffix;
+                if (lastIsSubBlock) {
+                  // Recurse
+                  currentFrame = pushFrame(getState());
+                  break;
+                } else {
+                  //if (DEBUG) System.out.println("  fallback return term=" + brToString(term) + " curFrame.nextEnt=" + currentFrame.nextEnt);
+                  return;
+                }
+              }
+            }
+          }
+        }
+
+        assert false;
+      }
+

@@ -1,10 +1,18 @@
   @AfterClass
   public static void afterClassLuceneTestCaseJ4() {
-    if (!testsFailed) {
-      assertTrue("ensure your setUp() calls super.setUp() and your tearDown() calls super.tearDown()!!!", 
-          state == State.INITIAL || state == State.TEARDOWN);
+    State oldState = state; // capture test execution state
+    state = State.INITIAL; // set the state for subsequent tests
+    
+    Throwable problem = null;
+    try {
+      if (!testsFailed) {
+        assertTrue("ensure your setUp() calls super.setUp() and your tearDown() calls super.tearDown()!!!", 
+          oldState == State.INITIAL || oldState == State.TEARDOWN);
+      }
+    } catch (Throwable t) {
+      if (problem == null) problem = t;
     }
-    state = State.INITIAL;
+    
     if (! "false".equals(TEST_CLEAN_THREADS)) {
       int rogueThreads = threadCleanup("test class");
       if (rogueThreads > 0) {
@@ -12,82 +20,49 @@
         System.err.println("RESOURCE LEAK: test class left " + rogueThreads + " thread(s) running");
       }
     }
-    String codecDescription;
-    CodecProvider cp = CodecProvider.getDefault();
-
-    if ("randomPerField".equals(TEST_CODEC) && cp instanceof RandomCodecProvider) {
-      codecDescription = cp.toString();
-    } else {
-      codecDescription = codec.toString();
-    }
-
-    if ("random".equals(TEST_CODECPROVIDER) && CodecProvider.getDefault() == savedCodecProvider)
-      removeTestCodecs(codec, CodecProvider.getDefault());
-    CodecProvider.setDefault(savedCodecProvider);
+    
+    String codecDescription = uninstallCodecsAfterClass();
     Locale.setDefault(savedLocale);
     TimeZone.setDefault(savedTimeZone);
     System.clearProperty("solr.solr.home");
     System.clearProperty("solr.data.dir");
-    // now look for unclosed resources
-    if (!testsFailed)
-      for (MockDirectoryWrapper d : stores.keySet()) {
-        if (d.isOpen()) {
-          StackTraceElement elements[] = stores.get(d);
-          // Look for the first class that is not LuceneTestCase that requested
-          // a Directory. The first two items are of Thread's, so skipping over
-          // them.
-          StackTraceElement element = null;
-          for (int i = 2; i < elements.length; i++) {
-            StackTraceElement ste = elements[i];
-            if (ste.getClassName().indexOf("LuceneTestCase") == -1) {
-              element = ste;
-              break;
-            }
-          }
-          fail("directory of test was not closed, opened from: " + element);
-        }
+    
+    try {
+      // now look for unclosed resources
+      if (!testsFailed) {
+        checkResourcesAfterClass();
       }
+    } catch (Throwable t) {
+      if (problem == null) problem = t;
+    }
+    
     stores = null;
-    // if verbose or tests failed, report some information back
-    if (VERBOSE || testsFailed)
-      System.err.println("NOTE: test params are: codec=" + codecDescription +
-        ", locale=" + locale +
-        ", timezone=" + (timeZone == null ? "(null)" : timeZone.getID()));
-    if (VERBOSE || testsFailed) {
-      System.err.println("NOTE: all tests run in this JVM:");
-      System.err.println(Arrays.toString(testClassesRun.toArray()));
-      System.err.println("NOTE: " + System.getProperty("os.name") + " "
-          + System.getProperty("os.version") + " "
-          + System.getProperty("os.arch") + "/"
-          + System.getProperty("java.vendor") + " "
-          + System.getProperty("java.version") + " "
-          + (Constants.JRE_IS_64BIT ? "(64-bit)" : "(32-bit)") + "/"
-          + "cpus=" + Runtime.getRuntime().availableProcessors() + ","
-          + "threads=" + Thread.activeCount() + ","
-          + "free=" + Runtime.getRuntime().freeMemory() + ","
-          + "total=" + Runtime.getRuntime().totalMemory());
-    }
-    // clear out any temp directories if we can
-    if (!testsFailed) {
-      for (Entry<File, StackTraceElement[]> entry : tempDirs.entrySet()) {
-        try {
-          _TestUtil.rmDir(entry.getKey());
-        } catch (IOException e) {
-          e.printStackTrace();
-          System.err.println("path " + entry.getKey() + " allocated from");
-          // first two STE's are Java's
-          StackTraceElement[] elements = entry.getValue();
-          for (int i = 2; i < elements.length; i++) {
-            StackTraceElement ste = elements[i];            
-            // print only our code's stack information
-            if (ste.getClassName().indexOf("org.apache.lucene") == -1) break; 
-            System.err.println("\t" + ste);
-          }
-          fail("could not remove temp dir: " + entry.getKey());
-        }
+
+    try {
+      // clear out any temp directories if we can
+      if (!testsFailed) {
+        clearTempDirectoriesAfterClass();
       }
+    } catch (Throwable t) {
+      if (problem == null) problem = t;
     }
+
+    // if we had afterClass failures, get some debugging information
+    if (problem != null) {
+      reportPartialFailureInfo();      
+    }
+    
+    // if verbose or tests failed, report some information back
+    if (VERBOSE || testsFailed || problem != null) {
+      printDebuggingInformation(codecDescription);
+    }
+    
+    // reset seed
     random.setSeed(0L);
     random.initialized = false;
+    
+    if (problem != null) {
+      throw new RuntimeException(problem);
+    }
   }
 

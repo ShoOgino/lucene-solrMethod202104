@@ -1,0 +1,48 @@
+  public final void visitDocument(int n, StoredFieldVisitor visitor) throws CorruptIndexException, IOException {
+    seekIndex(n);
+    fieldsStream.seek(indexStream.readLong());
+
+    final int numFields = fieldsStream.readVInt();
+    for (int fieldIDX = 0; fieldIDX < numFields; fieldIDX++) {
+      int fieldNumber = fieldsStream.readVInt();
+      FieldInfo fieldInfo = fieldInfos.fieldInfo(fieldNumber);
+      
+      int bits = fieldsStream.readByte() & 0xFF;
+      assert bits <= (FieldsWriter.FIELD_IS_NUMERIC_MASK | FieldsWriter.FIELD_IS_BINARY): "bits=" + Integer.toHexString(bits);
+
+      final boolean binary = (bits & FieldsWriter.FIELD_IS_BINARY) != 0;
+      final int numeric = bits & FieldsWriter.FIELD_IS_NUMERIC_MASK;
+
+      final boolean doStop;
+      if (binary) {
+        final int numBytes = fieldsStream.readVInt();
+        doStop = visitor.binaryField(fieldInfo, fieldsStream, numBytes);
+      } else if (numeric != 0) {
+        switch(numeric) {
+        case FieldsWriter.FIELD_IS_NUMERIC_INT:
+          doStop = visitor.intField(fieldInfo, fieldsStream.readInt());
+          break;
+        case FieldsWriter.FIELD_IS_NUMERIC_LONG:
+          doStop = visitor.longField(fieldInfo, fieldsStream.readLong());
+          break;
+        case FieldsWriter.FIELD_IS_NUMERIC_FLOAT:
+          doStop = visitor.floatField(fieldInfo, Float.intBitsToFloat(fieldsStream.readInt()));
+          break;
+        case FieldsWriter.FIELD_IS_NUMERIC_DOUBLE:
+          doStop = visitor.doubleField(fieldInfo, Double.longBitsToDouble(fieldsStream.readLong()));
+          break;
+        default:
+          throw new FieldReaderException("Invalid numeric type: " + Integer.toHexString(numeric));
+        }
+      } else {
+        // Text:
+        final int numUTF8Bytes = fieldsStream.readVInt();
+        doStop = visitor.stringField(fieldInfo, fieldsStream, numUTF8Bytes);
+      }
+
+      if (doStop) {
+        return;
+      }
+    }
+  }
+

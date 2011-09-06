@@ -1,0 +1,97 @@
+  @Override
+  public void process(ResponseBuilder rb) throws IOException
+  {
+    SolrQueryRequest req = rb.req;
+    SolrQueryResponse rsp = rb.rsp;
+    SolrParams params = req.getParams();
+
+    if (!params.getBool(COMPONENT_NAME, true)) {
+      return;
+    }
+
+    String id[] = params.getParams("id");
+    String ids[] = params.getParams("ids");
+
+    if (id == null && ids == null) {
+      return;
+    }
+
+    String[] allIds = id==null ? new String[0] : id;
+
+    if (ids != null) {
+      List<String> lst = new ArrayList<String>();
+      for (String s : allIds) {
+        lst.add(s);
+      }
+      for (String idList : ids) {
+        lst.addAll( StrUtils.splitSmart(idList, ",", true) );
+      }
+      allIds = lst.toArray(new String[lst.size()]);
+    }
+
+    SchemaField idField = req.getSchema().getUniqueKeyField();
+    FieldType fieldType = idField.getType();
+
+    SolrDocumentList docList = new SolrDocumentList();
+    UpdateLog ulog = req.getCore().getUpdateHandler().getUpdateLog();
+
+    RefCounted<SolrIndexSearcher> searcherHolder = null;
+
+   try {
+     SolrIndexSearcher searcher = null;
+
+     BytesRef idBytes = new BytesRef();
+     for (String idStr : allIds) {
+       fieldType.readableToIndexed(idStr, idBytes);
+       if (ulog != null) {
+         Object o = ulog.lookup(idBytes);
+         if (o != null) {
+           // should currently be a List<Oper,Ver,Doc/Id>
+           List entry = (List)o;
+           assert entry.size() >= 3;
+           int oper = (Integer)entry.get(0);
+           switch (oper) {
+             case UpdateLog.ADD:
+              docList.add(toSolrDoc((SolrInputDocument)entry.get(entry.size()-1), req.getSchema()));
+              break;
+             case UpdateLog.DELETE:
+              break;
+             default:
+               throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,  "Unknown Operation! " + oper);
+           }
+           continue;
+         }
+       }
+
+       // didn't find it in the update log, so it should be in the newest searcher opened
+       if (searcher == null) {
+         searcherHolder =  req.getCore().getNewestSearcher(false);
+         searcher = searcherHolder.get();
+       }
+
+       int docid = searcher.getFirstMatch(new Term(idField.getName(), idBytes));
+       if (docid < 0) continue;
+       Document luceneDocument = searcher.doc(docid);
+       docList.add(toSolrDoc(luceneDocument,  req.getSchema()));
+     }
+
+   } finally {
+     if (searcherHolder != null) {
+       searcherHolder.decref();
+     }
+   }
+
+
+   // if the client specified a single id=foo, then use "doc":{
+   // otherwise use a standard doclist
+
+   if (ids ==  null && allIds.length <= 1) {
+     // if the doc was not found, then use a value of null.
+     rsp.add("doc", docList.size() > 0 ? docList.get(0) : null);
+   } else {
+     docList.setNumFound(docList.size());
+     rsp.add("response", docList);
+   }
+
+  }
+

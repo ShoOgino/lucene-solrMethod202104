@@ -15,6 +15,11 @@
 
     boolean error=true;
     try {
+      // only allow one hard commit to proceed at once
+      if (!cmd.softCommit) {
+        commitLock.lock();
+      }
+
       log.info("start "+cmd);
 
       if (cmd.optimize) {
@@ -24,6 +29,10 @@
       }
 
       if (!cmd.softCommit) {
+        synchronized (this) { // sync is currently needed to prevent preCommit from being called between preSoft and postSoft... see postSoft comments.
+          ulog.preCommit(cmd);
+        }
+
         writer.commit();
         numDocsPending.set(0);
         callPostCommitCallbacks();
@@ -37,13 +46,23 @@
       }
 
 
-      synchronized (this) {
         if (cmd.softCommit) {
-          core.getSearcher(true,false,waitSearcher, true);
+          // ulog.preSoftCommit();
+          synchronized (this) {
+            ulog.preSoftCommit(cmd);
+            core.getSearcher(true,false,waitSearcher, true);
+            ulog.postSoftCommit(cmd);
+          }
+          // ulog.postSoftCommit();
         } else {
-          core.getSearcher(true,false,waitSearcher);
+          synchronized (this) {
+            ulog.preSoftCommit(cmd);
+            core.getSearcher(true,false,waitSearcher);
+            ulog.postSoftCommit(cmd);
+          }
+          ulog.postCommit(cmd); // postCommit currently means new searcher has also been opened
         }
-      }
+
 
       // reset commit tracking
 
@@ -58,6 +77,10 @@
       error=false;
     }
     finally {
+      if (!cmd.softCommit) {
+        commitLock.unlock();
+      }
+
       addCommands.set(0);
       deleteByIdCommands.set(0);
       deleteByQueryCommands.set(0);

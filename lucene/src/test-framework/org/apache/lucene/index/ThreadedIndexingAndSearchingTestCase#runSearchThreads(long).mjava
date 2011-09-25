@@ -1,0 +1,96 @@
+  protected void runSearchThreads(final long stopTimeMS) throws Exception {
+    final int numThreads = _TestUtil.nextInt(random, 1, 5);
+    final Thread[] searchThreads = new Thread[numThreads];
+    final AtomicInteger totHits = new AtomicInteger();
+
+    // silly starting guess:
+    final AtomicInteger totTermCount = new AtomicInteger(100);
+
+    // TODO: we should enrich this to do more interesting searches
+    for(int thread=0;thread<searchThreads.length;thread++) {
+      searchThreads[thread] = new Thread() {
+          @Override
+          public void run() {
+            while (System.currentTimeMillis() < stopTimeMS) {
+              try {
+                final IndexSearcher s = getCurrentSearcher();
+                try {
+                  if (s.getIndexReader().numDocs() > 0) {
+                    smokeTestSearcher(s);
+                    Fields fields = MultiFields.getFields(s.getIndexReader());
+                    if (fields == null) {
+                      continue;
+                    }
+                    Terms terms = fields.terms("body");
+                    if (terms == null) {
+                      continue;
+                    }
+                    TermsEnum termsEnum = terms.iterator();
+                    int seenTermCount = 0;
+                    int shift;
+                    int trigger; 
+                    if (totTermCount.get() < 10) {
+                      shift = 0;
+                      trigger = 1;
+                    } else {
+                      trigger = totTermCount.get()/10;
+                      shift = random.nextInt(trigger);
+                    }
+                    BytesRef term = termsEnum.next();
+                    if (term == null) {
+                      if (seenTermCount == 0) {
+                        break;
+                      }
+                      totTermCount.set(seenTermCount);
+                      seenTermCount = 0;
+                      if (totTermCount.get() < 10) {
+                        shift = 0;
+                        trigger = 1;
+                      } else {
+                        trigger = totTermCount.get()/10;
+                        //System.out.println("trigger " + trigger);
+                        shift = random.nextInt(trigger);
+                      }
+                      termsEnum.seekCeil(new BytesRef(""));
+                      continue;
+                    }
+                    seenTermCount++;
+                    // search 10 terms
+                    if (trigger == 0) {
+                      trigger = 1;
+                    }
+                    if ((seenTermCount + shift) % trigger == 0) {
+                      //if (VERBOSE) {
+                      //System.out.println(Thread.currentThread().getName() + " now search body:" + term.utf8ToString());
+                      //}
+                      totHits.addAndGet(runQuery(s, new TermQuery(new Term("body", term))));
+                    }
+                    //if (VERBOSE) {
+                    //System.out.println(Thread.currentThread().getName() + ": search done");
+                    //}
+                  }
+                } finally {
+                  releaseSearcher(s);
+                }
+              } catch (Throwable t) {
+                System.out.println(Thread.currentThread().getName() + ": hit exc");
+                failed.set(true);
+                t.printStackTrace(System.out);
+                throw new RuntimeException(t);
+              }
+            }
+          }
+        };
+      searchThreads[thread].setDaemon(true);
+      searchThreads[thread].start();
+    }
+
+    for(int thread=0;thread<searchThreads.length;thread++) {
+      searchThreads[thread].join();
+    }
+
+    if (VERBOSE) {
+      System.out.println("TEST: DONE search: totHits=" + totHits);
+    }
+  }
+

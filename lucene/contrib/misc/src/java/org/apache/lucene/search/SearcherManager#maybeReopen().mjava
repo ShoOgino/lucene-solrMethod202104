@@ -1,0 +1,48 @@
+  /** You must call this, periodically, to perform a
+   *  reopen.  This calls {@link IndexReader#reopen} on the
+   *  underlying reader, and if that returns a new reader,
+   *  it's warmed (if you provided a {@link SearcherWarmer}
+   *  and then swapped into production.
+   *
+   *  <p><b>Threads</b>: it's fine for more than one thread to
+   *  call this at once.  Only the first thread will attempt
+   *  the reopen; subsequent threads will see that another
+   *  thread is already handling reopen and will return
+   *  immediately.  Note that this means if another thread
+   *  is already reopening then subsequent threads will
+   *  return right away without waiting for the reader
+   *  reopen to complete.</p>
+   *
+   *  <p>This method returns true if a new reader was in
+   *  fact opened.</p>
+   */
+  public boolean maybeReopen()
+    throws  IOException {
+
+    if (currentSearcher == null) {
+      throw new AlreadyClosedException("this SearcherManager is closed");
+    }
+
+    // Ensure only 1 thread does reopen at once; other
+    // threads just return immediately:
+    if (!reopening.getAndSet(true)) {
+      try {
+        IndexReader newReader = currentSearcher.getIndexReader().reopen();
+        if (newReader != currentSearcher.getIndexReader()) {
+          IndexSearcher newSearcher = new IndexSearcher(newReader, es);
+          if (warmer != null) {
+            warmer.warm(newSearcher);
+          }
+          swapSearcher(newSearcher);
+          return true;
+        } else {
+          return false;
+        }
+      } finally {
+        reopening.set(false);
+      }
+    } else {
+      return false;
+    }
+  }
+

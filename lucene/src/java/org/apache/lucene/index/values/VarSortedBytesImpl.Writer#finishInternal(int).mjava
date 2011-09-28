@@ -1,0 +1,39 @@
+    // Important that we get docCount, in case there were
+    // some last docs that we didn't see
+    @Override
+    public void finishInternal(int docCount) throws IOException {
+      final int count = hash.size();
+      final IndexOutput datOut = getOrCreateDataOut();
+      long offset = 0;
+      long lastOffset = 0;
+      final int[] index = new int[count+1];
+      final long[] offsets = new long[count];
+      final int[] sortedEntries = hash.sort(comp);
+      // first dump bytes data, recording index & offset as
+      // we go
+      for (int i = 0; i < count; i++) {
+        final int e = sortedEntries[i];
+        offsets[i] = offset;
+        index[e+1] = 1 + i;
+
+        final BytesRef bytes = hash.get(e, new BytesRef());
+        // TODO: we could prefix code...
+        datOut.writeBytes(bytes.bytes, bytes.offset, bytes.length);
+        lastOffset = offset;
+        offset += bytes.length;
+      }
+
+      final IndexOutput idxOut = getOrCreateIndexOut();
+      // total bytes of data
+      idxOut.writeLong(offset);
+      // write index -- first doc -> 1+ord
+      writeIndex(idxOut, docCount, count, index, docToEntry);
+      // next ord (0-based) -> offset
+      PackedInts.Writer offsetWriter = PackedInts.getWriter(idxOut, count,
+          PackedInts.bitsRequired(lastOffset));
+      for (int i = 0; i < count; i++) {
+        offsetWriter.add(offsets[i]);
+      }
+      offsetWriter.finish();
+    }
+

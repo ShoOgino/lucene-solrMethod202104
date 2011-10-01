@@ -1,0 +1,63 @@
+    @Override
+    public Scorer scorer(AtomicReaderContext context, boolean scoreDocsInOrder,
+        boolean topScorer, Bits acceptDocs) throws IOException {
+      assert !termArrays.isEmpty();
+      final IndexReader reader = context.reader;
+      final Bits liveDocs = acceptDocs;
+      
+      PhraseQuery.PostingsAndFreq[] postingsFreqs = new PhraseQuery.PostingsAndFreq[termArrays.size()];
+
+      for (int pos=0; pos<postingsFreqs.length; pos++) {
+        Term[] terms = termArrays.get(pos);
+
+        final DocsAndPositionsEnum postingsEnum;
+        int docFreq;
+
+        if (terms.length > 1) {
+          postingsEnum = new UnionDocsAndPositionsEnum(reader, terms);
+
+          // coarse -- this overcounts since a given doc can
+          // have more than one terms:
+          docFreq = 0;
+          for(int termIdx=0;termIdx<terms.length;termIdx++) {
+            docFreq += reader.docFreq(terms[termIdx]);
+          }
+        } else {
+          final Term term = terms[0];
+          postingsEnum = reader.termPositionsEnum(liveDocs,
+                                                  term.field(),
+                                                  term.bytes());
+
+          if (postingsEnum == null) {
+            if (reader.termDocsEnum(liveDocs, term.field(), term.bytes()) != null) {
+              // term does exist, but has no positions
+              throw new IllegalStateException("field \"" + term.field() + "\" was indexed without position data; cannot run PhraseQuery (term=" + term.text() + ")");
+            } else {
+              // term does not exist
+              return null;
+            }
+          }
+
+          docFreq = reader.docFreq(term.field(), term.bytes());
+        }
+
+        postingsFreqs[pos] = new PhraseQuery.PostingsAndFreq(postingsEnum, docFreq, positions.get(pos).intValue(), terms[0]);
+      }
+
+      // sort by increasing docFreq order
+      if (slop == 0) {
+        ArrayUtil.mergeSort(postingsFreqs);
+      }
+
+      if (slop == 0) {
+        ExactPhraseScorer s = new ExactPhraseScorer(this, postingsFreqs, similarity.exactDocScorer(stats, field, context));
+        if (s.noDocs) {
+          return null;
+        } else {
+          return s;
+        }
+      } else {
+        return new SloppyPhraseScorer(this, postingsFreqs, slop, similarity.sloppyDocScorer(stats, field, context));
+      }
+    }
+

@@ -1,5 +1,5 @@
-  /** This constructor is only used for {@link #reopen()} */
-  DirectoryReader(Directory directory, SegmentInfos infos, SegmentReader[] oldReaders, int[] oldStarts,
+  /** This constructor is only used for {@link #doOpenIfChanged()} */
+  DirectoryReader(Directory directory, SegmentInfos infos, SegmentReader[] oldReaders,
                   boolean readOnly, boolean doClone, int termInfosIndexDivisor, CodecProvider codecs,
                   Collection<ReaderFinishedListener> readerFinishedListeners) throws IOException {
     this.directory = directory;
@@ -55,18 +55,21 @@
           // this is a new reader; in case we hit an exception we can close it safely
           newReader = SegmentReader.get(readOnly, infos.info(i), termInfosIndexDivisor, IOContext.READ);
           newReader.readerFinishedListeners = readerFinishedListeners;
-        } else {
-          newReader = newReaders[i].reopenSegment(infos.info(i), doClone, readOnly);
-          assert newReader.readerFinishedListeners == readerFinishedListeners;
-        }
-        if (newReader == newReaders[i]) {
-          // this reader will be shared between the old and the new one,
-          // so we must incRef it
-          readerShared[i] = true;
-          newReader.incRef();
-        } else {
           readerShared[i] = false;
           newReaders[i] = newReader;
+        } else {
+          newReader = newReaders[i].reopenSegment(infos.info(i), doClone, readOnly);
+          if (newReader == null) {
+            // this reader will be shared between the old and the new one,
+            // so we must incRef it
+            readerShared[i] = true;
+            newReaders[i].incRef();
+          } else {
+            assert newReader.readerFinishedListeners == readerFinishedListeners;
+            readerShared[i] = false;
+            // Steal ref returned to us by reopenSegment:
+            newReaders[i] = newReader;
+          }
         }
         success = true;
       } finally {

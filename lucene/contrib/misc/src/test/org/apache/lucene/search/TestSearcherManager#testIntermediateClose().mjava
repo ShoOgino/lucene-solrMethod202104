@@ -6,19 +6,20 @@
     writer.commit();
     final CountDownLatch awaitEnterWarm = new CountDownLatch(1);
     final CountDownLatch awaitClose = new CountDownLatch(1);
-
-    final SearcherManager searcherManager = new SearcherManager(dir,
-        new SearcherWarmer() {
-          @Override
-          public void warm(IndexSearcher s) throws IOException {
-            try {
-              awaitEnterWarm.countDown();
-              awaitClose.await();
-            } catch (InterruptedException e) {
-              //
-            }
-          }
-        });
+    final ExecutorService es = random.nextBoolean() ? null : Executors.newCachedThreadPool(new NamedThreadFactory("testIntermediateClose"));
+    final SearcherWarmer warmer = new SearcherWarmer() {
+      @Override
+      public void warm(IndexSearcher s) throws IOException {
+        try {
+          awaitEnterWarm.countDown();
+          awaitClose.await();
+        } catch (InterruptedException e) {
+          //
+        }
+      }
+    };
+    final SearcherManager searcherManager = random.nextBoolean() ? SearcherManager.open(dir,
+        warmer, es) : SearcherManager.open(writer, random.nextBoolean(), warmer, es);
     IndexSearcher searcher = searcherManager.acquire();
     try {
       assertEquals(1, searcher.getIndexReader().numDocs());
@@ -65,6 +66,9 @@
     assertNull("" + exc[0], exc[0]);
     writer.close();
     dir.close();
-
+    if (es != null) {
+      es.shutdown();
+      es.awaitTermination(1, TimeUnit.SECONDS);
+    }
   }
 

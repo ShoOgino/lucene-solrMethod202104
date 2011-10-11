@@ -4,30 +4,44 @@
    * is performed. The results are compared to non-sampled ones.
    */
   public void testCountUsingSamping() throws Exception, IOException {
+    boolean useRandomSampler = random.nextBoolean();
     for (int partitionSize : partitionSizes) {
-      initIndex(partitionSize);
-      
-      // Get all of the documents and run the query, then do different
-      // facet counts and compare to control
-      Query q = new TermQuery(new Term(CONTENT_FIELD, BETA)); // 90% of the docs
-      ScoredDocIdCollector docCollector = ScoredDocIdCollector.create(searcher.maxDoc(), false);
-      
-      FacetSearchParams expectedSearchParams = searchParamsWithRequests(K, partitionSize); 
-      FacetsCollector fc = new FacetsCollector(expectedSearchParams, indexReader, taxoReader);
-      
-      searcher.search(q, MultiCollector.wrap(docCollector, fc));
-      
-      List<FacetResult> expectedResults = fc.getFacetResults();
-      
-      // complement with sampling!
-      final Sampler sampler = createSampler(docCollector.getScoredDocIDs());
-      
-      FacetSearchParams samplingSearchParams = searchParamsWithRequests(K, partitionSize); 
-
-      assertSampling(expectedResults, q, sampler, samplingSearchParams, false);
-      assertSampling(expectedResults, q, sampler, samplingSearchParams, true);
-
-      closeAll();
+      try {
+        initIndex(partitionSize);
+        // Get all of the documents and run the query, then do different
+        // facet counts and compare to control
+        Query q = new TermQuery(new Term(CONTENT_FIELD, BETA)); // 90% of the docs
+        ScoredDocIdCollector docCollector = ScoredDocIdCollector.create(searcher.maxDoc(), false);
+        
+        FacetSearchParams expectedSearchParams = searchParamsWithRequests(K, partitionSize); 
+        FacetsCollector fc = new FacetsCollector(expectedSearchParams, indexReader, taxoReader);
+        
+        searcher.search(q, MultiCollector.wrap(docCollector, fc));
+        
+        List<FacetResult> expectedResults = fc.getFacetResults();
+        
+        FacetSearchParams samplingSearchParams = searchParamsWithRequests(K, partitionSize); 
+        
+        // try several times in case of failure, because the test has a chance to fail 
+        // if the top K facets are not sufficiently common with the sample set
+        for (int nTrial=0; nTrial<RETRIES; nTrial++) {
+          try {
+            // complement with sampling!
+            final Sampler sampler = createSampler(nTrial, docCollector.getScoredDocIDs(), useRandomSampler);
+            
+            assertSampling(expectedResults, q, sampler, samplingSearchParams, false);
+            assertSampling(expectedResults, q, sampler, samplingSearchParams, true);
+            
+            break; // succeeded
+          } catch (NotSameResultError e) {
+            if (nTrial>=RETRIES-1) {
+              throw e; // no more retries allowed, must fail
+            }
+          }
+        }
+      } finally { 
+        closeAll();
+      }
     }
   }
 

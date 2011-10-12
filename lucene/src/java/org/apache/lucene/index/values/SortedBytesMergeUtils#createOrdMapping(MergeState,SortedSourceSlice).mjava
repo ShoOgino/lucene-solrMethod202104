@@ -1,0 +1,41 @@
+  /*
+   * In order to merge we need to map the ords used in each segment to the new
+   * global ords in the new segment. Additionally we need to drop values that
+   * are not referenced anymore due to deleted documents. This method walks all
+   * live documents and fetches their current ordinal. We store this ordinal per
+   * slice and (SortedSourceSlice#ordMapping) and remember the doc to ord
+   * mapping in docIDToRelativeOrd. After the merge SortedSourceSlice#ordMapping
+   * contains the new global ordinals for the relative index.
+   */
+  private static void createOrdMapping(MergeState mergeState,
+      SortedSourceSlice currentSlice) {
+    final int readerIdx = currentSlice.readerIdx;
+    final int[] currentDocMap = mergeState.docMaps[readerIdx];
+    final int docBase = currentSlice.docToOrdStart;
+    assert docBase == mergeState.docBase[readerIdx];
+    if (currentDocMap != null) { // we have deletes
+      for (int i = 0; i < currentDocMap.length; i++) {
+        final int doc = currentDocMap[i];
+        if (doc != -1) { // not deleted
+          final int ord = currentSlice.source.ord(i); // collect ords strictly
+                                                      // increasing
+          currentSlice.docIDToRelativeOrd[docBase + doc] = ord;
+          // use ord + 1 to identify unreferenced values (ie. == 0)
+          currentSlice.ordMapping[ord] = ord + 1;
+        }
+      }
+    } else { // no deletes
+      final IndexReaderAndLiveDocs indexReaderAndLiveDocs = mergeState.readers
+          .get(readerIdx);
+      final int numDocs = indexReaderAndLiveDocs.reader.numDocs();
+      assert indexReaderAndLiveDocs.liveDocs == null;
+      assert currentSlice.docToOrdEnd - currentSlice.docToOrdStart == numDocs;
+      for (int doc = 0; doc < numDocs; doc++) {
+        final int ord = currentSlice.source.ord(doc);
+        currentSlice.docIDToRelativeOrd[docBase + doc] = ord;
+        // use ord + 1 to identify unreferenced values (ie. == 0)
+        currentSlice.ordMapping[ord] = ord + 1;
+      }
+    }
+  }
+

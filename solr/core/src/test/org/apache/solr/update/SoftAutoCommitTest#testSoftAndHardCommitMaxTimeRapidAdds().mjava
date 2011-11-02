@@ -1,0 +1,58 @@
+  public void testSoftAndHardCommitMaxTimeRapidAdds() throws Exception {
+ 
+    final int softCommitWaitMillis = 500;
+    final int hardCommitWaitMillis = 1200;
+
+    CommitTracker hardTracker = updater.commitTracker;
+    CommitTracker softTracker = updater.softCommitTracker;
+    
+    softTracker.setTimeUpperBound(softCommitWaitMillis);
+    softTracker.setDocsUpperBound(-1);
+    hardTracker.setTimeUpperBound(hardCommitWaitMillis);
+    hardTracker.setDocsUpperBound(-1);
+    
+    // try to add 5 docs really fast
+    long fast5start = System.currentTimeMillis();
+    for( int i=0;i<5; i++ ) {
+      assertU(adoc("id", ""+500 + i, "subject", "five fast docs"));
+    }
+    long fast5end = System.currentTimeMillis() - 100; // minus a tad of slop
+    long fast5time = 1 + fast5end - fast5start;
+
+    // total time for all 5 adds determines the number of soft to expect
+    long expectedSoft = (long)Math.ceil(fast5time / softCommitWaitMillis);
+    long expectedHard = (long)Math.ceil(fast5time / hardCommitWaitMillis);
+    
+    // note: counting from 1 for multiplication
+    for (int i = 1; i <= expectedSoft; i++) {
+      // Wait for the soft commit with some fudge
+      Long soft = monitor.soft.poll(softCommitWaitMillis * 2, MILLISECONDS);
+      assertNotNull(i + ": soft wasn't fast enough", soft);
+      monitor.assertSaneOffers();
+
+      // have to assume none of the docs were added until
+      // very end of the add window
+      assertTrue(i + ": soft occured too fast: " + 
+                 fast5end + " + (" + softCommitWaitMillis + " * " + i +
+                 ") !<= " + soft,
+                 fast5end + (softCommitWaitMillis * i) <= soft);
+    }
+
+    // note: counting from 1 for multiplication
+    for (int i = 1; i <= expectedHard; i++) {
+      // wait for the hard commit, shouldn't need any fudge given 
+      // other actions already taken
+      Long hard = monitor.hard.poll(hardCommitWaitMillis, MILLISECONDS);
+      assertNotNull(i + ": hard wasn't fast enough", hard);
+      monitor.assertSaneOffers();
+      
+      // have to assume none of the docs were added until
+      // very end of the add window
+      assertTrue(i + ": soft occured too fast: " + 
+                 fast5end + " + (" + hardCommitWaitMillis + " * " + i +
+                 ") !<= " + hard,
+                 fast5end + (hardCommitWaitMillis * i) <= hard);
+    }
+ 
+  }
+

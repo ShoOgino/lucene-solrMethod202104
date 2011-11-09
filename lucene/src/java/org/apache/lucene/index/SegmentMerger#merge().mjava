@@ -4,24 +4,35 @@
    * @throws CorruptIndexException if the index is corrupt
    * @throws IOException if there is a low-level IO error
    */
-  final int merge() throws CorruptIndexException, IOException {
+  final MergeState merge() throws CorruptIndexException, IOException {
     // NOTE: it's important to add calls to
     // checkAbort.work(...) if you make any changes to this
     // method that will spend alot of time.  The frequency
     // of this check impacts how long
     // IndexWriter.close(false) takes to actually stop the
     // threads.
+    
+    final int numReaders = mergeState.readers.size();
+    // Remap docIDs
+    mergeState.docMaps = new int[numReaders][];
+    mergeState.docBase = new int[numReaders];
+    mergeState.dirPayloadProcessor = new PayloadProcessorProvider.DirPayloadProcessor[numReaders];
+    mergeState.currentPayloadProcessor = new PayloadProcessorProvider.PayloadProcessor[numReaders];
 
-    mergedDocs = mergeFields();
-    mergeTerms();
-    mergePerDoc();
+    mergeFieldInfos();
+    setMatchingSegmentReaders();
+    mergeState.mergedDocCount = mergeFields();
+
+    final SegmentWriteState segmentWriteState = new SegmentWriteState(mergeState.infoStream, directory, segment, mergeState.fieldInfos, mergeState.mergedDocCount, termIndexInterval, codec, null, context);
+    mergeTerms(segmentWriteState);
+    mergePerDoc(segmentWriteState);
     mergeNorms();
 
-    if (fieldInfos.hasVectors()) {
-      mergeVectors();
+    if (mergeState.fieldInfos.hasVectors()) {
+      mergeVectors(segmentWriteState);
     }
     // write FIS once merge is done. IDV might change types or drops fields
-    fieldInfos.write(directory, segment + "." + IndexFileNames.FIELD_INFOS_EXTENSION);
-    return mergedDocs;
+    mergeState.fieldInfos.write(directory, segment + "." + IndexFileNames.FIELD_INFOS_EXTENSION);
+    return mergeState;
   }
 

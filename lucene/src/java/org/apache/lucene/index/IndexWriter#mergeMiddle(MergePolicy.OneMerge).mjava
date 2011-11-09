@@ -14,11 +14,12 @@
     
     IOContext context = new IOContext(merge.getMergeInfo());
 
-    SegmentMerger merger = new SegmentMerger(directory, config.getTermIndexInterval(), mergedName, merge,
+    final MergeState.CheckAbort checkAbort = new MergeState.CheckAbort(merge, directory);
+    SegmentMerger merger = new SegmentMerger(infoStream, directory, config.getTermIndexInterval(), mergedName, checkAbort,
                                              payloadProcessorProvider, merge.info.getFieldInfos(), codec, context);
 
     if (infoStream != null) {
-      message("merging " + merge.segString(directory) + " mergeVectors=" + merge.info.getFieldInfos().hasVectors());
+      infoStream.message("IW", "merging " + merge.segString(directory) + " mergeVectors=" + merge.info.getFieldInfos().hasVectors());
     }
 
     merge.readers = new ArrayList<SegmentReader>();
@@ -52,22 +53,21 @@
       }
 
       if (infoStream != null) {
-        message("merge: total " + totDocCount + " docs");
+        infoStream.message("IW", "merge: total " + totDocCount + " docs");
       }
 
       merge.checkAborted(directory);
 
       // This is where all the work happens:
-      mergedDocCount = merge.info.docCount = merger.merge();
+      MergeState mergeState = merger.merge();
+      mergedDocCount = merge.info.docCount = mergeState.mergedDocCount;
 
       // Record which codec was used to write the segment
-      merge.info.setCodec(merger.getCodec());
+      merge.info.setCodec(codec);
 
       if (infoStream != null) {
-        message("merge codecs=" + merger.getCodec());
-        message("merge store matchedCount=" + merger.getMatchedSubReaderCount() + " vs " + merge.readers.size());
+        infoStream.message("IW", "merge codec=" + codec);
       }
-      anyNonBulkMerges |= merger.getAnyNonBulkMerges();
 
       assert mergedDocCount == totDocCount: "mergedDocCount=" + mergedDocCount + " vs " + totDocCount;
 
@@ -86,7 +86,7 @@
 
         try {
           if (infoStream != null) {
-            message("create compound file " + compoundFileName);
+            infoStream.message("IW", "create compound file " + compoundFileName);
           }
           merger.createCompoundFile(compoundFileName, merge.info, new IOContext(merge.getMergeInfo()));
           success = true;
@@ -105,7 +105,7 @@
         } finally {
           if (!success) {
             if (infoStream != null) {
-              message("hit exception creating compound file during merge");
+              infoStream.message("IW", "hit exception creating compound file during merge");
             }
 
             synchronized(this) {
@@ -126,7 +126,7 @@
 
           if (merge.isAborted()) {
             if (infoStream != null) {
-              message("abort merge after building CFS");
+              infoStream.message("IW", "abort merge after building CFS");
             }
             deleter.deleteFile(compoundFileName);
             return 0;
@@ -137,7 +137,7 @@
       }
 
       if (infoStream != null) {
-        message(String.format("merged segment size=%.3f MB vs estimate=%.3f MB", merge.info.sizeInBytes(true)/1024./1024., merge.estimatedMergeBytes/1024/1024.));
+        infoStream.message("IW", String.format("merged segment size=%.3f MB vs estimate=%.3f MB", merge.info.sizeInBytes(true)/1024./1024., merge.estimatedMergeBytes/1024/1024.));
       }
 
       final IndexReaderWarmer mergedSegmentWarmer = config.getMergedSegmentWarmer();

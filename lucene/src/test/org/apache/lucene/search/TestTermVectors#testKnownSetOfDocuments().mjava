@@ -44,16 +44,19 @@
     
     DocsEnum docs = null;
     while(fields.next() != null) {
-      TermsEnum terms = fields.terms();
-      while(terms.next() != null) {
-        String text = terms.term().utf8ToString();
-        docs = terms.docs(MultiFields.getLiveDocs(knownSearcher.reader), docs);
+      Terms terms = fields.terms();
+      assertNotNull(terms);
+      TermsEnum termsEnum = terms.iterator(null);
+
+      while (termsEnum.next() != null) {
+        String text = termsEnum.term().utf8ToString();
+        docs = termsEnum.docs(MultiFields.getLiveDocs(knownSearcher.reader), docs);
         
         while (docs.nextDoc() != DocsEnum.NO_MORE_DOCS) {
           int docId = docs.docID();
           int freq = docs.freq();
           //System.out.println("Doc Id: " + docId + " freq " + freq);
-          TermFreqVector vector = knownSearcher.reader.getTermFreqVector(docId, "field");
+          Terms vector = knownSearcher.reader.getTermVectors(docId).terms("field");
           //float tf = sim.tf(freq);
           //float idf = sim.idf(knownSearcher.docFreq(term), knownSearcher.maxDoc());
           //float qNorm = sim.queryNorm()
@@ -61,14 +64,12 @@
           //float lNorm = sim.lengthNorm("field", vector.getTerms().length);
           //float coord = sim.coord()
           //System.out.println("TF: " + tf + " IDF: " + idf + " LenNorm: " + lNorm);
-          assertTrue(vector != null);
-          BytesRef[] vTerms = vector.getTerms();
-          int [] freqs = vector.getTermFrequencies();
-          for (int i = 0; i < vTerms.length; i++)
-          {
-            if (text.equals(vTerms[i].utf8ToString()))
-            {
-              assertTrue(freqs[i] == freq);
+          assertNotNull(vector);
+          TermsEnum termsEnum2 = vector.iterator(null);
+
+          while(termsEnum2.next() != null) {
+            if (text.equals(termsEnum2.term().utf8ToString())) {
+              assertEquals(freq, termsEnum2.totalTermFreq());
             }
           }
         }
@@ -88,46 +89,20 @@
     assertTrue(hits[0].doc == 2);
     assertTrue(hits[1].doc == 3);
     assertTrue(hits[2].doc == 0);
-    TermFreqVector vector = knownSearcher.reader.getTermFreqVector(hits[1].doc, "field");
-    assertTrue(vector != null);
+    Terms vector = knownSearcher.reader.getTermVectors(hits[1].doc).terms("field");
+    assertNotNull(vector);
     //System.out.println("Vector: " + vector);
-    BytesRef[] terms = vector.getTerms();
-    int [] freqs = vector.getTermFrequencies();
-    assertTrue(terms != null && terms.length == 10);
-    for (int i = 0; i < terms.length; i++) {
-      String term = terms[i].utf8ToString();
+    assertEquals(10, vector.getUniqueTermCount());
+    TermsEnum termsEnum = vector.iterator(null);
+    while(termsEnum.next() != null) {
+      String term = termsEnum.term().utf8ToString();
       //System.out.println("Term: " + term);
-      int freq = freqs[i];
+      int freq = (int) termsEnum.totalTermFreq();
       assertTrue(test4.indexOf(term) != -1);
       Integer freqInt = test4Map.get(term);
       assertTrue(freqInt != null);
-      assertTrue(freqInt.intValue() == freq);        
+      assertEquals(freqInt.intValue(), freq);
     }
-    SortedTermVectorMapper mapper = new SortedTermVectorMapper(new TermVectorEntryFreqSortedComparator());
-    knownSearcher.reader.getTermFreqVector(hits[1].doc, mapper);
-    SortedSet<TermVectorEntry> vectorEntrySet = mapper.getTermVectorEntrySet();
-    assertTrue("mapper.getTermVectorEntrySet() Size: " + vectorEntrySet.size() + " is not: " + 10, vectorEntrySet.size() == 10);
-    TermVectorEntry last = null;
-    for (final TermVectorEntry tve : vectorEntrySet) {
-      if (tve != null && last != null)
-      {
-        assertTrue("terms are not properly sorted", last.getFrequency() >= tve.getFrequency());
-        Integer expectedFreq =  test4Map.get(tve.getTerm().utf8ToString());
-        //we expect double the expectedFreq, since there are two fields with the exact same text and we are collapsing all fields
-        assertTrue("Frequency is not correct:", tve.getFrequency() == 2*expectedFreq.intValue());
-      }
-      last = tve;
-      
-    }
-    
-    FieldSortedTermVectorMapper fieldMapper = new FieldSortedTermVectorMapper(new TermVectorEntryFreqSortedComparator());
-    knownSearcher.reader.getTermFreqVector(hits[1].doc, fieldMapper);
-    Map<String,SortedSet<TermVectorEntry>> map = fieldMapper.getFieldToTerms();
-    assertTrue("map Size: " + map.size() + " is not: " + 2, map.size() == 2);
-    vectorEntrySet = map.get("field");
-    assertTrue("vectorEntrySet is null and it shouldn't be", vectorEntrySet != null);
-    assertTrue("vectorEntrySet Size: " + vectorEntrySet.size() + " is not: " + 10, vectorEntrySet.size() == 10);
-    knownSearcher.close();
     reader.close();
     dir.close();
   } 

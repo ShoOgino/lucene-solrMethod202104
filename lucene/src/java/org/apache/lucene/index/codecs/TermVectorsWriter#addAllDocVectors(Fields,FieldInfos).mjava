@@ -1,0 +1,113 @@
+  /** Safe (but, slowish) default method to write every
+   *  vector field in the document.  This default
+   *  implementation requires that the vectors implement
+   *  both Fields.getUniqueFieldCount and
+   *  Terms.getUniqueTermCount. */
+  protected final void addAllDocVectors(Fields vectors, FieldInfos fieldInfos) throws IOException {
+    if (vectors == null) {
+      startDocument(0);
+      return;
+    }
+
+    final int numFields = vectors.getUniqueFieldCount();
+    if (numFields == -1) {
+      throw new IllegalStateException("vectors.getUniqueFieldCount() must be implemented (it returned -1)");
+    }
+    startDocument(numFields);
+    
+    final FieldsEnum fieldsEnum = vectors.iterator();
+    String fieldName;
+    String lastFieldName = null;
+
+    while((fieldName = fieldsEnum.next()) != null) {
+      
+      final FieldInfo fieldInfo = fieldInfos.fieldInfo(fieldName);
+
+      assert lastFieldName == null || fieldName.compareTo(lastFieldName) > 0: "lastFieldName=" + lastFieldName + " fieldName=" + fieldName;
+      lastFieldName = fieldName;
+
+      final Terms terms = fieldsEnum.terms();
+      if (terms == null) {
+        // FieldsEnum shouldn't lie...
+        continue;
+      }
+      final int numTerms = (int) terms.getUniqueTermCount();
+      if (numTerms == -1) {
+        throw new IllegalStateException("vector.getUniqueTermCount() must be implemented (it returned -1)");
+      }
+
+      final boolean positions;
+
+      OffsetAttribute offsetAtt;
+
+      final TermsEnum termsEnum = terms.iterator(null);
+
+      DocsAndPositionsEnum docsAndPositionsEnum = null;
+
+      if (termsEnum.next() != null) {
+        assert numTerms > 0;
+        docsAndPositionsEnum = termsEnum.docsAndPositions(null, null);
+        if (docsAndPositionsEnum != null) {
+          // has positions
+          positions = true;
+          if (docsAndPositionsEnum.attributes().hasAttribute(OffsetAttribute.class)) {
+            offsetAtt = docsAndPositionsEnum.attributes().getAttribute(OffsetAttribute.class);
+          } else {
+            offsetAtt = null;
+          }
+        } else {
+          positions = false;
+          offsetAtt = null;
+        }
+      } else {
+        // no terms in this field (hmm why is field present
+        // then...?)
+        assert numTerms == 0;
+        positions = false;
+        offsetAtt = null;
+      }
+      
+      startField(fieldInfo, numTerms, positions, offsetAtt != null);
+
+      int termCount = 1;
+
+      // NOTE: we already .next()'d the TermsEnum above, to
+      // peek @ first term to see if positions/offsets are
+      // present
+      while(true) {
+        final int freq = (int) termsEnum.totalTermFreq();
+        startTerm(termsEnum.term(), freq);
+
+        if (positions || offsetAtt != null) {
+          DocsAndPositionsEnum dp = termsEnum.docsAndPositions(null, docsAndPositionsEnum);
+          // TODO: add startOffset()/endOffset() to d&pEnum... this is insanity
+          if (dp != docsAndPositionsEnum) {
+            // producer didnt reuse, must re-pull attributes
+            if (offsetAtt != null) {
+              assert dp.attributes().hasAttribute(OffsetAttribute.class);
+              offsetAtt = dp.attributes().getAttribute(OffsetAttribute.class);
+            }
+          }
+          docsAndPositionsEnum = dp;
+          final int docID = docsAndPositionsEnum.nextDoc();
+          assert docID != DocsEnum.NO_MORE_DOCS;
+          assert docsAndPositionsEnum.freq() == freq;
+
+          for(int posUpto=0; posUpto<freq; posUpto++) {
+            final int pos = docsAndPositionsEnum.nextPosition();
+            final int startOffset = offsetAtt == null ? -1 : offsetAtt.startOffset();
+            final int endOffset = offsetAtt == null ? -1 : offsetAtt.endOffset();
+            
+            addPosition(pos, startOffset, endOffset);
+          }
+        }
+        
+        if (termsEnum.next() == null) {
+          assert termCount == numTerms;
+          break;
+        }
+        termCount++;
+      }
+    }
+  }
+

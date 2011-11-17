@@ -7,6 +7,14 @@
       
       PhraseQuery.PostingsAndFreq[] postingsFreqs = new PhraseQuery.PostingsAndFreq[termArrays.size()];
 
+      final Terms fieldTerms = reader.terms(field);
+      if (fieldTerms == null) {
+        return null;
+      }
+
+      // Reuse single TermsEnum below:
+      final TermsEnum termsEnum = fieldTerms.iterator(null);
+
       for (int pos=0; pos<postingsFreqs.length; pos++) {
         Term[] terms = termArrays.get(pos);
 
@@ -14,31 +22,43 @@
         int docFreq;
 
         if (terms.length > 1) {
-          postingsEnum = new UnionDocsAndPositionsEnum(liveDocs, reader, terms);
+          postingsEnum = new UnionDocsAndPositionsEnum(liveDocs, context, terms, termContexts, termsEnum);
 
           // coarse -- this overcounts since a given doc can
-          // have more than one terms:
+          // have more than one term:
           docFreq = 0;
           for(int termIdx=0;termIdx<terms.length;termIdx++) {
-            docFreq += reader.docFreq(terms[termIdx]);
+            final Term term = terms[termIdx];
+            TermState termState = termContexts.get(term).get(context.ord);
+            if (termState == null) {
+              // Term not in reader
+              continue;
+            }
+            termsEnum.seekExact(term.bytes(), termState);
+            docFreq += termsEnum.docFreq();
+          }
+
+          if (docFreq == 0) {
+            // None of the terms are in this reader
+            return null;
           }
         } else {
           final Term term = terms[0];
-          postingsEnum = reader.termPositionsEnum(liveDocs,
-                                                  term.field(),
-                                                  term.bytes());
+          TermState termState = termContexts.get(term).get(context.ord);
+          if (termState == null) {
+            // Term not in reader
+            return null;
+          }
+          termsEnum.seekExact(term.bytes(), termState);
+          postingsEnum = termsEnum.docsAndPositions(liveDocs, null);
 
           if (postingsEnum == null) {
-            if (reader.termDocsEnum(liveDocs, term.field(), term.bytes()) != null) {
-              // term does exist, but has no positions
-              throw new IllegalStateException("field \"" + term.field() + "\" was indexed without position data; cannot run PhraseQuery (term=" + term.text() + ")");
-            } else {
-              // term does not exist
-              return null;
-            }
+            // term does exist, but has no positions
+            assert termsEnum.docs(liveDocs, null) != null: "termstate found but no term exists in reader";
+            throw new IllegalStateException("field \"" + term.field() + "\" was indexed without position data; cannot run PhraseQuery (term=" + term.text() + ")");
           }
 
-          docFreq = reader.docFreq(term.field(), term.bytes());
+          docFreq = termsEnum.docFreq();
         }
 
         postingsFreqs[pos] = new PhraseQuery.PostingsAndFreq(postingsEnum, docFreq, positions.get(pos).intValue(), terms[0]);

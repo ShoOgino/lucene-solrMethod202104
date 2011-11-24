@@ -14,7 +14,13 @@
 
       final List<BytesRef> groups = new ArrayList<BytesRef>();
       for (int i = 0; i < numGroups; i++) {
-        groups.add(new BytesRef(_TestUtil.randomRealisticUnicodeString(random)));
+        String randomValue;
+        do {
+          // B/c of DV based impl we can't see the difference between an empty string and a null value.
+          // For that reason we don't generate empty string groups.
+          randomValue = _TestUtil.randomRealisticUnicodeString(random);
+        } while ("".equals(randomValue));
+        groups.add(new BytesRef(randomValue));
       }
       final String[] contentStrings = new String[_TestUtil.nextInt(random, 2, 20)];
       if (VERBOSE) {
@@ -39,11 +45,19 @@
           dir,
           newIndexWriterConfig(TEST_VERSION_CURRENT,
               new MockAnalyzer(random)));
+      boolean preFlex = "Lucene3x".equals(w.w.getConfig().getCodec().getName());
+      boolean canUseIDV = !preFlex;
+      ValueType valueType = vts[random.nextInt(vts.length)];
 
       Document doc = new Document();
       Document docNoGroup = new Document();
       Field group = newField("group", "", StringField.TYPE_UNSTORED);
       doc.add(group);
+      IndexDocValuesField valuesField = null;
+      if (canUseIDV) {
+        valuesField = new IndexDocValuesField("group");
+        doc.add(valuesField);
+      }
       Field sort1 = newField("sort1", "", StringField.TYPE_UNSTORED);
       doc.add(sort1);
       docNoGroup.add(sort1);
@@ -86,6 +100,9 @@
         groupDocs[i] = groupDoc;
         if (groupDoc.group != null) {
           group.setValue(groupDoc.group.utf8ToString());
+          if (canUseIDV) {
+            valuesField.setBytes(new BytesRef(groupDoc.group.utf8ToString()), valueType);
+          }
         }
         sort1.setValue(groupDoc.sort1.utf8ToString());
         sort2.setValue(groupDoc.sort2.utf8ToString());
@@ -112,6 +129,11 @@
 
       try {
         final IndexSearcher s = newSearcher(r);
+        if (SlowMultiReaderWrapper.class.isAssignableFrom(s.getIndexReader().getClass())) {
+          canUseIDV = false;
+        } else {
+          canUseIDV = !preFlex;
+        }
 
         for (int contentID = 0; contentID < 3; contentID++) {
           final ScoreDoc[] hits = s.search(new TermQuery(new Term("content", "real" + contentID)), numDocs).scoreDocs;
@@ -137,7 +159,7 @@
           final String searchTerm = "real" + random.nextInt(3);
           boolean sortByScoreOnly = random.nextBoolean();
           Sort sortWithinGroup = getRandomSort(sortByScoreOnly);
-          AbstractAllGroupHeadsCollector allGroupHeadsCollector = createRandomCollector("group", sortWithinGroup);
+          AbstractAllGroupHeadsCollector allGroupHeadsCollector = createRandomCollector("group", sortWithinGroup, canUseIDV, valueType);
           s.search(new TermQuery(new Term("content", searchTerm)), allGroupHeadsCollector);
           int[] expectedGroupHeads = createExpectedGroupHeads(searchTerm, groupDocs, sortWithinGroup, sortByScoreOnly, fieldIdToDocID);
           int[] actualGroupHeads = allGroupHeadsCollector.retrieveGroupHeads();

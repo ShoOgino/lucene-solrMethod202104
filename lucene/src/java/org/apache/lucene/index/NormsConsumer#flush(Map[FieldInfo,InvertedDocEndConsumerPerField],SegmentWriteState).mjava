@@ -6,27 +6,23 @@
       return;
     }
 
-    final String normsFileName = IndexFileNames.segmentFileName(state.segmentName, "", IndexFileNames.NORMS_EXTENSION);
-    IndexOutput normsOut = state.directory.createOutput(normsFileName, state.context);
+    NormsWriter normsOut = null;
     boolean success = false;
     try {
-      normsOut.writeBytes(SegmentNorms.NORMS_HEADER, 0, SegmentNorms.NORMS_HEADER.length);
-
-      int normCount = 0;
+      normsOut = normsFormat.normsWriter(state);
 
       for (FieldInfo fi : state.fieldInfos) {
-        final NormsWriterPerField toWrite = (NormsWriterPerField) fieldsToFlush.get(fi);
+        final NormsConsumerPerField toWrite = (NormsConsumerPerField) fieldsToFlush.get(fi);
         int upto = 0;
-        if (toWrite != null && toWrite.upto > 0) {
-          normCount++;
-
+        if (!fi.omitNorms && toWrite != null && toWrite.upto > 0) {
+          normsOut.startField(fi);
           int docID = 0;
           for (; docID < state.numDocs; docID++) {
             if (upto < toWrite.upto && toWrite.docIDs[upto] == docID) {
-              normsOut.writeByte(toWrite.norms[upto]);
+              normsOut.writeNorm(toWrite.norms[upto]);
               upto++;
             } else {
-              normsOut.writeByte((byte) 0);
+              normsOut.writeNorm((byte) 0);
             }
           }
 
@@ -35,14 +31,13 @@
 
           toWrite.reset();
         } else if (fi.isIndexed && !fi.omitNorms) {
-          normCount++;
           // Fill entire field with default norm:
+          normsOut.startField(fi);
           for(;upto<state.numDocs;upto++)
-            normsOut.writeByte((byte) 0);
+            normsOut.writeNorm((byte) 0);
         }
-
-        assert 4+normCount*state.numDocs == normsOut.getFilePointer() : ".nrm file size mismatch: expected=" + (4+normCount*state.numDocs) + " actual=" + normsOut.getFilePointer();
       }
+      normsOut.finish(state.numDocs);
       success = true;
     } finally {
       if (success) {

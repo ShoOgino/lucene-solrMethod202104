@@ -1,0 +1,52 @@
+  /** Produce _X.nrm if any document had a field with norms
+   *  not disabled */
+  @Override
+  public void flush(Map<FieldInfo,InvertedDocEndConsumerPerField> fieldsToFlush, SegmentWriteState state) throws IOException {
+    if (!state.fieldInfos.hasNorms()) {
+      return;
+    }
+
+    NormsWriter normsOut = null;
+    boolean success = false;
+    try {
+      normsOut = normsFormat.normsWriter(state);
+
+      for (FieldInfo fi : state.fieldInfos) {
+        final NormsConsumerPerField toWrite = (NormsConsumerPerField) fieldsToFlush.get(fi);
+        int upto = 0;
+        // we must check the final value of omitNorms for the fieldinfo, it could have 
+        // changed for this field since the first time we added it.
+        if (!fi.omitNorms && toWrite != null && toWrite.upto > 0) {
+          normsOut.startField(fi);
+          int docID = 0;
+          for (; docID < state.numDocs; docID++) {
+            if (upto < toWrite.upto && toWrite.docIDs[upto] == docID) {
+              normsOut.writeNorm(toWrite.norms[upto]);
+              upto++;
+            } else {
+              normsOut.writeNorm((byte) 0);
+            }
+          }
+
+          // we should have consumed every norm
+          assert upto == toWrite.upto;
+
+          toWrite.reset();
+        } else if (fi.isIndexed && !fi.omitNorms) {
+          // Fill entire field with default norm:
+          normsOut.startField(fi);
+          for(;upto<state.numDocs;upto++)
+            normsOut.writeNorm((byte) 0);
+        }
+      }
+      normsOut.finish(state.numDocs);
+      success = true;
+    } finally {
+      if (success) {
+        IOUtils.close(normsOut);
+      } else {
+        IOUtils.closeWhileHandlingException(normsOut);
+      }
+    }
+  }
+

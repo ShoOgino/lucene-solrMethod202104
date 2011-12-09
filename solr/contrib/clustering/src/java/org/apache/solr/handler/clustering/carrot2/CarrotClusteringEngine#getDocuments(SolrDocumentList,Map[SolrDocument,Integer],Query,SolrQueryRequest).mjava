@@ -10,6 +10,22 @@
     String urlField = solrParams.get(CarrotParams.URL_FIELD_NAME, "url");
     String titleFieldSpec = solrParams.get(CarrotParams.TITLE_FIELD_NAME, "title");
     String snippetFieldSpec = solrParams.get(CarrotParams.SNIPPET_FIELD_NAME, titleFieldSpec);
+    String languageField = solrParams.get(CarrotParams.LANGUAGE_FIELD_NAME, null);
+
+    // Parse language code map string into a map
+    Map<String, String> languageCodeMap = Maps.newHashMap();
+    if (StringUtils.isNotBlank(languageField)) {
+      for (String pair : solrParams.get(CarrotParams.LANGUAGE_CODE_MAP, "")
+          .split("[, ]")) {
+        final String[] split = pair.split(":");
+        if (split.length == 2 && StringUtils.isNotBlank(split[0]) && StringUtils.isNotBlank(split[1])) {
+          languageCodeMap.put(split[0], split[1]);
+        } else {
+          log.warn("Unsupported format for " + CarrotParams.LANGUAGE_CODE_MAP
+              + ": '" + pair + "'. Skipping this mapping.");
+        }
+      }
+    }
     
     // Get the documents
     boolean produceSummary = solrParams.getBool(CarrotParams.PRODUCE_SUMMARY, false);
@@ -82,9 +98,42 @@
         snippet = getConcatenated(sdoc, snippetFieldSpec);
       }
       
+      // Create a Carrot2 document
       Document carrotDocument = new Document(getConcatenated(sdoc, titleFieldSpec),
               snippet, (String)sdoc.getFieldValue(urlField));
+      
+      // Store Solr id of the document, we need it to map document instances 
+      // found in clusters back to identifiers.
       carrotDocument.setField(SOLR_DOCUMENT_ID, sdoc.getFieldValue(idFieldName));
+      
+      // Set language
+      if (StringUtils.isNotBlank(languageField)) {
+        Collection<Object> languages = sdoc.getFieldValues(languageField);
+        if (languages != null) {
+          
+          // Use the first Carrot2-supported language
+          for (Object l : languages) {
+            String lang = ObjectUtils.toString(l, "");
+            
+            if (languageCodeMap.containsKey(lang)) {
+              lang = languageCodeMap.get(lang);
+            }
+            
+            // Language detection Library for Java uses dashes to separate
+            // language variants, such as 'zh-cn', but Carrot2 uses underscores.
+            if (lang.indexOf('-') > 0) {
+              lang = lang.replace('-', '_');
+            }
+            
+            // If the language is supported by Carrot2, we'll get a non-null value
+            final LanguageCode carrot2Language = LanguageCode.forISOCode(lang);
+            if (carrot2Language != null) {
+              carrotDocument.setLanguage(carrot2Language);
+              break;
+            }
+          }
+        }
+      }
       result.add(carrotDocument);
     }
 

@@ -8,8 +8,8 @@
     SolrCore core = sreq.getCore();
 
     String urlField = solrParams.get(CarrotParams.URL_FIELD_NAME, "url");
-    String titleField = solrParams.get(CarrotParams.TITLE_FIELD_NAME, "title");
-    String snippetField = solrParams.get(CarrotParams.SNIPPET_FIELD_NAME, titleField);
+    String titleFieldSpec = solrParams.get(CarrotParams.TITLE_FIELD_NAME, "title");
+    String snippetFieldSpec = solrParams.get(CarrotParams.SNIPPET_FIELD_NAME, titleFieldSpec);
     
     // Get the documents
     boolean produceSummary = solrParams.getBool(CarrotParams.PRODUCE_SUMMARY, false);
@@ -20,7 +20,7 @@
       highlighter = HighlightComponent.getHighlighter(core);
       if (highlighter != null){
         Map<String, Object> args = Maps.newHashMap();
-        snippetFieldAry = new String[]{snippetField};
+        snippetFieldAry = snippetFieldSpec.split("[, ]");
         args.put(HighlightParams.FIELDS, snippetFieldAry);
         args.put(HighlightParams.HIGHLIGHT, "true");
         args.put(HighlightParams.SIMPLE_PRE, ""); //we don't care about actually highlighting the area
@@ -48,7 +48,8 @@
 
     while (docsIter.hasNext()) {
       SolrDocument sdoc = docsIter.next();
-      String snippet = getValue(sdoc, snippetField);
+      String snippet = null;
+      
       // TODO: docIds will be null when running distributed search.
       // See comment in ClusteringComponent#finishStage().
       if (produceSummary && docIds != null) {
@@ -56,24 +57,32 @@
         DocList docAsList = new DocSlice(0, 1, docsHolder, scores, 1, 1.0f);
         NamedList<Object> highlights = highlighter.doHighlighting(docAsList, theQuery, req, snippetFieldAry);
         if (highlights != null && highlights.size() == 1) {//should only be one value given our setup
-          //should only be one document with one field
+          //should only be one document
           @SuppressWarnings("unchecked")
           NamedList<String []> tmp = (NamedList<String[]>) highlights.getVal(0);
-          String [] highlt = tmp.get(snippetField);
           
-          // Join fragments with a period, so that Carrot2 does not create
-          // cross-fragment phrases, such phrases rarely make sense.
-          if (highlt != null && highlt.length > 0) {
-            final StringBuilder sb = new StringBuilder(highlt[0]);
-            for (int i = 1; i < highlt.length; i++) {
-              sb.append(" . ");
-              sb.append(highlt[i]);
+          final StringBuilder sb = new StringBuilder();
+          for (int j = 0; j < snippetFieldAry.length; j++) {
+            // Join fragments with a period, so that Carrot2 does not create
+            // cross-fragment phrases, such phrases rarely make sense.
+            String [] highlt = tmp.get(snippetFieldAry[j]);
+            if (highlt != null && highlt.length > 0) {
+              for (int i = 0; i < highlt.length; i++) {
+                sb.append(highlt[i]);
+                sb.append(" . ");
+              }
             }
-            snippet = sb.toString();
           }
+          snippet = sb.toString();
         }
       }
-      Document carrotDocument = new Document(getValue(sdoc, titleField),
+      
+      // If summaries not enabled or summary generation failed, use full content.
+      if (snippet == null) {
+        snippet = getConcatenated(sdoc, snippetFieldSpec);
+      }
+      
+      Document carrotDocument = new Document(getConcatenated(sdoc, titleFieldSpec),
               snippet, (String)sdoc.getFieldValue(urlField));
       carrotDocument.setField(SOLR_DOCUMENT_ID, sdoc.getFieldValue(idFieldName));
       result.add(carrotDocument);

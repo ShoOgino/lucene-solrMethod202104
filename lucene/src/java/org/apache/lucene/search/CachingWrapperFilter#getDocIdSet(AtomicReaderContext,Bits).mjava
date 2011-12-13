@@ -3,17 +3,31 @@
     final IndexReader reader = context.reader;
     final Object coreKey = reader.getCoreCacheKey();
 
-    DocIdSet docIdSet = cache.get(reader, coreKey);
+    // Only cache if incoming acceptDocs is == live docs;
+    // if Lucene passes in more interesting acceptDocs in
+    // the future we don't want to over-cache:
+    final boolean doCacheSubAcceptDocs = recacheDeletes && acceptDocs == reader.getLiveDocs();
+
+    final Bits subAcceptDocs;
+    if (doCacheSubAcceptDocs) {
+      subAcceptDocs = acceptDocs;
+    } else {
+      subAcceptDocs = null;
+    }
+
+    DocIdSet docIdSet = cache.get(reader, coreKey, subAcceptDocs);
     if (docIdSet != null) {
       hitCount++;
     } else {
       missCount++;
-      // cache miss: we use no acceptDocs here
-      // (this saves time on building DocIdSet, the acceptDocs will be applied on the cached set)
-      docIdSet = docIdSetToCache(filter.getDocIdSet(context, null/**!!!*/), reader);
-      cache.put(coreKey, docIdSet);
+      docIdSet = docIdSetToCache(filter.getDocIdSet(context, subAcceptDocs), reader);
+      cache.put(coreKey, subAcceptDocs, docIdSet);
     }
-    
-    return BitsFilteredDocIdSet.wrap(docIdSet, acceptDocs);
+
+    if (doCacheSubAcceptDocs) {
+      return docIdSet;
+    } else {
+      return BitsFilteredDocIdSet.wrap(docIdSet, acceptDocs);
+    }
   }
 

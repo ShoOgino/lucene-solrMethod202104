@@ -1,0 +1,33 @@
+      @Override
+      public TopDocs searchAfter(ScoreDoc after, Query query, int numHits) throws IOException {
+        final TopDocs[] shardHits = new TopDocs[nodeVersions.length];
+        ScoreDoc shardAfter = new ScoreDoc(after.doc, after.score);
+        for(int nodeID=0;nodeID<nodeVersions.length;nodeID++) {
+          if (nodeID < after.shardIndex) {
+            // If score is tied then no docs in this shard
+            // should be collected:
+            shardAfter.doc = Integer.MAX_VALUE;
+          } else if (nodeID == after.shardIndex) {
+            // If score is tied then we break according to
+            // docID (like normal):  
+            shardAfter.doc = after.doc;
+          } else {
+            // If score is tied then all docs in this shard
+            // should be collected, because they come after
+            // the previous bottom:
+            shardAfter.doc = -1;
+          }
+          if (nodeID == myNodeID) {
+            // My node; run using local shard searcher we
+            // already aquired:
+            shardHits[nodeID] = localSearchAfter(shardAfter, query, numHits);
+          } else {
+            shardHits[nodeID] = searchNode(nodeID, nodeVersions, query, null, numHits, shardAfter);
+          }
+          //System.out.println("  node=" + nodeID + " totHits=" + shardHits[nodeID].totalHits);
+        }
+
+        // Merge:
+        return TopDocs.merge(null, numHits, shardHits);
+      }
+

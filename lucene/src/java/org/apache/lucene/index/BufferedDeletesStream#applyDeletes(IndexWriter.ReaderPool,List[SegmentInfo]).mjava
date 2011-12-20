@@ -63,22 +63,25 @@
 
         // Lock order: IW -> BD -> RP
         assert readerPool.infoIsLive(info);
-        final SegmentReader reader = readerPool.get(info, false, IOContext.READ);
+        final IndexWriter.ReadersAndLiveDocs rld = readerPool.get(info, true);
+        final SegmentReader reader = rld.getReader(IOContext.READ);
         int delCount = 0;
         final boolean segAllDeletes;
         try {
           if (coalescedDeletes != null) {
             //System.out.println("    del coalesced");
-            delCount += applyTermDeletes(coalescedDeletes.termsIterable(), reader);
-            delCount += applyQueryDeletes(coalescedDeletes.queriesIterable(), reader);
+            delCount += applyTermDeletes(coalescedDeletes.termsIterable(), rld, reader);
+            delCount += applyQueryDeletes(coalescedDeletes.queriesIterable(), rld, reader);
           }
           //System.out.println("    del exact");
           // Don't delete by Term here; DocumentsWriterPerThread
           // already did that on flush:
-          delCount += applyQueryDeletes(packet.queriesIterable(), reader);
-          segAllDeletes = reader.numDocs() == 0;
+          delCount += applyQueryDeletes(packet.queriesIterable(), rld, reader);
+          final int fullDelCount = rld.info.getDelCount() + rld.pendingDeleteCount;
+          assert fullDelCount <= rld.info.docCount;
+          segAllDeletes = fullDelCount == rld.info.docCount;
         } finally {
-          readerPool.release(reader, IOContext.Context.READ);
+          readerPool.release(reader, false);
         }
         anyNewDeletes |= delCount > 0;
 
@@ -90,7 +93,7 @@
         }
 
         if (infoStream.isEnabled("BD")) {
-          infoStream.message("BD", "seg=" + info + " segGen=" + segGen + " segDeletes=[" + packet + "]; coalesced deletes=[" + (coalescedDeletes == null ? "null" : coalescedDeletes) + "] delCount=" + delCount + (segAllDeletes ? " 100% deleted" : ""));
+          infoStream.message("BD", "seg=" + info + " segGen=" + segGen + " segDeletes=[" + packet + "]; coalesced deletes=[" + (coalescedDeletes == null ? "null" : coalescedDeletes) + "] newDelCount=" + delCount + (segAllDeletes ? " 100% deleted" : ""));
         }
 
         if (coalescedDeletes == null) {
@@ -112,15 +115,18 @@
         if (coalescedDeletes != null) {
           // Lock order: IW -> BD -> RP
           assert readerPool.infoIsLive(info);
-          SegmentReader reader = readerPool.get(info, false, IOContext.READ);
+          final IndexWriter.ReadersAndLiveDocs rld = readerPool.get(info, true);
+          final SegmentReader reader = rld.getReader(IOContext.READ);
           int delCount = 0;
           final boolean segAllDeletes;
           try {
-            delCount += applyTermDeletes(coalescedDeletes.termsIterable(), reader);
-            delCount += applyQueryDeletes(coalescedDeletes.queriesIterable(), reader);
-            segAllDeletes = reader.numDocs() == 0;
+            delCount += applyTermDeletes(coalescedDeletes.termsIterable(), rld, reader);
+            delCount += applyQueryDeletes(coalescedDeletes.queriesIterable(), rld, reader);
+            final int fullDelCount = rld.info.getDelCount() + rld.pendingDeleteCount;
+            assert fullDelCount <= rld.info.docCount;
+            segAllDeletes = fullDelCount == rld.info.docCount;
           } finally {
-            readerPool.release(reader, IOContext.Context.READ);
+            readerPool.release(reader, false);
           }
           anyNewDeletes |= delCount > 0;
 
@@ -132,7 +138,7 @@
           }
 
           if (infoStream.isEnabled("BD")) {
-            infoStream.message("BD", "seg=" + info + " segGen=" + segGen + " coalesced deletes=[" + (coalescedDeletes == null ? "null" : coalescedDeletes) + "] delCount=" + delCount + (segAllDeletes ? " 100% deleted" : ""));
+            infoStream.message("BD", "seg=" + info + " segGen=" + segGen + " coalesced deletes=[" + (coalescedDeletes == null ? "null" : coalescedDeletes) + "] newDelCount=" + delCount + (segAllDeletes ? " 100% deleted" : ""));
           }
         }
         info.setBufferedDeletesGen(nextGen);

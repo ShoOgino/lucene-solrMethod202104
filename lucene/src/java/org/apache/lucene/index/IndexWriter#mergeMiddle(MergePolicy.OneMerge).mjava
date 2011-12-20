@@ -19,7 +19,7 @@
                                              payloadProcessorProvider, merge.info.getFieldInfos(), codec, context);
 
     if (infoStream.isEnabled("IW")) {
-      infoStream.message("IW", "merging " + merge.segString(directory) + " mergeVectors=" + merge.info.getFieldInfos().hasVectors());
+      infoStream.message("IW", "merging " + segString(merge.segments) + " mergeVectors=" + merge.info.getFieldInfos().hasVectors());
     }
 
     merge.readers = new ArrayList<SegmentReader>();
@@ -37,10 +37,28 @@
 
         // Hold onto the "live" reader; we will use this to
         // commit merged deletes
-        final SegmentReader reader = readerPool.get(info, context);
+        final ReadersAndLiveDocs rld = readerPool.get(info, true);
+        final SegmentReader reader = rld.getMergeReader(context);
+        assert reader != null;
 
         // Carefully pull the most recent live docs:
-        final BitVector liveDocs = getLiveDocsClone(info, reader);
+        final BitVector liveDocs;
+        synchronized(this) {
+          // Must sync to ensure BufferedDeletesStream
+          // cannot change liveDocs/pendingDeleteCount while
+          // we pull a copy:
+          liveDocs = rld.getReadOnlyLiveDocs();
+
+          if (infoStream.isEnabled("IW")) {
+            if (rld.pendingDeleteCount != 0) {
+              infoStream.message("IW", "seg=" + info + " delCount=" + info.getDelCount() + " pendingDelCount=" + rld.pendingDeleteCount);
+            } else if (info.getDelCount() != 0) {
+              infoStream.message("IW", "seg=" + info + " delCount=" + info.getDelCount());
+            } else {
+              infoStream.message("IW", "seg=" + info + " no deletes");
+            }
+          }
+        }
 
         merge.readerLiveDocs.add(liveDocs);
         merge.readers.add(reader);
@@ -48,6 +66,8 @@
         if (liveDocs == null || liveDocs.count() > 0) {
           merger.add(reader, liveDocs);
           totDocCount += liveDocs == null ? reader.maxDoc() : liveDocs.count();
+        } else {
+          //System.out.println("  skip seg: fully deleted");
         }
         segUpto++;
       }
@@ -142,41 +162,23 @@
 
       final IndexReaderWarmer mergedSegmentWarmer = config.getMergedSegmentWarmer();
 
-      // TODO: in the non-realtime case, we may want to only
-      // keep deletes (it's costly to open entire reader
-      // when we just need deletes)
-
-      final boolean loadDocStores;
-      if (mergedSegmentWarmer != null) {
-        // Load terms index & doc stores so the segment
-        // warmer can run searches, load documents/term
-        // vectors
-        loadDocStores = true;
-      } else {
-        loadDocStores = false;
+      if (poolReaders && mergedSegmentWarmer != null) {
+        final ReadersAndLiveDocs rld = readerPool.get(merge.info, true);
+        final SegmentReader sr = rld.getReader(IOContext.READ);
+        try {
+          mergedSegmentWarmer.warm(sr);
+        } finally {
+          synchronized(this) {
+            readerPool.release(sr, false);
+          }
+        }
       }
 
       // Force READ context because we merge deletes onto
       // this reader:
-      final SegmentReader mergedReader = readerPool.get(merge.info, loadDocStores, new IOContext(IOContext.Context.READ));
-      try {
-        if (poolReaders && mergedSegmentWarmer != null) {
-          mergedSegmentWarmer.warm(mergedReader);
-        }
-
-        if (!commitMerge(merge, mergedReader)) {
-          // commitMerge will return false if this merge was aborted
-          return 0;
-        }
-      } finally {
-        synchronized(this) {
-          if (readerPool.release(mergedReader, IOContext.Context.READ)) {
-            // Must checkpoint after releasing the
-            // mergedReader since it may have written a new
-            // deletes file:
-            checkpoint();
-          }
-        }
+      if (!commitMerge(merge)) {
+        // commitMerge will return false if this merge was aborted
+        return 0;
       }
 
       success = true;

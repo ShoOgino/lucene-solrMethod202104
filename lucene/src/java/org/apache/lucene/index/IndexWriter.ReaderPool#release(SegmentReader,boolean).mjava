@@ -1,20 +1,41 @@
     /**
      * Release the segment reader (i.e. decRef it and close if there
-     * are no more references.
-     * @return true if this release altered the index (eg
-     * the SegmentReader had pending changes to del docs and
-     * was closed).  Caller must call checkpoint() if so.
+     * are no more references).  If drop is true then we
+     * remove this entry from the pool.
      * @param sr
      * @throws IOException
      */
-    public synchronized boolean release(SegmentReader sr, boolean drop) throws IOException {
-      final SegmentCacheKey cacheKey = new SegmentCacheKey(sr.getSegmentInfo(), IOContext.Context.READ);
-      final SegmentReader other = readerMap.get(cacheKey);
-      if (sr == other) {
-        return release(sr, drop, IOContext.Context.READ);
-      } else {
-        assert sr == readerMap.get(new SegmentCacheKey(sr.getSegmentInfo(), IOContext.Context.MERGE));
-        return release(sr, drop, IOContext.Context.MERGE);
+    public synchronized void release(SegmentReader sr, boolean drop) throws IOException {
+      // Drop caller's ref; for an external reader (not
+      // pooled), this decRef will close it
+      //System.out.println("pool.release seg=" + sr.getSegmentInfo() + " rc=" + sr.getRefCount() + " drop=" + drop);
+      sr.decRef();
+
+      final ReadersAndLiveDocs rld = readerMap.get(sr.getSegmentInfo());
+
+      if (rld != null && (drop || (!poolReaders && !rld.anyOutsideRefs(sr)))) {
+
+        // Discard (don't save) changes when we are dropping
+        // the reader; this is used only on the sub-readers
+        // after a successful merge.  If deletes had
+        // accumulated on those sub-readers while the merge
+        // is running, by now we have carried forward those
+        // deletes onto the newly merged segment, so we can
+        // discard them on the sub-readers:
+
+        if (!drop) {
+          if (rld.writeLiveDocs(directory)) {
+            assert infoIsLive(sr.getSegmentInfo());
+            // Must checkpoint w/ deleter, because we just
+            // created created new _X_N.del file.
+            deleter.checkpoint(segmentInfos, false);
+          }
+        }
+
+        if (!rld.removeReader(sr, drop)) {
+          //System.out.println("DROP seg=" + rld.info + " " + readerMap.size() + " in pool");
+          readerMap.remove(sr.getSegmentInfo());
+        }
       }
     }
 

@@ -1,14 +1,24 @@
   @Override
   public void handleRequestBody(SolrQueryRequest req, SolrQueryResponse rsp) throws Exception
-  {    
+  {
     IndexSchema schema = req.getSchema();
     SolrIndexSearcher searcher = req.getSearcher();
     IndexReader reader = searcher.getIndexReader();
     SolrParams params = req.getParams();
     int numTerms = params.getInt( NUMTERMS, DEFAULT_COUNT );
-        
+
     // Always show the core lucene info
-    rsp.add("index", getIndexInfo(reader, numTerms>0 ) );
+    Map<String, TopTermQueue> topTerms = new TreeMap<String, TopTermQueue>();
+
+    // If no doc is given, show all fields and top terms
+    Set<String> fields = null;
+    if( params.get( CommonParams.FL ) != null ) {
+      fields = new TreeSet<String>(Arrays.asList(params.getParams( CommonParams.FL )));
+    }
+    if ( "schema".equals( params.get( "show" ))) {
+      numTerms = 0; // Abort any statistics gathering.
+    }
+    rsp.add("index", getIndexInfo(reader, numTerms, topTerms, fields ));
 
     Integer docId = params.getInt( DOC_ID );
     if( docId == null && params.get( ID ) != null ) {
@@ -21,7 +31,7 @@
         throw new SolrException( SolrException.ErrorCode.NOT_FOUND, "Can't find document: "+params.get( ID ) );
       }
     }
-        
+
     // Read the document from the index
     if( docId != null ) {
       Document doc = null;
@@ -32,9 +42,9 @@
       if( doc == null ) {
         throw new SolrException( SolrException.ErrorCode.NOT_FOUND, "Can't find document: "+docId );
       }
-      
+
       SimpleOrderedMap<Object> info = getDocumentFieldsInfo( doc, docId, reader, schema );
-      
+
       SimpleOrderedMap<Object> docinfo = new SimpleOrderedMap<Object>();
       docinfo.add( "docId", docId );
       docinfo.add( "lucene", info );
@@ -45,21 +55,13 @@
       rsp.add( "schema", getSchemaInfo( req.getSchema() ) );
     }
     else {
-      // If no doc is given, show all fields and top terms
-      Set<String> fields = null;
-      if( params.get( CommonParams.FL ) != null ) {
-        fields = new HashSet<String>();
-        for( String f : params.getParams( CommonParams.FL ) ) {
-          fields.add( f );
-        }
-      }
-      rsp.add( "fields", getIndexedFieldsInfo( searcher, fields, numTerms ) ) ;
+      rsp.add( "fields", getIndexedFieldsInfo( searcher, fields, numTerms, topTerms) ) ;
     }
 
     // Add some generally helpful information
     NamedList<Object> info = new SimpleOrderedMap<Object>();
     info.add( "key", getFieldFlagsKey() );
-    info.add( "NOTE", "Document Frequency (df) is not updated when a document is marked for deletion.  df values include deleted documents." ); 
+    info.add( "NOTE", "Document Frequency (df) is not updated when a document is marked for deletion.  df values include deleted documents." );
     rsp.add( "info", info );
     rsp.setHttpCaching(false);
   }

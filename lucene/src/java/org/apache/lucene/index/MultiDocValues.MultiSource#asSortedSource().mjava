@@ -1,0 +1,38 @@
+    @Override
+    public SortedSource asSortedSource() {
+      try {
+        if (type == Type.BYTES_FIXED_SORTED || type == Type.BYTES_VAR_SORTED) {
+          DocValues[] values = new DocValues[slices.length];
+          Comparator<BytesRef> comp = null;
+          for (int i = 0; i < values.length; i++) {
+            values[i] = slices[i].docValues;
+            if (!(values[i] instanceof EmptyDocValues)) {
+              Comparator<BytesRef> comparator = values[i].getDirectSource()
+                  .asSortedSource().getComparator();
+              assert comp == null || comp == comparator;
+              comp = comparator;
+            }
+          }
+          assert comp != null;
+          final int globalNumDocs = globalNumDocs();
+          final MergeContext ctx = SortedBytesMergeUtils.init(type, values,
+              comp, globalNumDocs);
+          List<SortedSourceSlice> slices = SortedBytesMergeUtils.buildSlices(
+              docBases(), new int[values.length][], values, ctx);
+          RecordingBytesRefConsumer consumer = new RecordingBytesRefConsumer(
+              type);
+          final int maxOrd = SortedBytesMergeUtils.mergeRecords(ctx, consumer,
+              slices);
+          final int[] docToOrd = new int[globalNumDocs];
+          for (SortedSourceSlice slice : slices) {
+            slice.toAbsolutOrds(docToOrd);
+          }
+          return new MultiSortedSource(type, comp, consumer.pagedBytes,
+              ctx.sizePerValues, maxOrd, docToOrd, consumer.ordToOffset);
+        }
+      } catch (IOException e) {
+        throw new RuntimeException("load failed", e);
+      }
+      return super.asSortedSource();
+    }
+

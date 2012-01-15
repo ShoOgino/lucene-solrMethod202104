@@ -5,9 +5,10 @@
 
     FreqProxPostingsArray postings = (FreqProxPostingsArray) termsHashPerField.postingsArray;
 
-    assert indexOptions == IndexOptions.DOCS_ONLY || postings.docFreqs[termID] > 0;
+    assert !writeFreq || postings.docFreqs[termID] > 0;
 
-    if (indexOptions == IndexOptions.DOCS_ONLY) {
+    if (!writeFreq) {
+      assert postings.docFreqs == null;
       if (docState.docID != postings.lastDocIDs[termID]) {
         assert docState.docID > postings.lastDocIDs[termID];
         termsHashPerField.writeVInt(0, postings.lastDocCodes[termID]);
@@ -15,33 +16,39 @@
         postings.lastDocIDs[termID] = docState.docID;
         fieldState.uniqueTermCount++;
       }
-    } else {
-      if (docState.docID != postings.lastDocIDs[termID]) {
-        assert docState.docID > postings.lastDocIDs[termID]:"id: "+docState.docID + " postings ID: "+ postings.lastDocIDs[termID] + " termID: "+termID;
-        // Term not yet seen in the current doc but previously
-        // seen in other doc(s) since the last flush
+    } else if (docState.docID != postings.lastDocIDs[termID]) {
+      assert docState.docID > postings.lastDocIDs[termID]:"id: "+docState.docID + " postings ID: "+ postings.lastDocIDs[termID] + " termID: "+termID;
+      // Term not yet seen in the current doc but previously
+      // seen in other doc(s) since the last flush
 
-        // Now that we know doc freq for previous doc,
-        // write it & lastDocCode
-        if (1 == postings.docFreqs[termID])
-          termsHashPerField.writeVInt(0, postings.lastDocCodes[termID]|1);
-        else {
-          termsHashPerField.writeVInt(0, postings.lastDocCodes[termID]);
-          termsHashPerField.writeVInt(0, postings.docFreqs[termID]);
-        }
-        postings.docFreqs[termID] = 1;
-        fieldState.maxTermFrequency = Math.max(1, fieldState.maxTermFrequency);
-        postings.lastDocCodes[termID] = (docState.docID - postings.lastDocIDs[termID]) << 1;
-        postings.lastDocIDs[termID] = docState.docID;
-        if (indexOptions == IndexOptions.DOCS_AND_FREQS_AND_POSITIONS) {
-          writeProx(termID, fieldState.position);
-        }
-        fieldState.uniqueTermCount++;
+      // Now that we know doc freq for previous doc,
+      // write it & lastDocCode
+      if (1 == postings.docFreqs[termID]) {
+        termsHashPerField.writeVInt(0, postings.lastDocCodes[termID]|1);
       } else {
-        fieldState.maxTermFrequency = Math.max(fieldState.maxTermFrequency, ++postings.docFreqs[termID]);
-        if (indexOptions == IndexOptions.DOCS_AND_FREQS_AND_POSITIONS) {
-          writeProx(termID, fieldState.position-postings.lastPositions[termID]);
+        termsHashPerField.writeVInt(0, postings.lastDocCodes[termID]);
+        termsHashPerField.writeVInt(0, postings.docFreqs[termID]);
+      }
+      postings.docFreqs[termID] = 1;
+      fieldState.maxTermFrequency = Math.max(1, fieldState.maxTermFrequency);
+      postings.lastDocCodes[termID] = (docState.docID - postings.lastDocIDs[termID]) << 1;
+      postings.lastDocIDs[termID] = docState.docID;
+      if (writeProx) {
+        writeProx(termID, fieldState.position);
+        if (writeOffsets) {
+          writeOffsets(termID, fieldState.offset);
         }
+      } else {
+        assert !writeOffsets;
+      }
+      fieldState.uniqueTermCount++;
+    } else {
+      fieldState.maxTermFrequency = Math.max(fieldState.maxTermFrequency, ++postings.docFreqs[termID]);
+      if (writeProx) {
+        writeProx(termID, fieldState.position-postings.lastPositions[termID]);
+      }
+      if (writeOffsets) {
+        writeOffsets(termID, postings.lastOffsets[termID]);
       }
     }
   }

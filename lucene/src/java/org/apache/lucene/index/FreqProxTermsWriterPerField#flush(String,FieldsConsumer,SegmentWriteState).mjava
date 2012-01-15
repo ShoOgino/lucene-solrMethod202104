@@ -7,7 +7,32 @@
     final TermsConsumer termsConsumer = consumer.addField(fieldInfo);
     final Comparator<BytesRef> termComp = termsConsumer.getComparator();
 
+    // CONFUSING: this.indexOptions holds the index options
+    // that were current when we first saw this field.  But
+    // it's possible this has changed, eg when other
+    // documents are indexed that cause a "downgrade" of the
+    // IndexOptions.  So we must decode the in-RAM buffer
+    // according to this.indexOptions, but then write the
+    // new segment to the directory according to
+    // currentFieldIndexOptions:
     final IndexOptions currentFieldIndexOptions = fieldInfo.indexOptions;
+
+    final boolean writeTermFreq = currentFieldIndexOptions.compareTo(IndexOptions.DOCS_AND_FREQS) >= 0;
+    final boolean writePositions = currentFieldIndexOptions.compareTo(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS) >= 0;
+    final boolean writeOffsets = currentFieldIndexOptions.compareTo(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS) >= 0;
+
+    final boolean readTermFreq = indexOptions.compareTo(IndexOptions.DOCS_AND_FREQS) >= 0;
+    final boolean readPositions = indexOptions.compareTo(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS) >= 0;
+    final boolean readOffsets = indexOptions.compareTo(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS) >= 0;
+
+    //System.out.println("flush readTF=" + readTermFreq + " readPos=" + readPositions + " readOffs=" + readOffsets);
+
+    // Make sure FieldInfo.update is working correctly!:
+    assert !writeTermFreq || readTermFreq;
+    assert !writePositions || readPositions;
+    assert !writeOffsets || readOffsets;
+
+    assert !writeOffsets || writePositions;
 
     final Map<Term,Integer> segDeletes;
     if (state.segDeletes != null && state.segDeletes.terms.size() > 0) {
@@ -29,12 +54,13 @@
 
     for (int i = 0; i < numTerms; i++) {
       final int termID = termIDs[i];
+      //System.out.println("term=" + termID);
       // Get BytesRef
       final int textStart = postings.textStarts[termID];
       termsHashPerField.bytePool.setBytesRef(text, textStart);
 
       termsHashPerField.initReader(freq, termID, 0);
-      if (fieldInfo.indexOptions == IndexOptions.DOCS_AND_FREQS_AND_POSITIONS) {
+      if (readPositions || readOffsets) {
         termsHashPerField.initReader(prox, termID, 1);
       }
 
@@ -64,15 +90,18 @@
       int numDocs = 0;
       long totTF = 0;
       int docID = 0;
-      int termFreq = 0;
 
       while(true) {
+        //System.out.println("  cycle");
+        final int termDocFreq;
         if (freq.eof()) {
           if (postings.lastDocCodes[termID] != -1) {
             // Return last doc
             docID = postings.lastDocIDs[termID];
-            if (indexOptions != IndexOptions.DOCS_ONLY) {
-              termFreq = postings.docFreqs[termID];
+            if (readTermFreq) {
+              termDocFreq = postings.docFreqs[termID];
+            } else {
+              termDocFreq = 0;
             }
             postings.lastDocCodes[termID] = -1;
           } else {
@@ -81,14 +110,15 @@
           }
         } else {
           final int code = freq.readVInt();
-          if (indexOptions == IndexOptions.DOCS_ONLY) {
+          if (!readTermFreq) {
             docID += code;
+            termDocFreq = 0;
           } else {
             docID += code >>> 1;
             if ((code & 1) != 0) {
-              termFreq = 1;
+              termDocFreq = 1;
             } else {
-              termFreq = freq.readVInt();
+              termDocFreq = freq.readVInt();
             }
           }
 
@@ -97,7 +127,6 @@
 
         numDocs++;
         assert docID < state.numDocs: "doc=" + docID + " maxDoc=" + state.numDocs;
-        final int termDocFreq = termFreq;
 
         // NOTE: we could check here if the docID was
         // deleted, and skip it.  However, this is somewhat
@@ -123,45 +152,54 @@
           state.liveDocs.clear(docID);
         }
 
-        if (currentFieldIndexOptions != IndexOptions.DOCS_ONLY) {
-          totTF += termDocFreq;
-        }
+        totTF += termDocFreq;
         
         // Carefully copy over the prox + payload info,
         // changing the format to match Lucene's segment
         // format.
 
-        if (currentFieldIndexOptions == IndexOptions.DOCS_AND_FREQS_AND_POSITIONS) {
-          // we do write positions & payload
+        if (readPositions || readOffsets) {
+          // we did record positions (& maybe payload) and/or offsets
           int position = 0;
+          int offset = 0;
           for(int j=0;j<termDocFreq;j++) {
-            final int code = prox.readVInt();
-            position += code >> 1;
-
-            final int payloadLength;
             final BytesRef thisPayload;
 
-            if ((code & 1) != 0) {
-              // This position has a payload
-              payloadLength = prox.readVInt();
+            if (readPositions) {
+              final int code = prox.readVInt();
+              position += code >> 1;
 
-              if (payload == null) {
-                payload = new BytesRef();
-                payload.bytes = new byte[payloadLength];
-              } else if (payload.bytes.length < payloadLength) {
-                payload.grow(payloadLength);
+              if ((code & 1) != 0) {
+
+                // This position has a payload
+                final int payloadLength = prox.readVInt();
+
+                if (payload == null) {
+                  payload = new BytesRef();
+                  payload.bytes = new byte[payloadLength];
+                } else if (payload.bytes.length < payloadLength) {
+                  payload.grow(payloadLength);
+                }
+
+                prox.readBytes(payload.bytes, 0, payloadLength);
+                payload.length = payloadLength;
+                thisPayload = payload;
+
+              } else {
+                thisPayload = null;
               }
 
-              prox.readBytes(payload.bytes, 0, payloadLength);
-              payload.length = payloadLength;
-              thisPayload = payload;
-
-            } else {
-              payloadLength = 0;
-              thisPayload = null;
+              if (readOffsets) {
+                final int startOffset = offset + prox.readVInt();
+                final int endOffset = startOffset + prox.readVInt();
+                offset = startOffset;
+                if (writePositions) {
+                  postingsConsumer.addPosition(position, thisPayload, startOffset, endOffset);
+                }
+              } else if (writePositions) {
+                postingsConsumer.addPosition(position, thisPayload, -1, -1);
+              }
             }
-
-            postingsConsumer.addPosition(position, thisPayload);
           }
 
           postingsConsumer.finishDoc();

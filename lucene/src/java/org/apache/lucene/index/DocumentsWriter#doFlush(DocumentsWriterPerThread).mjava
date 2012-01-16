@@ -3,7 +3,7 @@
     while (flushingDWPT != null) {
       maybeMerge = true;
       boolean success = false;
-      FlushTicket ticket = null;
+      SegmentFlushTicket ticket = null;
       try {
         assert currentFullFlushDelQueue == null
             || flushingDWPT.deleteQueue == currentFullFlushDelQueue : "expected: "
@@ -24,34 +24,27 @@
          * might miss to deletes documents in 'A'.
          */
         try {
-          synchronized (ticketQueue) {
-            // Each flush is assigned a ticket in the order they acquire the ticketQueue lock
-            ticket =  new FlushTicket(flushingDWPT.prepareFlush(), true);
-            ticketQueue.incrementAndAdd(ticket);
-          }
+          // Each flush is assigned a ticket in the order they acquire the ticketQueue lock
+          ticket = ticketQueue.addFlushTicket(flushingDWPT);
   
           // flush concurrently without locking
           final FlushedSegment newSegment = flushingDWPT.flush();
-          synchronized (ticketQueue) {
-            ticket.segment = newSegment;
-          }
+          ticketQueue.addSegment(ticket, newSegment);
           // flush was successful once we reached this point - new seg. has been assigned to the ticket!
           success = true;
         } finally {
           if (!success && ticket != null) {
-            synchronized (ticketQueue) {
-              // In the case of a failure make sure we are making progress and
-              // apply all the deletes since the segment flush failed since the flush
-              // ticket could hold global deletes see FlushTicket#canPublish()
-              ticket.isSegmentFlush = false;
-            }
+            // In the case of a failure make sure we are making progress and
+            // apply all the deletes since the segment flush failed since the flush
+            // ticket could hold global deletes see FlushTicket#canPublish()
+            ticketQueue.markTicketFailed(ticket);
           }
         }
         /*
          * Now we are done and try to flush the ticket queue if the head of the
          * queue has already finished the flush.
          */
-        applyFlushTickets();
+        ticketQueue.tryPurge(this);
       } finally {
         flushControl.doAfterFlush(flushingDWPT);
         flushingDWPT.checkAndResetHasAborted();

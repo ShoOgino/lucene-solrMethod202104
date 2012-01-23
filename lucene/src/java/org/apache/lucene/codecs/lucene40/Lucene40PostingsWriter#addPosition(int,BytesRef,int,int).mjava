@@ -2,16 +2,8 @@
   @Override
   public void addPosition(int position, BytesRef payload, int startOffset, int endOffset) throws IOException {
     //if (DEBUG) System.out.println("SPW:     addPos pos=" + position + " payload=" + (payload == null ? "null" : (payload.length + " bytes")) + " proxFP=" + proxOut.getFilePointer());
-    assert indexOptions == IndexOptions.DOCS_AND_FREQS_AND_POSITIONS: "invalid indexOptions: " + indexOptions;
+    assert indexOptions.compareTo(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS) >= 0 : "invalid indexOptions: " + indexOptions;
     assert proxOut != null;
-
-    // TODO: when we add offsets... often
-    // endOffset-startOffset will be constant or near
-    // constant for all docs (eg if the term wasn't stemmed
-    // then this will usually be the utf16 length of the
-    // term); would be nice to write that length once up
-    // front and then not encode endOffset for each
-    // position..
 
     final int delta = position - lastPosition;
     
@@ -19,8 +11,10 @@
 
     lastPosition = position;
 
+    int payloadLength = 0;
+
     if (storePayloads) {
-      final int payloadLength = payload == null ? 0 : payload.length;
+      payloadLength = payload == null ? 0 : payload.length;
 
       if (payloadLength != lastPayloadLength) {
         lastPayloadLength = payloadLength;
@@ -29,12 +23,27 @@
       } else {
         proxOut.writeVInt(delta << 1);
       }
-
-      if (payloadLength > 0) {
-        proxOut.writeBytes(payload.bytes, payload.offset, payloadLength);
-      }
     } else {
       proxOut.writeVInt(delta);
+    }
+    
+    if (storeOffsets) {
+      // don't use startOffset - lastEndOffset, because this creates lots of negative vints for synonyms,
+      // and the numbers aren't that much smaller anyways.
+      int offsetDelta = startOffset - lastOffset;
+      int offsetLength = endOffset - startOffset;
+      if (offsetLength != lastOffsetLength) {
+        proxOut.writeVInt(offsetDelta << 1 | 1);
+        proxOut.writeVInt(offsetLength);
+      } else {
+        proxOut.writeVInt(offsetDelta << 1);
+      }
+      lastOffset = startOffset;
+      lastOffsetLength = offsetLength;
+    }
+    
+    if (payloadLength > 0) {
+      proxOut.writeBytes(payload.bytes, payload.offset, payloadLength);
     }
   }
 

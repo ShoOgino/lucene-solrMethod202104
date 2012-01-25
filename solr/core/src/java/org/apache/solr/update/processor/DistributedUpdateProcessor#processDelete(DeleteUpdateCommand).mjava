@@ -1,0 +1,59 @@
+  @Override
+  public void processDelete(DeleteUpdateCommand cmd) throws IOException {
+    if (!cmd.isDeleteById()) {
+      // delete by query...
+      // TODO: handle versioned and distributed deleteByQuery
+
+      // even in non zk mode, tests simulate updates from a leader
+      if(!zkEnabled) {
+        isLeader = !req.getParams().getBool(SEEN_LEADER, false);
+      } else {
+        zkCheck();
+      }
+      
+      processDeleteByQuery(cmd);
+      return;
+    }
+
+    int hash = 0;
+    if (zkEnabled) {
+      zkCheck();
+      hash = hash(cmd);
+      nodes = setupRequest(hash);
+    } else {
+      // even in non zk mode, tests simulate updates from a leader
+      isLeader = !req.getParams().getBool(SEEN_LEADER, false);
+    }
+    
+    boolean dropCmd = false;
+    if (!forwardToLeader) {
+      dropCmd  = versionDelete(cmd);
+    }
+    
+    if (dropCmd) {
+      // TODO: do we need to add anything to the response?
+      return;
+    }
+
+    ModifiableSolrParams params = null;
+    if (nodes != null) {
+      params = new ModifiableSolrParams(req.getParams());
+      if (isLeader) {
+        params.set(SEEN_LEADER, true);
+      }
+      cmdDistrib.distribDelete(cmd, nodes, params);
+    }
+
+    // cmd.getIndexId == null when delete by query
+    // TODO: what to do when no idField?
+    if (returnVersions && rsp != null && cmd.getIndexedId() != null && idField != null) {
+      if (deleteResponse == null) {
+        deleteResponse = new NamedList<String>();
+        rsp.add("deletes",deleteResponse);
+      }
+      if (scratch == null) scratch = new CharsRef();
+      idField.getType().indexedToReadable(cmd.getIndexedId(), scratch);
+      deleteResponse.add(scratch.toString(), cmd.getVersion());  // we're returning the version of the delete.. not the version of the doc we deleted.
+    }
+  }
+

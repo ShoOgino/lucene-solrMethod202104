@@ -7,21 +7,50 @@
     try {
       Query q;
       try {
+        // TODO: move this higher in the stack?
         QParser parser = QParser.getParser(cmd.query, "lucene", cmd.req);
         q = parser.getQuery();
+        q = QueryUtils.makeQueryable(q);
+
+        // peer-sync can cause older deleteByQueries to be executed and could
+        // delete newer documents.  We prevent this by adding a clause restricting
+        // version.
+        if ((cmd.getFlags() & UpdateCommand.PEER_SYNC) != 0) {
+          BooleanQuery bq = new BooleanQuery();
+          bq.add(q, Occur.MUST);
+          SchemaField sf = core.getSchema().getField(VersionInfo.VERSION_FIELD);
+          ValueSource vs = sf.getType().getValueSource(sf, null);
+          ValueSourceRangeFilter filt = new ValueSourceRangeFilter(vs, null, Long.toString(Math.abs(cmd.version)), true, true);
+          FunctionRangeQuery range = new FunctionRangeQuery(filt);
+          bq.add(range, Occur.MUST);
+          q = bq;
+        }
+
+
+
       } catch (ParseException e) {
         throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e);
       }
       
       boolean delAll = MatchAllDocsQuery.class == q.getClass();
-      
-      if (delAll) {
-        deleteAll();
-      } else {
-        solrCoreState.getIndexWriter(core).deleteDocuments(q);
-      }
 
-      ulog.deleteByQuery(cmd);
+      commitTracker.deletedDocument(cmd.commitWithin);
+      
+      //
+      // synchronized to prevent deleteByQuery from running during the "open new searcher"
+      // part of a commit.  DBQ needs to signal that a fresh reader will be needed for
+      // a realtime view of the index.  When a new searcher is opened after a DBQ, that
+      // flag can be cleared.  If those thing happen concurrently, it's not thread safe.
+      //
+      synchronized (this) {
+        if (delAll) {
+          deleteAll();
+        } else {
+          solrCoreState.getIndexWriter(core).deleteDocuments(q);
+        }
+
+        if (ulog != null) ulog.deleteByQuery(cmd);
+      }
 
       madeIt = true;
       

@@ -1,0 +1,85 @@
+  // synchronously starts and stops shards randomly, unless there is only one
+  // active shard up for a slice or if there is one active and others recovering
+  public void startTheMonkey(boolean killLeaders, final int roundPause) {
+    this.aggressivelyKillLeaders = killLeaders;
+    startTime = System.currentTimeMillis();
+    // TODO: when kill leaders is on, lets kill a higher percentage of leaders
+    
+    stop = false;
+    new Thread() {
+      private List<JettySolrRunner> deadPool = new ArrayList<JettySolrRunner>();
+
+      @Override
+      public void run() {
+        while (!stop) {
+          try {
+            Thread.sleep(roundPause);
+ 
+            if (random.nextBoolean()) {
+             if (!deadPool.isEmpty()) {
+               int index = random.nextInt(deadPool.size());
+               JettySolrRunner jetty = deadPool.get(index);
+               try {
+                 jetty.start();
+               } catch (BindException e) {
+                 jetty.stop();
+                 sleep(2000);
+                 try {
+                   jetty.start();
+                 } catch (BindException e2) {
+                   jetty.stop();
+                   sleep(5000);
+                   try {
+                     jetty.start();
+                   } catch (BindException e3) {
+                     // we coud not get the port
+                     jetty.stop();
+                     continue;
+                   }
+                 }
+               }
+               //System.out.println("started on port:" + jetty.getLocalPort());
+               deadPool.remove(index);
+               starts.incrementAndGet();
+               continue;
+             }
+            }
+            
+            int rnd = random.nextInt(10);
+
+            if (expireSessions && rnd < EXPIRE_PERCENT) {
+              expireRandomSession();
+            } 
+            
+            if (causeConnectionLoss && rnd < CONLOSS_PERCENT) {
+              randomConnectionLoss();
+              randomConnectionLoss();
+            }
+            
+            JettySolrRunner jetty;
+            if (random.nextBoolean()) {
+              jetty = stopRandomShard();
+            } else {
+              jetty = killRandomShard();
+            }
+            if (jetty == null) {
+              // we cannot kill
+            } else {
+              deadPool.add(jetty);
+            }
+            
+          } catch (InterruptedException e) {
+            //
+          } catch (Exception e) {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+          }
+        }
+        
+        System.out.println("I ran for " + (System.currentTimeMillis() - startTime)/1000.0f + "sec. I stopped " + stops + " and I started " + starts
+            + ". I also expired " + expires.get() + " and caused " + connloss
+            + " connection losses");
+      }
+    }.start();
+  }
+

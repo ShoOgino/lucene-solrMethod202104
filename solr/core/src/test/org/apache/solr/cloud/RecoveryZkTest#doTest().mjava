@@ -1,0 +1,58 @@
+  @Override
+  public void doTest() throws Exception {
+    handle.clear();
+    handle.put("QTime", SKIPVAL);
+    handle.put("timestamp", SKIPVAL);
+    
+    // start a couple indexing threads
+    
+    indexThread = new StopableIndexingThread(0, true);
+    indexThread.start();
+    
+    indexThread2 = new StopableIndexingThread(10000, true);
+    
+    indexThread2.start();
+
+    // give some time to index...
+    Thread.sleep(atLeast(2000));   
+    
+    // bring shard replica down
+    JettySolrRunner replica = chaosMonkey.stopShard("shard1", 1);
+
+    
+    // wait a moment - lets allow some docs to be indexed so replication time is non 0
+    Thread.sleep(atLeast(2000));
+    
+    // bring shard replica up
+    replica.start();
+    
+    // make sure replication can start
+    Thread.sleep(1500);
+    
+    waitForRecoveriesToFinish(false);
+    
+    // stop indexing threads
+    indexThread.safeStop();
+    indexThread2.safeStop();
+    
+    indexThread.join();
+    indexThread2.join();
+    
+    Thread.sleep(5000);
+    
+    commit();
+
+    // test that leader and replica have same doc count
+    
+    checkShardConsistency("shard1", false); 
+    
+    long client1Docs = shardToClient.get("shard1").get(0).query(new SolrQuery("*:*")).getResults().getNumFound();
+    long client2Docs = shardToClient.get("shard1").get(1).query(new SolrQuery("*:*")).getResults().getNumFound();
+    
+    assertTrue(client1Docs > 0);
+    assertEquals(client1Docs, client2Docs);
+ 
+    // won't always pass yet...
+    //query("q", "*:*", "sort", "id desc");
+  }
+

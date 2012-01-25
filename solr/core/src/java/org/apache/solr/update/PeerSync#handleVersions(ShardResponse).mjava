@@ -1,0 +1,56 @@
+  private boolean handleVersions(ShardResponse srsp) {
+    // we retrieved the last N updates from the replica
+    List<Long> otherVersions = (List<Long>)srsp.getSolrResponse().getResponse().get("versions");
+    // TODO: how to handle short lists?
+
+    SyncShardRequest sreq = (SyncShardRequest) srsp.getShardRequest();
+    sreq.reportedVersions =  otherVersions;
+
+    if (otherVersions.size() == 0) {
+      return true;
+    }
+
+    Collections.sort(otherVersions, absComparator);
+
+    long otherHigh = percentile(otherVersions, .2f);
+    long otherLow = percentile(otherVersions, .8f);
+
+    if (ourHighThreshold < otherLow) {
+      // Small overlap between version windows and ours is older
+      // This means that we might miss updates if we attempted to use this method.
+      // Since there exists just one replica that is so much newer, we must
+      // fail the sync.
+      return false;
+    }
+
+    if (ourLowThreshold > otherHigh) {
+      // Small overlap between windows and ours is newer.
+      // Using this list to sync would result in requesting/replaying results we don't need
+      // and possibly bringing deleted docs back to life.
+      return true;
+    }
+    
+    List<Long> toRequest = new ArrayList<Long>();
+    for (Long otherVersion : otherVersions) {
+      // stop when the entries get old enough that reorders may lead us to see updates we don't need
+      if (Math.abs(otherVersion) < ourLowThreshold) break;
+
+      if (ourUpdateSet.contains(otherVersion) || requestedUpdateSet.contains(otherVersion)) {
+        // we either have this update, or already requested it
+        continue;
+      }
+
+      toRequest.add(otherVersion);
+      requestedUpdateSet.add(otherVersion);
+    }
+
+    sreq.requestedUpdates = toRequest;
+
+    if (toRequest.isEmpty()) {
+      // we had (or already requested) all the updates referenced by the replica
+      return true;
+    }
+
+    return requestUpdates(srsp, toRequest);
+  }
+

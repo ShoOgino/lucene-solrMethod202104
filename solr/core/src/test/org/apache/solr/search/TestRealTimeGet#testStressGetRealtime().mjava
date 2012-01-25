@@ -8,7 +8,7 @@
     final int commitPercent = 5 + random.nextInt(20);
     final int softCommitPercent = 30+random.nextInt(75); // what percent of the commits are soft
     final int deletePercent = 4+random.nextInt(25);
-    final int deleteByQueryPercent = 0;  // real-time get isn't currently supported with delete-by-query
+    final int deleteByQueryPercent = 1+random.nextInt(5);
     final int ndocs = 5 + (random.nextBoolean() ? random.nextInt(25) : random.nextInt(200));
     int nWriteThreads = 5 + random.nextInt(25);
 
@@ -16,7 +16,6 @@
 
         // query variables
     final int percentRealtimeQuery = 60;
-    // final AtomicLong operations = new AtomicLong(50000);  // number of query operations to perform in total
     final AtomicLong operations = new AtomicLong(50000);  // number of query operations to perform in total
     int nReadThreads = 5 + random.nextInt(25);
 
@@ -51,11 +50,11 @@
 
             if (oper < commitPercent) {
               if (numCommitting.incrementAndGet() <= maxConcurrentCommits) {
-                Map<Integer,Long> newCommittedModel;
+                Map<Integer,DocInfo> newCommittedModel;
                 long version;
 
                 synchronized(TestRealTimeGet.this) {
-                  newCommittedModel = new HashMap<Integer,Long>(model);  // take a snapshot
+                  newCommittedModel = new HashMap<Integer,DocInfo>(model);  // take a snapshot
                   version = snapshotCount++;
                   verbose("took snapshot version=",version);
                 }
@@ -98,8 +97,11 @@
 
             // We can't concurrently update the same document and retain our invariants of increasing values
             // since we can't guarantee what order the updates will be executed.
+            // Even with versions, we can't remove the sync because increasing versions does not mean increasing vals.
             synchronized (sync) {
-              Long val = model.get(id);
+              DocInfo info = model.get(id);
+
+              long val = info.val;
               long nextVal = Math.abs(val)+1;
 
               if (oper < commitPercent + deletePercent) {
@@ -107,8 +109,10 @@
                   verbose("deleting id",id,"val=",nextVal);
                 }
 
-                assertU("<delete><id>" + id + "</id></delete>");
-                model.put(id, -nextVal);
+                // assertU("<delete><id>" + id + "</id></delete>");
+                Long version = deleteAndGetVersion(Integer.toString(id), null);
+
+                model.put(id, new DocInfo(version, -nextVal));
                 if (VERBOSE) {
                   verbose("deleting id", id, "val=",nextVal,"DONE");
                 }
@@ -118,7 +122,7 @@
                 }
 
                 assertU("<delete><query>id:" + id + "</query></delete>");
-                model.put(id, -nextVal);
+                model.put(id, new DocInfo(-1L, -nextVal));
                 if (VERBOSE) {
                   verbose("deleteByQuery id",id, "val=",nextVal,"DONE");
                 }
@@ -127,15 +131,16 @@
                   verbose("adding id", id, "val=", nextVal);
                 }
 
-                assertU(adoc("id",Integer.toString(id), field, Long.toString(nextVal)));
-                model.put(id, nextVal);
+                // assertU(adoc("id",Integer.toString(id), field, Long.toString(nextVal)));
+                Long version = addAndGetVersion(sdoc("id", Integer.toString(id), field, Long.toString(nextVal)), null);
+                model.put(id, new DocInfo(version, nextVal));
 
                 if (VERBOSE) {
                   verbose("adding id", id, "val=", nextVal,"DONE");
                 }
 
               }
-            }
+            }   // end sync
 
             if (!before) {
               lastId = id;
@@ -168,13 +173,13 @@
               // so when querying, we should first check the model, and then the index
 
               boolean realTime = rand.nextInt(100) < percentRealtimeQuery;
-              long val;
+              DocInfo info;
 
               if (realTime) {
-                val = model.get(id);
+                info = model.get(id);
               } else {
                 synchronized(TestRealTimeGet.this) {
-                  val = committedModel.get(id);
+                  info = committedModel.get(id);
                 }
               }
 
@@ -196,9 +201,11 @@
               } else {
                 assertEquals(1, doclist.size());
                 long foundVal = (Long)(((Map)doclist.get(0)).get(field));
-                if (foundVal < Math.abs(val)) {
-                  verbose("ERROR, id", id, "foundVal=",foundVal,"model val=",val,"realTime=",realTime);
-                  assertTrue(foundVal >= Math.abs(val));
+                long foundVer = (Long)(((Map)doclist.get(0)).get("_version_"));
+                if (foundVal < Math.abs(info.val)
+                    || (foundVer == info.version && foundVal != info.val) ) {    // if the version matches, the val must
+                  verbose("ERROR, id=", id, "found=",response,"model",info);
+                  assertTrue(false);
                 }
               }
             }

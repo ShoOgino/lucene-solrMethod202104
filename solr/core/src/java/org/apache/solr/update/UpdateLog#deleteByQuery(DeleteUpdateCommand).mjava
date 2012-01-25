@@ -1,2 +1,38 @@
-  public abstract void deleteByQuery(DeleteUpdateCommand cmd);
+  public void deleteByQuery(DeleteUpdateCommand cmd) {
+    synchronized (this) {
+      long pos = -1;
+      // don't log if we are replaying from another log
+      if ((cmd.getFlags() & UpdateCommand.REPLAY) == 0) {
+        ensureLog();
+        pos = tlog.writeDeleteByQuery(cmd);
+      }
+
+      // only change our caches if we are not buffering
+      if ((cmd.getFlags() & UpdateCommand.BUFFERING) == 0) {
+        // given that we just did a delete-by-query, we don't know what documents were
+        // affected and hence we must purge our caches.
+        map.clear();
+
+        // oldDeletes.clear();
+
+        // We must cause a new IndexReader to be opened before anything looks at these caches again
+        // so that a cache miss will read fresh data.
+        //
+        // TODO: FUTURE: open a new searcher lazily for better throughput with delete-by-query commands
+        try {
+          RefCounted<SolrIndexSearcher> holder = uhandler.core.openNewSearcher(true, true);
+          holder.decref();
+        } catch (Throwable e) {
+          SolrException.log(log, "Error opening realtime searcher for deleteByQuery", e);
+        }
+
+      }
+
+      LogPtr ptr = new LogPtr(pos, cmd.getVersion());
+
+      if (debug) {
+        log.debug("TLOG: added deleteByQuery " + cmd.query + " to " + tlog + " " + ptr + " map=" + System.identityHashCode(map));
+      }
+    }
+  }
 

@@ -1,0 +1,79 @@
+  private boolean versionDelete(DeleteUpdateCommand cmd) throws IOException {
+
+    BytesRef idBytes = cmd.getIndexedId();
+
+    if (vinfo == null || idBytes == null) {
+      super.processDelete(cmd);
+      return false;
+    }
+
+    // This is only the hash for the bucket, and must be based only on the uniqueKey (i.e. do not use a pluggable hash here)
+    int bucketHash = Hash.murmurhash3_x86_32(idBytes.bytes, idBytes.offset, idBytes.length, 0);
+
+    // at this point, there is an update we need to try and apply.
+    // we may or may not be the leader.
+
+    // Find the version
+    long versionOnUpdate = cmd.getVersion();
+    if (versionOnUpdate == 0) {
+      String versionOnUpdateS = req.getParams().get(VERSION_FIELD);
+      versionOnUpdate = versionOnUpdateS == null ? 0 : Long.parseLong(versionOnUpdateS);
+    }
+    versionOnUpdate = Math.abs(versionOnUpdate);  // normalize to positive version
+
+    boolean isReplay = (cmd.getFlags() & UpdateCommand.REPLAY) != 0;
+    boolean leaderLogic = isLeader && !isReplay;
+
+    if (!leaderLogic && versionOnUpdate==0) {
+      throw new SolrException(ErrorCode.BAD_REQUEST, "missing _version_ on update from leader");
+    }
+
+    VersionBucket bucket = vinfo.bucket(bucketHash);
+
+    vinfo.lockForUpdate();
+    try {
+
+      synchronized (bucket) {
+        if (versionsStored) {
+          long bucketVersion = bucket.highest;
+
+          if (leaderLogic) {
+            long version = vinfo.getNewClock();
+            cmd.setVersion(-version);
+            bucket.updateHighest(version);
+          } else {
+            cmd.setVersion(-versionOnUpdate);
+
+            if (ulog.getState() != UpdateLog.State.ACTIVE && (cmd.getFlags() & UpdateCommand.REPLAY) == 0) {
+              // we're not in an active state, and this update isn't from a replay, so buffer it.
+              cmd.setFlags(cmd.getFlags() | UpdateCommand.BUFFERING);
+              ulog.delete(cmd);
+              return true;
+            }
+
+            // if we aren't the leader, then we need to check that updates were not re-ordered
+            if (bucketVersion != 0 && bucketVersion < versionOnUpdate) {
+              // we're OK... this update has a version higher than anything we've seen
+              // in this bucket so far, so we know that no reordering has yet occured.
+              bucket.updateHighest(versionOnUpdate);
+            } else {
+              // there have been updates higher than the current update.  we need to check
+              // the specific version for this id.
+              Long lastVersion = vinfo.lookupVersion(cmd.getIndexedId());
+              if (lastVersion != null && Math.abs(lastVersion) >= versionOnUpdate) {
+                // This update is a repeat, or was reordered.  We need to drop this update.
+                return true;
+              }
+            }
+          }
+        }
+
+        doLocalDelete(cmd);
+        return false;
+      }  // end synchronized (bucket)
+
+    } finally {
+      vinfo.unlockForUpdate();
+    }
+  }
+

@@ -1,0 +1,58 @@
+  private void syncToMe(ZkController zkController, String collection,
+      String shardId, ZkNodeProps leaderProps) throws MalformedURLException,
+      SolrServerException, IOException {
+    
+    // sync everyone else
+    // TODO: we should do this in parallel at least
+    List<ZkCoreNodeProps> nodes = zkController
+        .getZkStateReader()
+        .getReplicaProps(collection, shardId,
+            leaderProps.get(ZkStateReader.NODE_NAME_PROP),
+            leaderProps.get(ZkStateReader.CORE_NAME_PROP), ZkStateReader.ACTIVE);
+    if (nodes == null) {
+      // System.out.println("I have no replicas");
+      // I have no replicas
+      return;
+    }
+    //System.out.println("tell my replicas to sync");
+    ZkCoreNodeProps zkLeader = new ZkCoreNodeProps(leaderProps);
+    for (ZkCoreNodeProps node : nodes) {
+      try {
+        // TODO: do we first everyone register as sync phase? get the overseer
+        // to do it?
+        // TODO: this should be done in parallel
+        QueryRequest qr = new QueryRequest(params("qt", "/get", "getVersions",
+            Integer.toString(1000), "sync", zkLeader.getCoreUrl(), "distrib",
+            "false"));
+        CommonsHttpSolrServer server = new CommonsHttpSolrServer(
+            node.getCoreUrl());
+        //System.out.println("ask " + node.getCoreUrl() + " to sync");
+        NamedList rsp = server.request(qr);
+        //System.out.println("response about syncing to leader:" + rsp + " node:"
+        //    + node.getCoreUrl() + " me:" + zkController.getBaseUrl());
+        boolean success = (Boolean) rsp.get("sync");
+        //System.out.println("success:" + success);
+        if (!success) {
+         // System.out
+         //     .println("try and ask " + node.getCoreUrl() + " to recover");
+          log.info("try and ask " + node.getCoreUrl() + " to recover");
+          try {
+            server = new CommonsHttpSolrServer(node.getBaseUrl());
+            server.setSoTimeout(5000);
+            server.setConnectionTimeout(5000);
+            
+            RequestRecovery recoverRequestCmd = new RequestRecovery();
+            recoverRequestCmd.setAction(CoreAdminAction.REQUESTRECOVERY);
+            recoverRequestCmd.setCoreName(node.getCoreName());
+            
+            server.request(recoverRequestCmd);
+          } catch (Exception e) {
+            log.info("Could not tell a replica to recover", e);
+          }
+        }
+      } catch (Exception e) {
+        SolrException.log(log, "Error syncing replica to leader", e);
+      }
+    }
+  }
+

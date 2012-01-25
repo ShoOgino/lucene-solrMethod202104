@@ -1,0 +1,49 @@
+  @Override
+  public void processAdd(AddUpdateCommand cmd) throws IOException {
+    // TODO: check for id field?
+    int hash = 0;
+    if (zkEnabled) {
+      zkCheck();
+      hash = hash(cmd);
+      nodes = setupRequest(hash);
+    } else {
+      // even in non zk mode, tests simulate updates from a leader
+      isLeader = !req.getParams().getBool(SEEN_LEADER, false);
+    }
+    
+    boolean dropCmd = false;
+    if (!forwardToLeader) {
+      dropCmd = versionAdd(cmd);
+    }
+
+    if (dropCmd) {
+      // TODO: do we need to add anything to the response?
+      return;
+    }
+    
+    ModifiableSolrParams params = null;
+    if (nodes != null) {
+      params = new ModifiableSolrParams(req.getParams());
+      if (isLeader) {
+        params.set(SEEN_LEADER, true);
+      }
+      cmdDistrib.distribAdd(cmd, nodes, params);
+    }
+    
+    // TODO: what to do when no idField?
+    if (returnVersions && rsp != null && idField != null) {
+      if (addsResponse == null) {
+        addsResponse = new NamedList<String>();
+        rsp.add("adds",addsResponse);
+      }
+      if (scratch == null) scratch = new CharsRef();
+      idField.getType().indexedToReadable(cmd.getIndexedId(), scratch);
+      addsResponse.add(scratch.toString(), cmd.getVersion());
+    }
+    
+    // TODO: keep track of errors?  needs to be done at a higher level though since
+    // an id may fail before it gets to this processor.
+    // Given that, it may also make sense to move the version reporting out of this
+    // processor too.
+  }
+

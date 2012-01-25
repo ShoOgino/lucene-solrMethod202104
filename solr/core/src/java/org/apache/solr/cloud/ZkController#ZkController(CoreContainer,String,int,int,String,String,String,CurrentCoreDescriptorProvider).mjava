@@ -1,0 +1,87 @@
+  /**
+   * @param coreContainer if null, recovery will not be enabled
+   * @param zkServerAddress
+   * @param zkClientTimeout
+   * @param zkClientConnectTimeout
+   * @param localHost
+   * @param locaHostPort
+   * @param localHostContext
+   * @param numShards 
+   * @throws InterruptedException
+   * @throws TimeoutException
+   * @throws IOException
+   */
+  public ZkController(CoreContainer cc, String zkServerAddress, int zkClientTimeout, int zkClientConnectTimeout, String localHost, String locaHostPort,
+      String localHostContext, final CurrentCoreDescriptorProvider registerOnReconnect) throws InterruptedException,
+      TimeoutException, IOException {
+    this.cc = cc;
+    if (localHostContext.contains("/")) {
+      throw new IllegalArgumentException("localHostContext ("
+          + localHostContext + ") should not contain a /");
+    }
+    
+    this.zkServerAddress = zkServerAddress;
+    this.localHostPort = locaHostPort;
+    this.localHostContext = localHostContext;
+    this.localHost = localHost;
+
+    zkClient = new SolrZkClient(zkServerAddress, zkClientTimeout, zkClientConnectTimeout,
+        // on reconnect, reload cloud info
+        new OnReconnect() {
+
+          public void command() {
+            try {
+              // we need to create all of our lost watches
+              
+              // seems we dont need to do this again...
+              //Overseer.createClientNodes(zkClient, getNodeName());
+
+              ElectionContext context = new OverseerElectionContext(getNodeName(), zkClient, zkStateReader);
+              overseerElector.joinElection(context);
+              zkStateReader.createClusterStateWatchersAndUpdate();
+              
+              List<CoreDescriptor> descriptors = registerOnReconnect
+                  .getCurrentDescriptors();
+              if (descriptors != null) {
+                // before registering as live, make sure everyone is in a
+                // recovery state
+                for (CoreDescriptor descriptor : descriptors) {
+                  final String shardZkNodeName = getNodeName() + "_"
+                      + descriptor.getName();
+                  publishAsDown(getBaseUrl(), descriptor, shardZkNodeName,
+                      descriptor.getName());
+                }
+              }
+              
+              // we have to register as live first to pick up docs in the buffer
+              createEphemeralLiveNode();
+              
+              // re register all descriptors
+              if (descriptors != null) {
+                for (CoreDescriptor descriptor : descriptors) {
+                  // TODO: we need to think carefully about what happens when it was
+                  // a leader that was expired - as well as what to do about leaders/overseers
+                  // with connection loss
+                  register(descriptor.getName(), descriptor, true);
+                }
+              }
+  
+            } catch (InterruptedException e) {
+              // Restore the interrupted status
+              Thread.currentThread().interrupt();
+              throw new ZooKeeperException(
+                  SolrException.ErrorCode.SERVER_ERROR, "", e);
+            } catch (Exception e) {
+              SolrException.log(log, "", e);
+              throw new ZooKeeperException(
+                  SolrException.ErrorCode.SERVER_ERROR, "", e);
+            }
+
+          }
+        });
+    cmdExecutor = new ZkCmdExecutor();
+    leaderElector = new LeaderElector(zkClient);
+    zkStateReader = new ZkStateReader(zkClient);
+    init();
+  }
+

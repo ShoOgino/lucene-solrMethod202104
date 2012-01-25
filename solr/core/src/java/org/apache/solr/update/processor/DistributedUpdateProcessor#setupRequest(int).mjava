@@ -1,0 +1,56 @@
+  private List<Node> setupRequest(int hash) {
+    List<Node> nodes = null;
+
+    // if we are in zk mode...
+    if (zkEnabled) {
+      // the leader is...
+      // TODO: if there is no leader, wait and look again
+      // TODO: we are reading the leader from zk every time - we should cache
+      // this and watch for changes?? Just pull it from ZkController cluster state probably?
+      String shardId = getShard(hash, collection, zkController.getCloudState()); // get the right shard based on the hash...
+
+      try {
+        // TODO: if we find out we cannot talk to zk anymore, we should probably realize we are not
+        // a leader anymore - we shouldn't accept updates at all??
+        ZkCoreNodeProps leaderProps = new ZkCoreNodeProps(zkController.getZkStateReader().getLeaderProps(
+            collection, shardId));
+        
+        String leaderNodeName = leaderProps.getCoreNodeName();
+        String coreName = req.getCore().getName();
+        String coreNodeName = zkController.getNodeName() + "_" + coreName;
+        isLeader = coreNodeName.equals(leaderNodeName);
+        
+        if (req.getParams().getBool(SEEN_LEADER, false)) {
+          // we are coming from the leader, just go local - add no urls
+          forwardToLeader = false;
+        } else if (isLeader) {
+          // that means I want to forward onto my replicas...
+          // so get the replicas...
+          forwardToLeader = false;
+          List<ZkCoreNodeProps> replicaProps = zkController.getZkStateReader()
+              .getReplicaProps(collection, shardId, zkController.getNodeName(),
+                  coreName);
+          if (replicaProps != null) {
+            nodes = new ArrayList<Node>(replicaProps.size());
+            for (ZkCoreNodeProps props : replicaProps) {
+              nodes.add(new StdNode(props));
+            }
+          }
+          
+        } else {
+          // I need to forward onto the leader...
+          nodes = new ArrayList<Node>(1);
+          nodes.add(new RetryNode(leaderProps, zkController.getZkStateReader(), collection, shardId));
+          forwardToLeader = true;
+        }
+        
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new ZooKeeperException(SolrException.ErrorCode.SERVER_ERROR, "",
+            e);
+      }
+    }
+
+    return nodes;
+  }
+

@@ -1,0 +1,85 @@
+  @Override
+  public void run() {
+    boolean replayed = false;
+    boolean succesfulRecovery = false;
+    
+    while (!succesfulRecovery && !close && !isInterrupted()) {
+      UpdateLog ulog = core.getUpdateHandler().getUpdateLog();
+      if (ulog == null) return;
+      
+      ulog.bufferUpdates();
+      replayed = false;
+      CloudDescriptor cloudDesc = core.getCoreDescriptor().getCloudDescriptor();
+      try {
+        zkController.publish(core, ZkStateReader.RECOVERING);
+        
+        ZkNodeProps leaderprops = zkStateReader.getLeaderProps(
+            cloudDesc.getCollectionName(), cloudDesc.getShardId());
+        
+        // System.out.println("recover " + shardZkNodeName + " against " +
+        // leaderprops);
+        replicate(zkController.getNodeName(), core, coreZkNodeName,
+            leaderprops, ZkCoreNodeProps.getCoreUrl(baseUrl, coreName));
+        
+        replay(ulog);
+        replayed = true;
+        
+        // if there are pending recovery requests, don't advert as active
+        zkController.publishAsActive(baseUrl, core.getCoreDescriptor(), coreZkNodeName,
+            coreName);
+        
+        succesfulRecovery = true;
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        log.warn("Recovery was interrupted", e);
+        retries = INTERRUPTED;
+      } catch (Throwable t) {
+        SolrException.log(log, "Error while trying to recover", t);
+      } finally {
+        if (!replayed) {
+          try {
+            ulog.dropBufferedUpdates();
+          } catch (Throwable t) {
+            SolrException.log(log, "", t);
+          }
+        }
+        
+      }
+      
+      if (!succesfulRecovery) {
+        // lets pause for a moment and we need to try again...
+        // TODO: we don't want to retry for some problems?
+        // Or do a fall off retry...
+        try {
+
+          SolrException.log(log, "Recovery failed - trying again...");
+          retries++;
+          if (retries >= MAX_RETRIES) {
+            if (retries == INTERRUPTED) {
+
+            } else {
+              // TODO: for now, give up after 10 tries - should we do more?
+              recoveryFailed(core, zkController, baseUrl, coreZkNodeName,
+                  core.getCoreDescriptor());
+            }
+            break;
+          }
+          
+        } catch (Exception e) {
+          SolrException.log(log, "", e);
+        }
+        
+        try {
+          Thread.sleep(Math.min(START_TIMEOUT * retries, 60000));
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          log.warn("Recovery was interrupted", e);
+          retries = INTERRUPTED;
+        }
+      }
+      
+      log.info("Finished recovery process");
+      
+    }
+  }
+

@@ -1,12 +1,16 @@
   /** Never returns null, but you should never call this if
    *  arc.isLast() is true. */
   public Arc<T> readNextRealArc(Arc<T> arc, final BytesReader in) throws IOException {
+
+    // TODO: can't assert this because we call from readFirstArc
+    // assert !flag(arc.flags, BIT_LAST_ARC);
+
     // this is a continuing arc in a fixed array
     if (arc.bytesPerArc != 0) {
       // arcs are at fixed entries
       arc.arcIdx++;
       assert arc.arcIdx < arc.numArcs;
-      in.pos = arc.posArcsStart - arc.arcIdx*arc.bytesPerArc;
+      in.skip(arc.posArcsStart, arc.arcIdx*arc.bytesPerArc);
     } else {
       // arcs are packed
       in.pos = arc.nextArc;
@@ -35,20 +39,44 @@
       arc.nextArc = in.pos;
     } else if (arc.flag(BIT_TARGET_NEXT)) {
       arc.nextArc = in.pos;
-      if (!arc.flag(BIT_LAST_ARC)) {
-        if (arc.bytesPerArc == 0) {
-          // must scan
-          seekToNextNode(in);
-        } else {
-          in.pos = arc.posArcsStart - arc.bytesPerArc * arc.numArcs;
+      // TODO: would be nice to make this lazy -- maybe
+      // caller doesn't need the target and is scanning arcs...
+      if (nodeAddress == null) {
+        if (!arc.flag(BIT_LAST_ARC)) {
+          if (arc.bytesPerArc == 0) {
+            // must scan
+            seekToNextNode(in);
+          } else {
+            in.skip(arc.posArcsStart, arc.bytesPerArc * arc.numArcs);
+          }
         }
+        arc.target = in.pos;
+      } else {
+        arc.target = arc.node - 1;
+        assert arc.target > 0;
       }
-      arc.target = in.pos;
     } else {
-      arc.target = in.readInt();
+      if (packed) {
+        final int pos = in.pos;
+        final int code = in.readVInt();
+        if (arc.flag(BIT_TARGET_DELTA)) {
+          // Address is delta-coded from current address:
+          arc.target = pos + code;
+          //System.out.println("    delta pos=" + pos + " delta=" + code + " target=" + arc.target);
+        } else if (code < nodeRefToAddress.length) {
+          // Deref
+          arc.target = nodeRefToAddress[code];
+          //System.out.println("    deref code=" + code + " target=" + arc.target);
+        } else {
+          // Absolute
+          arc.target = code;
+          //System.out.println("    abs code=" + code + " derefLen=" + nodeRefToAddress.length);
+        }
+      } else {
+        arc.target = in.readInt();
+      }
       arc.nextArc = in.pos;
     }
-
     return arc;
   }
 

@@ -1,9 +1,9 @@
   // serializes new node by appending its bytes to the end
   // of the current byte[]
-  int addNode(Builder.UnCompiledNode<T> node) throws IOException {
-    //System.out.println("FST.addNode pos=" + posWrite + " numArcs=" + node.numArcs);
-    if (node.numArcs == 0) {
-      if (node.isFinal) {
+  int addNode(Builder.UnCompiledNode<T> nodeIn) throws IOException {
+    //System.out.println("FST.addNode pos=" + writer.posWrite + " numArcs=" + nodeIn.numArcs);
+    if (nodeIn.numArcs == 0) {
+      if (nodeIn.isFinal) {
         return FINAL_END_NODE;
       } else {
         return NON_FINAL_END_NODE;
@@ -13,15 +13,15 @@
     int startAddress = writer.posWrite;
     //System.out.println("  startAddr=" + startAddress);
 
-    final boolean doFixedArray = shouldExpand(node);
+    final boolean doFixedArray = shouldExpand(nodeIn);
     final int fixedArrayStart;
     if (doFixedArray) {
-      if (bytesPerArc.length < node.numArcs) {
-        bytesPerArc = new int[ArrayUtil.oversize(node.numArcs, 1)];
+      if (bytesPerArc.length < nodeIn.numArcs) {
+        bytesPerArc = new int[ArrayUtil.oversize(nodeIn.numArcs, 1)];
       }
       // write a "false" first arc:
-      writer.writeByte((byte) BIT_ARCS_AS_FIXED_ARRAY);
-      writer.writeVInt(node.numArcs);
+      writer.writeByte(ARCS_AS_FIXED_ARRAY);
+      writer.writeVInt(nodeIn.numArcs);
       // placeholder -- we'll come back and write the number
       // of bytes per arc (int) here:
       // TODO: we could make this a vInt instead
@@ -32,15 +32,14 @@
       fixedArrayStart = 0;
     }
 
-    nodeCount++;
-    arcCount += node.numArcs;
+    arcCount += nodeIn.numArcs;
     
-    final int lastArc = node.numArcs-1;
+    final int lastArc = nodeIn.numArcs-1;
 
     int lastArcStart = writer.posWrite;
     int maxBytesPerArc = 0;
-    for(int arcIdx=0;arcIdx<node.numArcs;arcIdx++) {
-      final Builder.Arc<T> arc = node.arcs[arcIdx];
+    for(int arcIdx=0;arcIdx<nodeIn.numArcs;arcIdx++) {
+      final Builder.Arc<T> arc = nodeIn.arcs[arcIdx];
       final Builder.CompiledNode target = (Builder.CompiledNode) arc.target;
       int flags = 0;
 
@@ -48,7 +47,10 @@
         flags += BIT_LAST_ARC;
       }
 
-      if (lastFrozenNode == target.address && !doFixedArray) {
+      if (lastFrozenNode == target.node && !doFixedArray) {
+        // TODO: for better perf (but more RAM used) we
+        // could avoid this except when arc is "near" the
+        // last arc:
         flags += BIT_TARGET_NEXT;
       }
 
@@ -61,10 +63,12 @@
         assert arc.nextFinalOutput == NO_OUTPUT;
       }
 
-      boolean targetHasArcs = target.address > 0;
+      boolean targetHasArcs = target.node > 0;
 
       if (!targetHasArcs) {
         flags += BIT_STOP_NODE;
+      } else if (inCounts != null) {
+        inCounts[target.node]++;
       }
 
       if (arc.output != NO_OUTPUT) {
@@ -74,19 +78,23 @@
       writer.writeByte((byte) flags);
       writeLabel(arc.label);
 
-      //System.out.println("  write arc: label=" + arc.label + " flags=" + flags);
+      // System.out.println("  write arc: label=" + (char) arc.label + " flags=" + flags + " target=" + target.node + " pos=" + writer.posWrite + " output=" + outputs.outputToString(arc.output));
 
       if (arc.output != NO_OUTPUT) {
         outputs.write(arc.output, writer);
+        //System.out.println("    write output");
         arcWithOutputCount++;
       }
+
       if (arc.nextFinalOutput != NO_OUTPUT) {
+        //System.out.println("    write final output");
         outputs.write(arc.nextFinalOutput, writer);
       }
 
-      if (targetHasArcs && (doFixedArray || lastFrozenNode != target.address)) {
-        assert target.address > 0;
-        writer.writeInt(target.address);
+      if (targetHasArcs && (flags & BIT_TARGET_NEXT) == 0) {
+        assert target.node > 0;
+        //System.out.println("    write target");
+        writer.writeInt(target.node);
       }
 
       // just write the arcs "like normal" on first pass,
@@ -106,10 +114,11 @@
     // such cases
 
     if (doFixedArray) {
+      //System.out.println("  doFixedArray");
       assert maxBytesPerArc > 0;
       // 2nd pass just "expands" all arcs to take up a fixed
       // byte size
-      final int sizeNeeded = fixedArrayStart + node.numArcs * maxBytesPerArc;
+      final int sizeNeeded = fixedArrayStart + nodeIn.numArcs * maxBytesPerArc;
       bytes = ArrayUtil.grow(bytes, sizeNeeded);
       // TODO: we could make this a vInt instead
       bytes[fixedArrayStart-4] = (byte) (maxBytesPerArc >> 24);
@@ -119,9 +128,9 @@
 
       // expand the arcs in place, backwards
       int srcPos = writer.posWrite;
-      int destPos = fixedArrayStart + node.numArcs*maxBytesPerArc;
+      int destPos = fixedArrayStart + nodeIn.numArcs*maxBytesPerArc;
       writer.posWrite = destPos;
-      for(int arcIdx=node.numArcs-1;arcIdx>=0;arcIdx--) {
+      for(int arcIdx=nodeIn.numArcs-1;arcIdx>=0;arcIdx--) {
         //System.out.println("  repack arcIdx=" + arcIdx + " srcPos=" + srcPos + " destPos=" + destPos);
         destPos -= maxBytesPerArc;
         srcPos -= bytesPerArc[arcIdx];
@@ -135,7 +144,7 @@
     // reverse bytes in-place; we do this so that the
     // "BIT_TARGET_NEXT" opto can work, ie, it reads the
     // node just before the current one
-    final int endAddress = lastFrozenNode = writer.posWrite - 1;
+    final int endAddress = writer.posWrite - 1;
 
     int left = startAddress;
     int right = endAddress;
@@ -144,7 +153,24 @@
       bytes[left++] = bytes[right];
       bytes[right--] = b;
     }
+    //System.out.println("  endAddress=" + endAddress);
 
-    return endAddress;
+    nodeCount++;
+    final int node;
+    if (nodeAddress != null) {
+      // Nodes are addressed by 1+ord:
+      if (nodeCount == nodeAddress.length) {
+        nodeAddress = ArrayUtil.grow(nodeAddress);
+        inCounts = ArrayUtil.grow(inCounts);
+      }
+      nodeAddress[nodeCount] = endAddress;
+      // System.out.println("  write nodeAddress[" + nodeCount + "] = " + endAddress);
+      node = nodeCount;
+    } else {
+      node = endAddress;
+    }
+    lastFrozenNode = node;
+
+    return node;
   }
 

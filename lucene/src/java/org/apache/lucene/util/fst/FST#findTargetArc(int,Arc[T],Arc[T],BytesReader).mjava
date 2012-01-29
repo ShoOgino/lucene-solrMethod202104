@@ -1,25 +1,17 @@
   /** Finds an arc leaving the incoming arc, replacing the arc in place.
    *  This returns null if the arc was not found, else the incoming arc. */
-  public Arc<T> findTargetArc(int labelToMatch, Arc<T> follow, Arc<T> arc) throws IOException {
+  public Arc<T> findTargetArc(int labelToMatch, Arc<T> follow, Arc<T> arc, BytesReader in) throws IOException {
     assert cachedRootArcs != null;
-    // Short-circuit if this arc is in the root arc cache:
-    if (follow.target == startNode && labelToMatch != END_LABEL && labelToMatch < cachedRootArcs.length) {
-      final Arc<T> result = cachedRootArcs[labelToMatch];
-      if (result == null) {
-        return result;
-      } else {
-        arc.copyFrom(result);
-        return arc;
-      }
-    }
- 
+
     if (labelToMatch == END_LABEL) {
       if (follow.isFinal()) {
         if (follow.target <= 0) {
           arc.flags = BIT_LAST_ARC;
         } else {
           arc.flags = 0;
+          // NOTE: nextArc is a node (not an address!) in this case:
           arc.nextArc = follow.target;
+          arc.node = follow.target;
         }
         arc.output = follow.nextFinalOutput;
         arc.label = END_LABEL;
@@ -29,35 +21,49 @@
       }
     }
 
+    // Short-circuit if this arc is in the root arc cache:
+    if (follow.target == startNode && labelToMatch < cachedRootArcs.length) {
+      final Arc<T> result = cachedRootArcs[labelToMatch];
+      if (result == null) {
+        return result;
+      } else {
+        arc.copyFrom(result);
+        return arc;
+      }
+    }
+
     if (!targetHasArcs(follow)) {
       return null;
     }
 
-    // TODO: maybe make an explicit thread state that holds
-    // reusable stuff eg BytesReader:
-    final BytesReader in = getBytesReader(follow.target);
+    in.pos = getNodeAddress(follow.target);
+
+    arc.node = follow.target;
 
     // System.out.println("fta label=" + (char) labelToMatch);
 
-    if ((in.readByte() & BIT_ARCS_AS_FIXED_ARRAY) != 0) {
+    if (in.readByte() == ARCS_AS_FIXED_ARRAY) {
       // Arcs are full array; do binary search:
       arc.numArcs = in.readVInt();
-      //System.out.println("  bs " + arc.numArcs);
-      arc.bytesPerArc = in.readInt();
+      if (packed) {
+        arc.bytesPerArc = in.readVInt();
+      } else {
+        arc.bytesPerArc = in.readInt();
+      }
       arc.posArcsStart = in.pos;
       int low = 0;
       int high = arc.numArcs-1;
       while (low <= high) {
         //System.out.println("    cycle");
         int mid = (low + high) >>> 1;
-        in.pos = arc.posArcsStart - arc.bytesPerArc*mid - 1;
+        in.skip(arc.posArcsStart, arc.bytesPerArc*mid + 1);
         int midLabel = readLabel(in);
         final int cmp = midLabel - labelToMatch;
-        if (cmp < 0)
+        if (cmp < 0) {
           low = mid + 1;
-        else if (cmp > 0)
+        } else if (cmp > 0) {
           high = mid - 1;
-        else {
+        } else {
           arc.arcIdx = mid-1;
           //System.out.println("    found!");
           return readNextRealArc(arc, in);
@@ -68,7 +74,8 @@
     }
 
     // Linear scan
-    readFirstTargetArc(follow, arc);
+    readFirstRealTargetArc(follow.target, arc, in);
+
     while(true) {
       //System.out.println("  non-bs cycle");
       // TODO: we should fix this code to not have to create
@@ -82,7 +89,7 @@
       } else if (arc.isLast()) {
         return null;
       } else {
-        readNextArc(arc);
+        readNextRealArc(arc, in);
       }
     }
   }

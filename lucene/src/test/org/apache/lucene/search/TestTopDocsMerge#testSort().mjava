@@ -57,20 +57,25 @@
     // NOTE: sometimes reader has just one segment, which is
     // important to test
     final IndexSearcher searcher = newSearcher(reader);
-    IndexReader[] subReaders = searcher.getIndexReader().getSequentialSubReaders();
-    if (subReaders == null) {
-      subReaders = new IndexReader[] {searcher.getIndexReader()};
-    }
-    final ShardSearcher[] subSearchers = new ShardSearcher[subReaders.length];
     final IndexReader.ReaderContext ctx = searcher.getTopReaderContext();
 
-    if (ctx instanceof IndexReader.AtomicReaderContext) {
-      assert subSearchers.length == 1;
-      subSearchers[0] = new ShardSearcher((IndexReader.AtomicReaderContext) ctx, ctx);
+    final ShardSearcher[] subSearchers;
+    final int[] docStarts;
+    
+    if (ctx instanceof AtomicIndexReader.AtomicReaderContext) {
+      subSearchers = new ShardSearcher[1];
+      docStarts = new int[1];
+      subSearchers[0] = new ShardSearcher((AtomicIndexReader.AtomicReaderContext) ctx, null);
+      docStarts[0] = 0;
     } else {
-      final IndexReader.CompositeReaderContext compCTX = (IndexReader.CompositeReaderContext) ctx;
+      final CompositeIndexReader.CompositeReaderContext compCTX = (CompositeIndexReader.CompositeReaderContext) ctx;
+      subSearchers = new ShardSearcher[compCTX.leaves().length];
+      docStarts = new int[compCTX.leaves().length];
+      int docBase = 0;
       for(int searcherIDX=0;searcherIDX<subSearchers.length;searcherIDX++) { 
-        subSearchers[searcherIDX] = new ShardSearcher(compCTX.leaves[searcherIDX], compCTX);
+        subSearchers[searcherIDX] = new ShardSearcher(compCTX.leaves()[searcherIDX], compCTX);
+        docStarts[searcherIDX] = docBase;
+        docBase += compCTX.leaves()[searcherIDX].reader().maxDoc();
       }
     }
 
@@ -85,14 +90,6 @@
     sortFields.add(new SortField(null, SortField.Type.SCORE, false));
     sortFields.add(new SortField(null, SortField.Type.DOC, true));
     sortFields.add(new SortField(null, SortField.Type.DOC, false));
-
-    final int[] docStarts = new int[subSearchers.length];
-    int docBase = 0;
-    for(int subIDX=0;subIDX<docStarts.length;subIDX++) {
-      docStarts[subIDX] = docBase;
-      docBase += subReaders[subIDX].maxDoc();
-      //System.out.println("docStarts[" + subIDX + "]=" + docStarts[subIDX]);
-    }
 
     for(int iter=0;iter<1000*RANDOM_MULTIPLIER;iter++) {
 

@@ -1,0 +1,56 @@
+    @Override
+    protected Object createValue(AtomicReader reader, Entry entryKey, boolean setDocsWithField)
+        throws IOException {
+      String field = entryKey.field;
+      ByteParser parser = (ByteParser) entryKey.custom;
+      if (parser == null) {
+        return wrapper.getBytes(reader, field, FieldCache.DEFAULT_BYTE_PARSER, setDocsWithField);
+      }
+      final int maxDoc = reader.maxDoc();
+      final byte[] retArray = new byte[maxDoc];
+      Terms terms = reader.terms(field);
+      FixedBitSet docsWithField = null;
+      if (terms != null) {
+        if (setDocsWithField) {
+          final int termsDocCount = terms.getDocCount();
+          assert termsDocCount <= maxDoc;
+          if (termsDocCount == maxDoc) {
+            // Fast case: all docs have this field:
+            wrapper.setDocsWithField(reader, field, new Bits.MatchAllBits(maxDoc));
+            setDocsWithField = false;
+          }
+        }
+        final TermsEnum termsEnum = terms.iterator(null);
+        DocsEnum docs = null;
+        try {
+          while(true) {
+            final BytesRef term = termsEnum.next();
+            if (term == null) {
+              break;
+            }
+            final byte termval = parser.parseByte(term);
+            docs = termsEnum.docs(null, docs, false);
+            while (true) {
+              final int docID = docs.nextDoc();
+              if (docID == DocsEnum.NO_MORE_DOCS) {
+                break;
+              }
+              retArray[docID] = termval;
+              if (setDocsWithField) {
+                if (docsWithField == null) {
+                  // Lazy init
+                  docsWithField = new FixedBitSet(maxDoc);
+                }
+                docsWithField.set(docID);
+              }
+            }
+          }
+        } catch (StopFillCacheException stop) {
+        }
+      }
+      if (setDocsWithField) {
+        wrapper.setDocsWithField(reader, field, docsWithField);
+      }
+      return retArray;
+    }
+

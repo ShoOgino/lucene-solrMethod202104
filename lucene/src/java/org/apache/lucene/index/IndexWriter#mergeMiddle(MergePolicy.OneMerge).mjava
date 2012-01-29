@@ -23,13 +23,12 @@
     }
 
     merge.readers = new ArrayList<SegmentReader>();
-    merge.readerLiveDocs = new ArrayList<BitVector>();
+    merge.readerLiveDocs = new ArrayList<Bits>();
 
     // This is try/finally to make sure merger's readers are
     // closed:
     boolean success = false;
     try {
-      int totDocCount = 0;
       int segUpto = 0;
       while(segUpto < sourceSegments.size()) {
 
@@ -42,12 +41,14 @@
         assert reader != null;
 
         // Carefully pull the most recent live docs:
-        final BitVector liveDocs;
+        final Bits liveDocs;
         synchronized(this) {
           // Must sync to ensure BufferedDeletesStream
           // cannot change liveDocs/pendingDeleteCount while
           // we pull a copy:
           liveDocs = rld.getReadOnlyLiveDocs();
+
+          assert rld.verifyDocCounts();
 
           if (infoStream.isEnabled("IW")) {
             if (rld.pendingDeleteCount != 0) {
@@ -59,21 +60,14 @@
             }
           }
         }
-
         merge.readerLiveDocs.add(liveDocs);
         merge.readers.add(reader);
-
-        if (liveDocs == null || liveDocs.count() > 0) {
+        final int delCount = rld.pendingDeleteCount + info.getDelCount();
+        assert delCount <= info.docCount;
+        if (delCount < info.docCount) {
           merger.add(reader, liveDocs);
-          totDocCount += liveDocs == null ? reader.maxDoc() : liveDocs.count();
-        } else {
-          //System.out.println("  skip seg: fully deleted");
         }
         segUpto++;
-      }
-
-      if (infoStream.isEnabled("IW")) {
-        infoStream.message("IW", "merge: total " + totDocCount + " docs");
       }
 
       merge.checkAborted(directory);
@@ -86,10 +80,8 @@
       merge.info.setCodec(codec);
 
       if (infoStream.isEnabled("IW")) {
-        infoStream.message("IW", "merge codec=" + codec);
+        infoStream.message("IW", "merge codec=" + codec + " docCount=" + mergedDocCount);
       }
-
-      assert mergedDocCount == totDocCount: "mergedDocCount=" + mergedDocCount + " vs " + totDocCount;
 
       // Very important to do this before opening the reader
       // because codec must know if prox was written for

@@ -1,0 +1,52 @@
+  private static IndexReader[] prepareSubReaders(CompositeReader[] readers, CompositeReader[] storedFieldsReaders) throws IOException {
+    if (readers.length == 0) {
+      if (storedFieldsReaders.length > 0)
+        throw new IllegalArgumentException("There must be at least one main reader if storedFieldsReaders are used.");
+      return new IndexReader[0];
+    } else {
+      final IndexReader[] firstSubReaders = readers[0].getSequentialSubReaders();
+
+      // check compatibility:
+      final int maxDoc = readers[0].maxDoc();
+      final int[] childMaxDoc = new int[firstSubReaders.length];
+      for (int i = 0; i < firstSubReaders.length; i++) {
+        childMaxDoc[i] = firstSubReaders[i].maxDoc();
+      }
+      validate(readers, maxDoc, childMaxDoc);
+      validate(storedFieldsReaders, maxDoc, childMaxDoc);
+
+      // hierarchically build the same subreader structure as the first CompositeReader with Parallel*Readers:
+      final IndexReader[] subReaders = new IndexReader[firstSubReaders.length];
+      for (int i = 0; i < subReaders.length; i++) {
+        if (firstSubReaders[i] instanceof AtomicReader) {
+          final AtomicReader[] atomicSubs = new AtomicReader[readers.length];
+          for (int j = 0; j < readers.length; j++) {
+            atomicSubs[j] = (AtomicReader) readers[j].getSequentialSubReaders()[i];
+          }
+          final AtomicReader[] storedSubs = new AtomicReader[storedFieldsReaders.length];
+          for (int j = 0; j < storedFieldsReaders.length; j++) {
+            storedSubs[j] = (AtomicReader) storedFieldsReaders[j].getSequentialSubReaders()[i];
+          }
+          // we simply enable closing of subReaders, to prevent incRefs on subReaders
+          // -> for synthetic subReaders, close() is never
+          // called by our doClose()
+          subReaders[i] = new ParallelAtomicReader(true, atomicSubs, storedSubs);
+        } else {
+          assert firstSubReaders[i] instanceof CompositeReader;
+          final CompositeReader[] compositeSubs = new CompositeReader[readers.length];
+          for (int j = 0; j < readers.length; j++) {
+            compositeSubs[j] = (CompositeReader) readers[j].getSequentialSubReaders()[i];
+          }
+          final CompositeReader[] storedSubs = new CompositeReader[storedFieldsReaders.length];
+          for (int j = 0; j < storedFieldsReaders.length; j++) {
+            storedSubs[j] = (CompositeReader) storedFieldsReaders[j].getSequentialSubReaders()[i];
+          }
+          // we simply enable closing of subReaders, to prevent incRefs on subReaders
+          // -> for synthetic subReaders, close() is never called by our doClose()
+          subReaders[i] = new ParallelCompositeReader(true, compositeSubs, storedSubs);
+        }
+      }
+      return subReaders;
+    }
+  }
+

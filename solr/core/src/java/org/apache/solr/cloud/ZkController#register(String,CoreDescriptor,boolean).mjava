@@ -12,11 +12,6 @@
     
     final CloudDescriptor cloudDesc = desc.getCloudDescriptor();
     final String collection = cloudDesc.getCollectionName();
-    
-
-    log.info("Attempting to update " + ZkStateReader.CLUSTER_STATE + " version "
-        + null);
-    CloudState state = CloudState.load(zkClient, zkStateReader.getCloudState().getLiveNodes());
 
     final String coreZkNodeName = getNodeName() + "_" + coreName;
     
@@ -43,8 +38,25 @@
 
     joinElection(collection, coreZkNodeName, shardId, leaderProps);
     
-    String leaderUrl = zkStateReader.getLeaderUrl(collection,
-        cloudDesc.getShardId(), 30000);
+    // rather than look in the cluster state file, we go straight to the zknodes
+    // here, because on cluster restart there could be stale leader info in the
+    // cluster state node that won't be updated for a moment
+    String leaderUrl = getLeaderUrl(collection, cloudDesc.getShardId());
+    
+    // now wait until our currently cloud state contains the latest leader
+    String cloudStateLeader = zkStateReader.getLeaderUrl(collection, cloudDesc.getShardId(), 30000);
+    int tries = 0;
+    while (!leaderUrl.equals(cloudStateLeader)) {
+      if (tries == 60) {
+        throw new SolrException(ErrorCode.SERVER_ERROR,
+            "There is conflicting information about the leader of shard: "
+                + cloudDesc.getShardId());
+      }
+      Thread.sleep(1000);
+      tries++;
+      cloudStateLeader = zkStateReader.getLeaderUrl(collection,
+          cloudDesc.getShardId(), 30000);
+    }
     
     String ourUrl = ZkCoreNodeProps.getCoreUrl(baseUrl, coreName);
     log.info("We are " + ourUrl + " and leader is " + leaderUrl);

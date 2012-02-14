@@ -1,0 +1,80 @@
+  @SuppressWarnings("unchecked")
+  private static SimpleOrderedMap<Object> getIndexedFieldsInfo(SolrQueryRequest req)
+      throws Exception {
+
+    SolrIndexSearcher searcher = req.getSearcher();
+    SolrParams params = req.getParams();
+
+    Set<String> fields = null;
+    String fl = params.get(CommonParams.FL);
+    if (fl != null) {
+      fields = new TreeSet<String>(Arrays.asList(fl.split( "[,\\s]+" )));
+    }
+
+    AtomicReader reader = searcher.getAtomicReader();
+    IndexSchema schema = searcher.getSchema();
+
+    // Don't be tempted to put this in the loop below, the whole point here is to alphabetize the fields!
+    Set<String> fieldNames = new TreeSet<String>();
+    for(FieldInfo fieldInfo : reader.getFieldInfos()) {
+      fieldNames.add(fieldInfo.name);
+    }
+
+    // Walk the term enum and keep a priority queue for each map in our set
+    SimpleOrderedMap<Object> finfo = new SimpleOrderedMap<Object>();
+
+    for (String fieldName : fieldNames) {
+      if (fields != null && ! fields.contains(fieldName) && ! fields.contains("*")) {
+        continue; //we're not interested in this field Still an issue here
+      }
+
+      SimpleOrderedMap<Object> fieldMap = new SimpleOrderedMap<Object>();
+
+      SchemaField sfield = schema.getFieldOrNull( fieldName );
+      FieldType ftype = (sfield==null)?null:sfield.getType();
+
+      fieldMap.add( "type", (ftype==null)?null:ftype.getTypeName() );
+      fieldMap.add("schema", getFieldFlags(sfield));
+      if (sfield != null && schema.isDynamicField(sfield.getName()) && schema.getDynamicPattern(sfield.getName()) != null) {
+        fieldMap.add("dynamicBase", schema.getDynamicPattern(sfield.getName()));
+      }
+      Terms terms = reader.fields().terms(fieldName);
+      if (terms == null) { // Not indexed, so we need to report what we can (it made it through the fl param if specified)
+        finfo.add( fieldName, fieldMap );
+        continue;
+      }
+
+      if(sfield != null && sfield.indexed() ) {
+        // In the pre-4.0 days, this did a veeeery expensive range query. But we can be much faster now,
+        // so just do this all the time.
+        Document doc = getFirstLiveDoc(reader, fieldName, terms);
+
+
+        if( doc != null ) {
+          // Found a document with this field
+          try {
+            IndexableField fld = doc.getField( fieldName );
+            if( fld != null ) {
+              fieldMap.add("index", getFieldFlags(fld));
+            }
+            else {
+              // it is a non-stored field...
+              fieldMap.add("index", "(unstored field)");
+            }
+          }
+          catch( Exception ex ) {
+            log.warn( "error reading field: "+fieldName );
+          }
+        }
+        fieldMap.add("docs", terms.getDocCount());
+
+      }
+      if (fields != null && (fields.contains(fieldName) || fields.contains("*"))) {
+        getDetailedFieldInfo(req, fieldName, fieldMap);
+      }
+      // Add the field
+      finfo.add( fieldName, fieldMap );
+    }
+    return finfo;
+  }
+

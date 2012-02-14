@@ -1,0 +1,52 @@
+  // Get terribly detailed information about a particular field. This is a very expensive call, use it with caution
+  // especially on large indexes!
+  private static void getDetailedFieldInfo(SolrQueryRequest req, String field, SimpleOrderedMap<Object> fieldMap)
+      throws IOException {
+
+    SolrParams params = req.getParams();
+    int numTerms = params.getInt( NUMTERMS, DEFAULT_COUNT );
+
+    TopTermQueue tiq = new TopTermQueue(numTerms + 1);  // Something to collect the top N terms in.
+
+    final CharsRef spare = new CharsRef();
+
+    Fields fields = MultiFields.getFields(req.getSearcher().getIndexReader());
+
+    if (fields == null) { // No indexed fields
+      return;
+    }
+
+    Terms terms = fields.terms(field);
+    if (terms == null) {  // No terms in the field.
+      return;
+    }
+    TermsEnum termsEnum = terms.iterator(null);
+    BytesRef text;
+    int[] buckets = new int[HIST_ARRAY_SIZE];
+    while ((text = termsEnum.next()) != null) {
+      int freq = termsEnum.docFreq();  // This calculation seems odd, but it gives the same results as it used to.
+      int slot = 32 - Integer.numberOfLeadingZeros(Math.max(0, freq - 1));
+      buckets[slot] = buckets[slot] + 1;
+      if (freq > tiq.minFreq) {
+        UnicodeUtil.UTF8toUTF16(text, spare);
+        String t = spare.toString();
+        tiq.distinctTerms = new Long(terms.getUniqueTermCount()).intValue();
+
+        tiq.add(new TopTermQueue.TermInfo(new Term(field, t), termsEnum.docFreq()));
+        if (tiq.size() > numTerms) { // if tiq full
+          tiq.pop(); // remove lowest in tiq
+          tiq.minFreq = tiq.getTopTermInfo().docFreq;
+        }
+      }
+    }
+    tiq.histogram.add(buckets);
+    fieldMap.add("distinct", tiq.distinctTerms);
+
+    // Include top terms
+    fieldMap.add("topTerms", tiq.toNamedList(req.getSearcher().getSchema()));
+
+    // Add a histogram
+    fieldMap.add("histogram", tiq.histogram.toNamedList());
+  }
+  //////////////////////// SolrInfoMBeans methods //////////////////////
+

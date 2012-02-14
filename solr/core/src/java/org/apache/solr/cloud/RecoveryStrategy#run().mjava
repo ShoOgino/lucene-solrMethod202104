@@ -4,46 +4,72 @@
     boolean succesfulRecovery = false;
     
     while (!succesfulRecovery && !close && !isInterrupted()) {
-      UpdateLog ulog = core.getUpdateHandler().getUpdateLog();
-      if (ulog == null) return;
-      
-      ulog.bufferUpdates();
-      replayed = false;
-      CloudDescriptor cloudDesc = core.getCoreDescriptor().getCloudDescriptor();
       try {
+        // first thing we just try to sync
         zkController.publish(core, ZkStateReader.RECOVERING);
+        CloudDescriptor cloudDesc = core.getCoreDescriptor()
+            .getCloudDescriptor();
+        ZkNodeProps leaderprops = null;
         
-        ZkNodeProps leaderprops = zkStateReader.getLeaderProps(
+        leaderprops = zkStateReader.getLeaderProps(
             cloudDesc.getCollectionName(), cloudDesc.getShardId());
         
-        // System.out.println("recover " + shardZkNodeName + " against " +
-        // leaderprops);
-        replicate(zkController.getNodeName(), core, coreZkNodeName,
-            leaderprops, ZkCoreNodeProps.getCoreUrl(baseUrl, coreName));
+        String leaderUrl = ZkCoreNodeProps.getCoreUrl(leaderprops.get(ZkStateReader.BASE_URL_PROP), leaderprops.get(ZkStateReader.CORE_NAME_PROP));
         
-        replay(ulog);
-        replayed = true;
+        log.info("Attempting to PeerSync from " + leaderUrl);
+        PeerSync peerSync = new PeerSync(core,
+            Collections.singletonList(leaderUrl), 100);
+        boolean syncSuccess = peerSync.sync();
+        if (syncSuccess) {
+          SolrQueryRequest req = new LocalSolrQueryRequest(core,
+              new ModifiableSolrParams());
+          core.getUpdateHandler().commit(new CommitUpdateCommand(req, false));
+          log.info("Sync Recovery was succesful - registering as Active");
+          // sync success - register as active and return
+          zkController.publishAsActive(baseUrl, core.getCoreDescriptor(),
+              coreZkNodeName, coreName);
+          return;
+        }
+        log.info("Sync Recovery was not successful - trying replication");
+        UpdateLog ulog = core.getUpdateHandler().getUpdateLog();
+        if (ulog == null) return;
         
-        // if there are pending recovery requests, don't advert as active
-        zkController.publishAsActive(baseUrl, core.getCoreDescriptor(), coreZkNodeName,
-            coreName);
+        ulog.bufferUpdates();
+        replayed = false;
         
-        succesfulRecovery = true;
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        log.warn("Recovery was interrupted", e);
-        retries = INTERRUPTED;
-      } catch (Throwable t) {
-        SolrException.log(log, "Error while trying to recover", t);
-      } finally {
-        if (!replayed) {
-          try {
-            ulog.dropBufferedUpdates();
-          } catch (Throwable t) {
-            SolrException.log(log, "", t);
+        try {
+          
+          replicate(zkController.getNodeName(), core,
+              leaderprops, leaderUrl);
+          
+          replay(ulog);
+          replayed = true;
+          
+          log.info("Recovery was succesful - registering as Active");
+          // if there are pending recovery requests, don't advert as active
+          zkController.publishAsActive(baseUrl, core.getCoreDescriptor(),
+              coreZkNodeName, coreName);
+          
+          succesfulRecovery = true;
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          log.warn("Recovery was interrupted", e);
+          retries = INTERRUPTED;
+        } catch (Throwable t) {
+          SolrException.log(log, "Error while trying to recover", t);
+        } finally {
+          if (!replayed) {
+            try {
+              ulog.dropBufferedUpdates();
+            } catch (Throwable t) {
+              SolrException.log(log, "", t);
+            }
           }
+          
         }
         
+      } catch (Throwable t) {
+        SolrException.log(log, "Error while trying to recover", t);
       }
       
       if (!succesfulRecovery) {
@@ -51,14 +77,14 @@
         // TODO: we don't want to retry for some problems?
         // Or do a fall off retry...
         try {
-
+          
           SolrException.log(log, "Recovery failed - trying again...");
           retries++;
           if (retries >= MAX_RETRIES) {
             if (retries == INTERRUPTED) {
-
+              
             } else {
-              // TODO: for now, give up after 10 tries - should we do more?
+              // TODO: for now, give up after X tries - should we do more?
               recoveryFailed(core, zkController, baseUrl, coreZkNodeName,
                   core.getCoreDescriptor());
             }

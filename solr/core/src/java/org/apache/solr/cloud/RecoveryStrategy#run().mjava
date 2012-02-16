@@ -19,20 +19,23 @@
       startingRecentUpdates.close();
     }
     
-    while (!succesfulRecovery && !close && !isInterrupted()) {
+    while (!succesfulRecovery && !close && !isInterrupted()) { // don't use interruption or it will close channels though
       try {
         // first thing we just try to sync
         zkController.publish(core, ZkStateReader.RECOVERING);
+ 
         CloudDescriptor cloudDesc = core.getCoreDescriptor()
             .getCloudDescriptor();
-        ZkNodeProps leaderprops = null;
-        
-        leaderprops = zkStateReader.getLeaderProps(
+        ZkNodeProps leaderprops = zkStateReader.getLeaderProps(
             cloudDesc.getCollectionName(), cloudDesc.getShardId());
         
-        String leaderUrl = ZkCoreNodeProps.getCoreUrl(leaderprops.get(ZkStateReader.BASE_URL_PROP), leaderprops.get(ZkStateReader.CORE_NAME_PROP));
-
-        // TODO: we should only try this the first time through the loop?
+        String leaderBaseUrl = leaderprops.get(ZkStateReader.BASE_URL_PROP);
+        String leaderCoreName = leaderprops.get(ZkStateReader.CORE_NAME_PROP);
+        
+        String leaderUrl = ZkCoreNodeProps.getCoreUrl(leaderBaseUrl, leaderCoreName); 
+        
+        sendPrepRecoveryCmd(leaderBaseUrl, leaderCoreName);
+        
         log.info("Attempting to PeerSync from " + leaderUrl);
         PeerSync peerSync = new PeerSync(core,
             Collections.singletonList(leaderUrl), 100);
@@ -46,8 +49,11 @@
           // sync success - register as active and return
           zkController.publishAsActive(baseUrl, core.getCoreDescriptor(),
               coreZkNodeName, coreName);
+          succesfulRecovery = true;
+          close = true;
           return;
         }
+
         log.info("Sync Recovery was not successful - trying replication");
         
         log.info("Begin buffering updates");
@@ -66,7 +72,7 @@
           // if there are pending recovery requests, don't advert as active
           zkController.publishAsActive(baseUrl, core.getCoreDescriptor(),
               coreZkNodeName, coreName);
-          
+          close = true;
           succesfulRecovery = true;
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();

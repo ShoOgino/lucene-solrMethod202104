@@ -2,13 +2,23 @@
   public void run() {
     boolean replayed = false;
     boolean succesfulRecovery = false;
-
-    UpdateLog ulog = core.getUpdateHandler().getUpdateLog();
-    if (ulog == null) {
-      SolrException.log(log, "No UpdateLog found - cannot recover");
-      recoveryFailed(core, zkController, baseUrl, coreZkNodeName,
-          core.getCoreDescriptor());
+    
+    SolrCore core = cc.getCore(coreName);
+    if (core == null) {
+      SolrException.log(log, "SolrCore not found - cannot recover:" + coreName);
       return;
+    }
+    UpdateLog ulog;
+    try {
+      ulog = core.getUpdateHandler().getUpdateLog();
+      if (ulog == null) {
+        SolrException.log(log, "No UpdateLog found - cannot recover");
+        recoveryFailed(core, zkController, baseUrl, coreZkNodeName,
+            core.getCoreDescriptor());
+        return;
+      }
+    } finally {
+      core.close();
     }
 
     List<Long> startingRecentVersions;
@@ -47,6 +57,11 @@
     boolean firstTime = true;
 
     while (!succesfulRecovery && !close && !isInterrupted()) { // don't use interruption or it will close channels though
+      core = cc.getCore(coreName);
+      if (core == null) {
+        SolrException.log(log, "SolrCore not found - cannot recover:" + coreName);
+        return;
+      }
       try {
         // first thing we just try to sync
         zkController.publish(core.getCoreDescriptor(), ZkStateReader.RECOVERING);
@@ -143,11 +158,15 @@
               SolrException.log(log, "", t);
             }
           }
-          
+
         }
         
       } catch (Throwable t) {
         SolrException.log(log, "Error while trying to recover", t);
+      } finally {
+        if (core != null) {
+          core.close();
+        }
       }
       
       if (!succesfulRecovery) {
@@ -163,8 +182,15 @@
               
             } else {
               // TODO: for now, give up after X tries - should we do more?
-              recoveryFailed(core, zkController, baseUrl, coreZkNodeName,
-                  core.getCoreDescriptor());
+              core = cc.getCore(coreName);
+              try {
+                recoveryFailed(core, zkController, baseUrl, coreZkNodeName,
+                    core.getCoreDescriptor());
+              } finally {
+                if (core != null) {
+                  core.close();
+                }
+              }
             }
             break;
           }
@@ -181,6 +207,7 @@
           retries = INTERRUPTED;
         }
       }
+    
       
       log.info("Finished recovery process");
       

@@ -1,15 +1,16 @@
     @Override
     public void run() {
+      ModifiableSolrParams params = new ModifiableSolrParams();
+      params.set(DistributedUpdateProcessor.SEEN_LEADER, true);
+      SolrQueryRequest req = new LocalSolrQueryRequest(uhandler.core, params);
+      SolrQueryResponse rsp = new SolrQueryResponse();
+      SolrRequestInfo.setRequestInfo(new SolrRequestInfo(req, rsp));    // setting request info will help logging
+
       try {
 
-        uhandler.core.log.warn("Starting log replay " + translog + " active="+activeLog + "starting pos=" + recoveryInfo.positionOfStart);
+        loglog.warn("Starting log replay " + translog + " active="+activeLog + " starting pos=" + recoveryInfo.positionOfStart);
 
         tlogReader = translog.getReader(recoveryInfo.positionOfStart);
-
-        ModifiableSolrParams params = new ModifiableSolrParams();
-        params.set(DistributedUpdateProcessor.SEEN_LEADER, true);
-        SolrQueryRequest req = new LocalSolrQueryRequest(uhandler.core, params);
-        SolrQueryResponse rsp = new SolrQueryResponse();
 
         // NOTE: we don't currently handle a core reload during recovery.  This would cause the core
         // to change underneath us.
@@ -81,6 +82,8 @@
                 cmd.solrDoc = sdoc;
                 cmd.setVersion(version);
                 cmd.setFlags(UpdateCommand.REPLAY | UpdateCommand.IGNORE_AUTOCOMMIT);
+                if (debug) log.debug("add " +  cmd);
+
                 proc.processAdd(cmd);
                 break;
               }
@@ -92,6 +95,7 @@
                 cmd.setIndexedId(new BytesRef(idBytes));
                 cmd.setVersion(version);
                 cmd.setFlags(UpdateCommand.REPLAY | UpdateCommand.IGNORE_AUTOCOMMIT);
+                if (debug) log.debug("delete " +  cmd);
                 proc.processDelete(cmd);
                 break;
               }
@@ -104,6 +108,7 @@
                 cmd.query = query;
                 cmd.setVersion(version);
                 cmd.setFlags(UpdateCommand.REPLAY | UpdateCommand.IGNORE_AUTOCOMMIT);
+                if (debug) log.debug("deleteByQuery " +  cmd);
                 proc.processDelete(cmd);
                 break;
               }
@@ -119,20 +124,20 @@
             }
 
             if (rsp.getException() != null) {
-              log.error("Exception replaying log", rsp.getException());
+              loglog.error("REPLAY_ERR: Exception replaying log", rsp.getException());
               throw rsp.getException();
             }
           } catch (IOException ex) {
             recoveryInfo.errors++;
-            log.warn("IOException reading log", ex);
+            loglog.warn("REYPLAY_ERR: IOException reading log", ex);
             // could be caused by an incomplete flush if recovering from log
           } catch (ClassCastException cl) {
             recoveryInfo.errors++;
-            log.warn("Unexpected log entry or corrupt log.  Entry=" + o, cl);
+            loglog.warn("REPLAY_ERR: Unexpected log entry or corrupt log.  Entry=" + o, cl);
             // would be caused by a corrupt transaction log
           } catch (Throwable ex) {
             recoveryInfo.errors++;
-            log.warn("Exception replaying log", ex);
+            loglog.warn("REPLAY_ERR: Exception replaying log", ex);
             // something wrong with the request?
           }
         }
@@ -143,10 +148,11 @@
         cmd.waitSearcher = true;
         cmd.setFlags(UpdateCommand.REPLAY);
         try {
+          if (debug) log.debug("commit " +  cmd);
           uhandler.commit(cmd);          // this should cause a commit to be added to the incomplete log and avoid it being replayed again after a restart.
         } catch (IOException ex) {
           recoveryInfo.errors++;
-          log.error("Replay exception: final commit.", ex);
+          loglog.error("Replay exception: final commit.", ex);
         }
         
         if (!activeLog) {
@@ -159,7 +165,7 @@
           proc.finish();
         } catch (IOException ex) {
           recoveryInfo.errors++;
-          log.error("Replay exception: finish()", ex);
+          loglog.error("Replay exception: finish()", ex);
         }
 
         tlogReader.close();
@@ -176,8 +182,10 @@
         }
       }
 
-      log.warn("Ending log replay " + tlogReader);
+      loglog.warn("Ending log replay " + tlogReader + " recoveryInfo=" + recoveryInfo);
 
       if (testing_logReplayFinishHook != null) testing_logReplayFinishHook.run();
+
+      SolrRequestInfo.clearRequestInfo();
     }
 

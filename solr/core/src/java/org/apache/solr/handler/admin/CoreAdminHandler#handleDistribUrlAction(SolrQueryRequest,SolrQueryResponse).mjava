@@ -10,6 +10,9 @@
 
     String collection = required.get("collection");
     
+    newParams.set(CoreAdminParams.ACTION, subAction);
+
+    
     SolrCore core = req.getCore();
     ZkController zkController = core.getCoreDescriptor().getCoreContainer()
         .getZkController();
@@ -23,26 +26,30 @@
       for (Map.Entry<String,ZkNodeProps> shardEntry : shardEntries) {
         final ZkNodeProps node = shardEntry.getValue();
         if (cloudState.liveNodesContain(node.get(ZkStateReader.NODE_NAME_PROP))) {
-          CommonsHttpSolrServer server = new CommonsHttpSolrServer(node.get(ZkStateReader.BASE_URL_PROP));
+          newParams.set(CoreAdminParams.CORE, node.get(ZkStateReader.CORE_NAME_PROP));
+          String replica = node.get(ZkStateReader.BASE_URL_PROP) + "/admin/cores";
+          ShardRequest sreq = new ShardRequest();
+          sreq.purpose = 1;
+          // TODO: this sucks
+          if (replica.startsWith("http://"))
+            replica = replica.substring(7);
+          sreq.shards = new String[]{replica};
+          sreq.actualShards = sreq.shards;
+          sreq.params = newParams;
 
-          server.request(new CoreAdminRequest() {
-            {
-              action = CoreAdminAction.valueOf(subAction);
-              setCoreName(node.get(ZkStateReader.CORE_NAME_PROP));
-            }
-            
-            @Override
-            public SolrParams getParams() {
-              SolrParams superParams = super.getParams();
-              newParams.add(superParams);
-              return newParams;
-            }
-          });
+          shardHandler.submit(sreq, replica, sreq.params);
         }
       }
     }
  
-
+    ShardResponse srsp;
+    do {
+      srsp = shardHandler.takeCompletedOrError();
+      Throwable e = srsp.getException();
+      if (e != null) {
+        log.error("Error talking to shard: " + srsp.getShard(), e);
+      }
+    } while(srsp != null);
     
   }
 

@@ -2,175 +2,14 @@
     public void run() {
       ModifiableSolrParams params = new ModifiableSolrParams();
       params.set(DistributedUpdateProcessor.SEEN_LEADER, true);
-      SolrQueryRequest req = new LocalSolrQueryRequest(uhandler.core, params);
-      SolrQueryResponse rsp = new SolrQueryResponse();
+      req = new LocalSolrQueryRequest(uhandler.core, params);
+      rsp = new SolrQueryResponse();
       SolrRequestInfo.setRequestInfo(new SolrRequestInfo(req, rsp));    // setting request info will help logging
 
       try {
-
-        loglog.warn("Starting log replay " + translog + " active="+activeLog + " starting pos=" + recoveryInfo.positionOfStart);
-
-        tlogReader = translog.getReader(recoveryInfo.positionOfStart);
-
-        // NOTE: we don't currently handle a core reload during recovery.  This would cause the core
-        // to change underneath us.
-
-        // TODO: use the standard request factory?  We won't get any custom configuration instantiating this way.
-        RunUpdateProcessorFactory runFac = new RunUpdateProcessorFactory();
-        DistributedUpdateProcessorFactory magicFac = new DistributedUpdateProcessorFactory();
-        runFac.init(new NamedList());
-        magicFac.init(new NamedList());
-
-        UpdateRequestProcessor proc = magicFac.getInstance(req, rsp, runFac.getInstance(req, rsp, null));
-
-        long commitVersion = 0;
-
-        for(;;) {
-          Object o = null;
-          if (cancelApplyBufferUpdate) break;
-          try {
-            if (testing_logReplayHook != null) testing_logReplayHook.run();
-            o = null;
-            o = tlogReader.next();
-            if (o == null && activeLog) {
-              if (!finishing) {
-                // block to prevent new adds, but don't immediately unlock since
-                // we could be starved from ever completing recovery.  Only unlock
-                // after we've finished this recovery.
-                // NOTE: our own updates won't be blocked since the thread holding a write lock can
-                // lock a read lock.
-                versionInfo.blockUpdates();
-                finishing = true;
-                o = tlogReader.next();
-              } else {
-                // we had previously blocked updates, so this "null" from the log is final.
-
-                // Wait until our final commit to change the state and unlock.
-                // This is only so no new updates are written to the current log file, and is
-                // only an issue if we crash before the commit (and we are paying attention
-                // to incomplete log files).
-                //
-                // versionInfo.unblockUpdates();
-              }
-            }
-          } catch (InterruptedException e) {
-            SolrException.log(log,e);
-          } catch (IOException e) {
-            SolrException.log(log,e);
-          } catch (Throwable e) {
-            SolrException.log(log,e);
-          }
-
-          if (o == null) break;
-
-          try {
-
-            // should currently be a List<Oper,Ver,Doc/Id>
-            List entry = (List)o;
-
-            int oper = (Integer)entry.get(0);
-            long version = (Long) entry.get(1);
-
-            switch (oper) {
-              case UpdateLog.ADD:
-              {
-                recoveryInfo.adds++;
-                // byte[] idBytes = (byte[]) entry.get(2);
-                SolrInputDocument sdoc = (SolrInputDocument)entry.get(entry.size()-1);
-                AddUpdateCommand cmd = new AddUpdateCommand(req);
-                // cmd.setIndexedId(new BytesRef(idBytes));
-                cmd.solrDoc = sdoc;
-                cmd.setVersion(version);
-                cmd.setFlags(UpdateCommand.REPLAY | UpdateCommand.IGNORE_AUTOCOMMIT);
-                if (debug) log.debug("add " +  cmd);
-
-                proc.processAdd(cmd);
-                break;
-              }
-              case UpdateLog.DELETE:
-              {
-                recoveryInfo.deletes++;
-                byte[] idBytes = (byte[]) entry.get(2);
-                DeleteUpdateCommand cmd = new DeleteUpdateCommand(req);
-                cmd.setIndexedId(new BytesRef(idBytes));
-                cmd.setVersion(version);
-                cmd.setFlags(UpdateCommand.REPLAY | UpdateCommand.IGNORE_AUTOCOMMIT);
-                if (debug) log.debug("delete " +  cmd);
-                proc.processDelete(cmd);
-                break;
-              }
-
-              case UpdateLog.DELETE_BY_QUERY:
-              {
-                recoveryInfo.deleteByQuery++;
-                String query = (String)entry.get(2);
-                DeleteUpdateCommand cmd = new DeleteUpdateCommand(req);
-                cmd.query = query;
-                cmd.setVersion(version);
-                cmd.setFlags(UpdateCommand.REPLAY | UpdateCommand.IGNORE_AUTOCOMMIT);
-                if (debug) log.debug("deleteByQuery " +  cmd);
-                proc.processDelete(cmd);
-                break;
-              }
-
-              case UpdateLog.COMMIT:
-              {
-                commitVersion = version;
-                break;
-              }
-
-              default:
-                throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,  "Unknown Operation! " + oper);
-            }
-
-            if (rsp.getException() != null) {
-              loglog.error("REPLAY_ERR: Exception replaying log", rsp.getException());
-              throw rsp.getException();
-            }
-          } catch (IOException ex) {
-            recoveryInfo.errors++;
-            loglog.warn("REYPLAY_ERR: IOException reading log", ex);
-            // could be caused by an incomplete flush if recovering from log
-          } catch (ClassCastException cl) {
-            recoveryInfo.errors++;
-            loglog.warn("REPLAY_ERR: Unexpected log entry or corrupt log.  Entry=" + o, cl);
-            // would be caused by a corrupt transaction log
-          } catch (Throwable ex) {
-            recoveryInfo.errors++;
-            loglog.warn("REPLAY_ERR: Exception replaying log", ex);
-            // something wrong with the request?
-          }
+        for (TransactionLog translog : translogs) {
+          doReplay(translog);
         }
-
-        CommitUpdateCommand cmd = new CommitUpdateCommand(req, false);
-        cmd.setVersion(commitVersion);
-        cmd.softCommit = false;
-        cmd.waitSearcher = true;
-        cmd.setFlags(UpdateCommand.REPLAY);
-        try {
-          if (debug) log.debug("commit " +  cmd);
-          uhandler.commit(cmd);          // this should cause a commit to be added to the incomplete log and avoid it being replayed again after a restart.
-        } catch (IOException ex) {
-          recoveryInfo.errors++;
-          loglog.error("Replay exception: final commit.", ex);
-        }
-        
-        if (!activeLog) {
-          // if we are replaying an old tlog file, we need to add a commit to the end
-          // so we don't replay it again if we restart right after.
-          translog.writeCommit(cmd);
-        }
-
-        try {
-          proc.finish();
-        } catch (IOException ex) {
-          recoveryInfo.errors++;
-          loglog.error("Replay exception: finish()", ex);
-        }
-
-        tlogReader.close();
-        translog.decref();
-
       } catch (Throwable e) {
         recoveryInfo.errors++;
         SolrException.log(log,e);
@@ -182,7 +21,7 @@
         }
       }
 
-      loglog.warn("Ending log replay " + tlogReader + " recoveryInfo=" + recoveryInfo);
+      loglog.warn("Log replay finished. recoveryInfo=" + recoveryInfo);
 
       if (testing_logReplayFinishHook != null) testing_logReplayFinishHook.run();
 

@@ -1,0 +1,71 @@
+  /**
+   * Check if the candidate with the given n_* sequence number is the leader.
+   * If it is, set the leaderId on the leader zk node. If it is not, start
+   * watching the candidate that is in line before this one - if it goes down, check
+   * if this candidate is the leader again.
+   * @param leaderSeqPath 
+   * 
+   * @param seq
+   * @param context 
+   * @param replacement has someone else been the leader already?
+   * @throws KeeperException
+   * @throws InterruptedException
+   * @throws IOException 
+   * @throws UnsupportedEncodingException
+   */
+  private void checkIfIamLeader(final int seq, final ElectionContext context, boolean replacement) throws KeeperException,
+      InterruptedException, IOException {
+    // get all other numbers...
+    final String holdElectionPath = context.electionPath + ELECTION_NODE;
+    List<String> seqs = zkClient.getChildren(holdElectionPath, null, true);
+    
+    sortSeqs(seqs);
+    List<Integer> intSeqs = getSeqs(seqs);
+    if (seq <= intSeqs.get(0)) {
+      runIamLeaderProcess(context, replacement);
+    } else {
+      // I am not the leader - watch the node below me
+      int i = 1;
+      for (; i < intSeqs.size(); i++) {
+        int s = intSeqs.get(i);
+        if (seq < s) {
+          // we found who we come before - watch the guy in front
+          break;
+        }
+      }
+      int index = i - 2;
+      if (index < 0) {
+        log.warn("Our node is no longer in line to be leader");
+        return;
+      }
+      try {
+        zkClient.getData(holdElectionPath + "/" + seqs.get(index),
+            new Watcher() {
+              
+              @Override
+              public void process(WatchedEvent event) {
+                // am I the next leader?
+                try {
+                  checkIfIamLeader(seq, context, true);
+                } catch (InterruptedException e) {
+                  // Restore the interrupted status
+                  Thread.currentThread().interrupt();
+                  log.warn("", e);
+                } catch (IOException e) {
+                  log.warn("", e);
+                } catch (Exception e) {
+                  log.warn("", e);
+                }
+              }
+              
+            }, null, true);
+      } catch (KeeperException.SessionExpiredException e) {
+        throw e;
+      } catch (KeeperException e) {
+        // we couldn't set our watch - the node before us may already be down?
+        // we need to check if we are the leader again
+        checkIfIamLeader(seq, context, true);
+      }
+    }
+  }
+

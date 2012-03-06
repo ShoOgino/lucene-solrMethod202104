@@ -1,18 +1,27 @@
   private ZkCoreNodeProps waitForLeaderToSeeDownState(
-      CoreDescriptor descriptor, final String shardZkNodeName) {
+      CoreDescriptor descriptor, final String coreZkNodeName) {
     CloudDescriptor cloudDesc = descriptor.getCloudDescriptor();
     String collection = cloudDesc.getCollectionName();
     String shard = cloudDesc.getShardId();
-    ZkCoreNodeProps leaderProps;
-    try {
-      // go straight to zk, not the cloud state - we must have current info
-      leaderProps = getLeaderProps(collection, shard);
-    } catch (InterruptedException e) {
-      // Restore the interrupted status
-      Thread.currentThread().interrupt();
-      throw new ZooKeeperException(SolrException.ErrorCode.SERVER_ERROR, "", e);
-    } catch (KeeperException e) {
-      throw new ZooKeeperException(SolrException.ErrorCode.SERVER_ERROR, "", e);
+    ZkCoreNodeProps leaderProps = null;
+    
+    int retries = 6;
+    for (int i = 0; i < retries; i++) {
+      try {
+        // go straight to zk, not the cloud state - we must have current info
+        leaderProps = getLeaderProps(collection, shard);
+        break;
+      } catch (Exception e) {
+        SolrException.log(log, "There was a problem finding the leader in zk", e);
+        try {
+          Thread.sleep(2000);
+        } catch (InterruptedException e1) {
+          Thread.currentThread().interrupt();
+        }
+        if (i == retries - 1) {
+          throw new SolrException(ErrorCode.SERVER_ERROR, "There was a problem finding the leader in zk");
+        }
+      }
     }
     
     String leaderBaseUrl = leaderProps.getBaseUrl();
@@ -23,8 +32,6 @@
     
     boolean isLeader = leaderProps.getCoreUrl().equals(ourUrl);
     if (!isLeader && !SKIP_AUTO_RECOVERY) {
-      // wait until the leader sees us as down before we are willing to accept
-      // updates.
       CommonsHttpSolrServer server = null;
       try {
         server = new CommonsHttpSolrServer(leaderBaseUrl);
@@ -37,16 +44,30 @@
       WaitForState prepCmd = new WaitForState();
       prepCmd.setCoreName(leaderCoreName);
       prepCmd.setNodeName(getNodeName());
-      prepCmd.setCoreNodeName(shardZkNodeName);
+      prepCmd.setCoreNodeName(coreZkNodeName);
       prepCmd.setState(ZkStateReader.DOWN);
-      prepCmd.setCheckLive(false);
+      prepCmd.setPauseFor(0);
       
-      try {
-        server.request(prepCmd);
-      } catch (Exception e) {
-        throw new ZooKeeperException(SolrException.ErrorCode.SERVER_ERROR,
-            "Could not talk to the leader", e);
+      // let's retry a couple times - perhaps the leader just went down,
+      // or perhaps he is just not quite ready for us yet
+      retries = 6;
+      for (int i = 0; i < retries; i++) {
+        try {
+          server.request(prepCmd);
+          break;
+        } catch (Exception e) {
+          SolrException.log(log, "There was a problem making a request to the leader", e);
+          try {
+            Thread.sleep(2000);
+          } catch (InterruptedException e1) {
+            Thread.currentThread().interrupt();
+          }
+          if (i == retries - 1) {
+            throw new SolrException(ErrorCode.SERVER_ERROR, "There was a problem making a request to the leader");
+          }
+        }
       }
+      
       server.shutdown();
     }
     return leaderProps;

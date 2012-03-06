@@ -1,0 +1,47 @@
+  @Override
+  public List<LookupResult> lookup(CharSequence key, boolean onlyMorePopular, int num) {
+    assert num > 0;
+    BytesRef scratch = new BytesRef(key);
+    int prefixLength = scratch.length;
+    Arc<Long> arc = new Arc<Long>();
+    
+    // match the prefix portion exactly
+    Long prefixOutput = null;
+    try {
+      prefixOutput = lookupPrefix(scratch, arc);
+    } catch (IOException bogus) { throw new RuntimeException(bogus); }
+    
+    if (prefixOutput == null) {
+      return Collections.<LookupResult>emptyList();
+    }
+    
+    List<LookupResult> results = new ArrayList<LookupResult>(num);
+    CharsRef spare = new CharsRef();
+    if (exactFirst && arc.isFinal()) {
+      spare.grow(scratch.length);
+      UnicodeUtil.UTF8toUTF16(scratch, spare);
+      results.add(new LookupResult(spare.toString(), decodeWeight(prefixOutput + arc.nextFinalOutput)));
+      if (--num == 0) {
+        return results; // that was quick
+      }
+    }
+    
+    // complete top-N
+    MinResult<Long> completions[] = null;
+    try {
+      completions = Util.shortestPaths(fst, arc, weightComparator, num);
+    } catch (IOException bogus) { throw new RuntimeException(bogus); }
+    
+    BytesRef suffix = new BytesRef(8);
+    for (MinResult<Long> completion : completions) {
+      scratch.length = prefixLength;
+      // append suffix
+      Util.toBytesRef(completion.input, suffix);
+      scratch.append(suffix);
+      spare.grow(scratch.length);
+      UnicodeUtil.UTF8toUTF16(scratch, spare);
+      results.add(new LookupResult(spare.toString(), decodeWeight(prefixOutput + completion.output)));
+    }
+    return results;
+  }
+

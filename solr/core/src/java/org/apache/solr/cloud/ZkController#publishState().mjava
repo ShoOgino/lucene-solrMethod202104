@@ -1,0 +1,32 @@
+  private void publishState() {
+    final String nodePath = "/node_states/" + getNodeName();
+
+    long version;
+    byte[] coreStatesData;
+    synchronized (coreStates) {
+      version = ++coreStatesVersion;
+      coreStatesData = ZkStateReader.toJSON(coreStates.values());
+    }
+
+    // if multiple threads are trying to publish state, make sure that we never write
+    // an older version after a newer version.
+    synchronized (coreStatesPublishLock) {
+      try {
+        if (version < coreStatesPublishedVersion) {
+          log.info("Another thread already published a newer coreStates: ours="+version + " lastPublished=" + coreStatesPublishedVersion);
+        } else {
+          zkClient.setData(nodePath, coreStatesData, true);
+          coreStatesPublishedVersion = version;  // put it after so it won't be set if there's an exception
+        }
+      } catch (KeeperException e) {
+        throw new ZooKeeperException(SolrException.ErrorCode.SERVER_ERROR,
+            "could not publish node state", e);
+      } catch (InterruptedException e) {
+        // Restore the interrupted status
+        Thread.currentThread().interrupt();
+        throw new ZooKeeperException(SolrException.ErrorCode.SERVER_ERROR,
+            "could not publish node state", e);
+      }
+    }
+  }
+

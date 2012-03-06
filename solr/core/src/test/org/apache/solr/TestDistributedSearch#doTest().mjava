@@ -225,6 +225,47 @@
     query("q", "id:[1 TO 5]", CommonParams.DEBUG, CommonParams.RESULTS);
     query("q", "id:[1 TO 5]", CommonParams.DEBUG, CommonParams.QUERY);
 
+    // Check Info is added to for each shard
+    ModifiableSolrParams q = new ModifiableSolrParams();
+    q.set("q", "*:*");
+    q.set(ShardParams.SHARDS_INFO, true);
+    setDistributedParams(q);
+    QueryResponse rsp = queryServer(q);
+    NamedList<?> sinfo = (NamedList<?>) rsp.getResponse().get(ShardParams.SHARDS_INFO);
+    String shards = getShardsString();
+    int cnt = StringUtils.countMatches(shards, ",")+1;
+    
+    assertNotNull("missing shard info", sinfo);
+    assertEquals("should have an entry for each shard ["+sinfo+"] "+shards, cnt, sinfo.size());
+    
+    // test shards.tolerant=true
+    for(int numDownServers = 0; numDownServers < jettys.size()-1; numDownServers++)
+    {
+      List<JettySolrRunner> upJettys = new ArrayList<JettySolrRunner>(jettys);
+      List<SolrServer> upClients = new ArrayList<SolrServer>(clients);
+      List<JettySolrRunner> downJettys = new ArrayList<JettySolrRunner>();
+      List<String> upShards = new ArrayList<String>(Arrays.asList(shardsArr));
+      for(int i=0; i<numDownServers; i++)
+      {
+        // shut down some of the jettys
+        int indexToRemove = r.nextInt(upJettys.size());
+        JettySolrRunner downJetty = upJettys.remove(indexToRemove);
+        upClients.remove(indexToRemove);
+        upShards.remove(indexToRemove);
+        ChaosMonkey.stop(downJetty);
+        downJettys.add(downJetty);
+      }
+      
+      queryPartialResults(upShards, upClients, "q","*:*",ShardParams.SHARDS_INFO,"true",ShardParams.SHARDS_TOLERANT,"true");
+      
+      // restart the jettys
+      for (JettySolrRunner downJetty : downJettys) {
+        downJetty.start();
+      }
+    }
+
+    // This index has the same number for every field
+    
     // TODO: This test currently fails because debug info is obtained only
     // on shards with matches.
     // query("q","matchesnothing","fl","*,score", "debugQuery", "true");

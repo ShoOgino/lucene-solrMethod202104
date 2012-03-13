@@ -1,0 +1,72 @@
+  // Delete by Term
+  private synchronized long applyTermDeletes(Iterable<Term> termsIter, ReadersAndLiveDocs rld, SegmentReader reader) throws IOException {
+    long delCount = 0;
+    Fields fields = reader.fields();
+    if (fields == null) {
+      // This reader has no postings
+      return 0;
+    }
+
+    TermsEnum termsEnum = null;
+
+    String currentField = null;
+    DocsEnum docs = null;
+
+    assert checkDeleteTerm(null);
+
+    boolean any = false;
+
+    //System.out.println(Thread.currentThread().getName() + " del terms reader=" + reader);
+    for (Term term : termsIter) {
+      // Since we visit terms sorted, we gain performance
+      // by re-using the same TermsEnum and seeking only
+      // forwards
+      if (!term.field().equals(currentField)) {
+        assert currentField == null || currentField.compareTo(term.field()) < 0;
+        currentField = term.field();
+        Terms terms = fields.terms(currentField);
+        if (terms != null) {
+          termsEnum = terms.iterator(null);
+        } else {
+          termsEnum = null;
+        }
+      }
+
+      if (termsEnum == null) {
+        continue;
+      }
+      assert checkDeleteTerm(term);
+
+      // System.out.println("  term=" + term);
+
+      if (termsEnum.seekExact(term.bytes(), false)) {
+        DocsEnum docsEnum = termsEnum.docs(rld.getLiveDocs(), docs, false);
+        //System.out.println("BDS: got docsEnum=" + docsEnum);
+
+        if (docsEnum != null) {
+          while (true) {
+            final int docID = docsEnum.nextDoc();
+            //System.out.println(Thread.currentThread().getName() + " del term=" + term + " doc=" + docID);
+            if (docID == DocIdSetIterator.NO_MORE_DOCS) {
+              break;
+            }   
+            // NOTE: there is no limit check on the docID
+            // when deleting by Term (unlike by Query)
+            // because on flush we apply all Term deletes to
+            // each segment.  So all Term deleting here is
+            // against prior segments:
+            if (!any) {
+              rld.initWritableLiveDocs();
+              any = true;
+            }
+            if (rld.delete(docID)) {
+              delCount++;
+            }
+          }
+        }
+      }
+    }
+
+    return delCount;
+  }
+

@@ -1,15 +1,9 @@
   /**
    * Initialize PhrasePositions in place.
-   * There is a one time initialization for this scorer (taking place at the first doc that matches all terms):
+   * A one time initialization for this scorer (on first doc matching all terms):
    * <ul>
-   *  <li>Detect groups of repeating pps: those with same tpPos (tpPos==position in the doc) but different offsets in query.
-   *  <li>For each such group:
-   *  <ul>
-   *   <li>form an inner linked list of the repeating ones.
-   *   <li>propagate all group members but first so that they land on different tpPos().
-   *  </ul>
-   *  <li>Mark whether there are repetitions at all, so that scoring queries with no repetitions has no overhead due to this computation.
-   *  <li>Insert to pq only non repeating PPs, or PPs that are the first in a repeating group.
+   *  <li>Check if there are repetitions
+   *  <li>If there are, find groups of repetitions.
    * </ul>
    * Examples:
    * <ol>
@@ -17,94 +11,17 @@
    *  <li>repetitions: <b>"ho my my"~2</b>
    *  <li>repetitions: <b>"my ho my"~2</b>
    * </ol>
-   * @return end (max position), or Integer.MIN_VALUE if any term ran out (i.e. done) 
+   * @return false if PPs are exhausted (and so current doc will not be a match) 
    */
-  private int initPhrasePositions() throws IOException {
-    int end = Integer.MIN_VALUE;
-    
-    // no repeats at all (most common case is also the simplest one)
-    if (checkedRepeats && !hasRepeats) {
-      // build queue from list
-      pq.clear();
-      for (PhrasePositions pp=min,prev=null; prev!=max; pp=(prev=pp).next) {  // iterate cyclic list: done once handled max
-        pp.firstPosition();
-        if (pp.position > end) {
-          end = pp.position;
-        }
-        pq.add(pp);         // build pq from list
-      }
-      return end;
+  private boolean initPhrasePositions() throws IOException {
+    end = Integer.MIN_VALUE;
+    if (!checkedRpts) {
+      return initFirstTime();
     }
-    
-    //printPositions(System.err, "Init: 1: Bef position");
-    
-    // position the pp's
-    for (PhrasePositions pp=min,prev=null; prev!=max; pp=(prev=pp).next) {  // iterate cyclic list: done once handled max  
-      pp.firstPosition();
+    if (!hasRpts) {
+      initSimple();
+      return true; // PPs available
     }
-    
-    //printPositions(System.err, "Init: 2: Aft position");
-    
-    // one time initialization for this scorer (done only for the first candidate doc)
-    if (!checkedRepeats) {
-      checkedRepeats = true;
-      ArrayList<PhrasePositions> ppsA = new ArrayList<PhrasePositions>();
-      PhrasePositions dummyPP = new PhrasePositions(null, -1, -1);
-      // check for repeats
-      for (PhrasePositions pp=min,prev=null; prev!=max; pp=(prev=pp).next) {  // iterate cyclic list: done once handled max
-        if (pp.nextRepeating != null) {
-          continue; // a repetition of an earlier pp
-        }
-        ppsA.add(pp);
-        int tpPos = tpPos(pp);
-        for (PhrasePositions prevB=pp, pp2=pp.next; pp2!= min; pp2=pp2.next) {
-          if (
-              pp2.nextRepeating != null  // already detected as a repetition of an earlier pp
-              || pp.offset == pp2.offset // not a repetition: the two PPs are originally in same offset in the query! 
-              || tpPos(pp2) != tpPos) {  // not a repetition
-            continue; 
-          }
-          // a repetition
-          hasRepeats = true;
-          prevB.nextRepeating = pp2;  // add pp2 to the repeats linked list
-          pp2.nextRepeating = dummyPP; // allows not to handle the last pp in a sub-list
-          prevB = pp2;
-        }
-      }
-      if (hasRepeats) {
-        // clean dummy markers
-        for (PhrasePositions pp=min,prev=null; prev!=max; pp=(prev=pp).next) {  // iterate cyclic list: done once handled max
-          if (pp.nextRepeating == dummyPP) {
-            pp.nextRepeating = null;
-          }
-        }
-      }
-      nrPps = ppsA.toArray(new PhrasePositions[0]);
-      pq = new PhraseQueue(nrPps.length);
-    }
-    
-    //printPositions(System.err, "Init: 3: Aft check-repeats");
-    
-    // with repeats must advance some repeating pp's so they all start with differing tp's
-    if (hasRepeats) {
-      for (PhrasePositions pp: nrPps) {
-        if ((end=advanceRepeats(pp, end)) == Integer.MIN_VALUE) {
-          return Integer.MIN_VALUE; // ran out of a term -- done (no valid matches in current doc)
-        }
-      }
-    }
-    
-    //printPositions(System.err, "Init: 4: Aft advance-repeats");
-    
-    // build queue from non repeating pps 
-    pq.clear();
-    for (PhrasePositions pp: nrPps) {
-      if (pp.position > end) {
-        end = pp.position;
-      }
-      pq.add(pp);
-    }
-    
-    return end;
+    return initComplex();
   }
 

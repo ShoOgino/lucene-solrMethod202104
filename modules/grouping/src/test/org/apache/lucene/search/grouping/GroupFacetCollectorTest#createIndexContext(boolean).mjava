@@ -35,19 +35,37 @@
             new MockAnalyzer(random)
         )
     );
+    boolean canUseDV = !"Lucene3x".equals(writer.w.getConfig().getCodec().getName());
+    boolean useDv = canUseDV && random.nextBoolean();
 
     Document doc = new Document();
     Document docNoGroup = new Document();
     Document docNoFacet = new Document();
     Document docNoGroupNoFacet = new Document();
     Field group = newField("group", "", StringField.TYPE_UNSTORED);
+    DocValuesField groupDc = new DocValuesField("group", new BytesRef(), DocValues.Type.BYTES_VAR_SORTED);
+    if (useDv) {
+      doc.add(groupDc);
+      docNoFacet.add(groupDc);
+    }
     doc.add(group);
     docNoFacet.add(group);
-    Field[] facetFields = multipleFacetValuesPerDocument? new Field[2 + random.nextInt(6)] : new Field[1];
-    for (int i = 0; i < facetFields.length; i++) {
-      facetFields[i] = newField("facet", "", StringField.TYPE_UNSTORED);
-      doc.add(facetFields[i]);
-      docNoGroup.add(facetFields[i]);
+    Field[] facetFields;
+    if (useDv) {
+      facetFields = new Field[2];
+      facetFields[0] = newField("facet", "", StringField.TYPE_UNSTORED);
+      doc.add(facetFields[0]);
+      docNoGroup.add(facetFields[0]);
+      facetFields[1] = new DocValuesField("facet", new BytesRef(), DocValues.Type.BYTES_VAR_SORTED);
+      doc.add(facetFields[1]);
+      docNoGroup.add(facetFields[1]);
+    } else {
+      facetFields = multipleFacetValuesPerDocument ? new Field[2 + random.nextInt(6)] : new Field[1];
+      for (int i = 0; i < facetFields.length; i++) {
+        facetFields[i] = newField("facet", "", StringField.TYPE_UNSTORED);
+        doc.add(facetFields[i]);
+        docNoGroup.add(facetFields[i]);
+      }
     }
     Field content = newField("content", "", StringField.TYPE_UNSTORED);
     doc.add(content);
@@ -90,7 +108,7 @@
 
       List<String> facetVals = new ArrayList<String>();
       if (random.nextInt(24) != 18) {
-        for (Field facetField : facetFields) {
+        if (useDv) {
           String facetValue = facetValues.get(random.nextInt(facetValues.size()));
           uniqueFacetValues.add(facetValue);
           if (!facetToGroups.containsKey(facetValue)) {
@@ -101,8 +119,24 @@
           if (groupsInFacet.size() > facetWithMostGroups) {
             facetWithMostGroups = groupsInFacet.size();
           }
-          facetField.setStringValue(facetValue);
+          facetFields[0].setStringValue(facetValue);
+          facetFields[1].setBytesValue(new BytesRef(facetValue));
           facetVals.add(facetValue);
+        } else {
+          for (Field facetField : facetFields) {
+            String facetValue = facetValues.get(random.nextInt(facetValues.size()));
+            uniqueFacetValues.add(facetValue);
+            if (!facetToGroups.containsKey(facetValue)) {
+              facetToGroups.put(facetValue, new HashSet<String>());
+            }
+            Set<String> groupsInFacet = facetToGroups.get(facetValue);
+            groupsInFacet.add(groupValue);
+            if (groupsInFacet.size() > facetWithMostGroups) {
+              facetWithMostGroups = groupsInFacet.size();
+            }
+            facetField.setStringValue(facetValue);
+            facetVals.add(facetValue);
+          }
         }
       } else {
         uniqueFacetValues.add(null);
@@ -121,6 +155,9 @@
       }
 
       if (groupValue != null) {
+        if (useDv) {
+          groupDc.setBytesValue(new BytesRef(groupValue));
+        }
         group.setStringValue(groupValue);
       }
       content.setStringValue(contentStr);
@@ -138,6 +175,6 @@
     DirectoryReader reader = writer.getReader();
     writer.close();
 
-    return new IndexContext(searchTermToFacetToGroups, reader, numDocs, dir, facetWithMostGroups, numGroups, contentBrs, uniqueFacetValues);
+    return new IndexContext(searchTermToFacetToGroups, reader, numDocs, dir, facetWithMostGroups, numGroups, contentBrs, uniqueFacetValues, useDv);
   }
 

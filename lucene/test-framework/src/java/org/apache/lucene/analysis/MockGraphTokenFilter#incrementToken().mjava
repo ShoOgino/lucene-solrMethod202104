@@ -1,0 +1,140 @@
+  @Override
+  public boolean incrementToken() throws IOException {
+
+    if (DEBUG) {
+      System.out.println("MockGraphTF.incr inputPos=" + inputPos + " outputPos=" + outputPos);
+    }
+
+    while (true) {
+      final Position posData = positions.get(outputPos);
+      if (posData.nextRead < posData.states.size()) {
+        // Serve up all buffered tokens from this position:
+        if (DEBUG) {
+          System.out.println("  restore buffered nextRead=" + posData.nextRead + " vs " + posData.states.size());
+        }
+        restoreState(posData.states.get(posData.nextRead++));
+        if (DEBUG) {
+          System.out.println("    term=" + termAtt + " outputPos=" + outputPos);
+        }
+        pushOutputPos();
+        return true;
+      }
+
+      boolean tokenPending = false;
+
+      final int prevInputPos = inputPos;
+
+      if (inputPos == -1 || inputPos == outputPos) {
+        // We've used up the buffered tokens; pull the next
+        // input token:
+        if (end) {
+          return false;
+        }
+        final TOKEN_POS result = nextInputToken();
+        if (result == TOKEN_POS.SAME) {
+          return true;
+        } else if (result == TOKEN_POS.NEXT) {
+          tokenPending = true;
+        } else {
+          // NOTE: we don't set end=true here... because we
+          // are immediately passing through "the end" to
+          // caller (return false), and caller must not call
+          // us again:
+          return false;
+        }
+      } else {
+        assert inputPos > outputPos;
+        if (DEBUG) {
+          System.out.println("  done @ outputPos=" + outputPos);
+        }
+      }
+
+      // We're done (above) serving up all tokens leaving
+      // from the same position; now maybe insert a token.
+      // Note that we may insert more than one token leaving
+      // from this position.  We only inject tokens at
+      // positions where we've seen at least one input token
+      // (ie, we cannot inject inside holes):
+
+      if (prevInputPos != -1  && positions.get(outputPos).startOffset != -1 && random.nextInt(7) == 5) {
+        if (DEBUG) {
+          System.out.println("  inject @ outputPos=" + outputPos);
+        }
+
+        if (tokenPending) {
+          positions.get(inputPos).captureState();
+        }
+        final int posLength = _TestUtil.nextInt(random, 1, 5);
+        final Position posEndData = positions.get(outputPos + posLength);
+
+        // Pull enough tokens until we discover what our
+        // endOffset should be:
+        while (!end && posEndData.endOffset == -1 && inputPos <= (outputPos + posLength)) {
+          if (DEBUG) {
+            System.out.println("  lookahead [endPos=" + (outputPos + posLength) + "]...");
+          }
+          final TOKEN_POS result = nextInputToken();
+          if (result != TOKEN_POS.END) {
+            positions.get(inputPos).captureState();
+          } else {
+            end = true;
+            if (DEBUG) {
+              System.out.println("    force end lookahead");
+            }
+            break;
+          }
+        }
+
+        // TODO: really, here, on hitting end-of-tokens,
+        // we'd like to know the ending "posInc", and allow
+        // our token to extend up until that.  But: a
+        // TokenFilter is not allowed to call end() from
+        // within its incrementToken, so we can't do that.
+        // It may have been better if the ending
+        // posInc/offsets were set when incrementToken
+        // returned false (ie, without having to call the
+        // special end method):
+
+        if (posEndData.endOffset != -1) {
+          assert posEndData.endOffset != -1;
+          clearAttributes();
+          posLengthAtt.setPositionLength(posLength);
+          termAtt.append(_TestUtil.randomUnicodeString(random));
+          pushOutputPos();
+          offsetAtt.setOffset(positions.get(outputPos).startOffset,
+                              positions.get(outputPos + posLength).endOffset);
+          if (DEBUG) {
+            System.out.println("  inject: outputPos=" + outputPos + " startOffset=" + offsetAtt.startOffset() +
+                               " endOffset=" + offsetAtt.endOffset() +
+                               " posLength=" + posLengthAtt.getPositionLength());
+          }
+          // TODO: set TypeAtt too?
+          return true;
+
+        } else {
+          // Either, we hit the end of the tokens (ie, our
+          // attempted posLength is too long because it
+          // hangs out over the end), or, our attempted
+          // posLength ended in the middle of a hole; just
+          // skip injecting in these cases.  We will still
+          // test these cases by having a StopFilter after
+          // MockGraphTokenFilter...
+        }
+
+      } else if (tokenPending) {
+        outputPos = inputPos;
+        if (DEBUG) {
+          System.out.println("  pass-through");
+        }
+        pushOutputPos();
+        return true;
+      } else {
+        // We are skipping over a hole (posInc > 1) from our input:
+        outputPos++;
+        if (DEBUG) {
+          System.out.println("  incr outputPos=" + outputPos);
+        }
+      }
+    }
+  }
+

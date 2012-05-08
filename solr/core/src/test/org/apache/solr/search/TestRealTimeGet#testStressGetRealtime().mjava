@@ -9,6 +9,8 @@
     final int softCommitPercent = 30+random().nextInt(75); // what percent of the commits are soft
     final int deletePercent = 4+random().nextInt(25);
     final int deleteByQueryPercent = 1+random().nextInt(5);
+    final int optimisticPercent = 1+random().nextInt(50);    // percent change that an update uses optimistic locking
+    final int optimisticCorrectPercent = 25+random().nextInt(70);    // percent change that a version specified will be correct
     final int ndocs = 5 + (random().nextBoolean() ? random().nextInt(25) : random().nextInt(200));
     int nWriteThreads = 5 + random().nextInt(25);
 
@@ -105,14 +107,40 @@
               long nextVal = Math.abs(val)+1;
 
               if (oper < commitPercent + deletePercent) {
+                boolean opt = rand.nextInt() < optimisticPercent;
+                boolean correct = opt ? rand.nextInt() < optimisticCorrectPercent : false;
+                long badVersion = correct ? 0 : badVersion(rand, info.version);
+
                 if (VERBOSE) {
-                  verbose("deleting id",id,"val=",nextVal);
+                  if (!opt) {
+                    verbose("deleting id",id,"val=",nextVal);
+                  } else {
+                    verbose("deleting id",id,"val=",nextVal, "existing_version=",info.version,  (correct ? "" : (" bad_version=" + badVersion)));
+                  }
                 }
 
                 // assertU("<delete><id>" + id + "</id></delete>");
-                Long version = deleteAndGetVersion(Integer.toString(id), null);
+                Long version = null;
 
-                model.put(id, new DocInfo(version, -nextVal));
+                if (opt) {
+                  if (correct) {
+                    version = deleteAndGetVersion(Integer.toString(id), params("_version_", Long.toString(info.version)));
+                  } else {
+                    try {
+                      version = deleteAndGetVersion(Integer.toString(id), params("_version_", Long.toString(badVersion)));
+                      fail();
+                    } catch (SolrException se) {
+                      assertEquals(409, se.code());
+                    }
+                  }
+                } else {
+                  version = deleteAndGetVersion(Integer.toString(id), null);
+                }
+
+                if (version != null) {
+                  model.put(id, new DocInfo(version, -nextVal));
+                }
+
                 if (VERBOSE) {
                   verbose("deleting id", id, "val=",nextVal,"DONE");
                 }
@@ -127,13 +155,40 @@
                   verbose("deleteByQuery id",id, "val=",nextVal,"DONE");
                 }
               } else {
+                boolean opt = rand.nextInt() < optimisticPercent;
+                boolean correct = opt ? rand.nextInt() < optimisticCorrectPercent : false;
+                long badVersion = correct ? 0 : badVersion(rand, info.version);
+
                 if (VERBOSE) {
-                  verbose("adding id", id, "val=", nextVal);
+                  if (!opt) {
+                    verbose("adding id",id,"val=",nextVal);
+                  } else {
+                    verbose("adding id",id,"val=",nextVal, "existing_version=",info.version,  (correct ? "" : (" bad_version=" + badVersion)));
+                  }
                 }
 
-                // assertU(adoc("id",Integer.toString(id), field, Long.toString(nextVal)));
-                Long version = addAndGetVersion(sdoc("id", Integer.toString(id), field, Long.toString(nextVal)), null);
-                model.put(id, new DocInfo(version, nextVal));
+                Long version = null;
+                SolrInputDocument sd = sdoc("id", Integer.toString(id), field, Long.toString(nextVal));
+
+                if (opt) {
+                  if (correct) {
+                    version = addAndGetVersion(sd, params("_version_", Long.toString(info.version)));
+                  } else {
+                    try {
+                      version = addAndGetVersion(sd, params("_version_", Long.toString(badVersion)));
+                      fail();
+                    } catch (SolrException se) {
+                      assertEquals(409, se.code());
+                    }
+                  }
+                } else {
+                  version = addAndGetVersion(sd, null);
+                }
+
+
+                if (version != null) {
+                  model.put(id, new DocInfo(version, nextVal));
+                }
 
                 if (VERBOSE) {
                   verbose("adding id", id, "val=", nextVal,"DONE");
@@ -148,8 +203,7 @@
           }
         } catch (Throwable e) {
           operations.set(-1L);
-          SolrException.log(log, e);
-          fail(e.getMessage());
+          throw new RuntimeException(e);
         }
         }
       };
@@ -210,12 +264,11 @@
               }
             }
           }
-          catch (Throwable e) {
-            operations.set(-1L);
-            SolrException.log(log, e);
-            fail(e.getMessage());
-          }
+        catch (Throwable e) {
+          operations.set(-1L);
+          throw new RuntimeException(e);
         }
+      }
       };
 
       threads.add(thread);

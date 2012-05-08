@@ -1,0 +1,51 @@
+  public static SolrInputDocument getInputDocument(SolrCore core, BytesRef idBytes) throws IOException {
+    SolrInputDocument sid = null;
+    RefCounted<SolrIndexSearcher> searcherHolder = null;
+    try {
+      SolrIndexSearcher searcher = null;
+      UpdateLog ulog = core.getUpdateHandler().getUpdateLog();
+
+
+      if (ulog != null) {
+        Object o = ulog.lookup(idBytes);
+        if (o != null) {
+          // should currently be a List<Oper,Ver,Doc/Id>
+          List entry = (List)o;
+          assert entry.size() >= 3;
+          int oper = (Integer)entry.get(0);
+          switch (oper) {
+            case UpdateLog.ADD:
+              sid = (SolrInputDocument)entry.get(entry.size()-1);
+              break;
+            case UpdateLog.DELETE:
+              return null;
+            default:
+              throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,  "Unknown Operation! " + oper);
+          }
+        }
+      }
+
+      if (sid == null) {
+        // didn't find it in the update log, so it should be in the newest searcher opened
+        if (searcher == null) {
+          searcherHolder = core.getRealtimeSearcher();
+          searcher = searcherHolder.get();
+        }
+
+        // SolrCore.verbose("RealTimeGet using searcher ", searcher);
+        SchemaField idField = core.getSchema().getUniqueKeyField();
+
+        int docid = searcher.getFirstMatch(new Term(idField.getName(), idBytes));
+        if (docid < 0) return null;
+        Document luceneDocument = searcher.doc(docid);
+        sid = toSolrInputDocument(luceneDocument, core.getSchema());
+      }
+    } finally {
+      if (searcherHolder != null) {
+        searcherHolder.decref();
+      }
+    }
+
+    return sid;
+  }
+

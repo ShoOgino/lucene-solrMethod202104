@@ -1,0 +1,69 @@
+  private void write(Directory directory) throws IOException {
+
+    String segmentFileName = getNextSegmentFileName();
+    
+    // Always advance the generation on write:
+    if (generation == -1) {
+      generation = 1;
+    } else {
+      generation++;
+    }
+    
+    ChecksumIndexOutput segnOutput = null;
+    boolean success = false;
+
+    // nocommit document somewhere taht we store this
+    // list-of-segs plus delGen plus other stuff
+    // "generically" and then codec gets to write SI
+
+    try {
+      // nocommit what IOCtx to use...
+      segnOutput = new ChecksumIndexOutput(directory.createOutput(segmentFileName, new IOContext(new FlushInfo(totalDocCount(), 0))));
+      CodecUtil.writeHeader(segnOutput, "segments", VERSION_40);
+      segnOutput.writeLong(version); 
+      segnOutput.writeInt(counter); // write counter
+      segnOutput.writeInt(size()); // write infos
+      Codec codec3X = Codec.forName("Lucene3x");
+      for (SegmentInfo si : this) {
+        segnOutput.writeString(si.name);
+        segnOutput.writeString(si.getCodec().getName());
+        segnOutput.writeLong(si.getDelGen());
+        segnOutput.writeInt(si.getDelCount());
+        assert si.dir == directory;
+
+        // nocommit hacky!
+        String version = si.getVersion();
+        if (version == null || version.startsWith("3.")) {
+          String fileName = IndexFileNames.segmentFileName(si.name, "", Lucene3xSegmentInfosFormat.SI_EXTENSION);
+          if (!directory.fileExists(fileName)) {
+            //System.out.println("write 3x info seg=" + si.name + " version=" + si.getVersion() + " codec=" + si.getCodec().getName());
+            write3xInfo(si);
+            // nocommit do this after, on success...
+            //si.setVersion("4.0");
+            si.clearFilesCache();
+          }
+        }
+      }
+      segnOutput.writeStringStringMap(userData);
+      segnOutput.prepareCommit();
+      pendingSegnOutput = segnOutput;
+      success = true;
+    } finally {
+      if (!success) {
+        // We hit an exception above; try to close the file
+        // but suppress any exception:
+        IOUtils.closeWhileHandlingException(segnOutput);
+
+        // nocommit must also remove any written .si files...
+
+        try {
+          // Try not to leave a truncated segments_N file in
+          // the index:
+          directory.deleteFile(segmentFileName);
+        } catch (Throwable t) {
+          // Suppress so we keep throwing the original exception
+        }
+      }
+    }
+  }
+

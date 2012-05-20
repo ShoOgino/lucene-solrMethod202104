@@ -16,9 +16,10 @@
     // list-of-segs plus delGen plus other stuff
     // "generically" and then codec gets to write SI
 
+    final Set<String> upgradedSIFiles = new HashSet<String>();
+
     try {
-      // nocommit what IOCtx to use...
-      segnOutput = new ChecksumIndexOutput(directory.createOutput(segmentFileName, new IOContext(new FlushInfo(totalDocCount(), 0))));
+      segnOutput = new ChecksumIndexOutput(directory.createOutput(segmentFileName, IOContext.DEFAULT));
       CodecUtil.writeHeader(segnOutput, "segments", VERSION_40);
       segnOutput.writeLong(version); 
       segnOutput.writeInt(counter); // write counter
@@ -31,19 +32,19 @@
         segnOutput.writeInt(si.getDelCount());
         assert si.dir == directory;
 
-        // nocommit hacky!
+        // If this segment is pre-4.x, perform a one-time
+        // "ugprade" to write the .si file for it:
         String version = si.getVersion();
         if (version == null || version.startsWith("3.")) {
           String fileName = IndexFileNames.segmentFileName(si.name, "", Lucene3xSegmentInfosFormat.SI_EXTENSION);
           if (!directory.fileExists(fileName)) {
             //System.out.println("write 3x info seg=" + si.name + " version=" + si.getVersion() + " codec=" + si.getCodec().getName());
-            write3xInfo(si);
+            upgradedSIFiles.add(write3xInfo(directory, si, IOContext.DEFAULT));
             si.clearFilesCache();
           }
         }
       }
       segnOutput.writeStringStringMap(userData);
-      segnOutput.prepareCommit();
       pendingSegnOutput = segnOutput;
       success = true;
     } finally {
@@ -52,7 +53,13 @@
         // but suppress any exception:
         IOUtils.closeWhileHandlingException(segnOutput);
 
-        // nocommit must also remove any written .si files...
+        for(String fileName : upgradedSIFiles) {
+          try {
+            directory.deleteFile(fileName);
+          } catch (Throwable t) {
+            // Suppress so we keep throwing the original exception
+          }
+        }
 
         try {
           // Try not to leave a truncated segments_N file in

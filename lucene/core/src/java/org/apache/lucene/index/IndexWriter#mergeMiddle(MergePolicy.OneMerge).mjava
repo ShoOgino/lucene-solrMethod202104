@@ -8,15 +8,12 @@
 
     final String mergedName = merge.info.name;
 
-    int mergedDocCount = 0;
-
     List<SegmentInfo> sourceSegments = merge.segments;
     
     IOContext context = new IOContext(merge.getMergeInfo());
 
     final MergeState.CheckAbort checkAbort = new MergeState.CheckAbort(merge, directory);
     SegmentMerger merger = new SegmentMerger(infoStream, directory, config.getTermIndexInterval(), mergedName, checkAbort,
-                                             // nocommit
                                              payloadProcessorProvider, new FieldInfos.Builder(globalFieldNumberMap), codec, context);
 
     if (infoStream.isEnabled("IW")) {
@@ -77,7 +74,7 @@
 
       // This is where all the work happens:
       MergeState mergeState = merger.merge();
-      mergedDocCount = merge.info.docCount = mergeState.mergedDocCount;
+      merge.info.docCount = mergeState.mergedDocCount;
 
       // Record which codec was used to write the segment
 
@@ -85,11 +82,8 @@
       // ctor when we make the merge.info:
       merge.info.setCodec(codec);
 
-      // nocommit should segment merger do this!?  else
-      // other places must do so...??? addIndexes...
-
       if (infoStream.isEnabled("IW")) {
-        infoStream.message("IW", "merge codec=" + codec + " docCount=" + mergedDocCount + "; merged segment has " +
+        infoStream.message("IW", "merge codec=" + codec + " docCount=" + merge.info.docCount + "; merged segment has " +
                            (mergeState.fieldInfos.hasVectors() ? "vectors" : "no vectors") + "; " +
                            (mergeState.fieldInfos.hasNorms() ? "norms" : "no norms") + "; " + 
                            (mergeState.fieldInfos.hasDocValues() ? "docValues" : "no docValues") + "; " + 
@@ -111,10 +105,7 @@
         final String compoundFileName = IndexFileNames.segmentFileName(mergedName, "", IndexFileNames.COMPOUND_FILE_EXTENSION);
 
         try {
-          if (infoStream.isEnabled("IW")) {
-            infoStream.message("IW", "create compound file " + compoundFileName);
-          }
-          createCompoundFile(directory, compoundFileName, checkAbort, merge.info, context);
+          createCompoundFile(infoStream, directory, compoundFileName, checkAbort, merge.info, context);
           success = true;
         } catch (IOException ioe) {
           synchronized(this) {
@@ -142,6 +133,7 @@
           }
         }
 
+        // nocommit why do we set success back to false here!?
         success = false;
 
         synchronized(this) {
@@ -162,14 +154,21 @@
         merge.info.setUseCompoundFile(true);
       }
 
-      // nocommit need try/success thingy...?  ie must
-      // remove all seg files if we fail to write the .si?
-
       // Have codec write SegmentInfo.  Must do this after
       // creating CFS so that 1) .si isn't slurped into CFS,
       // and 2) .si reflects useCompoundFile=true change
       // above:
-      codec.segmentInfosFormat().getSegmentInfosWriter().write(directory, merge.info, mergeState.fieldInfos, context);
+      boolean success2 = false;
+      try {
+        codec.segmentInfosFormat().getSegmentInfosWriter().write(directory, merge.info, mergeState.fieldInfos, context);
+        success2 = true;
+      } finally {
+        if (!success2) {
+          synchronized(this) {
+            deleter.deleteNewFiles(merge.info.files());
+          }          
+        }
+      }
       merge.info.clearFilesCache();
 
       // nocommit ideally we would freeze merge.info here!!
@@ -212,6 +211,6 @@
       }
     }
 
-    return mergedDocCount;
+    return merge.info.docCount;
   }
 

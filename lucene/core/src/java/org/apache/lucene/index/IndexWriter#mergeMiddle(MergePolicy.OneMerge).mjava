@@ -13,7 +13,8 @@
     IOContext context = new IOContext(merge.getMergeInfo());
 
     final MergeState.CheckAbort checkAbort = new MergeState.CheckAbort(merge, directory);
-    SegmentMerger merger = new SegmentMerger(infoStream, directory, config.getTermIndexInterval(), mergedName, checkAbort,
+    final TrackingDirectoryWrapper dirWrapper = new TrackingDirectoryWrapper(directory);
+    SegmentMerger merger = new SegmentMerger(infoStream, dirWrapper, config.getTermIndexInterval(), mergedName, checkAbort,
                                              payloadProcessorProvider, new FieldInfos.Builder(globalFieldNumberMap), codec, context);
 
     if (infoStream.isEnabled("IW")) {
@@ -75,6 +76,7 @@
       // This is where all the work happens:
       MergeState mergeState = merger.merge();
       merge.info.docCount = mergeState.mergedDocCount;
+      merge.info.setFiles(new HashSet<String>(dirWrapper.getCreatedFiles()));
 
       // Record which codec was used to write the segment
 
@@ -102,10 +104,11 @@
 
       if (useCompoundFile) {
         success = false;
-        final String compoundFileName = IndexFileNames.segmentFileName(mergedName, "", IndexFileNames.COMPOUND_FILE_EXTENSION);
+
+        Collection<String> filesToRemove = merge.info.files();
 
         try {
-          createCompoundFile(infoStream, directory, compoundFileName, checkAbort, merge.info, context);
+          filesToRemove = createCompoundFile(infoStream, directory, checkAbort, merge.info, context);
           success = true;
         } catch (IOException ioe) {
           synchronized(this) {
@@ -126,7 +129,7 @@
             }
 
             synchronized(this) {
-              deleter.deleteFile(compoundFileName);
+              deleter.deleteFile(IndexFileNames.segmentFileName(mergedName, "", IndexFileNames.COMPOUND_FILE_EXTENSION));
               deleter.deleteFile(IndexFileNames.segmentFileName(mergedName, "", IndexFileNames.COMPOUND_FILE_ENTRIES_EXTENSION));
               deleter.deleteNewFiles(merge.info.files());
             }
@@ -140,13 +143,14 @@
 
           // delete new non cfs files directly: they were never
           // registered with IFD
-          deleter.deleteNewFiles(merge.info.files());
+          deleter.deleteNewFiles(filesToRemove);
 
           if (merge.isAborted()) {
             if (infoStream.isEnabled("IW")) {
               infoStream.message("IW", "abort merge after building CFS");
             }
-            deleter.deleteFile(compoundFileName);
+            deleter.deleteFile(IndexFileNames.segmentFileName(mergedName, "", IndexFileNames.COMPOUND_FILE_EXTENSION));
+            deleter.deleteFile(IndexFileNames.segmentFileName(mergedName, "", IndexFileNames.COMPOUND_FILE_ENTRIES_EXTENSION));
             return 0;
           }
         }
@@ -166,7 +170,7 @@
         if (!success2) {
           synchronized(this) {
             deleter.deleteNewFiles(merge.info.files());
-          }          
+          }
         }
       }
       merge.info.clearFilesCache();

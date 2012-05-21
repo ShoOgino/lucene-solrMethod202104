@@ -34,12 +34,13 @@
       String mergedName = newSegmentName();
       for (IndexReader indexReader : readers) {
         numDocs += indexReader.numDocs();
-       }
-       final IOContext context = new IOContext(new MergeInfo(numDocs, -1, true, -1));
+      }
+      final IOContext context = new IOContext(new MergeInfo(numDocs, -1, true, -1));
 
       // TODO: somehow we should fix this merge so it's
       // abortable so that IW.close(false) is able to stop it
-      SegmentMerger merger = new SegmentMerger(infoStream, directory, config.getTermIndexInterval(),
+      TrackingDirectoryWrapper trackingDir = new TrackingDirectoryWrapper(directory);
+      SegmentMerger merger = new SegmentMerger(infoStream, trackingDir, config.getTermIndexInterval(),
                                                mergedName, MergeState.CheckAbort.NONE, payloadProcessorProvider,
                                                new FieldInfos.Builder(globalFieldNumberMap), codec, context);
 
@@ -52,6 +53,8 @@
       SegmentInfo info = new SegmentInfo(directory, Constants.LUCENE_MAIN_VERSION, mergedName, docCount,
                                          -1, mergedName, false, null, false, 0,
                                          codec, null);
+      info.setFiles(new HashSet<String>(trackingDir.getCreatedFiles()));
+      trackingDir.getCreatedFiles().clear();
                                          
       setDiagnostics(info, "addIndexes(IndexReader...)");
 
@@ -67,12 +70,13 @@
 
       // Now create the compound file if needed
       if (useCompoundFile) {
-        createCompoundFile(infoStream, directory, IndexFileNames.segmentFileName(mergedName, "", IndexFileNames.COMPOUND_FILE_EXTENSION), MergeState.CheckAbort.NONE, info, context);
+        Collection<String> filesToDelete = info.files();
+        createCompoundFile(infoStream, directory, MergeState.CheckAbort.NONE, info, context);
 
         // delete new non cfs files directly: they were never
         // registered with IFD
         synchronized(this) {
-          deleter.deleteNewFiles(info.files());
+          deleter.deleteNewFiles(filesToDelete);
         }
         info.setUseCompoundFile(true);
       }
@@ -81,8 +85,9 @@
       // creating CFS so that 1) .si isn't slurped into CFS,
       // and 2) .si reflects useCompoundFile=true change
       // above:
-      codec.segmentInfosFormat().getSegmentInfosWriter().write(directory, info, mergeState.fieldInfos, context);
+      codec.segmentInfosFormat().getSegmentInfosWriter().write(trackingDir, info, mergeState.fieldInfos, context);
       info.clearFilesCache();
+      info.getFiles().addAll(trackingDir.getCreatedFiles());
 
       // Register the new segment
       synchronized(this) {

@@ -24,10 +24,19 @@
                                                                         Lucene3xSegmentInfosFormat.SI_EXTENSION);
 
     if (hasSharedDocStore) {
-      // only violate the codec this way if its preflex &
+      // only violate the codec this way if it's preflex &
       // shares doc stores
-      info.getCodec().storedFieldsFormat().files(info, codecDocStoreFiles);
-      info.getCodec().termVectorsFormat().files(info, codecDocStoreFiles);
+      assert info.getDocStoreSegment() != null;
+      // nocommit what to do....
+      if (info.getDocStoreIsCompoundFile()) {
+        codecDocStoreFiles.add(IndexFileNames.segmentFileName(info.getDocStoreSegment(), "", "cfx"));
+      } else {
+        codecDocStoreFiles.add(IndexFileNames.segmentFileName(info.getDocStoreSegment(), "", "fdt"));
+        codecDocStoreFiles.add(IndexFileNames.segmentFileName(info.getDocStoreSegment(), "", "fdx"));
+        codecDocStoreFiles.add(IndexFileNames.segmentFileName(info.getDocStoreSegment(), "", "tvx"));
+        codecDocStoreFiles.add(IndexFileNames.segmentFileName(info.getDocStoreSegment(), "", "tvf"));
+        codecDocStoreFiles.add(IndexFileNames.segmentFileName(info.getDocStoreSegment(), "", "tvd"));
+      }
     }
 
     //System.out.println("copy seg=" + info.name + " version=" + info.getVersion());
@@ -38,18 +47,30 @@
                                           info.getDelCount(), info.getCodec(), info.getDiagnostics());
     newInfo.setDelGen(info.getDelGen());
 
+    Set<String> segFiles = new HashSet<String>();
+
+    // Build up new segment's file names:
+    for (String file: info.files()) {
+      final String newFileName;
+      if (codecDocStoreFiles.contains(file)) {
+        newFileName = newDsName + IndexFileNames.stripSegmentName(file);
+      } else {
+        newFileName = segName + IndexFileNames.stripSegmentName(file);
+      }
+      segFiles.add(newFileName);
+    }
+    newInfo.setFiles(segFiles);
+    
     // We must rewrite the SI file because it references
     // segment name (its own name, if its 3.x, and doc
     // store segment name):
-    TrackingDirectoryWrapper dirWrapper = new TrackingDirectoryWrapper(directory);
     try {
-      newInfo.getCodec().segmentInfosFormat().getSegmentInfosWriter().write(dirWrapper, newInfo, null, context);
+      newInfo.getCodec().segmentInfosFormat().getSegmentInfosWriter().write(directory, newInfo, null, context);
     } catch (UnsupportedOperationException uoe) {
       // OK: 3x codec cannot write a new SI file;
       // SegmentInfos will write this on commit
     }
-    final Set<String> siFileNames = dirWrapper.getCreatedFiles();
-    
+
     // Copy the segment's files
     for (String file: info.files()) {
 
@@ -64,8 +85,10 @@
         newFileName = segName + IndexFileNames.stripSegmentName(file);
       }
 
-      if (siFileNames != null && siFileNames.contains(newFileName)) {
-        // We already rewwrote this above
+      // nocommit hack
+      //if (siFileNames != null && siFileNames.contains(newFileName)) {
+      if (newFileName.endsWith(".si")) {
+        // We already rewrote this above
         continue;
       }
 

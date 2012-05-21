@@ -13,7 +13,7 @@
     // TODO (Facet): we should probably completely clear the cache before starting
     // to read it?
     if (reader == null) {
-      reader = openReader();
+      openInternalReader();
     }
 
     if (!cache.hasRoom(reader.numDocs())) {
@@ -21,7 +21,29 @@
     }
 
     CategoryPath cp = new CategoryPath();
-    Terms terms = MultiFields.getTerms(reader, Consts.FULL);
+    TermsEnum termsEnum = null;
+    DocsEnum docsEnum = null;
+    int base = 0;
+    for (AtomicReader r : reader.getSequentialSubReaders()) {
+      Terms terms = r.terms(Consts.FULL);
+      if (terms != null) { // cannot really happen, but be on the safe side
+        termsEnum = terms.iterator(termsEnum);
+        while (termsEnum.next() != null) {
+          BytesRef t = termsEnum.term();
+          // Since we guarantee uniqueness of categories, each term has exactly
+          // one document. Also, since we do not allow removing categories (and
+          // hence documents), there are no deletions in the index. Therefore, it
+          // is sufficient to call next(), and then doc(), exactly once with no
+          // 'validation' checks.
+          cp.clear();
+          cp.add(t.utf8ToString(), delimiter);
+          docsEnum = termsEnum.docs(null, docsEnum, false);
+          cache.put(cp, docsEnum.nextDoc() + base);
+        }
+      }
+      base += r.maxDoc(); // we don't have any deletions, so we're ok
+    }
+    /*Terms terms = MultiFields.getTerms(reader, Consts.FULL);
     // The check is done here to avoid checking it on every iteration of the
     // below loop. A null term wlil be returned if there are no terms in the
     // lexicon, or after the Consts.FULL term. However while the loop is
@@ -41,11 +63,10 @@
         docsEnum = termsEnum.docs(liveDocs, docsEnum, false);
         docsEnum.nextDoc();
         cp.clear();
-        // TODO (Facet): avoid String creation/use bytes?
         cp.add(t.utf8ToString(), delimiter);
         cache.put(cp, docsEnum.docID());
       }
-    }
+    }*/
 
     cacheIsComplete = true;
     // No sense to keep the reader open - we will not need to read from it

@@ -1,6 +1,8 @@
   @Override
   @SuppressWarnings({ "unchecked", "rawtypes" })
   public String init(NamedList config, final SolrCore core) {
+    this.core = core;
+
     String result = super.init(config, core);
     final SolrParams initParams = SolrParams.toSolrParams(config);
 
@@ -14,10 +16,14 @@
     // Additionally, we set a custom lexical resource factory for Carrot2 that
     // will use both Carrot2 default stop words as well as stop words from
     // the StopFilter defined on the field.
-    BasicPreprocessingPipelineDescriptor.attributeBuilder(initAttributes)
-        .stemmerFactory(LuceneCarrot2StemmerFactory.class)
-        .tokenizerFactory(LuceneCarrot2TokenizerFactory.class)
-        .lexicalDataFactory(SolrStopwordsCarrot2LexicalDataFactory.class);
+    final AttributeBuilder attributeBuilder = BasicPreprocessingPipelineDescriptor.attributeBuilder(initAttributes);
+    attributeBuilder.lexicalDataFactory(SolrStopwordsCarrot2LexicalDataFactory.class);
+    if (!initAttributes.containsKey(BasicPreprocessingPipelineDescriptor.Keys.TOKENIZER_FACTORY)) {
+      attributeBuilder.tokenizerFactory(LuceneCarrot2TokenizerFactory.class);
+    }
+    if (!initAttributes.containsKey(BasicPreprocessingPipelineDescriptor.Keys.STEMMER_FACTORY)) {
+      attributeBuilder.stemmerFactory(LuceneCarrot2StemmerFactory.class);
+    }
 
     // Pass the schema to SolrStopwordsCarrot2LexicalDataFactory.
     initAttributes.put("solrIndexSchema", core.getSchema());
@@ -31,8 +37,19 @@
         // Using the class loader directly because this time we want to omit the prefix
         new ClassLoaderLocator(core.getResourceLoader().getClassLoader())));
 
-    this.controller.init(initAttributes);
-    
+    // Carrot2 uses current thread's context class loader to get
+    // certain classes (e.g. custom tokenizer/stemmer) at initialization time.
+    // To make sure classes from contrib JARs are available,
+    // we swap the context class loader for the time of clustering.
+    Thread ct = Thread.currentThread();
+    ClassLoader prev = ct.getContextClassLoader();
+    try {
+      ct.setContextClassLoader(core.getResourceLoader().getClassLoader());
+      this.controller.init(initAttributes);
+    } finally {
+      ct.setContextClassLoader(prev);
+    }
+
     SchemaField uniqueField = core.getSchema().getUniqueKeyField();
     if (uniqueField == null) {
       throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, 

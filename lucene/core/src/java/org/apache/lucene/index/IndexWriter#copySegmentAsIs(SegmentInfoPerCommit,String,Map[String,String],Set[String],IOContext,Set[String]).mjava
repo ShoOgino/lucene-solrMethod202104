@@ -1,0 +1,103 @@
+  /** Copies the segment files as-is into the IndexWriter's directory. */
+  private SegmentInfoPerCommit copySegmentAsIs(SegmentInfoPerCommit info, String segName,
+                                               Map<String, String> dsNames, Set<String> dsFilesCopied, IOContext context,
+                                               Set<String> copiedFiles)
+      throws IOException {
+    // Determine if the doc store of this segment needs to be copied. It's
+    // only relevant for segments that share doc store with others,
+    // because the DS might have been copied already, in which case we
+    // just want to update the DS name of this SegmentInfo.
+    String dsName = info.info.getDocStoreSegment();
+    assert dsName != null;
+    final String newDsName;
+    if (dsNames.containsKey(dsName)) {
+      newDsName = dsNames.get(dsName);
+    } else {
+      dsNames.put(dsName, segName);
+      newDsName = segName;
+    }
+    
+    Set<String> codecDocStoreFiles = new HashSet<String>();
+    final boolean hasSharedDocStore = info.info.getDocStoreOffset() != -1;
+    final String segmentInfoFileName3X = IndexFileNames.segmentFileName(info.info.name,
+                                                                        "",
+                                                                        Lucene3xSegmentInfoFormat.SI_EXTENSION);
+
+    if (hasSharedDocStore) {
+      // only violate the codec this way if it's preflex &
+      // shares doc stores
+      assert info.info.getDocStoreSegment() != null;
+      // nocommit what to do....
+      if (info.info.getDocStoreIsCompoundFile()) {
+        codecDocStoreFiles.add(IndexFileNames.segmentFileName(info.info.getDocStoreSegment(), "", "cfx"));
+      } else {
+        codecDocStoreFiles.add(IndexFileNames.segmentFileName(info.info.getDocStoreSegment(), "", "fdt"));
+        codecDocStoreFiles.add(IndexFileNames.segmentFileName(info.info.getDocStoreSegment(), "", "fdx"));
+        codecDocStoreFiles.add(IndexFileNames.segmentFileName(info.info.getDocStoreSegment(), "", "tvx"));
+        codecDocStoreFiles.add(IndexFileNames.segmentFileName(info.info.getDocStoreSegment(), "", "tvf"));
+        codecDocStoreFiles.add(IndexFileNames.segmentFileName(info.info.getDocStoreSegment(), "", "tvd"));
+      }
+    }
+
+    //System.out.println("copy seg=" + info.info.name + " version=" + info.info.getVersion());
+
+    // Same SI as before but we change directory, name and docStoreSegment:
+    SegmentInfo newInfo = new SegmentInfo(directory, info.info.getVersion(), segName, info.info.docCount, info.info.getDocStoreOffset(),
+                                          newDsName, info.info.getDocStoreIsCompoundFile(), info.info.getNormGen(), info.info.getUseCompoundFile(),
+                                          info.info.getCodec(), info.info.getDiagnostics());
+    SegmentInfoPerCommit newInfoPerCommit = new SegmentInfoPerCommit(newInfo, info.getDelCount(), info.getDelGen());
+
+    Set<String> segFiles = new HashSet<String>();
+
+    // Build up new segment's file names:
+    for (String file: info.files()) {
+      final String newFileName;
+      if (codecDocStoreFiles.contains(file)) {
+        newFileName = newDsName + IndexFileNames.stripSegmentName(file);
+      } else {
+        newFileName = segName + IndexFileNames.stripSegmentName(file);
+      }
+      segFiles.add(newFileName);
+    }
+    newInfo.setFiles(segFiles);
+    
+    // We must rewrite the SI file because it references
+    // segment name (its own name, if its 3.x, and doc
+    // store segment name):
+    try {
+      newInfo.getCodec().segmentInfosFormat().getSegmentInfosWriter().write(directory, newInfo, null, context);
+    } catch (UnsupportedOperationException uoe) {
+      // OK: 3x codec cannot write a new SI file;
+      // SegmentInfos will write this on commit
+    }
+
+    // Copy the segment's files
+    for (String file: info.files()) {
+
+      final String newFileName;
+      if (codecDocStoreFiles.contains(file)) {
+        newFileName = newDsName + IndexFileNames.stripSegmentName(file);
+        if (dsFilesCopied.contains(newFileName)) {
+          continue;
+        }
+        dsFilesCopied.add(newFileName);
+      } else {
+        newFileName = segName + IndexFileNames.stripSegmentName(file);
+      }
+
+      // nocommit hack
+      //if (siFileNames != null && siFileNames.contains(newFileName)) {
+      if (newFileName.endsWith(".si")) {
+        // We already rewrote this above
+        continue;
+      }
+
+      assert !directory.fileExists(newFileName): "file \"" + newFileName + "\" already exists";
+      assert !copiedFiles.contains(file): "file \"" + file + "\" is being copied more than once";
+      copiedFiles.add(file);
+      info.info.dir.copy(directory, file, newFileName, context);
+    }
+    
+    return newInfoPerCommit;
+  }
+

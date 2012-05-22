@@ -1,0 +1,235 @@
+  /**
+   * Test term vectors for a segment.
+   */
+  private Status.TermVectorStatus testTermVectors(FieldInfos fieldInfos, SegmentInfoPerCommit info, SegmentReader reader, NumberFormat format) {
+    final Status.TermVectorStatus status = new Status.TermVectorStatus();
+
+    final Bits onlyDocIsDeleted = new FixedBitSet(1);
+    
+    try {
+      if (infoStream != null) {
+        infoStream.print("    test: term vectors........");
+      }
+
+      DocsEnum docs = null;
+      DocsAndPositionsEnum postings = null;
+
+      // Only used if crossCheckTermVectors is true:
+      DocsEnum postingsDocs = null;
+      DocsAndPositionsEnum postingsPostings = null;
+
+      final Bits liveDocs = reader.getLiveDocs();
+
+      final Fields postingsFields;
+      // TODO: testTermsIndex
+      if (crossCheckTermVectors) {
+        postingsFields = reader.fields();
+      } else {
+        postingsFields = null;
+      }
+
+      TermsEnum termsEnum = null;
+      TermsEnum postingsTermsEnum = null;
+
+      for (int j = 0; j < info.info.docCount; ++j) {
+        // Intentionally pull/visit (but don't count in
+        // stats) deleted documents to make sure they too
+        // are not corrupt:
+        Fields tfv = reader.getTermVectors(j);
+
+        // TODO: can we make a IS(FIR) that searches just
+        // this term vector... to pass for searcher?
+
+        if (tfv != null) {
+          // First run with no deletions:
+          checkFields(tfv, null, 1, fieldInfos, null, false);
+
+          // Again, with the one doc deleted:
+          checkFields(tfv, onlyDocIsDeleted, 1, fieldInfos, null, false);
+
+          // Only agg stats if the doc is live:
+          final boolean doStats = liveDocs == null || liveDocs.get(j);
+          if (doStats) {
+            status.docCount++;
+          }
+
+          FieldsEnum fieldsEnum = tfv.iterator();
+          String field = null;
+          while((field = fieldsEnum.next()) != null) {
+            if (doStats) {
+              status.totVectors++;
+            }
+
+            // Make sure FieldInfo thinks this field is vector'd:
+            final FieldInfo fieldInfo = fieldInfos.fieldInfo(field);
+            if (!fieldInfo.hasVectors()) {
+              throw new RuntimeException("docID=" + j + " has term vectors for field=" + field + " but FieldInfo has storeTermVector=false");
+            }
+
+            if (crossCheckTermVectors) {
+              Terms terms = tfv.terms(field);
+              termsEnum = terms.iterator(termsEnum);
+
+              Terms postingsTerms = postingsFields.terms(field);
+              if (postingsTerms == null) {
+                throw new RuntimeException("vector field=" + field + " does not exist in postings; doc=" + j);
+              }
+              postingsTermsEnum = postingsTerms.iterator(postingsTermsEnum);
+              
+              BytesRef term = null;
+              while ((term = termsEnum.next()) != null) {
+                
+                final boolean hasPositions;
+                final boolean hasOffsets;
+                final boolean hasFreqs;
+
+                // TODO: really we need a reflection/query
+                // API so we can just ask what was indexed
+                // instead of "probing"...
+
+                // Try offsets:
+                postings = termsEnum.docsAndPositions(null, postings, true);
+                if (postings == null) {
+                  hasOffsets = false;
+                  // Try only positions:
+                  postings = termsEnum.docsAndPositions(null, postings, false);
+                  if (postings == null) {
+                    hasPositions = false;
+                    // Try docIDs & freqs:
+                    docs = termsEnum.docs(null, docs, true);
+                    if (docs == null) {
+                      // OK, only docIDs:
+                      hasFreqs = false;
+                      docs = termsEnum.docs(null, docs, false);
+                    } else {
+                      hasFreqs = true;
+                    }
+                  } else {
+                    hasPositions = true;
+                    hasFreqs = true;
+                  }
+                } else {
+                  hasOffsets = true;
+                  // NOTE: may be a lie... but we accept -1
+                  hasPositions = true;
+                  hasFreqs = true;
+                }
+
+                final DocsEnum docs2;
+                if (hasPositions || hasOffsets) {
+                  assert postings != null;
+                  docs2 = postings;
+                } else {
+                  assert docs != null;
+                  docs2 = docs;
+                }
+
+                final DocsEnum postingsDocs2;
+                final boolean postingsHasFreq;
+                if (!postingsTermsEnum.seekExact(term, true)) {
+                  throw new RuntimeException("vector term=" + term + " field=" + field + " does not exist in postings; doc=" + j);
+                }
+                postingsPostings = postingsTermsEnum.docsAndPositions(null, postingsPostings, true);
+                if (postingsPostings == null) {
+                  // Term vectors were indexed w/ offsets but postings were not
+                  postingsPostings = postingsTermsEnum.docsAndPositions(null, postingsPostings, false);
+                  if (postingsPostings == null) {
+                    postingsDocs = postingsTermsEnum.docs(null, postingsDocs, true);
+                    if (postingsDocs == null) {
+                      postingsHasFreq = false;
+                      postingsDocs = postingsTermsEnum.docs(null, postingsDocs, false);
+                      if (postingsDocs == null) {
+                        throw new RuntimeException("vector term=" + term + " field=" + field + " does not exist in postings; doc=" + j);
+                      }
+                    } else {
+                      postingsHasFreq = true;
+                    }
+                  } else {
+                    postingsHasFreq = true;
+                  }
+                } else {
+                  postingsHasFreq = true;
+                }
+
+                if (postingsPostings != null) {
+                  postingsDocs2 = postingsPostings;
+                } else {
+                  postingsDocs2 = postingsDocs;
+                }
+                  
+                final int advanceDoc = postingsDocs2.advance(j);
+                if (advanceDoc != j) {
+                  throw new RuntimeException("vector term=" + term + " field=" + field + ": doc=" + j + " was not found in postings (got: " + advanceDoc + ")");
+                }
+
+                final int doc = docs2.nextDoc();
+                  
+                if (doc != 0) {
+                  throw new RuntimeException("vector for doc " + j + " didn't return docID=0: got docID=" + doc);
+                }
+
+                if (hasFreqs) {
+                  final int tf = docs2.freq();
+                  if (postingsHasFreq && postingsDocs2.freq() != tf) {
+                    throw new RuntimeException("vector term=" + term + " field=" + field + " doc=" + j + ": freq=" + tf + " differs from postings freq=" + postingsDocs2.freq());
+                  }
+                
+                  if (hasPositions || hasOffsets) {
+                    for (int i = 0; i < tf; i++) {
+                      int pos = postings.nextPosition();
+                      if (postingsPostings != null) {
+                        int postingsPos = postingsPostings.nextPosition();
+                        if (pos != -1 && postingsPos != -1 && pos != postingsPos) {
+                          throw new RuntimeException("vector term=" + term + " field=" + field + " doc=" + j + ": pos=" + pos + " differs from postings pos=" + postingsPos);
+                        }
+                      }
+
+                      if (hasOffsets) {
+                        // Call the methods to at least make
+                        // sure they don't throw exc:
+                        final int startOffset = postings.startOffset();
+                        final int endOffset = postings.endOffset();
+                        // TODO: these are too anal...?
+                        /*
+                          if (endOffset < startOffset) {
+                          throw new RuntimeException("vector startOffset=" + startOffset + " is > endOffset=" + endOffset);
+                          }
+                          if (startOffset < lastStartOffset) {
+                          throw new RuntimeException("vector startOffset=" + startOffset + " is < prior startOffset=" + lastStartOffset);
+                          }
+                          lastStartOffset = startOffset;
+                        */
+
+                        if (postingsPostings != null) {
+                          final int postingsStartOffset = postingsPostings.startOffset();
+
+                          final int postingsEndOffset = postingsPostings.endOffset();
+                          if (startOffset != -1 && postingsStartOffset != -1 && startOffset != postingsStartOffset) {
+                            throw new RuntimeException("vector term=" + term + " field=" + field + " doc=" + j + ": startOffset=" + startOffset + " differs from postings startOffset=" + postingsStartOffset);
+                          }
+                          if (endOffset != -1 && postingsEndOffset != -1 && endOffset != postingsEndOffset) {
+                            throw new RuntimeException("vector term=" + term + " field=" + field + " doc=" + j + ": endOffset=" + endOffset + " differs from postings endOffset=" + postingsEndOffset);
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      msg("OK [" + status.totVectors + " total vector count; avg " + 
+          format.format((((float) status.totVectors) / status.docCount)) + " term/freq vector fields per doc]");
+    } catch (Throwable e) {
+      msg("ERROR [" + String.valueOf(e.getMessage()) + "]");
+      status.error = e;
+      if (infoStream != null) {
+        e.printStackTrace(infoStream);
+      }
+    }
+    
+    return status;
+  }
+

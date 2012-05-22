@@ -1,0 +1,160 @@
+  /** Resolves the buffered deleted Term/Query/docIDs, into
+   *  actual deleted docIDs in the liveDocs MutableBits for
+   *  each SegmentReader. */
+  public synchronized ApplyDeletesResult applyDeletes(IndexWriter.ReaderPool readerPool, List<SegmentInfoPerCommit> infos) throws IOException {
+    final long t0 = System.currentTimeMillis();
+
+    if (infos.size() == 0) {
+      return new ApplyDeletesResult(false, nextGen++, null);
+    }
+
+    assert checkDeleteStats();
+
+    if (!any()) {
+      if (infoStream.isEnabled("BD")) {
+        infoStream.message("BD", "applyDeletes: no deletes; skipping");
+      }
+      return new ApplyDeletesResult(false, nextGen++, null);
+    }
+
+    if (infoStream.isEnabled("BD")) {
+      infoStream.message("BD", "applyDeletes: infos=" + infos + " packetCount=" + deletes.size());
+    }
+
+    List<SegmentInfoPerCommit> infos2 = new ArrayList<SegmentInfoPerCommit>();
+    infos2.addAll(infos);
+    Collections.sort(infos2, sortSegInfoByDelGen);
+
+    CoalescedDeletes coalescedDeletes = null;
+    boolean anyNewDeletes = false;
+
+    int infosIDX = infos2.size()-1;
+    int delIDX = deletes.size()-1;
+
+    List<SegmentInfoPerCommit> allDeleted = null;
+
+    while (infosIDX >= 0) {
+      //System.out.println("BD: cycle delIDX=" + delIDX + " infoIDX=" + infosIDX);
+
+      final FrozenBufferedDeletes packet = delIDX >= 0 ? deletes.get(delIDX) : null;
+      final SegmentInfoPerCommit info = infos2.get(infosIDX);
+      final long segGen = info.getBufferedDeletesGen();
+
+      if (packet != null && segGen < packet.delGen()) {
+        //System.out.println("  coalesce");
+        if (coalescedDeletes == null) {
+          coalescedDeletes = new CoalescedDeletes();
+        }
+        if (!packet.isSegmentPrivate) {
+          /*
+           * Only coalesce if we are NOT on a segment private del packet: the segment private del packet
+           * must only applied to segments with the same delGen.  Yet, if a segment is already deleted
+           * from the SI since it had no more documents remaining after some del packets younger than
+           * its segPrivate packet (higher delGen) have been applied, the segPrivate packet has not been
+           * removed.
+           */
+          coalescedDeletes.update(packet);
+        }
+
+        delIDX--;
+      } else if (packet != null && segGen == packet.delGen()) {
+        assert packet.isSegmentPrivate : "Packet and Segments deletegen can only match on a segment private del packet gen=" + segGen;
+        //System.out.println("  eq");
+
+        // Lock order: IW -> BD -> RP
+        assert readerPool.infoIsLive(info);
+        final ReadersAndLiveDocs rld = readerPool.get(info, true);
+        final SegmentReader reader = rld.getReader(IOContext.READ);
+        int delCount = 0;
+        final boolean segAllDeletes;
+        try {
+          if (coalescedDeletes != null) {
+            //System.out.println("    del coalesced");
+            delCount += applyTermDeletes(coalescedDeletes.termsIterable(), rld, reader);
+            delCount += applyQueryDeletes(coalescedDeletes.queriesIterable(), rld, reader);
+          }
+          //System.out.println("    del exact");
+          // Don't delete by Term here; DocumentsWriterPerThread
+          // already did that on flush:
+          delCount += applyQueryDeletes(packet.queriesIterable(), rld, reader);
+          final int fullDelCount = rld.info.getDelCount() + rld.getPendingDeleteCount();
+          assert fullDelCount <= rld.info.info.docCount;
+          segAllDeletes = fullDelCount == rld.info.info.docCount;
+        } finally {
+          rld.release(reader);
+          readerPool.release(rld);
+        }
+        anyNewDeletes |= delCount > 0;
+
+        if (segAllDeletes) {
+          if (allDeleted == null) {
+            allDeleted = new ArrayList<SegmentInfoPerCommit>();
+          }
+          allDeleted.add(info);
+        }
+
+        if (infoStream.isEnabled("BD")) {
+          infoStream.message("BD", "seg=" + info + " segGen=" + segGen + " segDeletes=[" + packet + "]; coalesced deletes=[" + (coalescedDeletes == null ? "null" : coalescedDeletes) + "] newDelCount=" + delCount + (segAllDeletes ? " 100% deleted" : ""));
+        }
+
+        if (coalescedDeletes == null) {
+          coalescedDeletes = new CoalescedDeletes();
+        }
+        
+        /*
+         * Since we are on a segment private del packet we must not
+         * update the coalescedDeletes here! We can simply advance to the 
+         * next packet and seginfo.
+         */
+        delIDX--;
+        infosIDX--;
+        info.setBufferedDeletesGen(nextGen);
+
+      } else {
+        //System.out.println("  gt");
+
+        if (coalescedDeletes != null) {
+          // Lock order: IW -> BD -> RP
+          assert readerPool.infoIsLive(info);
+          final ReadersAndLiveDocs rld = readerPool.get(info, true);
+          final SegmentReader reader = rld.getReader(IOContext.READ);
+          int delCount = 0;
+          final boolean segAllDeletes;
+          try {
+            delCount += applyTermDeletes(coalescedDeletes.termsIterable(), rld, reader);
+            delCount += applyQueryDeletes(coalescedDeletes.queriesIterable(), rld, reader);
+            final int fullDelCount = rld.info.getDelCount() + rld.getPendingDeleteCount();
+            assert fullDelCount <= rld.info.info.docCount;
+            segAllDeletes = fullDelCount == rld.info.info.docCount;
+          } finally {   
+            rld.release(reader);
+            readerPool.release(rld);
+          }
+          anyNewDeletes |= delCount > 0;
+
+          if (segAllDeletes) {
+            if (allDeleted == null) {
+              allDeleted = new ArrayList<SegmentInfoPerCommit>();
+            }
+            allDeleted.add(info);
+          }
+
+          if (infoStream.isEnabled("BD")) {
+            infoStream.message("BD", "seg=" + info + " segGen=" + segGen + " coalesced deletes=[" + (coalescedDeletes == null ? "null" : coalescedDeletes) + "] newDelCount=" + delCount + (segAllDeletes ? " 100% deleted" : ""));
+          }
+        }
+        info.setBufferedDeletesGen(nextGen);
+
+        infosIDX--;
+      }
+    }
+
+    assert checkDeleteStats();
+    if (infoStream.isEnabled("BD")) {
+      infoStream.message("BD", "applyDeletes took " + (System.currentTimeMillis()-t0) + " msec");
+    }
+    // assert infos != segmentInfos || !any() : "infos=" + infos + " segmentInfos=" + segmentInfos + " any=" + any;
+
+    return new ApplyDeletesResult(anyNewDeletes, nextGen++, allDeleted);
+  }
+

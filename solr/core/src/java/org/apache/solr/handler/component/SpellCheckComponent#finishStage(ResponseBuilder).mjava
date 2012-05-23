@@ -10,6 +10,7 @@
     boolean collationExtendedResults = params.getBool(SPELLCHECK_COLLATE_EXTENDED_RESULTS, false);
     int maxCollationTries = params.getInt(SPELLCHECK_MAX_COLLATION_TRIES, 0);
     int maxCollations = params.getInt(SPELLCHECK_MAX_COLLATIONS, 1);
+    Integer maxResultsForSuggest = params.getInt(SpellingParams.SPELLCHECK_MAX_RESULTS_FOR_SUGGEST); 
     int count = rb.req.getParams().getInt(SPELLCHECK_COUNT, 1);
     int numSug = Math.max(count, AbstractLuceneSpellChecker.DEFAULT_SUGGESTION_COUNT);
 
@@ -19,17 +20,22 @@
       if (origQuery == null) {
         origQuery = params.get(CommonParams.Q);
       }
-    }    
+    }
     
-    SpellCheckMergeData mergeData = new SpellCheckMergeData();     
-    for (ShardRequest sreq : rb.finished) {
-      for (ShardResponse srsp : sreq.responses) {
-        NamedList nl = (NamedList) srsp.getSolrResponse().getResponse().get("spellcheck");
-        LOG.info(srsp.getShard() + " " + nl);
-        if (nl != null) {
-        	mergeData.totalNumberShardResponses++;
-        	collectShardSuggestions(nl, mergeData);          
-          collectShardCollations(mergeData, nl, maxCollationTries);
+    long hits = rb.getNumberDocumentsFound();
+    boolean isCorrectlySpelled = hits > (maxResultsForSuggest==null ? 0 : maxResultsForSuggest);
+    
+    SpellCheckMergeData mergeData = new SpellCheckMergeData();  
+    if (maxResultsForSuggest==null || !isCorrectlySpelled) {
+      for (ShardRequest sreq : rb.finished) {
+        for (ShardResponse srsp : sreq.responses) {
+          NamedList nl = (NamedList) srsp.getSolrResponse().getResponse().get("spellcheck");
+          LOG.info(srsp.getShard() + " " + nl);
+          if (nl != null) {
+          	mergeData.totalNumberShardResponses++;
+          	collectShardSuggestions(nl, mergeData);          
+            collectShardCollations(mergeData, nl, maxCollationTries);
+          }
         }
       }
     }
@@ -40,10 +46,12 @@
     SpellingResult result = checker.mergeSuggestions(mergeData, numSug, count, extendedResults);
     
     NamedList response = new SimpleOrderedMap();
-		NamedList suggestions = toNamedList(false, result, origQuery, extendedResults, collate);
-		if (collate) {
-			SpellCheckCollation[] sortedCollations = mergeData.collations.values().toArray(new SpellCheckCollation[mergeData.collations.size()]);
-			Arrays.sort(sortedCollations);
+    NamedList suggestions = toNamedList(false, result, origQuery,
+        extendedResults, collate, isCorrectlySpelled);
+    if (collate) {
+      SpellCheckCollation[] sortedCollations = mergeData.collations.values()
+          .toArray(new SpellCheckCollation[mergeData.collations.size()]);
+      Arrays.sort(sortedCollations);
 			int i = 0;
 			while (i < maxCollations && i < sortedCollations.length) {
 				SpellCheckCollation collation = sortedCollations[i];

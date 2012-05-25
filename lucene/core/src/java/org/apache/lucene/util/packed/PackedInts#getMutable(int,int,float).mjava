@@ -1,0 +1,56 @@
+  /**
+   * Create a packed integer array with the given amount of values initialized
+   * to 0. the valueCount and the bitsPerValue cannot be changed after creation.
+   * All Mutables known by this factory are kept fully in RAM.
+   * 
+   * Positive values of <code>acceptableOverheadRatio</code> will trade space
+   * for speed by selecting a faster but potentially less memory-efficient
+   * implementation. An <code>acceptableOverheadRatio</code> of
+   * {@link PackedInts#COMPACT} will make sure that the most memory-efficient
+   * implementation is selected whereas {@link PackedInts#FASTEST} will make sure
+   * that the fastest implementation is selected.
+   *
+   * @param valueCount   the number of elements
+   * @param bitsPerValue the number of bits available for any given value
+   * @param acceptableOverheadRatio an acceptable overhead
+   *        ratio per value
+   * @return a mutable packed integer array
+   * @throws java.io.IOException if the Mutable could not be created. With the
+   *         current implementations, this never happens, but the method
+   *         signature allows for future persistence-backed Mutables.
+   * @lucene.internal
+   */
+  public static Mutable getMutable(int valueCount,
+      int bitsPerValue, float acceptableOverheadRatio) {
+    acceptableOverheadRatio = Math.max(COMPACT, acceptableOverheadRatio);
+    acceptableOverheadRatio = Math.min(FASTEST, acceptableOverheadRatio);
+    float acceptableOverheadPerValue = acceptableOverheadRatio * bitsPerValue; // in bits
+
+    int maxBitsPerValue = bitsPerValue + (int) acceptableOverheadPerValue;
+
+    if (bitsPerValue <= 8 && maxBitsPerValue >= 8) {
+      return new Direct8(valueCount);
+    } else if (bitsPerValue <= 16 && maxBitsPerValue >= 16) {
+      return new Direct16(valueCount);
+    } else if (bitsPerValue <= 32 && maxBitsPerValue >= 32) {
+      return new Direct32(valueCount);
+    } else if (bitsPerValue <= 64 && maxBitsPerValue >= 64) {
+      return new Direct64(valueCount);
+    } else if (valueCount <= Packed8ThreeBlocks.MAX_SIZE && bitsPerValue <= 24 && maxBitsPerValue >= 24) {
+      return new Packed8ThreeBlocks(valueCount);
+    } else if (valueCount <= Packed16ThreeBlocks.MAX_SIZE && bitsPerValue <= 48 && maxBitsPerValue >= 48) {
+      return new Packed16ThreeBlocks(valueCount);
+    } else {
+      for (int bpv = bitsPerValue; bpv <= maxBitsPerValue; ++bpv) {
+        if (Packed64SingleBlock.isSupported(bpv)) {
+          float overhead = Packed64SingleBlock.overheadPerValue(bpv);
+          float acceptableOverhead = acceptableOverheadPerValue + bitsPerValue - bpv;
+          if (overhead <= acceptableOverhead) {
+            return Packed64SingleBlock.create(valueCount, bpv);
+          }
+        }
+      }
+      return new Packed64(valueCount, bitsPerValue);
+    }
+  }
+

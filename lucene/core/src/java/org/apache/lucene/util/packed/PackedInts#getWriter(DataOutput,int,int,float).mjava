@@ -1,0 +1,55 @@
+  /**
+   * Create a packed integer array writer for the given number of values at the
+   * given bits/value. Writers append to the given IndexOutput and has very
+   * low memory overhead.
+   *
+   * Positive values of <code>acceptableOverheadRatio</code> will trade space
+   * for speed by selecting a faster but potentially less memory-efficient
+   * implementation. An <code>acceptableOverheadRatio</code> of
+   * {@link PackedInts#COMPACT} will make sure that the most memory-efficient
+   * implementation is selected whereas {@link PackedInts#FASTEST} will make sure
+   * that the fastest implementation is selected.
+   *
+   * @param out          the destination for the produced bits.
+   * @param valueCount   the number of elements.
+   * @param bitsPerValue the number of bits available for any given value.
+   * @param acceptableOverheadRatio an acceptable overhead ratio per value
+   * @return a Writer ready for receiving values.
+   * @throws IOException if bits could not be written to out.
+   * @lucene.internal
+   */
+  public static Writer getWriter(DataOutput out,
+      int valueCount, int bitsPerValue, float acceptableOverheadRatio)
+    throws IOException {
+    acceptableOverheadRatio = Math.max(COMPACT, acceptableOverheadRatio);
+    acceptableOverheadRatio = Math.min(FASTEST, acceptableOverheadRatio);
+    float acceptableOverheadPerValue = acceptableOverheadRatio * bitsPerValue; // in bits
+
+    int maxBitsPerValue = bitsPerValue + (int) acceptableOverheadPerValue;
+
+    if (bitsPerValue <= 8 && maxBitsPerValue >= 8) {
+      return new PackedWriter(out, valueCount, 8);
+    } else if (bitsPerValue <= 16 && maxBitsPerValue >= 16) {
+      return new PackedWriter(out, valueCount, 16);
+    } else if (bitsPerValue <= 32 && maxBitsPerValue >= 32) {
+      return new PackedWriter(out, valueCount, 32);
+    } else if (bitsPerValue <= 64 && maxBitsPerValue >= 64) {
+      return new PackedWriter(out, valueCount, 64);
+    } else if (valueCount <= Packed8ThreeBlocks.MAX_SIZE && bitsPerValue <= 24 && maxBitsPerValue >= 24) {
+      return new PackedWriter(out, valueCount, 24);
+    } else if (valueCount <= Packed16ThreeBlocks.MAX_SIZE && bitsPerValue <= 48 && maxBitsPerValue >= 48) {
+      return new PackedWriter(out, valueCount, bitsPerValue);
+    } else {
+      for (int bpv = bitsPerValue; bpv <= maxBitsPerValue; ++bpv) {
+        if (Packed64SingleBlock.isSupported(bpv)) {
+          float overhead = Packed64SingleBlock.overheadPerValue(bpv);
+          float acceptableOverhead = acceptableOverheadPerValue + bitsPerValue - bpv;
+          if (overhead <= acceptableOverhead) {
+            return new Packed64SingleBlockWriter(out, valueCount, bpv);
+          }
+        }
+      }
+      return new PackedWriter(out, valueCount, bitsPerValue);
+    }
+  }
+

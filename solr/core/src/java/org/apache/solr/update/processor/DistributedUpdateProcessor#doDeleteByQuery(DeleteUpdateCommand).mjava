@@ -1,23 +1,24 @@
   public void doDeleteByQuery(DeleteUpdateCommand cmd) throws IOException {
     // even in non zk mode, tests simulate updates from a leader
     if(!zkEnabled) {
-      isLeader = !req.getParams().getBool(SEEN_LEADER, false);
+      isLeader = getNonZkLeaderAssumption(req);
     } else {
       zkCheck();
     }
 
-    // Lev1: we are the first to receive this deleteByQuery, it must be forwarded to the leader of every shard
-    // Lev2: we are a leader receiving a forwarded deleteByQuery... we must:
+    // NONE: we are the first to receive this deleteByQuery
+    //       - it must be forwarded to the leader of every shard
+    // TO:   we are a leader receiving a forwarded deleteByQuery... we must:
     //       - block all updates (use VersionInfo)
     //       - flush *all* updates going to our replicas
     //       - forward the DBQ to our replicas and wait for the response
     //       - log + execute the local DBQ
-    // Lev3: we are a replica receiving a DBQ from our leader
+    // FROM: we are a replica receiving a DBQ from our leader
     //       - log + execute the local DBQ
+    DistribPhase phase = 
+      DistribPhase.parseParam(req.getParams().get(DISTRIB_UPDATE_PARAM));
 
-    int dbqlevel = req.getParams().getInt(DELETE_BY_QUERY_LEVEL, 1);
-
-    if (zkEnabled && dbqlevel == 1) {
+    if (zkEnabled && DistribPhase.NONE == phase) {
       boolean leaderForAnyShard = false;  // start off by assuming we are not a leader for any shard
 
       Map<String,Slice> slices = zkController.getCloudState().getSlices(collection);
@@ -28,7 +29,7 @@
       }
 
       ModifiableSolrParams params = new ModifiableSolrParams(req.getParams());
-      params.set(DELETE_BY_QUERY_LEVEL, 2);
+      params.set(DISTRIB_UPDATE_PARAM, DistribPhase.TOLEADER.toString());
 
       List<Node> leaders =  new ArrayList<Node>(slices.size());
       for (Map.Entry<String,Slice> sliceEntry : slices.entrySet()) {
@@ -65,13 +66,13 @@
         return;
       }
 
-      // change the level to 2 so we look up and forward to our own replicas (if any)
-      dbqlevel = 2;
+      // change the phase to TOLEADER so we look up and forward to our own replicas (if any)
+      phase = DistribPhase.TOLEADER;
     }
 
     List<Node> replicas = null;
 
-    if (zkEnabled && dbqlevel == 2) {
+    if (zkEnabled && DistribPhase.TOLEADER == phase) {
       // This core should be a leader
       replicas = setupRequest();
     }
@@ -138,9 +139,8 @@
     // forward to all replicas
     if (leaderLogic && replicas != null) {
       ModifiableSolrParams params = new ModifiableSolrParams(req.getParams());
-      params.set(DELETE_BY_QUERY_LEVEL, 3);
       params.set(VERSION_FIELD, Long.toString(cmd.getVersion()));
-      params.set(SEEN_LEADER, "true");
+      params.set(DISTRIB_UPDATE_PARAM, DistribPhase.FROMLEADER.toString());
       cmdDistrib.distribDelete(cmd, replicas, params);
       cmdDistrib.finish();
     }

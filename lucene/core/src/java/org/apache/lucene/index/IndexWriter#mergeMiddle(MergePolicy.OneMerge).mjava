@@ -6,20 +6,20 @@
 
     merge.checkAborted(directory);
 
-    final String mergedName = merge.info.name;
+    final String mergedName = merge.info.info.name;
 
-    int mergedDocCount = 0;
-
-    List<SegmentInfo> sourceSegments = merge.segments;
+    List<SegmentInfoPerCommit> sourceSegments = merge.segments;
     
     IOContext context = new IOContext(merge.getMergeInfo());
 
     final MergeState.CheckAbort checkAbort = new MergeState.CheckAbort(merge, directory);
-    SegmentMerger merger = new SegmentMerger(infoStream, directory, config.getTermIndexInterval(), mergedName, checkAbort,
-                                             payloadProcessorProvider, merge.info.getFieldInfos(), codec, context);
+    final TrackingDirectoryWrapper dirWrapper = new TrackingDirectoryWrapper(directory);
+
+    SegmentMerger merger = new SegmentMerger(merge.info.info, infoStream, dirWrapper, config.getTermIndexInterval(), checkAbort,
+                                             payloadProcessorProvider, globalFieldNumberMap, context);
 
     if (infoStream.isEnabled("IW")) {
-      infoStream.message("IW", "merging " + segString(merge.segments) + " mergeVectors=" + merge.info.getFieldInfos().hasVectors());
+      infoStream.message("IW", "merging " + segString(merge.segments));
     }
 
     merge.readers = new ArrayList<SegmentReader>();
@@ -32,7 +32,7 @@
       int segUpto = 0;
       while(segUpto < sourceSegments.size()) {
 
-        final SegmentInfo info = sourceSegments.get(segUpto);
+        final SegmentInfoPerCommit info = sourceSegments.get(segUpto);
 
         // Hold onto the "live" reader; we will use this to
         // commit merged deletes
@@ -65,8 +65,8 @@
         }
         merge.readerLiveDocs.add(liveDocs);
         merge.readers.add(reader);
-        assert delCount <= info.docCount: "delCount=" + delCount + " info.docCount=" + info.docCount + " rld.pendingDeleteCount=" + rld.getPendingDeleteCount() + " info.getDelCount()=" + info.getDelCount();
-        if (delCount < info.docCount) {
+        assert delCount <= info.info.getDocCount(): "delCount=" + delCount + " info.docCount=" + info.info.getDocCount() + " rld.pendingDeleteCount=" + rld.getPendingDeleteCount() + " info.getDelCount()=" + info.getDelCount();
+        if (delCount < info.info.getDocCount()) {
           merger.add(reader, liveDocs);
         }
         segUpto++;
@@ -76,13 +76,18 @@
 
       // This is where all the work happens:
       MergeState mergeState = merger.merge();
-      mergedDocCount = merge.info.docCount = mergeState.mergedDocCount;
+      assert mergeState.segmentInfo == merge.info.info;
+      merge.info.info.setFiles(new HashSet<String>(dirWrapper.getCreatedFiles()));
 
       // Record which codec was used to write the segment
-      merge.info.setCodec(codec);
 
       if (infoStream.isEnabled("IW")) {
-        infoStream.message("IW", "merge codec=" + codec + " docCount=" + mergedDocCount);
+        infoStream.message("IW", "merge codec=" + codec + " docCount=" + merge.info.info.getDocCount() + "; merged segment has " +
+                           (mergeState.fieldInfos.hasVectors() ? "vectors" : "no vectors") + "; " +
+                           (mergeState.fieldInfos.hasNorms() ? "norms" : "no norms") + "; " + 
+                           (mergeState.fieldInfos.hasDocValues() ? "docValues" : "no docValues") + "; " + 
+                           (mergeState.fieldInfos.hasProx() ? "prox" : "no prox") + "; " + 
+                           (mergeState.fieldInfos.hasProx() ? "freqs" : "no freqs"));
       }
 
       // Very important to do this before opening the reader
@@ -93,16 +98,14 @@
       synchronized (this) { // Guard segmentInfos
         useCompoundFile = mergePolicy.useCompoundFile(segmentInfos, merge.info);
       }
-      
+
       if (useCompoundFile) {
         success = false;
-        final String compoundFileName = IndexFileNames.segmentFileName(mergedName, "", IndexFileNames.COMPOUND_FILE_EXTENSION);
+
+        Collection<String> filesToRemove = merge.info.files();
 
         try {
-          if (infoStream.isEnabled("IW")) {
-            infoStream.message("IW", "create compound file " + compoundFileName);
-          }
-          createCompoundFile(directory, compoundFileName, checkAbort, merge.info, new IOContext(merge.getMergeInfo()));
+          filesToRemove = createCompoundFile(infoStream, directory, checkAbort, merge.info.info, context);
           success = true;
         } catch (IOException ioe) {
           synchronized(this) {
@@ -123,35 +126,64 @@
             }
 
             synchronized(this) {
-              deleter.deleteFile(compoundFileName);
+              deleter.deleteFile(IndexFileNames.segmentFileName(mergedName, "", IndexFileNames.COMPOUND_FILE_EXTENSION));
               deleter.deleteFile(IndexFileNames.segmentFileName(mergedName, "", IndexFileNames.COMPOUND_FILE_ENTRIES_EXTENSION));
               deleter.deleteNewFiles(merge.info.files());
             }
           }
         }
 
+        // So that, if we hit exc in deleteNewFiles (next)
+        // or in commitMerge (later), we close the
+        // per-segment readers in the finally clause below:
         success = false;
 
         synchronized(this) {
 
           // delete new non cfs files directly: they were never
           // registered with IFD
-          deleter.deleteNewFiles(merge.info.files());
+          deleter.deleteNewFiles(filesToRemove);
 
           if (merge.isAborted()) {
             if (infoStream.isEnabled("IW")) {
               infoStream.message("IW", "abort merge after building CFS");
             }
-            deleter.deleteFile(compoundFileName);
+            deleter.deleteFile(IndexFileNames.segmentFileName(mergedName, "", IndexFileNames.COMPOUND_FILE_EXTENSION));
+            deleter.deleteFile(IndexFileNames.segmentFileName(mergedName, "", IndexFileNames.COMPOUND_FILE_ENTRIES_EXTENSION));
             return 0;
           }
         }
 
-        merge.info.setUseCompoundFile(true);
+        merge.info.info.setUseCompoundFile(true);
+      } else {
+        // So that, if we hit exc in commitMerge (later),
+        // we close the per-segment readers in the finally
+        // clause below:
+        success = false;
       }
 
+      // Have codec write SegmentInfo.  Must do this after
+      // creating CFS so that 1) .si isn't slurped into CFS,
+      // and 2) .si reflects useCompoundFile=true change
+      // above:
+      boolean success2 = false;
+      try {
+        codec.segmentInfoFormat().getSegmentInfosWriter().write(directory, merge.info.info, mergeState.fieldInfos, context);
+        success2 = true;
+      } finally {
+        if (!success2) {
+          synchronized(this) {
+            deleter.deleteNewFiles(merge.info.files());
+          }
+        }
+      }
+
+      // TODO: ideally we would freeze merge.info here!!
+      // because any changes after writing the .si will be
+      // lost... 
+
       if (infoStream.isEnabled("IW")) {
-        infoStream.message("IW", String.format("merged segment size=%.3f MB vs estimate=%.3f MB", merge.info.sizeInBytes()/1024./1024., merge.estimatedMergeBytes/1024/1024.));
+        infoStream.message("IW", String.format("merged segment size=%.3f MB vs estimate=%.3f MB", merge.info.info.sizeInBytes()/1024./1024., merge.estimatedMergeBytes/1024/1024.));
       }
 
       final IndexReaderWarmer mergedSegmentWarmer = config.getMergedSegmentWarmer();
@@ -186,6 +218,6 @@
       }
     }
 
-    return mergedDocCount;
+    return merge.info.info.getDocCount();
   }
 

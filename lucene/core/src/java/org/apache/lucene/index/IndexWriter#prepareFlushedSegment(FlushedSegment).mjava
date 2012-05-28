@@ -7,50 +7,43 @@
    * 
    * @see #publishFlushedSegment(SegmentInfo, FrozenBufferedDeletes, FrozenBufferedDeletes)
    */
-  SegmentInfo prepareFlushedSegment(FlushedSegment flushedSegment) throws IOException {
+  SegmentInfoPerCommit prepareFlushedSegment(FlushedSegment flushedSegment) throws IOException {
     assert flushedSegment != null;
 
-    SegmentInfo newSegment = flushedSegment.segmentInfo;
+    SegmentInfoPerCommit newSegment = flushedSegment.segmentInfo;
 
-    setDiagnostics(newSegment, "flush");
+    setDiagnostics(newSegment.info, "flush");
     
-    IOContext context = new IOContext(new FlushInfo(newSegment.docCount, newSegment.sizeInBytes()));
+    IOContext context = new IOContext(new FlushInfo(newSegment.info.getDocCount(), newSegment.info.sizeInBytes()));
 
     boolean success = false;
     try {
       if (useCompoundFile(newSegment)) {
-        String compoundFileName = IndexFileNames.segmentFileName(newSegment.name, "", IndexFileNames.COMPOUND_FILE_EXTENSION);
-        if (infoStream.isEnabled("IW")) {
-          infoStream.message("IW", "creating compound file " + compoundFileName);
-        }
+
         // Now build compound file
-        final Directory cfsDir = new CompoundFileDirectory(directory, compoundFileName, context, true);
-        IOException prior = null;
-        try {
-          for(String fileName : newSegment.files()) {
-            directory.copy(cfsDir, fileName, fileName, context);
-          }
-        } catch(IOException ex) {
-          prior = ex;
-        } finally {
-          IOUtils.closeWhileHandlingException(prior, cfsDir);
-        }
-        // Perform the merge
+        Collection<String> oldFiles = createCompoundFile(infoStream, directory, MergeState.CheckAbort.NONE, newSegment.info, context);
+        newSegment.info.setUseCompoundFile(true);
         
         synchronized(this) {
-          deleter.deleteNewFiles(newSegment.files());
+          deleter.deleteNewFiles(oldFiles);
         }
-
-        newSegment.setUseCompoundFile(true);
       }
+
+      // Have codec write SegmentInfo.  Must do this after
+      // creating CFS so that 1) .si isn't slurped into CFS,
+      // and 2) .si reflects useCompoundFile=true change
+      // above:
+      codec.segmentInfoFormat().getSegmentInfosWriter().write(directory, newSegment.info, flushedSegment.fieldInfos, context);
+
+      // TODO: ideally we would freeze newSegment here!!
+      // because any changes after writing the .si will be
+      // lost... 
 
       // Must write deleted docs after the CFS so we don't
       // slurp the del file into CFS:
       if (flushedSegment.liveDocs != null) {
         final int delCount = flushedSegment.delCount;
         assert delCount > 0;
-        newSegment.setDelCount(delCount);
-        newSegment.advanceDelGen();
         if (infoStream.isEnabled("IW")) {
           infoStream.message("IW", "flush: write " + delCount + " deletes gen=" + flushedSegment.segmentInfo.getDelGen());
         }
@@ -61,9 +54,11 @@
         // carry the changes; there's no reason to use
         // filesystem as intermediary here.
           
-        SegmentInfo info = flushedSegment.segmentInfo;
-        Codec codec = info.getCodec();
-        codec.liveDocsFormat().writeLiveDocs(flushedSegment.liveDocs, directory, info, context);
+        SegmentInfoPerCommit info = flushedSegment.segmentInfo;
+        Codec codec = info.info.getCodec();
+        codec.liveDocsFormat().writeLiveDocs(flushedSegment.liveDocs, directory, info, delCount, context);
+        newSegment.setDelCount(delCount);
+        newSegment.advanceDelGen();
       }
 
       success = true;
@@ -71,11 +66,11 @@
       if (!success) {
         if (infoStream.isEnabled("IW")) {
           infoStream.message("IW", "hit exception " +
-              "reating compound file for newly flushed segment " + newSegment.name);
+              "reating compound file for newly flushed segment " + newSegment.info.name);
         }
 
         synchronized(this) {
-          deleter.refresh(newSegment.name);
+          deleter.refresh(newSegment.info.name);
         }
       }
     }

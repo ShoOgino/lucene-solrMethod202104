@@ -34,46 +34,62 @@
       String mergedName = newSegmentName();
       for (IndexReader indexReader : readers) {
         numDocs += indexReader.numDocs();
-       }
-       final IOContext context = new IOContext(new MergeInfo(numDocs, -1, true, -1));
+      }
+      final IOContext context = new IOContext(new MergeInfo(numDocs, -1, true, -1));
 
       // TODO: somehow we should fix this merge so it's
       // abortable so that IW.close(false) is able to stop it
-      SegmentMerger merger = new SegmentMerger(infoStream, directory, config.getTermIndexInterval(),
-                                               mergedName, MergeState.CheckAbort.NONE, payloadProcessorProvider,
-                                               new FieldInfos(globalFieldNumberMap), codec, context);
+      TrackingDirectoryWrapper trackingDir = new TrackingDirectoryWrapper(directory);
 
-      for (IndexReader reader : readers)      // add new indexes
+      SegmentInfo info = new SegmentInfo(directory, Constants.LUCENE_MAIN_VERSION, mergedName, -1,
+                                         false, codec, null, null);
+
+      SegmentMerger merger = new SegmentMerger(info, infoStream, trackingDir, config.getTermIndexInterval(),
+                                               MergeState.CheckAbort.NONE, payloadProcessorProvider,
+                                               globalFieldNumberMap, context);
+
+      for (IndexReader reader : readers) {    // add new indexes
         merger.add(reader);
+      }
+
       MergeState mergeState = merger.merge();                // merge 'em
-      int docCount = mergeState.mergedDocCount;
-      final FieldInfos fieldInfos = mergeState.fieldInfos;
-      SegmentInfo info = new SegmentInfo(mergedName, docCount, directory,
-                                         false, codec,
-                                         fieldInfos);
+
+      SegmentInfoPerCommit infoPerCommit = new SegmentInfoPerCommit(info, 0, -1L);
+
+      info.setFiles(new HashSet<String>(trackingDir.getCreatedFiles()));
+      trackingDir.getCreatedFiles().clear();
+                                         
       setDiagnostics(info, "addIndexes(IndexReader...)");
 
       boolean useCompoundFile;
       synchronized(this) { // Guard segmentInfos
         if (stopMerges) {
-          deleter.deleteNewFiles(info.files());
+          deleter.deleteNewFiles(infoPerCommit.files());
           return;
         }
         ensureOpen();
-        useCompoundFile = mergePolicy.useCompoundFile(segmentInfos, info);
+        useCompoundFile = mergePolicy.useCompoundFile(segmentInfos, infoPerCommit);
       }
 
       // Now create the compound file if needed
       if (useCompoundFile) {
-        createCompoundFile(directory, IndexFileNames.segmentFileName(mergedName, "", IndexFileNames.COMPOUND_FILE_EXTENSION), MergeState.CheckAbort.NONE, info, context);
+        Collection<String> filesToDelete = infoPerCommit.files();
+        createCompoundFile(infoStream, directory, MergeState.CheckAbort.NONE, info, context);
 
         // delete new non cfs files directly: they were never
         // registered with IFD
         synchronized(this) {
-          deleter.deleteNewFiles(info.files());
+          deleter.deleteNewFiles(filesToDelete);
         }
         info.setUseCompoundFile(true);
       }
+
+      // Have codec write SegmentInfo.  Must do this after
+      // creating CFS so that 1) .si isn't slurped into CFS,
+      // and 2) .si reflects useCompoundFile=true change
+      // above:
+      codec.segmentInfoFormat().getSegmentInfosWriter().write(trackingDir, info, mergeState.fieldInfos, context);
+      info.addFiles(trackingDir.getCreatedFiles());
 
       // Register the new segment
       synchronized(this) {
@@ -82,7 +98,7 @@
           return;
         }
         ensureOpen();
-        segmentInfos.add(info);
+        segmentInfos.add(infoPerCommit);
         checkpoint();
       }
     } catch (OutOfMemoryError oom) {

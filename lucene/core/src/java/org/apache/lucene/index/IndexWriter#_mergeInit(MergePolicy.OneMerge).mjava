@@ -9,20 +9,14 @@
       throw new IllegalStateException("this writer hit an OutOfMemoryError; cannot merge");
     }
 
-    // TODO: is there any perf benefit to sorting
-    // merged segments?  eg biggest to smallest?
-
-    if (merge.info != null)
+    if (merge.info != null) {
       // mergeInit already done
       return;
+    }
 
-    if (merge.isAborted())
+    if (merge.isAborted()) {
       return;
-
-    // Bind a new segment name here so even with
-    // ConcurrentMergePolicy we keep deterministic segment
-    // names.
-    merge.info = new SegmentInfo(newSegmentName(), 0, directory, false, null, new FieldInfos(globalFieldNumberMap));
+    }
 
     // TODO: in the non-pool'd case this is somewhat
     // wasteful, because we open these readers, close them,
@@ -40,7 +34,7 @@
       if (infoStream.isEnabled("IW")) {
         infoStream.message("IW", "drop 100% deleted segments: " + result.allDeleted);
       }
-      for(SegmentInfo info : result.allDeleted) {
+      for(SegmentInfoPerCommit info : result.allDeleted) {
         segmentInfos.remove(info);
         if (merge.segments.contains(info)) {
           mergingSegments.remove(info);
@@ -51,37 +45,32 @@
       checkpoint();
     }
 
-    merge.info.setBufferedDeletesGen(result.gen);
-
-    // Lock order: IW -> BD
-    bufferedDeletesStream.prune(segmentInfos);
     Map<String,String> details = new HashMap<String,String>();
     details.put("mergeMaxNumSegments", ""+merge.maxNumSegments);
     details.put("mergeFactor", Integer.toString(merge.segments.size()));
-    setDiagnostics(merge.info, "merge", details);
+
+    // Bind a new segment name here so even with
+    // ConcurrentMergePolicy we keep deterministic segment
+    // names.
+    final String mergeSegmentName = newSegmentName();
+    SegmentInfo si = new SegmentInfo(directory, Constants.LUCENE_MAIN_VERSION, mergeSegmentName, -1, false, codec, details, null);
+    merge.info = new SegmentInfoPerCommit(si, 0, -1L);
+
+    // Lock order: IW -> BD
+    bufferedDeletesStream.prune(segmentInfos);
 
     if (infoStream.isEnabled("IW")) {
-      infoStream.message("IW", "merge seg=" + merge.info.name);
+      infoStream.message("IW", "merge seg=" + merge.info.info.name);
     }
 
     assert merge.estimatedMergeBytes == 0;
-    for(SegmentInfo info : merge.segments) {
-      if (info.docCount > 0) {
+    for(SegmentInfoPerCommit info : merge.segments) {
+      if (info.info.getDocCount() > 0) {
         final int delCount = numDeletedDocs(info);
-        assert delCount <= info.docCount;
-        final double delRatio = ((double) delCount)/info.docCount;
-        merge.estimatedMergeBytes += info.sizeInBytes() * (1.0 - delRatio);
+        assert delCount <= info.info.getDocCount();
+        final double delRatio = ((double) delCount)/info.info.getDocCount();
+        merge.estimatedMergeBytes += info.info.sizeInBytes() * (1.0 - delRatio);
       }
     }
-
-    // TODO: I think this should no longer be needed (we
-    // now build CFS before adding segment to the infos);
-    // however, on removing it, tests fail for some reason!
-
-    // Also enroll the merged segment into mergingSegments;
-    // this prevents it from getting selected for a merge
-    // after our merge is done but while we are building the
-    // CFS:
-    mergingSegments.add(merge.info);
   }
 

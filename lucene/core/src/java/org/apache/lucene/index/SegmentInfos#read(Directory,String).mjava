@@ -17,44 +17,50 @@
 
     lastGeneration = generation;
 
-    // TODO: scary to have default impl reopen the file... but to make it a bit more flexible,
-    // maybe we could use a plain indexinput here... could default impl rewind/wrap with checksumII,
-    // and any checksumming is then up to implementation?
-    ChecksumIndexInput input = null;
+    ChecksumIndexInput input = new ChecksumIndexInput(directory.openInput(segmentFileName, IOContext.READ));
     try {
-      input = new ChecksumIndexInput(directory.openInput(segmentFileName, IOContext.READ));
       final int format = input.readInt();
-      setFormat(format);
-    
-      // check that it is a format we can understand
-      if (format > FORMAT_MINIMUM)
-        throw new IndexFormatTooOldException(input, format,
-          FORMAT_MINIMUM, FORMAT_CURRENT);
-      if (format < FORMAT_CURRENT)
-        throw new IndexFormatTooNewException(input, format,
-          FORMAT_MINIMUM, FORMAT_CURRENT);
-
-      if (format <= FORMAT_4_0) {
-        codecFormat = Codec.forName(input.readString());
+      if (format == CodecUtil.CODEC_MAGIC) {
+        // 4.0+
+        CodecUtil.checkHeaderNoMagic(input, "segments", VERSION_40, VERSION_40);
+        version = input.readLong();
+        counter = input.readInt();
+        int numSegments = input.readInt();
+        for(int seg=0;seg<numSegments;seg++) {
+          String segName = input.readString();
+          Codec codec = Codec.forName(input.readString());
+          //System.out.println("SIS.read seg=" + seg + " codec=" + codec);
+          SegmentInfo info = codec.segmentInfoFormat().getSegmentInfosReader().read(directory, segName, IOContext.READ);
+          info.setCodec(codec);
+          long delGen = input.readLong();
+          int delCount = input.readInt();
+          assert delCount <= info.getDocCount();
+          add(new SegmentInfoPerCommit(info, delCount, delGen));
+        }
+        userData = input.readStringStringMap();
       } else {
-        codecFormat = Codec.forName("Lucene3x");
+        Lucene3xSegmentInfoReader.readLegacyInfos(this, directory, input, format);
+        Codec codec = Codec.forName("Lucene3x");
+        for (SegmentInfoPerCommit info : this) {
+          info.info.setCodec(codec);
+        }
       }
-      SegmentInfosReader infosReader = codecFormat.segmentInfosFormat().getSegmentInfosReader();
-      infosReader.read(directory, segmentFileName, input, this, IOContext.READ);
+
       final long checksumNow = input.getChecksum();
       final long checksumThen = input.readLong();
-      if (checksumNow != checksumThen)
+      if (checksumNow != checksumThen) {
         throw new CorruptIndexException("checksum mismatch in segments file (resource: " + input + ")");
-      success = true;
-    }
-    finally {
-      if (input != null) {
-        input.close();
       }
+
+      success = true;
+    } finally {
       if (!success) {
         // Clear any segment infos we had loaded so we
         // have a clean slate on retry:
         this.clear();
+        IOUtils.closeWhileHandlingException(input);
+      } else {
+        input.close();
       }
     }
   }

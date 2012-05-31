@@ -2,7 +2,7 @@
    * checks Fields api is consistent with itself.
    * searcher is optional, to verify with queries. Can be null.
    */
-  private Status.TermIndexStatus checkFields(Fields fields, Bits liveDocs, int maxDoc, FieldInfos fieldInfos, IndexSearcher searcher, boolean doPrint) throws IOException {
+  private Status.TermIndexStatus checkFields(Fields fields, Bits liveDocs, int maxDoc, FieldInfos fieldInfos, boolean doPrint) throws IOException {
     // TODO: we should probably return our own stats thing...?!
     
     final Status.TermIndexStatus status = new Status.TermIndexStatus();
@@ -339,8 +339,14 @@
             throw new RuntimeException("seek to last term " + lastTerm + " failed");
           }
           
-          if (searcher != null) {
-            searcher.search(new TermQuery(new Term(field, lastTerm)), 1);
+          int expectedDocFreq = termsEnum.docFreq();
+          DocsEnum d = termsEnum.docs(null, null, false);
+          int docFreq = 0;
+          while (d.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
+            docFreq++;
+          }
+          if (docFreq != expectedDocFreq) {
+            throw new RuntimeException("docFreq for last term " + lastTerm + "=" + expectedDocFreq + " != recomputed docFreq=" + docFreq);
           }
         }
         
@@ -385,16 +391,30 @@
               }
             }
             
-            // TermQuery
-            if (searcher != null) {
-              long totDocCount2 = 0;
-              for(int i=0;i<seekCount;i++) {
-                totDocCount2 += searcher.search(new TermQuery(new Term(field, seekTerms[i])), 1).totalHits;
+            long totDocCountNoDeletes = 0;
+            long totDocFreq = 0;
+            for(int i=0;i<seekCount;i++) {
+              if (!termsEnum.seekExact(seekTerms[i], true)) {
+                throw new RuntimeException("seek to existing term " + seekTerms[i] + " failed");
               }
               
-              if (totDocCount != totDocCount2) {
-                throw new RuntimeException("search to seek terms produced wrong number of hits: " + totDocCount + " vs " + totDocCount2);
+              totDocFreq += termsEnum.docFreq();
+              docs = termsEnum.docs(null, docs, false);
+              if (docs == null) {
+                throw new RuntimeException("null DocsEnum from to existing term " + seekTerms[i]);
               }
+              
+              while(docs.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
+                totDocCountNoDeletes++;
+              }
+            }
+            
+            if (totDocCount > totDocCountNoDeletes) {
+              throw new RuntimeException("more postings with deletes=" + totDocCount + " than without=" + totDocCountNoDeletes);
+            }
+            
+            if (totDocCountNoDeletes != totDocFreq) {
+              throw new RuntimeException("docfreqs=" + totDocFreq + " != recomputed docfreqs=" + totDocCountNoDeletes);
             }
           }
         }

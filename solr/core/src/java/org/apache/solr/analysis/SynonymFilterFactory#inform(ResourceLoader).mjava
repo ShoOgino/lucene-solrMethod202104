@@ -1,6 +1,38 @@
   @Override
   public void inform(ResourceLoader loader) {
-    assert delegator != null : "init() was not called!";
-    ((ResourceLoaderAware) delegator).inform(loader);
+    final boolean ignoreCase = getBoolean("ignoreCase", false); 
+    this.ignoreCase = ignoreCase;
+
+    String tf = args.get("tokenizerFactory");
+
+    final TokenizerFactory factory = tf == null ? null : loadTokenizerFactory(loader, tf);
+    
+    Analyzer analyzer = new Analyzer() {
+      @Override
+      protected TokenStreamComponents createComponents(String fieldName, Reader reader) {
+        Tokenizer tokenizer = factory == null ? new WhitespaceTokenizer(Version.LUCENE_50, reader) : factory.create(reader);
+        TokenStream stream = ignoreCase ? new LowerCaseFilter(Version.LUCENE_50, tokenizer) : tokenizer;
+        return new TokenStreamComponents(tokenizer, stream);
+      }
+    };
+
+    String format = args.get("format");
+    try {
+      if (format == null || format.equals("solr")) {
+        // TODO: expose dedup as a parameter?
+        map = loadSolrSynonyms(loader, true, analyzer);
+      } else if (format.equals("wordnet")) {
+        map = loadWordnetSynonyms(loader, true, analyzer);
+      } else {
+        // TODO: somehow make this more pluggable
+        throw new InitializationException("Unrecognized synonyms format: " + format);
+      }
+    } catch (Exception e) {
+      throw new InitializationException("Exception thrown while loading synonyms", e);
+    }
+    
+    if (map.fst == null) {
+      log.warn("Synonyms loaded with " + args + " has empty rule set!");
+    }
   }
 

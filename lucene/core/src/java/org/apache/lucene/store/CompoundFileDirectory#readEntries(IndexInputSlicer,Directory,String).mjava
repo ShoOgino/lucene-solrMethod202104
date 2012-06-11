@@ -1,22 +1,23 @@
   /** Helper method that reads CFS entries from an input stream */
   private static final Map<String, FileEntry> readEntries(
       IndexInputSlicer handle, Directory dir, String name) throws IOException {
-    // read the first VInt. If it is negative, it's the version number
-    // otherwise it's the count (pre-3.1 indexes)
     final IndexInput stream = handle.openFullSlice();
     final Map<String, FileEntry> mapping;
     boolean success = false;
     try {
-      final int firstInt = stream.readVInt();
-      if (firstInt == CompoundFileWriter.FORMAT_CURRENT) {
+      final int firstInt = stream.readInt();
+      // NOTE: as long as we want to throw indexformattooold (vs corruptindexexception), we need
+      // to read the magic ourselves. See SegmentInfos which also has this.
+      if (firstInt == CodecUtil.CODEC_MAGIC) {
+        CodecUtil.checkHeaderNoMagic(stream, CompoundFileWriter.DATA_CODEC, 
+            CompoundFileWriter.VERSION_START, CompoundFileWriter.VERSION_START);
         IndexInput input = null;
         try {
           final String entriesFileName = IndexFileNames.segmentFileName(
                                                 IndexFileNames.stripExtension(name), "",
                                                 IndexFileNames.COMPOUND_FILE_ENTRIES_EXTENSION);
           input = dir.openInput(entriesFileName, IOContext.READONCE);
-          final int readInt = input.readInt(); // unused right now
-          assert readInt == CompoundFileWriter.ENTRY_FORMAT_CURRENT;
+          CodecUtil.checkHeader(input, CompoundFileWriter.ENTRY_CODEC, CompoundFileWriter.VERSION_START, CompoundFileWriter.VERSION_START);
           final int numEntries = input.readVInt();
           mapping = new HashMap<String, CompoundFileDirectory.FileEntry>(
               numEntries);
@@ -34,8 +35,8 @@
           IOUtils.close(input);
         }
       } else {
-        throw new IndexFormatTooOldException(stream, firstInt, 
-            CompoundFileWriter.FORMAT_CURRENT, CompoundFileWriter.FORMAT_CURRENT);
+        throw new IndexFormatTooOldException(stream, firstInt,
+            CodecUtil.CODEC_MAGIC, CodecUtil.CODEC_MAGIC);
       }
     } finally {
       if (success) {

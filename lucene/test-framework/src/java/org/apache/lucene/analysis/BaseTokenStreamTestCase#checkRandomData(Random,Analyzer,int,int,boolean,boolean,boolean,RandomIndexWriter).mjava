@@ -1,0 +1,92 @@
+  private static void checkRandomData(Random random, Analyzer a, int iterations, int maxWordLength, boolean useCharFilter, boolean simple, boolean offsetsAreCorrect, RandomIndexWriter iw) throws IOException {
+
+    final LineFileDocs docs = new LineFileDocs(random);
+    Document doc = null;
+    Field field = null, currentField = null;
+    StringReader bogus = new StringReader("");
+    if (iw != null) {
+      doc = new Document();
+      FieldType ft = new FieldType(TextField.TYPE_NOT_STORED);
+      if (random.nextBoolean()) {
+        ft.setStoreTermVectors(true);
+        ft.setStoreTermVectorOffsets(random.nextBoolean());
+        ft.setStoreTermVectorPositions(random.nextBoolean());
+      }
+      if (random.nextBoolean()) {
+        ft.setOmitNorms(true);
+      }
+      String pf = _TestUtil.getPostingsFormat("dummy");
+      boolean supportsOffsets = !doesntSupportOffsets.contains(pf);
+      switch(random.nextInt(4)) {
+        case 0: ft.setIndexOptions(IndexOptions.DOCS_ONLY); break;
+        case 1: ft.setIndexOptions(IndexOptions.DOCS_AND_FREQS); break;
+        case 2: ft.setIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS); break;
+        default:
+                if (supportsOffsets && offsetsAreCorrect) {
+                  ft.setIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS);
+                } else {
+                  ft.setIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS);
+                }
+      }
+      currentField = field = new Field("dummy", bogus, ft);
+      doc.add(currentField);
+    }
+    
+    try {
+      for (int i = 0; i < iterations; i++) {
+        String text;
+        
+        if (random.nextInt(10) == 7) {
+          // real data from linedocs
+          text = docs.nextDoc().get("body");
+          if (text.length() > maxWordLength) {
+            
+            // Take a random slice from the text...:
+            int startPos = random.nextInt(text.length() - maxWordLength);
+            if (startPos > 0 && Character.isLowSurrogate(text.charAt(startPos))) {
+              // Take care not to split up a surrogate pair:
+              startPos--;
+              assert Character.isHighSurrogate(text.charAt(startPos));
+            }
+            int endPos = startPos + maxWordLength - 1;
+            if (Character.isHighSurrogate(text.charAt(endPos))) {
+              // Take care not to split up a surrogate pair:
+              endPos--;
+            }
+            text = text.substring(startPos, 1+endPos);
+          }
+        } else {
+          // synthetic
+          text = randomAnalysisString(random, maxWordLength, simple);
+        }
+        
+        try {
+          checkAnalysisConsistency(random, a, useCharFilter, text, offsetsAreCorrect, currentField);
+          if (iw != null) {
+            if (random.nextInt(7) == 0) {
+              // pile up a multivalued field
+              FieldType ft = field.fieldType();
+              currentField = new Field("dummy", bogus, ft);
+              doc.add(currentField);
+            } else {
+              iw.addDocument(doc);
+              if (doc.getFields().size() > 1) {
+                // back to 1 field
+                currentField = field;
+                doc.removeFields("dummy");
+                doc.add(currentField);
+              }
+            }
+          }
+        } catch (Throwable t) {
+          // TODO: really we should pass a random seed to
+          // checkAnalysisConsistency then print it here too:
+          System.err.println("TEST FAIL: useCharFilter=" + useCharFilter + " text='" + escape(text) + "'");
+          Rethrow.rethrow(t);
+        }
+      }
+    } finally {
+      IOUtils.closeWhileHandlingException(docs);
+    }
+  }
+

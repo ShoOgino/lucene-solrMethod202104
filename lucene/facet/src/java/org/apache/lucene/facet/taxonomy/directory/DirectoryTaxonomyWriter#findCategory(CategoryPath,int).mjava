@@ -6,30 +6,34 @@
   private int findCategory(CategoryPath categoryPath, int prefixLen)
       throws IOException {
     int res = cache.get(categoryPath, prefixLen);
-    if (res >= 0) {
+    if (res >= 0 || cacheIsComplete) {
       return res;
     }
-    if (cacheIsComplete) {
-      return -1;
-    }
-    cacheMisses++;
-    if (perhapsFillCache()) {
-      return cache.get(categoryPath, prefixLen);
-    }
-    if (reader == null) {
-      openInternalReader();
-    }
     
-    int base = 0;
+    cacheMisses.incrementAndGet();
+    perhapsFillCache();
+    res = cache.get(categoryPath, prefixLen);
+    if (res >= 0 || cacheIsComplete) {
+      return res;
+    }
+
+    initReaderManager();
+    
     int doc = -1;
-    for (AtomicReader r : reader.getSequentialSubReaders()) {
-      DocsEnum docs = r.termDocsEnum(null, Consts.FULL, 
-          new BytesRef(categoryPath.toString(delimiter, prefixLen)), false);
-      if (docs != null) {
-        doc = docs.nextDoc() + base;
-        break;
+    DirectoryReader reader = readerManager.acquire();
+    try {
+      int base = 0;
+      for (AtomicReader r : reader.getSequentialSubReaders()) {
+        DocsEnum docs = r.termDocsEnum(null, Consts.FULL, 
+            new BytesRef(categoryPath.toString(delimiter, prefixLen)), false);
+        if (docs != null) {
+          doc = docs.nextDoc() + base;
+          break;
+        }
+        base += r.maxDoc(); // we don't have deletions, so it's ok to call maxDoc
       }
-      base += r.maxDoc(); // we don't have deletions, so it's ok to call maxDoc
+    } finally {
+      readerManager.release(reader);
     }
     
     if (doc > 0) {

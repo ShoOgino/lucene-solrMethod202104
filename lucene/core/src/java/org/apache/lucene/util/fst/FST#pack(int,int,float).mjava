@@ -1,7 +1,9 @@
   /** Expert: creates an FST by packing this one.  This
    *  process requires substantial additional RAM (currently
-   *  ~8 bytes per node), but then should produce a smaller FST. */
-  public FST<T> pack(int minInCountDeref, int maxDerefNodes) throws IOException {
+   *  up to ~8 bytes per node depending on
+   *  <code>acceptableOverheadRatio</code>), but then should
+   *  produce a smaller FST. */
+  public FST<T> pack(int minInCountDeref, int maxDerefNodes, float acceptableOverheadRatio) throws IOException {
 
     // TODO: other things to try
     //   - renumber the nodes to get more next / better locality?
@@ -22,22 +24,22 @@
 
     final BytesReader r = getBytesReader(0);
 
-    final int topN = Math.min(maxDerefNodes, inCounts.length);
+    final int topN = Math.min(maxDerefNodes, inCounts.size());
 
     // Find top nodes with highest number of incoming arcs:
     NodeQueue q = new NodeQueue(topN);
 
     // TODO: we could use more RAM efficient selection algo here...
     NodeAndInCount bottom = null;
-    for(int node=0;node<inCounts.length;node++) {
-      if (inCounts[node] >= minInCountDeref) {
+    for(int node=0; node<inCounts.size(); node++) {
+      if (inCounts.get(node) >= minInCountDeref) {
         if (bottom == null) {
-          q.add(new NodeAndInCount(node, inCounts[node]));
+          q.add(new NodeAndInCount(node, (int) inCounts.get(node)));
           if (q.size() == topN) {
             bottom = q.top();
           }
-        } else if (inCounts[node] > bottom.count) {
-          q.insertWithOverflow(new NodeAndInCount(node, inCounts[node]));
+        } else if (inCounts.get(node) > bottom.count) {
+          q.insertWithOverflow(new NodeAndInCount(node, (int) inCounts.get(node)));
         }
       }
     }
@@ -52,20 +54,17 @@
       //System.out.println("map node=" + n.node + " inCount=" + n.count + " to newID=" + downTo);
     }
 
-    // TODO: we can use packed ints:
-    // +1 because node ords start at 1 (0 is reserved as
-    // stop node):
-    final int[] nodeRefToAddressIn = new int[topNodeMap.size()];
-
-    final FST<T> fst = new FST<T>(inputType, nodeRefToAddressIn, outputs);
+    final FST<T> fst = new FST<T>(inputType, null, outputs);
 
     final BytesWriter writer = fst.writer;
-    
-    final int[] newNodeAddress = new int[1+nodeCount];
+
+    // +1 because node ords start at 1 (0 is reserved as stop node):
+    final GrowableWriter newNodeAddress = new GrowableWriter(
+        PackedInts.bitsRequired(bytes.length), 1 + nodeCount, acceptableOverheadRatio);
 
     // Fill initial coarse guess:
     for(int node=1;node<=nodeCount;node++) {
-      newNodeAddress[node] = 1 + bytes.length - nodeAddress[node];
+      newNodeAddress.set(node, 1 + bytes.length - nodeAddress.get(node));
     }
 
     int absCount;
@@ -105,11 +104,11 @@
         fst.nodeCount++;
         final int address = writer.posWrite;
         //System.out.println("  node: " + node + " address=" + address);
-        if (address != newNodeAddress[node]) {
-          addressError = address - newNodeAddress[node];
+        if (address != newNodeAddress.get(node)) {
+          addressError = address - (int) newNodeAddress.get(node);
           //System.out.println("    change: " + (address - newNodeAddress[node]));
           changed = true;
-          newNodeAddress[node] = address;
+          newNodeAddress.set(node, address);
           changedCount++;
         }
 
@@ -189,10 +188,10 @@
               if (ptr != null) {
                 absPtr = ptr;
               } else {
-                absPtr = topNodeMap.size() + newNodeAddress[arc.target] + addressError;
+                absPtr = topNodeMap.size() + (int) newNodeAddress.get(arc.target) + addressError;
               }
 
-              int delta = newNodeAddress[arc.target] + addressError - writer.posWrite - 2;
+              int delta = (int) newNodeAddress.get(arc.target) + addressError - writer.posWrite - 2;
               if (delta < 0) {
                 //System.out.println("neg: " + delta);
                 anyNegDelta = true;
@@ -222,7 +221,7 @@
 
             if (doWriteTarget) {
 
-              int delta = newNodeAddress[arc.target] + addressError - writer.posWrite;
+              int delta = (int) newNodeAddress.get(arc.target) + addressError - writer.posWrite;
               if (delta < 0) {
                 anyNegDelta = true;
                 //System.out.println("neg: " + delta);
@@ -313,11 +312,20 @@
       //System.out.println("  " + changedCount + " of " + fst.nodeCount + " changed; retry");
     }
 
-    for(Map.Entry<Integer,Integer> ent : topNodeMap.entrySet()) {
-      nodeRefToAddressIn[ent.getValue()] = newNodeAddress[ent.getKey()];
+    long maxAddress = 0;
+    for (int key : topNodeMap.keySet()) {
+      maxAddress = Math.max(maxAddress, newNodeAddress.get(key));
     }
 
-    fst.startNode = newNodeAddress[startNode];
+    PackedInts.Mutable nodeRefToAddressIn = PackedInts.getMutable(topNodeMap.size(),
+        PackedInts.bitsRequired(maxAddress), acceptableOverheadRatio);
+    for(Map.Entry<Integer,Integer> ent : topNodeMap.entrySet()) {
+      nodeRefToAddressIn.set(ent.getValue(), newNodeAddress.get(ent.getKey()));
+    }
+    fst.nodeRefToAddress = nodeRefToAddressIn;
+    
+
+    fst.startNode = (int) newNodeAddress.get(startNode);
     //System.out.println("new startNode=" + fst.startNode + " old startNode=" + startNode);
 
     if (emptyOutput != null) {

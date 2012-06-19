@@ -1,30 +1,21 @@
-  public static Bits getLiveDocs(IndexReader r) {
-    if (r.hasDeletions()) {
-      final List<Bits> liveDocs = new ArrayList<Bits>();
-      final List<Integer> starts = new ArrayList<Integer>();
-
-      try {
-        final int maxDoc = new ReaderUtil.Gather(r) {
-            @Override
-            protected void add(int base, AtomicReader r) throws IOException {
-              // record all liveDocs, even if they are null
-              liveDocs.add(r.getLiveDocs());
-              starts.add(base);
-            }
-          }.run();
-        starts.add(maxDoc);
-      } catch (IOException ioe) {
-        // should not happen
-        throw new RuntimeException(ioe);
+  public static Bits getLiveDocs(IndexReader reader) {
+    if (reader.hasDeletions()) {
+      final List<AtomicReaderContext> leaves = reader.getTopReaderContext().leaves();
+      final int size = leaves.size();
+      assert size > 0 : "A reader with deletions must have at least one leave";
+      if (size == 1) {
+        return leaves.get(0).reader().getLiveDocs();
       }
-
-      assert liveDocs.size() > 0;
-      if (liveDocs.size() == 1) {
-        // Only one actual sub reader -- optimize this case
-        return liveDocs.get(0);
-      } else {
-        return new MultiBits(liveDocs, starts, true);
+      final Bits[] liveDocs = new Bits[size];
+      final int[] starts = new int[size + 1];
+      for (int i = 0; i < size; i++) {
+        // record all liveDocs, even if they are null
+        final AtomicReaderContext ctx = leaves.get(i);
+        liveDocs[i] = ctx.reader().getLiveDocs();
+        starts[i] = ctx.docBase;
       }
+      starts[size] = reader.maxDoc();
+      return new MultiBits(liveDocs, starts, true);
     } else {
       return null;
     }

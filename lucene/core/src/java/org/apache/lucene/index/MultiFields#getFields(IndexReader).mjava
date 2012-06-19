@@ -4,42 +4,36 @@
    *  has no postings.
    *
    *  <p><b>NOTE</b>: this is a slow way to access postings.
-   *  It's better to get the sub-readers (using {@link
-   *  Gather}) and iterate through them
+   *  It's better to get the sub-readers and iterate through them
    *  yourself. */
-  public static Fields getFields(IndexReader r) throws IOException {
-    if (r instanceof AtomicReader) {
-      // already an atomic reader
-      return ((AtomicReader) r).fields();
-    }
-    assert r instanceof CompositeReader;
-    final IndexReader[] subs = ((CompositeReader) r).getSequentialSubReaders();
-    if (subs.length == 0) {
-      // no fields
-      return null;
-    } else {
-      final List<Fields> fields = new ArrayList<Fields>();
-      final List<ReaderUtil.Slice> slices = new ArrayList<ReaderUtil.Slice>();
-
-      new ReaderUtil.Gather(r) {
-        @Override
-        protected void add(int base, AtomicReader r) throws IOException {
+  public static Fields getFields(IndexReader reader) throws IOException {
+    final List<AtomicReaderContext> leaves = reader.getTopReaderContext().leaves();
+    switch (leaves.size()) {
+      case 0:
+        // no fields
+        return null;
+      case 1:
+        // already an atomic reader / reader with one leave
+        return leaves.get(0).reader().fields();
+      default:
+        final List<Fields> fields = new ArrayList<Fields>();
+        final List<ReaderSlice> slices = new ArrayList<ReaderSlice>();
+        for (final AtomicReaderContext ctx : leaves) {
+          final AtomicReader r = ctx.reader();
           final Fields f = r.fields();
           if (f != null) {
             fields.add(f);
-            slices.add(new ReaderUtil.Slice(base, r.maxDoc(), fields.size()-1));
+            slices.add(new ReaderSlice(ctx.docBase, r.maxDoc(), fields.size()-1));
           }
         }
-      }.run();
-
-      if (fields.isEmpty()) {
-        return null;
-      } else if (fields.size() == 1) {
-        return fields.get(0);
-      } else {
-        return new MultiFields(fields.toArray(Fields.EMPTY_ARRAY),
-                                       slices.toArray(ReaderUtil.Slice.EMPTY_ARRAY));
-      }
+        if (fields.isEmpty()) {
+          return null;
+        } else if (fields.size() == 1) {
+          return fields.get(0);
+        } else {
+          return new MultiFields(fields.toArray(Fields.EMPTY_ARRAY),
+                                         slices.toArray(ReaderSlice.EMPTY_ARRAY));
+        }
     }
   }
 

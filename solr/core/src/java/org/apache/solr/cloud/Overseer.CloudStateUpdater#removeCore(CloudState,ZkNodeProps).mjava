@@ -16,13 +16,36 @@
                 LinkedHashMap<String, ZkNodeProps> newShards = new LinkedHashMap<String, ZkNodeProps>();
                 newShards.putAll(slice.getShards());
                 newShards.remove(coreNodeName);
+                
                 Slice newSlice = new Slice(slice.getName(), newShards);
                 newSlices.put(slice.getName(), newSlice);
+
               } else {
                 newSlices.put(slice.getName(), slice);
               }
             }
-            newStates.put(collectionName, newSlices);
+            int cnt = 0;
+            for (Slice slice : newSlices.values()) {
+              cnt+=slice.getShards().size();
+            }
+            // TODO: if no nodes are left after this unload
+            // remove from zk - do we have a race where Overseer
+            // see's registered nodes and publishes though?
+            if (cnt > 0) {
+              newStates.put(collectionName, newSlices);
+            } else {
+              // TODO: it might be better logically to have this in ZkController
+              // but for tests (it's easier) it seems better for the moment to leave CoreContainer and/or
+              // ZkController out of the Overseer.
+              try {
+                zkClient.clean("/collections/" + collectionName);
+              } catch (InterruptedException e) {
+                SolrException.log(log, "Cleaning up collection in zk was interrupted:" + collectionName, e);
+                Thread.currentThread().interrupt();
+              } catch (KeeperException e) {
+                SolrException.log(log, "Problem cleaning up collection in zk:" + collectionName, e);
+              }
+            }
           } else {
             newStates.put(collectionName, cloudState.getSlices(collectionName));
           }

@@ -14,37 +14,67 @@
     try {
 
       if (cmd.overwrite) {
-        Term updateTerm;
-        Term idTerm = new Term(idField.getName(), cmd.getIndexedId());
-        boolean del = false;
-        if (cmd.updateTerm == null) {
-          updateTerm = idTerm;
+
+        // Check for delete by query commands newer (i.e. reordered).  This should always be null on a leader
+        List<UpdateLog.DBQ> deletesAfter = null;
+        if (ulog != null && cmd.version > 0) {
+          deletesAfter = ulog.getDBQNewer(cmd.version);
+        }
+
+        if (deletesAfter != null) {
+          List<Query> dbqList = new ArrayList<Query>(deletesAfter.size());
+          for (UpdateLog.DBQ dbq : deletesAfter) {
+            try {
+              DeleteUpdateCommand tmpDel = new DeleteUpdateCommand(cmd.req);
+              tmpDel.query = dbq.q;
+              tmpDel.version = -dbq.version;
+              dbqList.add( getQuery(tmpDel) );
+            } catch (Exception e) {
+              log.error("Exception parsing reordered query : " + dbq, e);
+            }
+          }
+
+          addAndDelete(cmd, dbqList);
         } else {
-          del = true;
-          updateTerm = cmd.updateTerm;
+          // normal update
+
+          Term updateTerm;
+          Term idTerm = new Term(idField.getName(), cmd.getIndexedId());
+          boolean del = false;
+          if (cmd.updateTerm == null) {
+            updateTerm = idTerm;
+          } else {
+            del = true;
+            updateTerm = cmd.updateTerm;
+          }
+
+          Document luceneDocument = cmd.getLuceneDocument();
+          // SolrCore.verbose("updateDocument",updateTerm,luceneDocument,writer);
+          writer.updateDocument(updateTerm, luceneDocument);
+          // SolrCore.verbose("updateDocument",updateTerm,"DONE");
+
+
+          if(del) { // ensure id remains unique
+            BooleanQuery bq = new BooleanQuery();
+            bq.add(new BooleanClause(new TermQuery(updateTerm), Occur.MUST_NOT));
+            bq.add(new BooleanClause(new TermQuery(idTerm), Occur.MUST));
+            writer.deleteDocuments(bq);
+          }
+
+
+          // Add to the transaction log *after* successfully adding to the index, if there was no error.
+          // This ordering ensures that if we log it, it's definitely been added to the the index.
+          // This also ensures that if a commit sneaks in-between, that we know everything in a particular
+          // log version was definitely committed.
+          if (ulog != null) ulog.add(cmd);
         }
 
-        Document luceneDocument = cmd.getLuceneDocument();
-        // SolrCore.verbose("updateDocument",updateTerm,luceneDocument,writer);
-        writer.updateDocument(updateTerm, luceneDocument);
-        // SolrCore.verbose("updateDocument",updateTerm,"DONE");
-
-        if(del) { // ensure id remains unique
-          BooleanQuery bq = new BooleanQuery();
-          bq.add(new BooleanClause(new TermQuery(updateTerm), Occur.MUST_NOT));
-          bq.add(new BooleanClause(new TermQuery(idTerm), Occur.MUST));
-          writer.deleteDocuments(bq);
-        }
       } else {
         // allow duplicates
         writer.addDocument(cmd.getLuceneDocument());
+        if (ulog != null) ulog.add(cmd);
       }
 
-      // Add to the transaction log *after* successfully adding to the index, if there was no error.
-      // This ordering ensures that if we log it, it's definitely been added to the the index.
-      // This also ensures that if a commit sneaks in-between, that we know everything in a particular
-      // log version was definitely committed.
-      if (ulog != null) ulog.add(cmd);
 
       if ((cmd.getFlags() & UpdateCommand.IGNORE_AUTOCOMMIT) == 0) {
         commitTracker.addedDocument( -1 );

@@ -1,0 +1,83 @@
+  public static int compress(final int[] data, int size, IntBuffer intBuffer) {
+    int numBits=getNumBits(data,size);
+  
+    int[] excValues = new int[size];
+    int excNum = 0, excLastPos = -1, excFirstPos = -1;
+    int excLastNonForcePos = -1; 
+    int excNumBase = 0;       // num of exception until the last non-force exception
+    int excBytes = 1;         // bytes per exception
+    int excByteOffset = 0;    // bytes of preceeding codes like header and normal area
+    long maxChain = (1<<8) - 2;  // header bits limits this to 254
+    boolean conValue, conForce, conEnd;
+    int i=0;
+
+    // estimate exceptions
+    for (i=0; i<size; ++i) {
+      conValue = ((data[i] & MASK[numBits]) != data[i]); // value exception
+      conForce = (i >= maxChain + excLastPos);           // force exception
+      if (conValue || conForce) {
+        excValues[excNum++] = data[i];
+        if (excLastPos == -1) {
+          maxChain = 1L<<numBits; 
+          excFirstPos = i;
+        }
+        if (conValue) {
+          excLastNonForcePos = i;
+          excNumBase = excNum;
+        }
+        excLastPos = i;
+      }
+    }
+
+    // encode normal area, record exception positions
+    i=0;
+    excNum = 0;
+    if (excFirstPos < 0) { // no exception 
+      for (; i<size; ++i) {
+        encodeNormalValue(intBuffer,i,data[i], numBits);
+      }
+      excLastPos = -1;
+    } else {
+      for (; i<excFirstPos; ++i) {
+        encodeNormalValue(intBuffer,i,data[i], numBits);
+      }
+      maxChain = 1L<<numBits;
+      excLastPos = -1;
+      for (; i<size; ++i) {
+        conValue = ((data[i] & MASK[numBits]) != data[i]); // value exception
+        conForce = (i >= maxChain + excLastPos);           // force exception
+        conEnd = (excNum == excNumBase);                   // following forced ignored
+        if ((!conValue && !conForce) || conEnd) {
+          encodeNormalValue(intBuffer,i,data[i], numBits);
+        } else {
+          if (excLastPos >= 0) {
+            encodeNormalValue(intBuffer, excLastPos, i-excLastPos-1, numBits); 
+          }
+          excNum++;
+          excLastPos = i;
+        }
+      }
+      if (excLastPos >= 0) { 
+        encodeNormalValue(intBuffer, excLastPos, (i-excLastPos-1)&MASK[numBits], numBits); // mask out suppressed force exception
+      }
+    }
+  
+    // encode exception area
+    i=0;
+    for (; i<excNum; ++i) {
+      if (excBytes < 2 && (excValues[i] & ~MASK[8]) != 0) {
+        excBytes=2;
+      }
+      if (excBytes < 4 && (excValues[i] & ~MASK[16]) != 0) {
+        excBytes=4;
+      }
+    }
+    excByteOffset = HEADER_INT_SIZE*4 + (size*numBits + 7)/8;
+    encodeExcValues(intBuffer, excValues, excNum, excBytes, excByteOffset);
+
+    // encode header
+    encodeHeader(intBuffer, size, numBits, excNum, excFirstPos, excBytes);
+
+    return (excByteOffset + excBytes*excNum + 3)/4*4;
+  }
+

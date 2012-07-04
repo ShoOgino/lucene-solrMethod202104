@@ -1,15 +1,13 @@
-  // This version doesn't synchronize on id to tell what update won, but instead uses versions
+  // This version simulates updates coming from the leader and sometimes being reordered
   @Test
-  public void testStressGetRealtimeVersions() throws Exception {
+  public void testStressReorderVersions() throws Exception {
     clearIndex();
     assertU(commit());
 
     final int commitPercent = 5 + random().nextInt(20);
     final int softCommitPercent = 30+random().nextInt(75); // what percent of the commits are soft
     final int deletePercent = 4+random().nextInt(25);
-    final int deleteByQueryPercent = 1 + random().nextInt(5);
-    final int optimisticPercent = 1+random().nextInt(50);    // percent change that an update uses optimistic locking
-    final int optimisticCorrectPercent = 25+random().nextInt(70);    // percent change that a version specified will be correct
+    final int deleteByQueryPercent = 0; // 1+random().nextInt(7);
     final int ndocs = 5 + (random().nextBoolean() ? random().nextInt(25) : random().nextInt(200));
     int nWriteThreads = 5 + random().nextInt(25);
 
@@ -21,12 +19,31 @@
     int nReadThreads = 5 + random().nextInt(25);
 
 
+    /** // testing
+    final int commitPercent = 5;
+    final int softCommitPercent = 100; // what percent of the commits are soft
+    final int deletePercent = 0;
+    final int deleteByQueryPercent = 50;
+    final int ndocs = 1;
+    int nWriteThreads = 2;
+
+    final int maxConcurrentCommits = nWriteThreads;   // number of committers at a time... it should be <= maxWarmingSearchers
+
+    // query variables
+    final int percentRealtimeQuery = 101;
+    final AtomicLong operations = new AtomicLong(50000);  // number of query operations to perform in total
+    int nReadThreads = 1;
+    **/
+
 
     initModel(ndocs);
 
     final AtomicInteger numCommitting = new AtomicInteger();
 
     List<Thread> threads = new ArrayList<Thread>();
+
+
+    final AtomicLong testVersion = new AtomicLong(0);
 
     for (int i=0; i<nWriteThreads; i++) {
       Thread thread = new Thread("WRITER"+i) {
@@ -43,7 +60,7 @@
                 Map<Integer,DocInfo> newCommittedModel;
                 long version;
 
-                synchronized(TestRealTimeGet.this) {
+                synchronized(TestStressReorder.this) {
                   newCommittedModel = new HashMap<Integer,DocInfo>(model);  // take a snapshot
                   version = snapshotCount++;
                 }
@@ -58,7 +75,7 @@
                   verbose("hardCommit end");
                 }
 
-                synchronized(TestRealTimeGet.this) {
+                synchronized(TestStressReorder.this) {
                   // install this model snapshot only if it's newer than the current one
                   if (version >= committedModelClock) {
                     if (VERBOSE) {
@@ -74,8 +91,13 @@
             }
 
 
-            int id = rand.nextInt(ndocs);
-            Object sync = syncArr[id];
+            int id;
+
+            if (rand.nextBoolean()) {
+              id = rand.nextInt(ndocs);
+            } else {
+              id = lastId;  // reuse the last ID half of the time to force more race conditions
+            }
 
             // set the lastId before we actually change it sometimes to try and
             // uncover more race conditions between writing and reading
@@ -84,22 +106,29 @@
               lastId = id;
             }
 
-            // We can't concurrently update the same document and retain our invariants of increasing values
-            // since we can't guarantee what order the updates will be executed.
-            // Even with versions, we can't remove the sync because increasing versions does not mean increasing vals.
-            //
-            // NOTE: versioning means we can now remove the sync and tell what update "won"
-            // synchronized (sync) {
-              DocInfo info = model.get(id);
+            DocInfo info = model.get(id);
 
-              long val = info.val;
-              long nextVal = Math.abs(val)+1;
+            long val = info.val;
+            long nextVal = Math.abs(val)+1;
+
+            // the version we set on the update should determine who wins
+            // These versions are not derived from the actual leader update handler hand hence this
+            // test may need to change depending on how we handle version numbers.
+            long version = testVersion.incrementAndGet();
+
+            // yield after getting the next version to increase the odds of updates happening out of order
+            if (rand.nextBoolean()) Thread.yield();
 
               if (oper < commitPercent + deletePercent) {
-                verbose("deleting id",id,"val=",nextVal);
+                verbose("deleting id",id,"val=",nextVal,"version",version);
 
-                Long version = deleteAndGetVersion(Integer.toString(id), null);
-                assertTrue(version < 0);
+                Long returnedVersion = deleteAndGetVersion(Integer.toString(id), params("_version_",Long.toString(-version), DISTRIB_UPDATE_PARAM,FROM_LEADER));
+
+                // TODO: returning versions for these types of updates is redundant
+                // but if we do return, they had better be equal
+                if (returnedVersion != null) {
+                  assertEquals(-version, returnedVersion.longValue());
+                }
 
                 // only update model if the version is newer
                 synchronized (model) {
@@ -109,12 +138,18 @@
                   }
                 }
 
-                verbose("deleting id", id, "val=",nextVal,"DONE");
+                verbose("deleting id", id, "val=",nextVal,"version",version,"DONE");
               } else if (oper < commitPercent + deletePercent + deleteByQueryPercent) {
-                verbose("deleteByQyery id",id,"val=",nextVal);
 
-                Long version = deleteByQueryAndGetVersion("id:"+Integer.toString(id), null);
-                assertTrue(version < 0);
+                verbose("deleteByQuery id",id,"val=",nextVal,"version",version);
+
+                Long returnedVersion = deleteByQueryAndGetVersion("id:"+Integer.toString(id), params("_version_",Long.toString(-version), DISTRIB_UPDATE_PARAM,FROM_LEADER));
+
+                // TODO: returning versions for these types of updates is redundant
+                // but if we do return, they had better be equal
+                if (returnedVersion != null) {
+                  assertEquals(-version, returnedVersion.longValue());
+                }
 
                 // only update model if the version is newer
                 synchronized (model) {
@@ -124,13 +159,15 @@
                   }
                 }
 
-                verbose("deleteByQyery id", id, "val=",nextVal,"DONE");
-              } else {
-                verbose("adding id", id, "val=", nextVal);
+                verbose("deleteByQuery id", id, "val=",nextVal,"version",version,"DONE");
 
-                // assertU(adoc("id",Integer.toString(id), field, Long.toString(nextVal)));
-                Long version = addAndGetVersion(sdoc("id", Integer.toString(id), field, Long.toString(nextVal)), null);
-                assertTrue(version > 0);
+              } else {
+                verbose("adding id", id, "val=", nextVal,"version",version);
+
+                Long returnedVersion = addAndGetVersion(sdoc("id", Integer.toString(id), field, Long.toString(nextVal), "_version_",Long.toString(version)), params(DISTRIB_UPDATE_PARAM,FROM_LEADER));
+                if (returnedVersion != null) {
+                  assertEquals(version, returnedVersion.longValue());
+                }
 
                 // only update model if the version is newer
                 synchronized (model) {
@@ -141,7 +178,7 @@
                 }
 
                 if (VERBOSE) {
-                  verbose("adding id", id, "val=", nextVal,"DONE");
+                  verbose("adding id", id, "val=", nextVal,"version",version,"DONE");
                 }
 
               }
@@ -153,6 +190,7 @@
           }
           } catch (Throwable e) {
             operations.set(-1L);
+            log.error("",e);
             throw new RuntimeException(e);
           }
         }
@@ -182,7 +220,7 @@
               if (realTime) {
                 info = model.get(id);
               } else {
-                synchronized(TestRealTimeGet.this) {
+                synchronized(TestStressReorder.this) {
                   info = committedModel.get(id);
                 }
               }
@@ -208,13 +246,14 @@
                 long foundVer = (Long)(((Map)doclist.get(0)).get("_version_"));
                 if (foundVer < Math.abs(info.version)
                     || (foundVer == info.version && foundVal != info.val) ) {    // if the version matches, the val must
-                  verbose("ERROR, id=", id, "found=",response,"model",info);
+                  log.error("ERROR, id=" + id + " found=" + response + " model" + info);
                   assertTrue(false);
                 }
               }
             }
           } catch (Throwable e) {
             operations.set(-1L);
+            log.error("",e);
             throw new RuntimeException(e);
           }
         }

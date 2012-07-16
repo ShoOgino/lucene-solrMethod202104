@@ -1,8 +1,30 @@
   @Override
-  public synchronized IndexWriter getIndexWriter(SolrCore core) throws IOException {
-    if (indexWriter == null) {
-      indexWriter = createMainIndexWriter(core, "DirectUpdateHandler2", false, false);
+  public synchronized RefCounted<IndexWriter> getIndexWriter(SolrCore core)
+      throws IOException {
+    while (pauseWriter) {
+      try {
+        wait();
+      } catch (InterruptedException e) {}
     }
-    return indexWriter;
+    
+    if (indexWriter == null) {
+      indexWriter = createMainIndexWriter(core, "DirectUpdateHandler2", false,
+          false);
+    }
+    if (refCntWriter == null) {
+      refCntWriter = new RefCounted<IndexWriter>(indexWriter) {
+        @Override
+        public void close() {
+          synchronized (DefaultSolrCoreState.this) {
+            writerFree = true;
+            DefaultSolrCoreState.this.notifyAll();
+          }
+        }
+      };
+    }
+    writerFree = false;
+    notifyAll();
+    refCntWriter.incref();
+    return refCntWriter;
   }
 

@@ -1,0 +1,51 @@
+  public void add(AddUpdateCommand cmd, boolean clearCaches) {
+    // don't log if we are replaying from another log
+    // TODO: we currently need to log to maintain correct versioning, rtg, etc
+    // if ((cmd.getFlags() & UpdateCommand.REPLAY) != 0) return;
+
+    synchronized (this) {
+      long pos = -1;
+
+      // don't log if we are replaying from another log
+      if ((cmd.getFlags() & UpdateCommand.REPLAY) == 0) {
+        ensureLog();
+        pos = tlog.write(cmd, operationFlags);
+      }
+
+      if (!clearCaches) {
+        // TODO: in the future we could support a real position for a REPLAY update.
+        // Only currently would be useful for RTG while in recovery mode though.
+        LogPtr ptr = new LogPtr(pos, cmd.getVersion());
+
+        // only update our map if we're not buffering
+        if ((cmd.getFlags() & UpdateCommand.BUFFERING) == 0) {
+          map.put(cmd.getIndexedId(), ptr);
+        }
+
+        if (trace) {
+          log.trace("TLOG: added id " + cmd.getPrintableId() + " to " + tlog + " " + ptr + " map=" + System.identityHashCode(map));
+        }
+
+      } else {
+        // replicate the deleteByQuery logic.  See deleteByQuery for comments.
+
+        if (map != null) map.clear();
+        if (prevMap != null) prevMap.clear();
+        if (prevMap2 != null) prevMap2.clear();
+
+        try {
+          RefCounted<SolrIndexSearcher> holder = uhandler.core.openNewSearcher(true, true);
+          holder.decref();
+        } catch (Throwable e) {
+          SolrException.log(log, "Error opening realtime searcher for deleteByQuery", e);
+        }
+
+        if (trace) {
+          log.trace("TLOG: added id " + cmd.getPrintableId() + " to " + tlog + " clearCaches=true");
+        }
+
+      }
+
+    }
+  }
+

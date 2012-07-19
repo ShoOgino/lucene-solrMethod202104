@@ -1,31 +1,32 @@
   /**
-   * Fetches the list of files in a given index commit point
+   * Fetches the list of files in a given index commit point and updates internal list of files to download.
    */
-  void fetchFileList(long gen) throws IOException {
-    HttpPost post = new HttpPost(masterUrl);
+  private void fetchFileList(long gen) throws IOException {
+    ModifiableSolrParams params = new ModifiableSolrParams();
+    params.set(COMMAND,  CMD_GET_FILE_LIST);
+    params.set(GENERATION, String.valueOf(gen));
+    params.set(CommonParams.WT, "javabin");
+    params.set(CommonParams.QT, "/replication");
+    QueryRequest req = new QueryRequest(params);
+    SolrServer server = new HttpSolrServer(masterUrl, myHttpClient);  //XXX modify to use shardhandler
 
-    List<BasicNameValuePair> formparams = new ArrayList<BasicNameValuePair>();
-    formparams.add(new BasicNameValuePair("wt", "javabin"));
-    formparams.add(new BasicNameValuePair(COMMAND, CMD_GET_FILE_LIST));
-    formparams.add(new BasicNameValuePair(GENERATION, String.valueOf(gen)));
+    try {
+      NamedList response = server.request(req);
 
-    UrlEncodedFormEntity entity = new UrlEncodedFormEntity(formparams, "UTF-8");
-    post.setEntity(entity);
+      List<Map<String, Object>> files = (List<Map<String,Object>>) response.get(CMD_GET_FILE_LIST);
+      if (files != null)
+        filesToDownload = Collections.synchronizedList(files);
+      else {
+        filesToDownload = Collections.emptyList();
+        LOG.error("No files to download for index generation: "+ gen);
+      }
 
-    @SuppressWarnings("unchecked")
-    NamedList<List<Map<String, Object>>> nl 
-      = (NamedList<List<Map<String, Object>>>) getNamedListResponse(post);
+      files = (List<Map<String,Object>>) response.get(CONF_FILES);
+      if (files != null)
+        confFilesToDownload = Collections.synchronizedList(files);
 
-    List<Map<String, Object>> f = nl.get(CMD_GET_FILE_LIST);
-    if (f != null)
-      filesToDownload = Collections.synchronizedList(f);
-    else {
-      filesToDownload = Collections.emptyList();
-      LOG.error("No files to download for index generation: "+ gen);
+    } catch (SolrServerException e) {
+      throw new IOException(e);
     }
-
-    f = nl.get(CONF_FILES);
-    if (f != null)
-      confFilesToDownload = Collections.synchronizedList(f);
   }
 

@@ -1,0 +1,77 @@
+  private void closeInternal(boolean waitForMerges, boolean doFlush) throws IOException {
+
+    try {
+
+      if (pendingCommit != null) {
+        throw new IllegalStateException("cannot close: prepareCommit was already called with no corresponding call to commit");
+      }
+
+      if (infoStream.isEnabled("IW")) {
+        infoStream.message("IW", "now flush at close waitForMerges=" + waitForMerges);
+      }
+
+      docWriter.close();
+
+      // Only allow a new merge to be triggered if we are
+      // going to wait for merges:
+      if (doFlush) {
+        flush(waitForMerges, true);
+      } else {
+        docWriter.abort(); // already closed
+      }
+
+      if (waitForMerges)
+        // Give merge scheduler last chance to run, in case
+        // any pending merges are waiting:
+        mergeScheduler.merge(this);
+
+      mergePolicy.close();
+
+      synchronized(this) {
+        finishMerges(waitForMerges);
+        stopMerges = true;
+      }
+      mergeScheduler.close();
+
+      if (infoStream.isEnabled("IW")) {
+        infoStream.message("IW", "now call final commit()");
+      }
+
+      if (doFlush) {
+        commitInternal(null);
+      }
+
+      if (infoStream.isEnabled("IW")) {
+        infoStream.message("IW", "at close: " + segString());
+      }
+      // used by assert below
+      final DocumentsWriter oldWriter = docWriter;
+      synchronized(this) {
+        readerPool.dropAll(true);
+        docWriter = null;
+        deleter.close();
+      }
+
+      if (writeLock != null) {
+        writeLock.release();                          // release write lock
+        writeLock = null;
+      }
+      synchronized(this) {
+        closed = true;
+      }
+      assert oldWriter.perThreadPool.numDeactivatedThreadStates() == oldWriter.perThreadPool.getMaxThreadStates();
+    } catch (OutOfMemoryError oom) {
+      handleOOM(oom, "closeInternal");
+    } finally {
+      synchronized(this) {
+        closing = false;
+        notifyAll();
+        if (!closed) {
+          if (infoStream.isEnabled("IW")) {
+            infoStream.message("IW", "hit exception while closing");
+          }
+        }
+      }
+    }
+  }
+

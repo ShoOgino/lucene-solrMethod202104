@@ -1,0 +1,68 @@
+    @Override
+    public int advance(int target) throws IOException {
+      // nocommit make frq block load lazy/skippable
+
+      // nocommit 2 is heuristic guess!!
+      // nocommit put cheating back!  does it help?
+      // nocommit use skipper!!!  it has next last doc id!!
+      //if (docFreq > blockSize && target - (blockSize - docBufferUpto) - 2*blockSize > accum) {
+      if (docFreq > blockSize && target - accum > blockSize) {
+
+        if (DEBUG) {
+          System.out.println("load skipper");
+        }
+
+        if (skipper == null) {
+          // Lazy init: first time this enum has ever been used for skipping
+          skipper = new BlockSkipReader((IndexInput) docIn.clone(),
+                                        BlockPostingsWriter.maxSkipLevels,
+                                        blockSize,
+                                        indexHasPos,
+                                        indexHasOffsets,
+                                        indexHasPayloads);
+        }
+
+        if (!skipped) {
+          assert skipOffset != -1;
+          // This is the first time this enum has skipped
+          // since reset() was called; load the skip data:
+          skipper.init(docTermStartFP+skipOffset, docTermStartFP, 0, 0, docFreq);
+          skipped = true;
+        }
+
+        final int newDocUpto = skipper.skipTo(target); 
+
+        if (newDocUpto > docUpto) {
+          // Skipper moved
+
+          if (DEBUG) {
+            System.out.println("skipper moved to docUpto=" + newDocUpto + " vs current=" + docUpto + "; docID=" + skipper.getDoc() + " fp=" + skipper.getDocPointer());
+          }
+
+          assert newDocUpto % blockSize == (blockSize-1): "got " + newDocUpto;
+          docUpto = newDocUpto+1;
+
+          // Force block read next:
+          docBufferUpto = blockSize;
+          accum = skipper.getDoc();
+          docIn.seek(skipper.getDocPointer());
+        }
+      }
+
+      // Now scan:
+      while (nextDoc() != NO_MORE_DOCS) {
+        if (doc >= target) {
+          if (DEBUG) {
+            System.out.println("  advance return doc=" + doc);
+          }
+          return doc;
+        }
+      }
+
+      if (DEBUG) {
+        System.out.println("  advance return doc=END");
+      }
+
+      return NO_MORE_DOCS;
+    }
+

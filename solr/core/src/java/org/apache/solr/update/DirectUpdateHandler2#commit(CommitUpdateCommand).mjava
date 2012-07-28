@@ -5,7 +5,6 @@
       return;
     }
 
-    IndexWriter writer = solrCoreState.getIndexWriter(core);
     if (cmd.optimize) {
       optimizeCommands.incrementAndGet();
     } else {
@@ -40,27 +39,35 @@
          commitTracker.cancelPendingCommit();
       }
 
-
-      if (cmd.optimize) {
-        writer.forceMerge(cmd.maxOptimizeSegments);
-      } else if (cmd.expungeDeletes) {
-        writer.forceMergeDeletes();
-      }
-
-      if (!cmd.softCommit) {
-        synchronized (this) { // sync is currently needed to prevent preCommit from being called between preSoft and postSoft... see postSoft comments.
-          if (ulog != null) ulog.preCommit(cmd);
+      RefCounted<IndexWriter> iw = solrCoreState.getIndexWriter(core);
+      try {
+        IndexWriter writer = iw.get();
+        if (cmd.optimize) {
+          writer.forceMerge(cmd.maxOptimizeSegments);
+        } else if (cmd.expungeDeletes) {
+          writer.forceMergeDeletes();
         }
-
-        // SolrCore.verbose("writer.commit() start writer=",writer);
-        final Map<String,String> commitData = new HashMap<String,String>();
-        commitData.put(SolrIndexWriter.COMMIT_TIME_MSEC_KEY, String.valueOf(System.currentTimeMillis()));
-        writer.commit(commitData);
-        // SolrCore.verbose("writer.commit() end");
-        numDocsPending.set(0);
-        callPostCommitCallbacks();
-      } else {
-        callPostSoftCommitCallbacks();
+        
+        if (!cmd.softCommit) {
+          synchronized (solrCoreState) { // sync is currently needed to prevent preCommit
+                                // from being called between preSoft and
+                                // postSoft... see postSoft comments.
+            if (ulog != null) ulog.preCommit(cmd);
+          }
+          
+          // SolrCore.verbose("writer.commit() start writer=",writer);
+          final Map<String,String> commitData = new HashMap<String,String>();
+          commitData.put(SolrIndexWriter.COMMIT_TIME_MSEC_KEY,
+              String.valueOf(System.currentTimeMillis()));
+          writer.commit(commitData);
+          // SolrCore.verbose("writer.commit() end");
+          numDocsPending.set(0);
+          callPostCommitCallbacks();
+        } else {
+          callPostSoftCommitCallbacks();
+        }
+      } finally {
+        iw.decref();
       }
 
 
@@ -71,14 +78,14 @@
 
       if (cmd.softCommit) {
         // ulog.preSoftCommit();
-        synchronized (this) {
+        synchronized (solrCoreState) {
           if (ulog != null) ulog.preSoftCommit(cmd);
           core.getSearcher(true, false, waitSearcher, true);
           if (ulog != null) ulog.postSoftCommit(cmd);
         }
         // ulog.postSoftCommit();
       } else {
-        synchronized (this) {
+        synchronized (solrCoreState) {
           if (ulog != null) ulog.preSoftCommit(cmd);
           if (cmd.openSearcher) {
             core.getSearcher(true, false, waitSearcher);

@@ -1,0 +1,77 @@
+    // nocommit in theory we could avoid loading frq block
+    // when not needed, ie, use skip data to load how far to
+    // seek the pos pointe ... instead of having to load frq
+    // blocks only to sum up how many positions to skip
+    private void skipPositions() throws IOException {
+      // Skip positions now:
+      int toSkip = posPendingCount - freq;
+      if (DEBUG) {
+        System.out.println("      FPR.skipPositions: toSkip=" + toSkip);
+      }
+
+      final int leftInBlock = blockSize - posBufferUpto;
+      if (toSkip < leftInBlock) {
+        int end = posBufferUpto + toSkip;
+        while(posBufferUpto < end) {
+          if (indexHasPayloads) {
+            payloadByteUpto += payloadLengthBuffer[posBufferUpto];
+          }
+          if (indexHasOffsets) {
+            lastEndOffset += offsetStartDeltaBuffer[posBufferUpto] + offsetLengthBuffer[posBufferUpto];
+          }
+          posBufferUpto++;
+        }
+        if (DEBUG) {
+          System.out.println("        skip w/in block to posBufferUpto=" + posBufferUpto);
+        }
+      } else {
+        toSkip -= leftInBlock;
+        while(toSkip >= blockSize) {
+          if (DEBUG) {
+            System.out.println("        skip whole block @ fp=" + posIn.getFilePointer());
+          }
+          assert posIn.getFilePointer() != lastPosBlockFP;
+          skipBlock(posIn);
+
+          if (indexHasPayloads) {
+            // Skip payloadLength block:
+            skipBlock(payIn);
+
+            // Skip payloadBytes block:
+            int numBytes = payIn.readVInt();
+            payIn.seek(payIn.getFilePointer() + numBytes);
+          }
+
+          if (indexHasOffsets) {
+            // Must load offset blocks merely to sum
+            // up into lastEndOffset:
+            readBlock(payIn, encoded, encodedBuffer, offsetStartDeltaLBuffer);
+            readBlock(payIn, encoded, encodedBuffer, offsetLengthLBuffer);
+            for(int i=0;i<blockSize;i++) {
+              lastEndOffset += offsetStartDeltaBuffer[i] + offsetLengthBuffer[i];
+            }
+          }
+          toSkip -= blockSize;
+        }
+        refillPositions();
+        payloadByteUpto = 0;
+        posBufferUpto = 0;
+        while(posBufferUpto < toSkip) {
+          if (indexHasPayloads) {
+            payloadByteUpto += payloadLengthBuffer[posBufferUpto];
+          }
+          if (indexHasOffsets) {
+            lastEndOffset += offsetStartDeltaBuffer[posBufferUpto] + offsetLengthBuffer[posBufferUpto];
+          }
+          posBufferUpto++;
+        }
+        if (DEBUG) {
+          System.out.println("        skip w/in block to posBufferUpto=" + posBufferUpto);
+        }
+      }
+
+      position = 0;
+      payloadLength = 0;
+      lastEndOffset = 0;
+    }
+

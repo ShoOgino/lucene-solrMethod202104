@@ -1,0 +1,75 @@
+  @Override
+  public void startDoc(int docID, int termDocFreq) throws IOException {
+    if (DEBUG) {
+      System.out.println("FPW.startDoc docID=" + docID);
+    }
+
+    // nocommit do this in finishDoc... but does it fail...?
+    // is it not always called...?
+    if (posOut != null && saveNextPosBlock) {
+      lastBlockPosFP = posOut.getFilePointer();
+      if (payOut != null) {
+        lastBlockPayFP = payOut.getFilePointer();
+      }
+      lastBlockPosBufferUpto = posBufferUpto;
+      lastBlockEndOffset = lastEndOffset;
+      lastBlockPayloadByteUpto = payloadByteUpto;
+      saveNextPosBlock = false;
+      if (DEBUG) {
+        System.out.println("  now save lastBlockPosFP=" + lastBlockPosFP + " lastBlockPosBufferUpto=" + lastBlockPosBufferUpto + " lastBlockPayloadByteUpto=" + lastBlockPayloadByteUpto);
+      }
+    }
+
+    final int docDelta = docID - lastDocID;
+    if (docID < 0 || (docCount > 0 && docDelta <= 0)) {
+      throw new CorruptIndexException("docs out of order (" + docID + " <= " + lastDocID + " ) (docOut: " + docOut + ")");
+    }
+    lastDocID = docID;
+
+    docDeltaBuffer[docBufferUpto] = docDelta;
+    if (DEBUG) {
+      System.out.println("  docDeltaBuffer[" + docBufferUpto + "]=" + docDelta);
+    }
+    if (fieldHasFreqs) {
+      freqBuffer[docBufferUpto] = termDocFreq;
+    }
+
+    docBufferUpto++;
+    docCount++;
+
+    if (docBufferUpto == blockSize) {
+      // nocommit maybe instead of buffering skip before
+      // writing a block based on last block's end data
+      // ... we could buffer after writing the block?  only
+      // iffiness with that approach is it could be a
+      // pointlness skip?  like we may stop adding docs
+      // right after that, then we have skip point AFTER
+      // last doc.  the thing is, in finishTerm we are
+      // already sometimes adding a skip point AFTER the
+      // last doc?
+      if (lastBlockDocID != -1) {
+        if (DEBUG) {
+          System.out.println("  bufferSkip at writeBlock: lastDocID=" + lastBlockDocID + " docCount=" + (docCount-blockSize));
+        }
+        skipWriter.bufferSkip(lastBlockDocID, docCount-blockSize, lastBlockPosFP, lastBlockPayFP, lastBlockPosBufferUpto, lastBlockEndOffset, lastBlockPayloadByteUpto);
+      }
+      lastBlockDocID = docID;
+      saveNextPosBlock = true;
+
+      if (DEBUG) {
+        System.out.println("  write docDelta block @ fp=" + docOut.getFilePointer());
+      }
+      writeBlock(docDeltaLBuffer, docOut);
+      if (fieldHasFreqs) {
+        if (DEBUG) {
+          System.out.println("  write freq block @ fp=" + docOut.getFilePointer());
+        }
+        writeBlock(freqLBuffer, docOut);
+      }
+      docBufferUpto = 0;
+    }
+
+    lastPosition = 0;
+    lastEndOffset = 0;
+  }
+

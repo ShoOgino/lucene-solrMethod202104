@@ -1,9 +1,8 @@
   protected void updateMappingsFromZk(List<JettySolrRunner> jettys,
       List<SolrServer> clients) throws Exception {
     zkStateReader.updateCloudState(true);
-    shardToClient.clear();
+    cloudJettys.clear();
     shardToJetty.clear();
-    jettyToInfo.clear();
     
     CloudState cloudState = zkStateReader.getCloudState();
     Map<String,Slice> slices = cloudState.getSlices(DEFAULT_COLLECTION);
@@ -13,6 +12,7 @@
           + DEFAULT_COLLECTION + " in " + cloudState.getCollections());
     }
     
+    List<CloudSolrServerClient> theClients = new ArrayList<CloudSolrServerClient>();
     for (SolrServer client : clients) {
       // find info for this client in zk 
       nextClient:
@@ -25,36 +25,23 @@
           
           if (shard.getKey().contains(":" + port + "_")) {
             CloudSolrServerClient csc = new CloudSolrServerClient();
-            csc.client = client;
+            csc.solrClient = client;
+            csc.port = port;
             csc.shardName = shard.getValue().get(ZkStateReader.NODE_NAME_PROP);
-            boolean isLeader = shard.getValue().containsKey(
-                ZkStateReader.LEADER_PROP);
-            clientToInfo.put(csc, shard.getValue());
-            List<SolrServer> list = shardToClient.get(slice.getKey());
-            if (list == null) {
-              list = new ArrayList<SolrServer>();
-              shardToClient.put(slice.getKey(), list);
-            }
-            list.add(client);
+            csc.info = shard.getValue();
             
-            if (isLeader) {
-              shardToLeaderClient.put(slice.getKey(), client);
-            }
+            theClients .add(csc);
+            
             break nextClient;
           }
         }
       }
     }
-    
-    for (Map.Entry<String,Slice> slice : slices.entrySet()) {
-      // check that things look right
-      assertEquals(slice.getValue().getShards().size(), shardToClient.get(slice.getKey()).size());
-    }
  
     for (JettySolrRunner jetty : jettys) {
       int port = jetty.getLocalPort();
       if (port == -1) {
-        continue; // If we cannot get the port, this jetty is down
+        throw new RuntimeException("Cannot find the port for jetty");
       }
       
       nextJetty:
@@ -62,7 +49,6 @@
         Map<String,ZkNodeProps> theShards = slice.getValue().getShards();
         for (Map.Entry<String,ZkNodeProps> shard : theShards.entrySet()) {
           if (shard.getKey().contains(":" + port + "_")) {
-            jettyToInfo.put(jetty, shard.getValue());
             List<CloudJettyRunner> list = shardToJetty.get(slice.getKey());
             if (list == null) {
               list = new ArrayList<CloudJettyRunner>();
@@ -72,13 +58,16 @@
                 ZkStateReader.LEADER_PROP);
             CloudJettyRunner cjr = new CloudJettyRunner();
             cjr.jetty = jetty;
+            cjr.info = shard.getValue();
             cjr.nodeName = shard.getValue().get(ZkStateReader.NODE_NAME_PROP);
             cjr.coreNodeName = shard.getKey();
             cjr.url = shard.getValue().get(ZkStateReader.BASE_URL_PROP) + "/" + shard.getValue().get(ZkStateReader.CORE_NAME_PROP);
+            cjr.client = findClientByPort(port, theClients);
             list.add(cjr);
             if (isLeader) {
               shardToLeaderJetty.put(slice.getKey(), cjr);
             }
+            cloudJettys.add(cjr);
             break nextJetty;
           }
         }
@@ -93,7 +82,7 @@
       List<CloudJettyRunner> jetties = shardToJetty.get(slice.getKey());
       assertNotNull("Test setup problem: We found no jetties for shard: " + slice.getKey()
           + " just:" + shardToJetty.keySet(), jetties);
-      assertTrue(jetties.size() > 0);
+      assertEquals(slice.getValue().getShards().size(), jetties.size());
     }
   }
 

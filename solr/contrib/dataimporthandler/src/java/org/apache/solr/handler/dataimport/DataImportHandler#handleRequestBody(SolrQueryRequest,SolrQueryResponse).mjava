@@ -14,48 +14,35 @@
       }
     }
     SolrParams params = req.getParams();
+    NamedList defaultParams = (NamedList) initArgs.get("defaults");
     RequestInfo requestParams = new RequestInfo(getParamsMap(params), contentStream);
     String command = requestParams.getCommand();
-   
     
-    if (DataImporter.SHOW_CONF_CMD.equals(command)) {
-      // Modify incoming request params to add wt=raw
-      ModifiableSolrParams rawParams = new ModifiableSolrParams(req.getParams());
-      rawParams.set(CommonParams.WT, "raw");
-      req.setParams(rawParams);
-      String dataConfigFile = defaults.get("config");
-      ContentStreamBase content = new ContentStreamBase.StringStream(SolrWriter
-              .getResourceAsString(req.getCore().getResourceLoader().openResource(
-              dataConfigFile)));
-      rsp.add(RawResponseWriter.CONTENT, content);
+    if (DataImporter.SHOW_CONF_CMD.equals(command)) {    
+      String dataConfigFile = params.get("config");
+      String dataConfig = params.get("dataConfig");
+      if(dataConfigFile != null) {
+        dataConfig = SolrWriter.getResourceAsString(req.getCore().getResourceLoader().openResource(dataConfigFile));
+      }
+      if(dataConfig==null)  {
+        rsp.add("status", DataImporter.MSG.NO_CONFIG_FOUND);
+      } else {
+        // Modify incoming request params to add wt=raw
+        ModifiableSolrParams rawParams = new ModifiableSolrParams(req.getParams());
+        rawParams.set(CommonParams.WT, "raw");
+        req.setParams(rawParams);
+        ContentStreamBase content = new ContentStreamBase.StringStream(dataConfig);
+        rsp.add(RawResponseWriter.CONTENT, content);
+      }
       return;
     }
 
     rsp.add("initArgs", initArgs);
     String message = "";
 
-    if (command != null)
+    if (command != null) {
       rsp.add("command", command);
-
-    if (requestParams.isDebug() && (importer == null || !importer.isBusy())) {
-      // Reload the data-config.xml
-      importer = null;
-      if (requestParams.getDataConfig() != null) {
-        try {
-          processConfiguration((NamedList) initArgs.get("defaults"));
-          importer = new DataImporter(new InputSource(new StringReader(requestParams.getDataConfig())), req.getCore()
-                  , dataSources, coreScopeSession, myName);
-        } catch (RuntimeException e) {
-          rsp.add("exception", DebugLogger.getStacktraceString(e));
-          importer = null;
-          return;
-        }
-      } else {
-        inform(req.getCore());
-      }
-      message = DataImporter.MSG.CONFIG_RELOADED;
     }
-
     // If importer is still null
     if (importer == null) {
       rsp.add("status", DataImporter.MSG.NO_INIT);
@@ -70,7 +57,7 @@
       if (DataImporter.FULL_IMPORT_CMD.equals(command)
               || DataImporter.DELTA_IMPORT_CMD.equals(command) ||
               IMPORT_CMD.equals(command)) {
-
+        importer.maybeReloadConfiguration(requestParams, defaultParams);
         UpdateRequestProcessorChain processorChain =
                 req.getCore().getUpdateProcessingChain(params.get(UpdateParams.UPDATE_CHAIN));
         UpdateRequestProcessor processor = processorChain.createProcessor(req, rsp);
@@ -97,10 +84,12 @@
             importer.runCmd(requestParams, sw);
           }
         }
-      } else if (DataImporter.RELOAD_CONF_CMD.equals(command)) {
-        importer = null;
-        inform(req.getCore());
-        message = DataImporter.MSG.CONFIG_RELOADED;
+      } else if (DataImporter.RELOAD_CONF_CMD.equals(command)) { 
+        if(importer.maybeReloadConfiguration(requestParams, defaultParams)) {
+          message = DataImporter.MSG.CONFIG_RELOADED;
+        } else {
+          message = DataImporter.MSG.CONFIG_NOT_RELOADED;
+        }
       }
     }
     rsp.add("status", importer.isBusy() ? "busy" : "idle");

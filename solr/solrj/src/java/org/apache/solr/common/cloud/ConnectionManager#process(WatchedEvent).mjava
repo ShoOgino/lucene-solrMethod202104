@@ -3,6 +3,8 @@
       log.info("Watcher " + this + " name:" + name + " got event " + event
           + " path:" + event.getPath() + " type:" + event.getType());
     }
+    
+    checkClosed();
 
     state = event.getState();
     if (state == KeeperState.SyncConnected) {
@@ -16,11 +18,18 @@
         connectionStrategy.reconnect(zkServerAddress, zkClientTimeout, this,
             new ZkClientConnectionStrategy.ZkUpdate() {
               @Override
-              public void update(SolrZooKeeper keeper)
-                  throws InterruptedException, TimeoutException {
+              public void update(SolrZooKeeper keeper) throws TimeoutException {
                 synchronized (connectionStrategy) {
-                  waitForConnected(SolrZkClient.DEFAULT_CLIENT_CONNECT_TIMEOUT);
-                  client.updateKeeper(keeper);
+                  checkClosed();
+                  try {
+                    waitForConnected(SolrZkClient.DEFAULT_CLIENT_CONNECT_TIMEOUT);
+                    checkClosed();
+                    client.updateKeeper(keeper);
+                  } catch (InterruptedException e) {
+                    // we must have been asked to stop
+                    throw new RuntimeException("Giving up on connecting - we were interrupted");
+                  }
+                  checkClosed();
                   if (onReconnect != null) {
                     onReconnect.command();
                   }
@@ -30,6 +39,7 @@
                 }
                 
               }
+
             });
       } catch (Exception e) {
         SolrException.log(log, "", e);

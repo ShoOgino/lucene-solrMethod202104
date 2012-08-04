@@ -1,6 +1,6 @@
   @Override
   public void doTest() throws Exception {
-    //del("*:*");
+    del("*:*");
     
     SolrCmdDistributor cmdDistrib = new SolrCmdDistributor(8);
     
@@ -79,6 +79,7 @@
     
     assertEquals(response.errors.toString(), 0, response.errors.size());
     
+    
     results = controlClient.query(new SolrQuery("*:*")).getResults();
     numFound = results.getNumFound();
     assertEquals(results.toString(), 2, numFound);
@@ -86,5 +87,48 @@
     numFound = client.query(new SolrQuery("*:*")).getResults()
         .getNumFound();
     assertEquals(results.toString(), 2, numFound);
+    
+    // debug stuff
+    for (SolrServer c : clients) {
+      c.optimize();
+      // distrib optimize is not working right yet, so call it on each client
+      //System.out.println(clients.get(0).request(new LukeRequest()));
+    }
+    
+    int id = 5;
+    
+    cmdDistrib = new SolrCmdDistributor(8);
+    
+    nodes.clear();
+    int cnt = atLeast(200);
+    for (int i = 0; i < cnt; i++) {
+      nodes.clear();
+      for (SolrServer c : clients) {
+        if (random().nextBoolean()) {
+          continue;
+        }
+        HttpSolrServer httpClient = (HttpSolrServer) c;
+        nodeProps = new ZkNodeProps(ZkStateReader.BASE_URL_PROP,
+            httpClient.getBaseURL(), ZkStateReader.CORE_NAME_PROP, "");
+        nodes.add(new StdNode(new ZkCoreNodeProps(nodeProps)));
+
+      }
+      
+      cmd.solrDoc = sdoc("id", id++);
+      cmdDistrib.distribAdd(cmd, nodes, params);
+    }
+
+    cmdDistrib.finish();
+    
+    cmdDistrib.distribCommit(ccmd, nodes, params);
+    
+    for (SolrServer c : clients) {
+      NamedList<Object> resp = c.request(new LukeRequest());
+      System.out.println(resp);
+      assertEquals("SOLR-3428: We only did adds - there should be no deletes",
+          ((NamedList<Object>) resp.get("index")).get("numDocs"),
+          ((NamedList<Object>) resp.get("index")).get("maxDoc"));
+    }
+
   }
 

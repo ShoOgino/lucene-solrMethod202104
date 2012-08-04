@@ -5,6 +5,11 @@
     // TODO: if you can hash here, you could favor the shard leader
     
     ClusterState clusterState = zkStateReader.getClusterState();
+    boolean sendToLeaders = false;
+    
+    if (request instanceof IsUpdateRequest && updatesToLeaders) {
+      sendToLeaders = true;
+    }
 
     SolrParams reqParams = request.getParams();
     if (reqParams == null) {
@@ -19,6 +24,9 @@
     // Extract each comma separated collection name and store in a List.
     List<String> collectionList = StrUtils.splitSmart(collection, ",", true);
     
+    // TODO: not a big deal because of the caching, but we could avoid looking at every shard
+    // when getting leaders if we tweaked some things
+    
     // Retrieve slices from the cloud state and, for each collection specified,
     // add it to the Map of slices.
     Map<String,Slice> slices = new HashMap<String,Slice>();
@@ -29,11 +37,7 @@
 
     Set<String> liveNodes = clusterState.getLiveNodes();
 
-    // IDEA: have versions on various things... like a global clusterState version
-    // or shardAddressVersion (which only changes when the shards change)
-    // to allow caching.
-
-    if (clusterState.hashCode() != this.lastClusterStateHashCode) {
+    if (sendToLeaders && leaderUrlList == null || !sendToLeaders && urlList == null || clusterState.hashCode() != this.lastClusterStateHashCode) {
     
       // build a map of unique nodes
       // TODO: allow filtering by group, role, etc
@@ -46,19 +50,32 @@
           if (!liveNodes.contains(coreNodeProps.getNodeName())
               || !coreNodeProps.getState().equals(ZkStateReader.ACTIVE)) continue;
           if (nodes.put(node, nodeProps) == null) {
-            String url = coreNodeProps.getCoreUrl();
-            urlList.add(url);
+            if (!sendToLeaders || (sendToLeaders && coreNodeProps.isLeader())) {
+              String url = coreNodeProps.getCoreUrl();
+              urlList.add(url);
+            }
           }
         }
       }
-      this.urlList = urlList;
+      if (sendToLeaders) {
+        this.leaderUrlList = urlList; 
+      } else {
+        this.urlList = urlList;
+      }
       this.lastClusterStateHashCode = clusterState.hashCode();
     }
-
-    Collections.shuffle(urlList, rand);
+    List<String> theUrlList;
+    if (sendToLeaders) {
+      theUrlList = new ArrayList<String>(leaderUrlList.size());
+      theUrlList.addAll(leaderUrlList);
+    } else {
+      theUrlList = new ArrayList<String>(urlList.size());
+      theUrlList.addAll(urlList);
+    }
+    Collections.shuffle(theUrlList, rand);
     //System.out.println("########################## MAKING REQUEST TO " + urlList);
  
-    LBHttpSolrServer.Req req = new LBHttpSolrServer.Req(request, urlList);
+    LBHttpSolrServer.Req req = new LBHttpSolrServer.Req(request, theUrlList);
     LBHttpSolrServer.Rsp rsp = lbServer.request(req);
     return rsp.getResponse();
   }

@@ -7,6 +7,15 @@
 
     NamedList<Object> termVectors = new NamedList<Object>();
     rb.rsp.add(TERM_VECTORS, termVectors);
+
+    IndexSchema schema = rb.req.getSchema();
+    SchemaField keyField = schema.getUniqueKeyField();
+    String uniqFieldName = null;
+    if (keyField != null) {
+      uniqFieldName = keyField.getName();
+      termVectors.add("uniqueKeyFieldName", uniqFieldName);
+    }
+
     FieldOptions allFields = new FieldOptions();
     //figure out what options we have, and try to get the appropriate vector
     allFields.termFreq = params.getBool(TermVectorParams.TF, false);
@@ -24,8 +33,6 @@
       allFields.tfIdf = true;
     }
 
-    //use this to validate our fields
-    IndexSchema schema = rb.req.getSchema();
     //Build up our per field mapping
     Map<String, FieldOptions> fieldOptions = new HashMap<String, FieldOptions>();
     NamedList<List<String>> warnings = new NamedList<List<String>>();
@@ -40,6 +47,11 @@
 
         // workarround SOLR-3523
         if (null == field || "score".equals(field)) continue; 
+
+        // we don't want to issue warnings about the uniqueKey field
+        // since it can cause lots of confusion in distributed requests
+        // where the uniqueKey field is injected into the fl for merging
+        final boolean fieldIsUniqueKey = field.equals(uniqFieldName);
 
         SchemaField sf = schema.getFieldOrNull(field);
         if (sf != null) {
@@ -56,15 +68,15 @@
             option.tfIdf = params.getFieldBool(field, TermVectorParams.TF_IDF, allFields.tfIdf);
             //Validate these are even an option
             option.positions = params.getFieldBool(field, TermVectorParams.POSITIONS, allFields.positions);
-            if (option.positions && !sf.storeTermPositions()){
+            if (option.positions && !sf.storeTermPositions() && !fieldIsUniqueKey){
               noPos.add(field);
             }
             option.offsets = params.getFieldBool(field, TermVectorParams.OFFSETS, allFields.offsets);
-            if (option.offsets && !sf.storeTermOffsets()){
+            if (option.offsets && !sf.storeTermOffsets() && !fieldIsUniqueKey){
               noOff.add(field);
             }
           } else {//field doesn't have term vectors
-            noTV.add(field);
+            if (!fieldIsUniqueKey) noTV.add(field);
           }
         } else {
           //field doesn't exist
@@ -72,6 +84,11 @@
         }
       }
     } //else, deal with all fields
+
+    // NOTE: currently all typs of warnings are schema driven, and garunteed
+    // to be consistent across all shards - if additional types of warnings 
+    // are added that might be differnet between shards, finishStage() needs 
+    // to be changed to account for that.
     boolean hasWarnings = false;
     if (!noTV.isEmpty()) {
       warnings.add("noTermVectors", noTV);
@@ -102,11 +119,7 @@
 
     IndexReader reader = searcher.getIndexReader();
     //the TVMapper is a TermVectorMapper which can be used to optimize loading of Term Vectors
-    SchemaField keyField = schema.getUniqueKeyField();
-    String uniqFieldName = null;
-    if (keyField != null) {
-      uniqFieldName = keyField.getName();
-    }
+
     //Only load the id field to get the uniqueKey of that
     //field
 
@@ -143,7 +156,6 @@
     while (iter.hasNext()) {
       Integer docId = iter.next();
       NamedList<Object> docNL = new NamedList<Object>();
-      termVectors.add("doc-" + docId, docNL);
 
       if (keyField != null) {
         reader.document(docId, getUniqValue);
@@ -152,9 +164,13 @@
           uniqVal = uniqValues.get(0);
           uniqValues.clear();
           docNL.add("uniqueKey", uniqVal);
-          termVectors.add("uniqueKeyFieldName", uniqFieldName);
+          termVectors.add(uniqVal, docNL);
         }
+      } else {
+        // support for schemas w/o a unique key,
+        termVectors.add("doc-" + docId, docNL);
       }
+
       if ( null != fields ) {
         for (Map.Entry<String, FieldOptions> entry : fieldOptions.entrySet()) {
           final String field = entry.getKey();

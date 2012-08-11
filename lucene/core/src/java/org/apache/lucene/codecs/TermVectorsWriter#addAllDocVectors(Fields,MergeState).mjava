@@ -3,7 +3,7 @@
    *  implementation requires that the vectors implement
    *  both Fields.size and
    *  Terms.size. */
-  protected final void addAllDocVectors(Fields vectors, FieldInfos fieldInfos) throws IOException {
+  protected final void addAllDocVectors(Fields vectors, MergeState mergeState) throws IOException {
     if (vectors == null) {
       startDocument(0);
       return;
@@ -21,9 +21,12 @@
     
     TermsEnum termsEnum = null;
     DocsAndPositionsEnum docsAndPositionsEnum = null;
+    
+    final ReaderPayloadProcessor readerPayloadProcessor = mergeState.currentReaderPayloadProcessor;
+    PayloadProcessor payloadProcessor = null;
 
     while((fieldName = fieldsEnum.next()) != null) {
-      final FieldInfo fieldInfo = fieldInfos.fieldInfo(fieldName);
+      final FieldInfo fieldInfo = mergeState.fieldInfos.fieldInfo(fieldName);
 
       assert lastFieldName == null || fieldName.compareTo(lastFieldName) > 0: "lastFieldName=" + lastFieldName + " fieldName=" + fieldName;
       lastFieldName = fieldName;
@@ -36,13 +39,15 @@
       
       final boolean hasPositions = terms.hasPositions();
       final boolean hasOffsets = terms.hasOffsets();
+      final boolean hasPayloads = terms.hasPayloads();
+      assert !hasPayloads || hasPositions;
       
       final int numTerms = (int) terms.size();
       if (numTerms == -1) {
         throw new IllegalStateException("terms.size() must be implemented (it returned -1)");
       }
       
-      startField(fieldInfo, numTerms, hasPositions, hasOffsets);
+      startField(fieldInfo, numTerms, hasPositions, hasOffsets, hasPayloads);
       termsEnum = terms.iterator(termsEnum);
 
       int termCount = 0;
@@ -52,6 +57,10 @@
         final int freq = (int) termsEnum.totalTermFreq();
         
         startTerm(termsEnum.term(), freq);
+        
+        if (hasPayloads && readerPayloadProcessor != null) {
+          payloadProcessor = readerPayloadProcessor.getProcessor(fieldName, termsEnum.term());
+        }
 
         if (hasPositions || hasOffsets) {
           docsAndPositionsEnum = termsEnum.docsAndPositions(null, docsAndPositionsEnum);
@@ -65,9 +74,22 @@
             final int pos = docsAndPositionsEnum.nextPosition();
             final int startOffset = docsAndPositionsEnum.startOffset();
             final int endOffset = docsAndPositionsEnum.endOffset();
+            
+            BytesRef payload = docsAndPositionsEnum.hasPayload() ? 
+                docsAndPositionsEnum.getPayload() : null;
+                
+            if (payloadProcessor != null && payload != null) {
+              // to not violate the D&P api, we must give the processor a private copy
+              payload = BytesRef.deepCopyOf(payload);
+              payloadProcessor.processPayload(payload);
+              if (payload.length == 0) {
+                // don't let PayloadProcessors corrumpt the index
+                payload = null;
+              }
+            }
 
             assert !hasPositions || pos >= 0;
-            addPosition(pos, startOffset, endOffset);
+            addPosition(pos, startOffset, endOffset, payload);
           }
         }
       }

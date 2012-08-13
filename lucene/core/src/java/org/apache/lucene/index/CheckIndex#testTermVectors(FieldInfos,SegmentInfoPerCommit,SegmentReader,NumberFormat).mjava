@@ -53,9 +53,7 @@
             status.docCount++;
           }
 
-          FieldsEnum fieldsEnum = tfv.iterator();
-          String field = null;
-          while((field = fieldsEnum.next()) != null) {
+          for(String field : tfv) {
             if (doStats) {
               status.totVectors++;
             }
@@ -70,6 +68,8 @@
               Terms terms = tfv.terms(field);
               termsEnum = terms.iterator(termsEnum);
               final boolean postingsHasFreq = fieldInfo.getIndexOptions().compareTo(IndexOptions.DOCS_AND_FREQS) >= 0;
+              final boolean postingsHasPayload = fieldInfo.hasPayloads();
+              final boolean vectorsHasPayload = terms.hasPayloads();
 
               Terms postingsTerms = postingsFields.terms(field);
               if (postingsTerms == null) {
@@ -77,19 +77,18 @@
               }
               postingsTermsEnum = postingsTerms.iterator(postingsTermsEnum);
               
+              final boolean hasProx = terms.hasOffsets() || terms.hasPositions();
               BytesRef term = null;
               while ((term = termsEnum.next()) != null) {
-                
-                final boolean hasProx;
 
-                // Try positions:
-                postings = termsEnum.docsAndPositions(null, postings);
-                if (postings == null) {
-                  hasProx = false;
-                  // Try docIDs & freqs:
-                  docs = termsEnum.docs(null, docs);
+                if (hasProx) {
+                  postings = termsEnum.docsAndPositions(null, postings);
+                  assert postings != null;
+                  docs = null;
                 } else {
-                  hasProx = true;
+                  docs = termsEnum.docs(null, docs);
+                  assert docs != null;
+                  postings = null;
                 }
 
                 final DocsEnum docs2;
@@ -142,7 +141,7 @@
                       int pos = postings.nextPosition();
                       if (postingsPostings != null) {
                         int postingsPos = postingsPostings.nextPosition();
-                        if (pos != -1 && postingsPos != -1 && pos != postingsPos) {
+                        if (terms.hasPositions() && pos != postingsPos) {
                           throw new RuntimeException("vector term=" + term + " field=" + field + " doc=" + j + ": pos=" + pos + " differs from postings pos=" + postingsPos);
                         }
                       }
@@ -171,6 +170,34 @@
                         }
                         if (endOffset != -1 && postingsEndOffset != -1 && endOffset != postingsEndOffset) {
                           throw new RuntimeException("vector term=" + term + " field=" + field + " doc=" + j + ": endOffset=" + endOffset + " differs from postings endOffset=" + postingsEndOffset);
+                        }
+                      }
+                      
+                      BytesRef payload = postings.getPayload();
+           
+                      if (payload != null) {
+                        assert vectorsHasPayload;
+                      }
+                      
+                      if (postingsHasPayload && vectorsHasPayload) {
+                        assert postingsPostings != null;
+                        
+                        if (payload == null) {
+                          // we have payloads, but not at this position. 
+                          // postings has payloads too, it should not have one at this position
+                          if (postingsPostings.getPayload() != null) {
+                            throw new RuntimeException("vector term=" + term + " field=" + field + " doc=" + j + " has no payload but postings does: " + postingsPostings.getPayload());
+                          }
+                        } else {
+                          // we have payloads, and one at this position
+                          // postings should also have one at this position, with the same bytes.
+                          if (postingsPostings.getPayload() == null) {
+                            throw new RuntimeException("vector term=" + term + " field=" + field + " doc=" + j + " has payload=" + payload + " but postings does not.");
+                          }
+                          BytesRef postingsPayload = postingsPostings.getPayload();
+                          if (!payload.equals(postingsPayload)) {
+                            throw new RuntimeException("vector term=" + term + " field=" + field + " doc=" + j + " has payload=" + payload + " but differs from postings payload=" + postingsPayload);
+                          }
                         }
                       }
                     }

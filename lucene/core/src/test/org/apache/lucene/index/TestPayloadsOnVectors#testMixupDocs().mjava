@@ -1,0 +1,45 @@
+  /** some docs have payload att, some not */
+  public void testMixupDocs() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = newIndexWriterConfig(TEST_VERSION_CURRENT, new MockAnalyzer(random()));
+    iwc.setMergePolicy(newLogMergePolicy());
+    RandomIndexWriter writer = new RandomIndexWriter(random(), dir, iwc);
+    Document doc = new Document();
+    FieldType customType = new FieldType(TextField.TYPE_NOT_STORED);
+    customType.setStoreTermVectors(true);
+    customType.setStoreTermVectorPositions(true);
+    customType.setStoreTermVectorPayloads(true);
+    customType.setStoreTermVectorOffsets(random().nextBoolean());
+    Field field = new Field("field", "", customType);
+    TokenStream ts = new MockTokenizer(new StringReader("here we go"), MockTokenizer.WHITESPACE, true);
+    assertFalse(ts.hasAttribute(PayloadAttribute.class));
+    field.setTokenStream(ts);
+    doc.add(field);
+    writer.addDocument(doc);
+    
+    Token withPayload = new Token("withPayload", 0, 11);
+    withPayload.setPayload(new BytesRef("test"));
+    ts = new CannedTokenStream(withPayload);
+    assertTrue(ts.hasAttribute(PayloadAttribute.class));
+    field.setTokenStream(ts);
+    writer.addDocument(doc);
+    
+    ts = new MockTokenizer(new StringReader("another"), MockTokenizer.WHITESPACE, true);
+    assertFalse(ts.hasAttribute(PayloadAttribute.class));
+    field.setTokenStream(ts);
+    writer.addDocument(doc);
+    
+    DirectoryReader reader = writer.getReader();
+    Terms terms = reader.getTermVector(1, "field");
+    assert terms != null;
+    TermsEnum termsEnum = terms.iterator(null);
+    assertTrue(termsEnum.seekExact(new BytesRef("withPayload"), true));
+    DocsAndPositionsEnum de = termsEnum.docsAndPositions(null, null);
+    assertEquals(0, de.nextDoc());
+    assertEquals(0, de.nextPosition());
+    assertEquals(new BytesRef("test"), de.getPayload());
+    writer.close();
+    reader.close();
+    dir.close();
+  }
+

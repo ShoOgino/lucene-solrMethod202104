@@ -9,30 +9,46 @@
    * @throws IOException
    */
   public SolrZkClient(String zkServerAddress, int zkClientTimeout,
-      ZkClientConnectionStrategy strat, final OnReconnect onReconnect, int clientConnectTimeout) throws InterruptedException,
-      TimeoutException, IOException {
+      ZkClientConnectionStrategy strat, final OnReconnect onReconnect, int clientConnectTimeout) {
     connManager = new ConnectionManager("ZooKeeperConnection Watcher:"
         + zkServerAddress, this, zkServerAddress, zkClientTimeout, strat, onReconnect);
-    strat.connect(zkServerAddress, zkClientTimeout, connManager,
-        new ZkUpdate() {
-          @Override
-          public void update(SolrZooKeeper zooKeeper) {
-            SolrZooKeeper oldKeeper = keeper;
-            keeper = zooKeeper;
-            if (oldKeeper != null) {
+    try {
+      strat.connect(zkServerAddress, zkClientTimeout, connManager,
+          new ZkUpdate() {
+            @Override
+            public void update(SolrZooKeeper zooKeeper) {
+              SolrZooKeeper oldKeeper = keeper;
+              keeper = zooKeeper;
               try {
-                oldKeeper.close();
-              } catch (InterruptedException e) {
-                // Restore the interrupted status
-                Thread.currentThread().interrupt();
-                log.error("", e);
-                throw new ZooKeeperException(SolrException.ErrorCode.SERVER_ERROR,
-                    "", e);
+                closeKeeper(oldKeeper);
+              } finally {
+                if (isClosed) {
+                  // we may have been closed
+                  closeKeeper(SolrZkClient.this.keeper);
+                }
               }
             }
-          }
-        });
-    connManager.waitForConnected(clientConnectTimeout);
+          });
+    } catch (IOException e) {
+      connManager.close();
+      throw new RuntimeException();
+    } catch (InterruptedException e) {
+      connManager.close();
+      throw new RuntimeException();
+    } catch (TimeoutException e) {
+      connManager.close();
+      throw new RuntimeException();
+    }
+    try {
+      connManager.waitForConnected(clientConnectTimeout);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      connManager.close();
+      throw new RuntimeException();
+    } catch (TimeoutException e) {
+      connManager.close();
+      throw new RuntimeException();
+    }
     numOpens.incrementAndGet();
   }
 

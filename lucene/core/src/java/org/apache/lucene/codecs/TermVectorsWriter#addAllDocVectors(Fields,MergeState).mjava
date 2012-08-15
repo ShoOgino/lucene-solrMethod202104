@@ -20,6 +20,9 @@
     TermsEnum termsEnum = null;
     DocsAndPositionsEnum docsAndPositionsEnum = null;
     
+    final ReaderPayloadProcessor readerPayloadProcessor = mergeState.currentReaderPayloadProcessor;
+    PayloadProcessor payloadProcessor = null;
+
     for(String fieldName : vectors) {
       final FieldInfo fieldInfo = mergeState.fieldInfos.fieldInfo(fieldName);
 
@@ -52,6 +55,10 @@
         final int freq = (int) termsEnum.totalTermFreq();
         
         startTerm(termsEnum.term(), freq);
+        
+        if (hasPayloads && readerPayloadProcessor != null) {
+          payloadProcessor = readerPayloadProcessor.getProcessor(fieldName, termsEnum.term());
+        }
 
         if (hasPositions || hasOffsets) {
           docsAndPositionsEnum = termsEnum.docsAndPositions(null, docsAndPositionsEnum);
@@ -66,7 +73,17 @@
             final int startOffset = docsAndPositionsEnum.startOffset();
             final int endOffset = docsAndPositionsEnum.endOffset();
             
-            final BytesRef payload = docsAndPositionsEnum.getPayload();
+            BytesRef payload = docsAndPositionsEnum.getPayload();
+                
+            if (payloadProcessor != null && payload != null) {
+              // to not violate the D&P api, we must give the processor a private copy
+              payload = BytesRef.deepCopyOf(payload);
+              payloadProcessor.processPayload(payload);
+              if (payload.length == 0) {
+                // don't let PayloadProcessors corrumpt the index
+                payload = null;
+              }
+            }
 
             assert !hasPositions || pos >= 0;
             addPosition(pos, startOffset, endOffset, payload);

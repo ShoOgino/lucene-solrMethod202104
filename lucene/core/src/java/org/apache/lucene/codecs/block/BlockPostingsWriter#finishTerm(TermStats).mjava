@@ -1,0 +1,142 @@
+  /** Called when we are done adding docs to this term */
+  @Override
+  public void finishTerm(TermStats stats) throws IOException {
+    assert stats.docFreq > 0;
+
+    // TODO: wasteful we are counting this (counting # docs
+    // for this term) in two places?
+    assert stats.docFreq == docCount: stats.docFreq + " vs " + docCount;
+
+    // if (DEBUG) {
+    //   System.out.println("FPW.finishTerm docFreq=" + stats.docFreq);
+    // }
+
+    // if (DEBUG) {
+    //   if (docBufferUpto > 0) {
+    //     System.out.println("  write doc/freq vInt block (count=" + docBufferUpto + ") at fp=" + docOut.getFilePointer() + " docTermStartFP=" + docTermStartFP);
+    //   }
+    // }
+
+    // vInt encode the remaining doc deltas and freqs:
+    for(int i=0;i<docBufferUpto;i++) {
+      final int docDelta = docDeltaBuffer[i];
+      final int freq = freqBuffer[i];
+      if (!fieldHasFreqs) {
+        docOut.writeVInt(docDelta);
+      } else if (freqBuffer[i] == 1) {
+        docOut.writeVInt((docDelta<<1)|1);
+      } else {
+        docOut.writeVInt(docDelta<<1);
+        docOut.writeVInt(freq);
+      }
+    }
+
+    final int lastPosBlockOffset;
+
+    if (fieldHasPositions) {
+      // if (DEBUG) {
+      //   if (posBufferUpto > 0) {
+      //     System.out.println("  write pos vInt block (count=" + posBufferUpto + ") at fp=" + posOut.getFilePointer() + " posTermStartFP=" + posTermStartFP + " hasPayloads=" + fieldHasPayloads + " hasOffsets=" + fieldHasOffsets);
+      //   }
+      // }
+
+      // totalTermFreq is just total number of positions(or payloads, or offsets)
+      // associated with current term.
+      assert stats.totalTermFreq != -1;
+      if (stats.totalTermFreq > BLOCK_SIZE) {
+        // record file offset for last pos in last block
+        lastPosBlockOffset = (int) (posOut.getFilePointer() - posTermStartFP);
+      } else {
+        lastPosBlockOffset = -1;
+      }
+      if (posBufferUpto > 0) {
+        posOut.writeVInt(posBufferUpto);
+        
+        // TODO: should we send offsets/payloads to
+        // .pay...?  seems wasteful (have to store extra
+        // vLong for low (< BLOCK_SIZE) DF terms = vast vast
+        // majority)
+
+        // vInt encode the remaining positions/payloads/offsets:
+        int lastPayloadLength = -1;
+        int payloadBytesReadUpto = 0;
+        for(int i=0;i<posBufferUpto;i++) {
+          final int posDelta = posDeltaBuffer[i];
+          if (fieldHasPayloads) {
+            final int payloadLength = payloadLengthBuffer[i];
+            if (payloadLength != lastPayloadLength) {
+              lastPayloadLength = payloadLength;
+              posOut.writeVInt((posDelta<<1)|1);
+              posOut.writeVInt(payloadLength);
+            } else {
+              posOut.writeVInt(posDelta<<1);
+            }
+
+            // if (DEBUG) {
+            //   System.out.println("        i=" + i + " payloadLen=" + payloadLength);
+            // }
+
+            if (payloadLength != 0) {
+              // if (DEBUG) {
+              //   System.out.println("          write payload @ pos.fp=" + posOut.getFilePointer());
+              // }
+              posOut.writeBytes(payloadBytes, payloadBytesReadUpto, payloadLength);
+              payloadBytesReadUpto += payloadLength;
+            }
+          } else {
+            posOut.writeVInt(posDelta);
+          }
+
+          if (fieldHasOffsets) {
+            // if (DEBUG) {
+            //   System.out.println("          write offset @ pos.fp=" + posOut.getFilePointer());
+            // }
+            posOut.writeVInt(offsetStartDeltaBuffer[i]);
+            posOut.writeVInt(offsetLengthBuffer[i]);
+          }
+        }
+
+        if (fieldHasPayloads) {
+          assert payloadBytesReadUpto == payloadByteUpto;
+          payloadByteUpto = 0;
+        }
+      }
+      // if (DEBUG) {
+      //   System.out.println("  totalTermFreq=" + stats.totalTermFreq + " lastPosBlockOffset=" + lastPosBlockOffset);
+      // }
+    } else {
+      lastPosBlockOffset = -1;
+    }
+
+    int skipOffset;
+    if (docCount > BLOCK_SIZE) {
+      skipOffset = (int) (skipWriter.writeSkip(docOut) - docTermStartFP);
+      
+      // if (DEBUG) {
+      //   System.out.println("skip packet " + (docOut.getFilePointer() - (docTermStartFP + skipOffset)) + " bytes");
+      // }
+    } else {
+      skipOffset = -1;
+      // if (DEBUG) {
+      //   System.out.println("  no skip: docCount=" + docCount);
+      // }
+    }
+
+    long payStartFP;
+    if (stats.totalTermFreq >= BLOCK_SIZE) {
+      payStartFP = payTermStartFP;
+    } else {
+      payStartFP = -1;
+    }
+
+    // if (DEBUG) {
+    //   System.out.println("  payStartFP=" + payStartFP);
+    // }
+
+    pendingTerms.add(new PendingTerm(docTermStartFP, posTermStartFP, payStartFP, skipOffset, lastPosBlockOffset));
+    docBufferUpto = 0;
+    posBufferUpto = 0;
+    lastDocID = 0;
+    docCount = 0;
+  }
+

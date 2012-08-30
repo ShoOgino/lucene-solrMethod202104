@@ -1,52 +1,115 @@
   @Override
-  void runLeaderProcess(boolean weAreReplacement)
-      throws KeeperException, InterruptedException, IOException {
-    if (cc != null) {
-      String coreName = leaderProps.get(ZkStateReader.CORE_NAME_PROP);
-      SolrCore core = null;
-      try {
-     
-        core = cc.getCore(coreName);
-
-        if (core == null) {
-          cancelElection();
-          throw new SolrException(ErrorCode.SERVER_ERROR, "Fatal Error, SolrCore not found:" + coreName + " in " + cc.getCoreNames());
-        }
-        // should I be leader?
-        if (weAreReplacement && !shouldIBeLeader(leaderProps)) {
-          // System.out.println("there is a better leader candidate it appears");
+  void runLeaderProcess(boolean weAreReplacement) throws KeeperException,
+      InterruptedException, IOException {
+    String coreName = leaderProps.get(ZkStateReader.CORE_NAME_PROP);
+    
+    // clear the leader in clusterstate
+    ZkNodeProps m = new ZkNodeProps(Overseer.QUEUE_OPERATION, "leader",
+        ZkStateReader.SHARD_ID_PROP, shardId, ZkStateReader.COLLECTION_PROP,
+        collection);
+    Overseer.getInQueue(zkClient).offer(ZkStateReader.toJSON(m));
+    
+    waitForReplicasToComeUp(weAreReplacement);
+    
+    // wait for local leader state to clear...
+    // int tries = 0;
+    // while (zkController.getClusterState().getLeader(collection, shardId) !=
+    // null) {
+    // System.out.println("leader still shown " + tries + " " +
+    // zkController.getClusterState().getLeader(collection, shardId));
+    // Thread.sleep(1000);
+    // tries++;
+    // if (tries == 30) {
+    // break;
+    // }
+    // }
+    // Thread.sleep(1000);
+    
+    SolrCore core = null;
+    try {
+      
+      core = cc.getCore(coreName);
+      
+      if (core == null) {
+        cancelElection();
+        throw new SolrException(ErrorCode.SERVER_ERROR,
+            "Fatal Error, SolrCore not found:" + coreName + " in "
+                + cc.getCoreNames());
+      }
+      
+      // should I be leader?
+      if (weAreReplacement && !shouldIBeLeader(leaderProps, core)) {
+        // System.out.println("there is a better leader candidate it appears");
+        rejoinLeaderElection(leaderSeqPath, core);
+        return;
+      }
+      
+      if (weAreReplacement) {
+        log.info("I may be the new leader - try and sync");
+        // we are going to attempt to be the leader
+        // first cancel any current recovery
+        core.getUpdateHandler().getSolrCoreState().cancelRecovery();
+        boolean success = syncStrategy.sync(zkController, core, leaderProps);
+        // solrcloud_debug
+        // try {
+        // RefCounted<SolrIndexSearcher> searchHolder =
+        // core.getNewestSearcher(false);
+        // SolrIndexSearcher searcher = searchHolder.get();
+        // try {
+        // System.out.println(core.getCoreDescriptor().getCoreContainer().getZkController().getNodeName()
+        // + " synched "
+        // + searcher.search(new MatchAllDocsQuery(), 1).totalHits);
+        // } finally {
+        // searchHolder.decref();
+        // }
+        // } catch (Exception e) {
+        //
+        // }
+        if (!success && anyoneElseActive()) {
           rejoinLeaderElection(leaderSeqPath, core);
           return;
         }
-
-        if (weAreReplacement) {
-          if (zkClient.exists(leaderPath, true)) {
-            zkClient.delete(leaderPath, -1, true);
-          }
-          log.info("I may be the new leader - try and sync");
-          // we are going to attempt to be the leader
-          // first cancel any current recovery
-          core.getUpdateHandler().getSolrCoreState().cancelRecovery();
-          boolean success = syncStrategy.sync(zkController, core, leaderProps);
-          if (!success && anyoneElseActive()) {
-            rejoinLeaderElection(leaderSeqPath, core);
-            return;
-          } 
+      }
+      
+      log.info("I am the new leader: "
+          + ZkCoreNodeProps.getCoreUrl(leaderProps));
+      
+    } finally {
+      if (core != null) {
+        core.close();
+      }
+    }
+    
+    try {
+      super.runLeaderProcess(weAreReplacement);
+    } catch (Throwable t) {
+      cancelElection();
+      try {
+        core = cc.getCore(coreName);
+        core.getCoreDescriptor().getCloudDescriptor().isLeader = false;
+        if (!cc.isShutDown()) {
+          // we could not publish ourselves as leader - rejoin election
+          rejoinLeaderElection(coreName, core);
         }
-        log.info("I am the new leader: " + ZkCoreNodeProps.getCoreUrl(leaderProps));
-        
-        // If I am going to be the leader I have to be active
-        core.getUpdateHandler().getSolrCoreState().cancelRecovery();
-        zkController.publish(core.getCoreDescriptor(), ZkStateReader.ACTIVE);
-        
       } finally {
-        if (core != null ) {
+        if (core != null) {
           core.close();
         }
       }
       
     }
     
-    super.runLeaderProcess(weAreReplacement);
+    try {
+      core = cc.getCore(coreName);
+      // we do this after the above super. call so that we don't
+      // briefly think we are the leader and then end up not being
+      // able to publish that we are the leader.
+      core.getCoreDescriptor().getCloudDescriptor().isLeader = true;
+    } finally {
+      if (core != null) {
+        core.close();
+      }
+    }
+    
   }
 

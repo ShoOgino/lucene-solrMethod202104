@@ -4,10 +4,11 @@
    * @param coreName
    * @param desc
    * @param recoverReloadedCores
+   * @param afterExpiration
    * @return the shardId for the SolrCore
    * @throws Exception
    */
-  public String register(String coreName, final CoreDescriptor desc, boolean recoverReloadedCores) throws Exception {  
+  public String register(String coreName, final CoreDescriptor desc, boolean recoverReloadedCores, boolean afterExpiration) throws Exception {  
     final String baseUrl = getBaseUrl();
     
     final CloudDescriptor cloudDesc = desc.getCloudDescriptor();
@@ -32,7 +33,7 @@
     ZkNodeProps leaderProps = new ZkNodeProps(props);
     
     try {
-      joinElection(desc);
+      joinElection(desc, afterExpiration);
     } catch (InterruptedException e) {
       // Restore the interrupted status
       Thread.currentThread().interrupt();
@@ -43,25 +44,7 @@
       throw new ZooKeeperException(SolrException.ErrorCode.SERVER_ERROR, "", e);
     }
     
-    // rather than look in the cluster state file, we go straight to the zknodes
-    // here, because on cluster restart there could be stale leader info in the
-    // cluster state node that won't be updated for a moment
-    String leaderUrl = getLeaderProps(collection, cloudDesc.getShardId()).getCoreUrl();
-    
-    // now wait until our currently cloud state contains the latest leader
-    String clusterStateLeader = zkStateReader.getLeaderUrl(collection, shardId, 30000);
-    int tries = 0;
-    while (!leaderUrl.equals(clusterStateLeader)) {
-      if (tries == 60) {
-        throw new SolrException(ErrorCode.SERVER_ERROR,
-            "There is conflicting information about the leader of shard: "
-                + cloudDesc.getShardId() + " our state says:" + clusterStateLeader + " but zookeeper says:" + leaderUrl);
-      }
-      Thread.sleep(1000);
-      tries++;
-      clusterStateLeader = zkStateReader.getLeaderUrl(collection, shardId, 30000);
-      leaderUrl = getLeaderProps(collection, cloudDesc.getShardId()).getCoreUrl();
-    }
+    String leaderUrl = getLeader(cloudDesc);
     
     String ourUrl = ZkCoreNodeProps.getCoreUrl(baseUrl, coreName);
     log.info("We are " + ourUrl + " and leader is " + leaderUrl);
@@ -94,8 +77,7 @@
         } else {
           log.info("No LogReplay needed for core="+core.getName() + " baseURL=" + baseUrl);
         }
-      }
-      
+      }      
       boolean didRecovery = checkRecovery(coreName, desc, recoverReloadedCores, isLeader, cloudDesc,
           collection, coreZkNodeName, shardId, leaderProps, core, cc);
       if (!didRecovery) {
@@ -106,6 +88,7 @@
         core.close();
       }
     }
+
     
     // make sure we have an update cluster state right away
     zkStateReader.updateClusterState(true);

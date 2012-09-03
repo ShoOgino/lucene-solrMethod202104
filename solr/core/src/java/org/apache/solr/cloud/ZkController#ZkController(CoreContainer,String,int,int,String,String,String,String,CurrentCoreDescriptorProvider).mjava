@@ -1,0 +1,136 @@
+  /**
+   * @param cc
+   * @param zkServerAddress
+   * @param zkClientTimeout
+   * @param zkClientConnectTimeout
+   * @param localHost
+   * @param locaHostPort
+   * @param localHostContext
+   * @param leaderVoteWait
+   * @param registerOnReconnect
+   * @throws InterruptedException
+   * @throws TimeoutException
+   * @throws IOException
+   */
+  public ZkController(final CoreContainer cc, String zkServerAddress, int zkClientTimeout, int zkClientConnectTimeout, String localHost, String locaHostPort,
+      String localHostContext, String leaderVoteWait, final CurrentCoreDescriptorProvider registerOnReconnect) throws InterruptedException,
+      TimeoutException, IOException {
+    if (cc == null) throw new IllegalArgumentException("CoreContainer cannot be null.");
+    this.cc = cc;
+    if (localHostContext.contains("/")) {
+      throw new IllegalArgumentException("localHostContext ("
+          + localHostContext + ") should not contain a /");
+    }
+    
+    this.zkServerAddress = zkServerAddress;
+    this.localHostPort = locaHostPort;
+    this.localHostContext = localHostContext;
+    this.localHost = getHostAddress(localHost);
+    this.hostName = getHostNameFromAddress(this.localHost);
+    this.nodeName = this.hostName + ':' + this.localHostPort + '_' + this.localHostContext;
+    this.baseURL = this.localHost + ":" + this.localHostPort + "/" + this.localHostContext;
+    this.leaderVoteWait = leaderVoteWait;
+
+    zkClient = new SolrZkClient(zkServerAddress, zkClientTimeout, zkClientConnectTimeout,
+        // on reconnect, reload cloud info
+        new OnReconnect() {
+
+          public void command() {
+            try {
+              // we need to create all of our lost watches
+              
+              // seems we dont need to do this again...
+              //Overseer.createClientNodes(zkClient, getNodeName());
+              ShardHandler shardHandler;
+              String adminPath;
+              shardHandler = cc.getShardHandlerFactory().getShardHandler();
+              adminPath = cc.getAdminPath();
+              ZkController.this.overseer = new Overseer(shardHandler, adminPath, zkStateReader);
+              ElectionContext context = new OverseerElectionContext(zkClient, overseer, getNodeName());
+              overseerElector.joinElection(context);
+              zkStateReader.createClusterStateWatchersAndUpdate();
+              
+              registerAllCoresAsDown(registerOnReconnect);
+              
+
+              // we have to register as live first to pick up docs in the buffer
+              createEphemeralLiveNode();
+              
+              List<CoreDescriptor> descriptors = registerOnReconnect.getCurrentDescriptors();
+              // re register all descriptors
+              if (descriptors  != null) {
+                for (CoreDescriptor descriptor : descriptors) {
+                  // TODO: we need to think carefully about what happens when it was
+                  // a leader that was expired - as well as what to do about leaders/overseers
+                  // with connection loss
+                  try {
+                    register(descriptor.getName(), descriptor, true, true);
+                  } catch (Throwable t) {
+                    SolrException.log(log, "Error registering SolrCore", t);
+                  }
+                }
+              }
+  
+            } catch (InterruptedException e) {
+              // Restore the interrupted status
+              Thread.currentThread().interrupt();
+              throw new ZooKeeperException(
+                  SolrException.ErrorCode.SERVER_ERROR, "", e);
+            } catch (Exception e) {
+              SolrException.log(log, "", e);
+              throw new ZooKeeperException(
+                  SolrException.ErrorCode.SERVER_ERROR, "", e);
+            }
+
+          }
+
+ 
+        });
+    
+    zkClient.getZkClientConnectionStrategy().addDisconnectedListener(new ZkClientConnectionStrategy.DisconnectedListener() {
+      
+      @Override
+      public void disconnected() {
+        List<CoreDescriptor> descriptors = registerOnReconnect.getCurrentDescriptors();
+        // re register all descriptors
+        if (descriptors  != null) {
+          for (CoreDescriptor descriptor : descriptors) {
+            descriptor.getCloudDescriptor().isLeader = false;
+          }
+        }
+      }
+    });
+    
+    zkClient.getZkClientConnectionStrategy().addConnectedListener(new ZkClientConnectionStrategy.ConnectedListener() {
+      
+      @Override
+      public void connected() {
+        List<CoreDescriptor> descriptors = registerOnReconnect.getCurrentDescriptors();
+        if (descriptors  != null) {
+          for (CoreDescriptor descriptor : descriptors) {
+            CloudDescriptor cloudDesc = descriptor.getCloudDescriptor();
+            String leaderUrl;
+            try {
+              leaderUrl = getLeaderProps(cloudDesc.getCollectionName(), cloudDesc.getShardId())
+                  .getCoreUrl();
+            } catch (InterruptedException e) {
+              throw new RuntimeException();
+            }
+            String ourUrl = ZkCoreNodeProps.getCoreUrl(getBaseUrl(), descriptor.getName());
+            boolean isLeader = leaderUrl.equals(ourUrl);
+            log.info("SolrCore connected to ZooKeeper - we are " + ourUrl + " and leader is " + leaderUrl);
+            cloudDesc.isLeader = isLeader;
+          }
+        }
+      }
+    });
+    
+    this.overseerJobQueue = Overseer.getInQueue(zkClient);
+    this.overseerCollectionQueue = Overseer.getCollectionQueue(zkClient);
+    cmdExecutor = new ZkCmdExecutor();
+    leaderElector = new LeaderElector(zkClient);
+    zkStateReader = new ZkStateReader(zkClient);
+    
+    init(registerOnReconnect);
+  }
+

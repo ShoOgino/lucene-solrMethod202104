@@ -3,59 +3,60 @@
     init(12);
 
     //1. Iterate test with the cluster at some worldly point of interest
-    Point[] clusterCenters = new Point[]{new PointImpl(0,0), new PointImpl(0,90),new PointImpl(0,-90)};
+    Point[] clusterCenters = new Point[]{ctx.makePoint(0,0), ctx.makePoint(0,90), ctx.makePoint(0,-90)};
     for (Point clusterCenter : clusterCenters) {
       //2. Iterate on size of cluster (a really small one and a large one)
       String hashCenter = GeohashUtils.encodeLatLon(clusterCenter.getY(), clusterCenter.getX(), maxLength);
       //calculate the number of degrees in the smallest grid box size (use for both lat & lon)
       String smallBox = hashCenter.substring(0,hashCenter.length()-1);//chop off leaf precision
       Rectangle clusterDims = GeohashUtils.decodeBoundary(smallBox,ctx);
-      double smallDegrees = Math.max(clusterDims.getMaxX()-clusterDims.getMinX(),clusterDims.getMaxY()-clusterDims.getMinY());
-      assert smallDegrees < 1;
-      double largeDegrees = 20d;//good large size; don't use >=45 for this test code to work
-      double[] sideDegrees = {largeDegrees,smallDegrees};
-      for (double sideDegree : sideDegrees) {
-        //3. Index random points in this cluster box
+      double smallRadius = Math.max(clusterDims.getMaxX()-clusterDims.getMinX(),clusterDims.getMaxY()-clusterDims.getMinY());
+      assert smallRadius < 1;
+      double largeRadius = 20d;//good large size; don't use >=45 for this test code to work
+      double[] radiusDegs = {largeRadius,smallRadius};
+      for (double radiusDeg : radiusDegs) {
+        //3. Index random points in this cluster circle
         deleteAll();
         List<Point> points = new ArrayList<Point>();
         for(int i = 0; i < 20; i++) {
-          double x = random().nextDouble()*sideDegree - sideDegree/2 + clusterCenter.getX();
-          double y = random().nextDouble()*sideDegree - sideDegree/2 + clusterCenter.getY();
-          final Point pt = normPointXY(x, y);
+          //Note that this will not result in randomly distributed points in the
+          // circle, they will be concentrated towards the center a little. But
+          // it's good enough.
+          Point pt = ctx.getDistCalc().pointOnBearing(clusterCenter,
+              random().nextDouble() * radiusDeg, random().nextInt() * 360, ctx, null);
+          pt = alignGeohash(pt);
           points.add(pt);
           addDocument(newDoc("" + i, pt));
         }
         commit();
 
-        //3. Use 4 query centers. Each is radially out from each corner of cluster box by twice distance to box edge.
-        for(double qcXoff : new double[]{sideDegree,-sideDegree}) {//query-center X offset from cluster center
-          for(double qcYoff : new double[]{sideDegree,-sideDegree}) {//query-center Y offset from cluster center
-            Point queryCenter = normPointXY(qcXoff + clusterCenter.getX(),
-                qcYoff + clusterCenter.getY());
-            double[] distRange = calcDistRange(queryCenter,clusterCenter,sideDegree);
-            //4.1 query a small box getting nothing
-            checkHits(q(queryCenter, distRange[0]*0.99), 0, null);
-            //4.2 Query a large box enclosing the cluster, getting everything
-            checkHits(q(queryCenter, distRange[1]*1.01), points.size(), null);
-            //4.3 Query a medium box getting some (calculate the correct solution and verify)
-            double queryDist = distRange[0] + (distRange[1]-distRange[0])/2;//average
+        //3. Use some query centers. Each is twice the cluster's radius away.
+        for(int ri = 0; ri < 4; ri++) {
+          Point queryCenter = ctx.getDistCalc().pointOnBearing(clusterCenter,
+              radiusDeg*2, random().nextInt() * 360, ctx, null);
+          queryCenter = alignGeohash(queryCenter);
+          //4.1 Query a small box getting nothing
+          checkHits(q(queryCenter, radiusDeg*0.99), 0, null);
+          //4.2 Query a large box enclosing the cluster, getting everything
+          checkHits(q(queryCenter, radiusDeg*3*1.01), points.size(), null);
+          //4.3 Query a medium box getting some (calculate the correct solution and verify)
+          double queryDist = radiusDeg * 2;
 
-            //Find matching points.  Put into int[] of doc ids which is the same thing as the index into points list.
-            int[] ids = new int[points.size()];
-            int ids_sz = 0;
-            for (int i = 0; i < points.size(); i++) {
-              Point point = points.get(i);
-              if (ctx.getDistCalc().distance(queryCenter, point) <= queryDist)
-                ids[ids_sz++] = i;
-            }
-            ids = Arrays.copyOf(ids, ids_sz);
-            //assert ids_sz > 0 (can't because randomness keeps us from being able to)
-
-            checkHits(q(queryCenter, queryDist), ids.length, ids);
+          //Find matching points.  Put into int[] of doc ids which is the same thing as the index into points list.
+          int[] ids = new int[points.size()];
+          int ids_sz = 0;
+          for (int i = 0; i < points.size(); i++) {
+            Point point = points.get(i);
+            if (ctx.getDistCalc().distance(queryCenter, point) <= queryDist)
+              ids[ids_sz++] = i;
           }
+          ids = Arrays.copyOf(ids, ids_sz);
+          //assert ids_sz > 0 (can't because randomness keeps us from being able to)
+
+          checkHits(q(queryCenter, queryDist), ids.length, ids);
         }
 
-      }//for sideDegree
+      }//for radiusDeg
 
     }//for clusterCenter
 

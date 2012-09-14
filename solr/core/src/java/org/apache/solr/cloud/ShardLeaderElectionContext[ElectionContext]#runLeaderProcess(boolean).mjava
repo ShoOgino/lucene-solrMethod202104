@@ -1,7 +1,7 @@
   @Override
   void runLeaderProcess(boolean weAreReplacement) throws KeeperException,
       InterruptedException, IOException {
-    log.info("Running the leader process. afterExpiration=" + afterExpiration);
+    log.info("Running the leader process.");
     
     String coreName = leaderProps.getStr(ZkStateReader.CORE_NAME_PROP);
     
@@ -12,7 +12,7 @@
     Overseer.getInQueue(zkClient).offer(ZkStateReader.toJSON(m));
     
     String leaderVoteWait = cc.getZkController().getLeaderVoteWait();
-    if (leaderVoteWait != null) {
+    if (!weAreReplacement && leaderVoteWait != null) {
       waitForReplicasToComeUp(weAreReplacement, leaderVoteWait);
     }
     
@@ -30,41 +30,58 @@
       
       // should I be leader?
       if (weAreReplacement && !shouldIBeLeader(leaderProps, core)) {
-        // System.out.println("there is a better leader candidate it appears");
         rejoinLeaderElection(leaderSeqPath, core);
         return;
       }
       
-      if (weAreReplacement) {
-        log.info("I may be the new leader - try and sync");
-        // we are going to attempt to be the leader
-        // first cancel any current recovery
-        core.getUpdateHandler().getSolrCoreState().cancelRecovery();
-        boolean success = syncStrategy.sync(zkController, core, leaderProps);
-        // solrcloud_debug
-        // try {
-        // RefCounted<SolrIndexSearcher> searchHolder =
-        // core.getNewestSearcher(false);
-        // SolrIndexSearcher searcher = searchHolder.get();
-        // try {
-        // System.out.println(core.getCoreDescriptor().getCoreContainer().getZkController().getNodeName()
-        // + " synched "
-        // + searcher.search(new MatchAllDocsQuery(), 1).totalHits);
-        // } finally {
-        // searchHolder.decref();
-        // }
-        // } catch (Exception e) {
-        //
-        // }
-        if (!success && anyoneElseActive()) {
-          rejoinLeaderElection(leaderSeqPath, core);
-          return;
-        }
+      log.info("I may be the new leader - try and sync");
+      // we are going to attempt to be the leader
+      // first cancel any current recovery
+      core.getUpdateHandler().getSolrCoreState().cancelRecovery();
+      boolean success = false;
+      try {
+        success = syncStrategy.sync(zkController, core, leaderProps);
+      } catch (Throwable t) {
+        SolrException.log(log, "Exception while trying to sync", t);
+        success = false;
       }
       
+      // if !success but no one else is in active mode,
+      // we are the leader anyway
+      // TODO: should we also be leader if there is only one other active?
+      // if we couldn't sync with it, it shouldn't be able to sync with us
+      // TODO: this needs to be moved to the election context - the logic does
+      // not belong here.
+      if (!success
+          && !areAnyOtherReplicasActive(zkController, leaderProps, collection,
+              shardId)) {
+        log.info("Sync was not a success but no one else is active! I am the leader");
+        success = true;
+      }
+      
+      // solrcloud_debug
+      // try {
+      // RefCounted<SolrIndexSearcher> searchHolder =
+      // core.getNewestSearcher(false);
+      // SolrIndexSearcher searcher = searchHolder.get();
+      // try {
+      // System.out.println(core.getCoreDescriptor().getCoreContainer().getZkController().getNodeName()
+      // + " synched "
+      // + searcher.search(new MatchAllDocsQuery(), 1).totalHits);
+      // } finally {
+      // searchHolder.decref();
+      // }
+      // } catch (Exception e) {
+      //
+      // }
+      if (!success) {
+        rejoinLeaderElection(leaderSeqPath, core);
+        return;
+      }
+
       log.info("I am the new leader: "
           + ZkCoreNodeProps.getCoreUrl(leaderProps));
-      
+      core.getCoreDescriptor().getCloudDescriptor().isLeader = true;
     } finally {
       if (core != null) {
         core.close();
@@ -74,31 +91,16 @@
     try {
       super.runLeaderProcess(weAreReplacement);
     } catch (Throwable t) {
-      cancelElection();
       try {
         core = cc.getCore(coreName);
         core.getCoreDescriptor().getCloudDescriptor().isLeader = false;
-        if (!cc.isShutDown()) {
-          // we could not publish ourselves as leader - rejoin election
-          rejoinLeaderElection(coreName, core);
-        }
+        
+        // we could not publish ourselves as leader - rejoin election
+        rejoinLeaderElection(coreName, core);
       } finally {
         if (core != null) {
           core.close();
         }
-      }
-      
-    }
-    
-    try {
-      core = cc.getCore(coreName);
-      // we do this after the above super. call so that we don't
-      // briefly think we are the leader and then end up not being
-      // able to publish that we are the leader.
-      core.getCoreDescriptor().getCloudDescriptor().isLeader = true;
-    } finally {
-      if (core != null) {
-        core.close();
       }
     }
     

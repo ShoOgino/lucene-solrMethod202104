@@ -30,13 +30,19 @@
     this.nodeName = this.hostName + ':' + this.localHostPort + '_' + this.localHostContext;
     this.baseURL = this.localHost + ":" + this.localHostPort + "/" + this.localHostContext;
     this.leaderVoteWait = leaderVoteWait;
-
+    this.clientTimeout = zkClientTimeout;
     zkClient = new SolrZkClient(zkServerAddress, zkClientTimeout, zkClientConnectTimeout,
         // on reconnect, reload cloud info
         new OnReconnect() {
 
           public void command() {
             try {
+              markAllAsNotLeader(registerOnReconnect);
+              
+              // this is troublesome - we dont want to kill anything the old leader accepted
+              // though I guess sync will likely get those updates back? But only if
+              // he is involved in the sync, and he certainly may not be
+            //  ExecutorUtil.shutdownAndAwaitTermination(cc.getCmdDistribExecutor());
               // we need to create all of our lost watches
               
               // seems we dont need to do this again...
@@ -45,16 +51,18 @@
               String adminPath;
               shardHandler = cc.getShardHandlerFactory().getShardHandler();
               adminPath = cc.getAdminPath();
-              ExecutorUtil.shutdownAndAwaitTermination(cc.getCmdDistribExecutor());
-              cc.newCmdDistribExecutor();
+
+              cc.cancelCoreRecoveries();
+              
+              registerAllCoresAsDown(registerOnReconnect, false);
+
               ZkController.this.overseer = new Overseer(shardHandler, adminPath, zkStateReader);
               ElectionContext context = new OverseerElectionContext(zkClient, overseer, getNodeName());
               overseerElector.joinElection(context);
               zkStateReader.createClusterStateWatchersAndUpdate();
-              
-              registerAllCoresAsDown(registerOnReconnect);
-              
 
+            //  cc.newCmdDistribExecutor();
+              
               // we have to register as live first to pick up docs in the buffer
               createEphemeralLiveNode();
               

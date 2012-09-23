@@ -1,0 +1,82 @@
+  FST<T> doTest(int prune1, int prune2, boolean allowRandomSuffixSharing) throws IOException {
+    if (LuceneTestCase.VERBOSE) {
+      System.out.println("\nTEST: prune1=" + prune1 + " prune2=" + prune2);
+    }
+
+    final boolean willRewrite = random.nextBoolean();
+
+    final Builder<T> builder = new Builder<T>(inputMode == 0 ? FST.INPUT_TYPE.BYTE1 : FST.INPUT_TYPE.BYTE4,
+                                              prune1, prune2,
+                                              prune1==0 && prune2==0,
+                                              allowRandomSuffixSharing ? random.nextBoolean() : true,
+                                              allowRandomSuffixSharing ? _TestUtil.nextInt(random, 1, 10) : Integer.MAX_VALUE,
+                                              outputs,
+                                              null,
+                                              willRewrite);
+
+    for(InputOutput<T> pair : pairs) {
+      if (pair.output instanceof List) {
+        @SuppressWarnings("unchecked") List<Long> longValues = (List<Long>) pair.output;
+        @SuppressWarnings("unchecked") final Builder<Object> builderObject = (Builder<Object>) builder;
+        for(Long value : longValues) {
+          builderObject.add(pair.input, value);
+        }
+      } else {
+        builder.add(pair.input, pair.output);
+      }
+    }
+    FST<T> fst = builder.finish();
+
+    if (random.nextBoolean() && fst != null && !willRewrite) {
+      IOContext context = LuceneTestCase.newIOContext(random);
+      IndexOutput out = dir.createOutput("fst.bin", context);
+      fst.save(out);
+      out.close();
+      IndexInput in = dir.openInput("fst.bin", context);
+      try {
+        fst = new FST<T>(in, outputs);
+      } finally {
+        in.close();
+        dir.deleteFile("fst.bin");
+      }
+    }
+
+    if (LuceneTestCase.VERBOSE && pairs.size() <= 20 && fst != null) {
+      Writer w = new OutputStreamWriter(new FileOutputStream("out.dot"), "UTF-8");
+      Util.toDot(fst, w, false, false);
+      w.close();
+      System.out.println("SAVED out.dot");
+    }
+
+    if (LuceneTestCase.VERBOSE) {
+      if (fst == null) {
+        System.out.println("  fst has 0 nodes (fully pruned)");
+      } else {
+        System.out.println("  fst has " + fst.getNodeCount() + " nodes and " + fst.getArcCount() + " arcs");
+      }
+    }
+
+    if (prune1 == 0 && prune2 == 0) {
+      verifyUnPruned(inputMode, fst);
+    } else {
+      verifyPruned(inputMode, fst, prune1, prune2);
+    }
+
+    if (willRewrite && fst != null) {
+      if (LuceneTestCase.VERBOSE) {
+        System.out.println("TEST: now rewrite");
+      }
+      final FST<T> packed = fst.pack(_TestUtil.nextInt(random, 1, 10), _TestUtil.nextInt(random, 0, 10000000), random.nextFloat());
+      if (LuceneTestCase.VERBOSE) {
+        System.out.println("TEST: now verify packed FST");
+      }
+      if (prune1 == 0 && prune2 == 0) {
+        verifyUnPruned(inputMode, packed);
+      } else {
+        verifyPruned(inputMode, packed, prune1, prune2);
+      }
+    }
+
+    return fst;
+  }
+

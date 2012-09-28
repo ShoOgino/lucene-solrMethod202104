@@ -1,0 +1,156 @@
+  @Override
+  public void build(TermFreqIterator iterator) throws IOException {
+    String prefix = getClass().getSimpleName();
+    File directory = Sort.defaultTempDir();
+    File tempInput = File.createTempFile(prefix, ".input", directory);
+    File tempSorted = File.createTempFile(prefix, ".sorted", directory);
+    
+    Sort.ByteSequencesWriter writer = new Sort.ByteSequencesWriter(tempInput);
+    Sort.ByteSequencesReader reader = null;
+    BytesRef scratch = new BytesRef();
+
+    TokenStreamToAutomaton ts2a = new EscapingTokenStreamToAutomaton();
+
+    // analyzed sequence + 0(byte) + weight(int) + surface + analyzedLength(short) 
+    boolean success = false;
+    byte buffer[] = new byte[8];
+    try {
+      ByteArrayDataOutput output = new ByteArrayDataOutput(buffer);
+      BytesRef surfaceForm;
+      while ((surfaceForm = iterator.next()) != null) {
+
+        // Analyze surface form:
+        TokenStream ts = indexAnalyzer.tokenStream("", new StringReader(surfaceForm.utf8ToString()));
+
+        // Create corresponding automaton: labels are bytes
+        // from each analyzed token, with byte 0 used as
+        // separator between tokens:
+        Automaton automaton = ts2a.toAutomaton(ts);
+        ts.end();
+        ts.close();
+
+        replaceSep(automaton);
+
+        assert SpecialOperations.isFinite(automaton);
+
+        // Get all paths from the automaton (there can be
+        // more than one path, eg if the analyzer created a
+        // graph using SynFilter or WDF):
+
+        // TODO: we could walk & add simultaneously, so we
+        // don't have to alloc [possibly biggish]
+        // intermediate HashSet in RAM:
+        Set<IntsRef> paths = SpecialOperations.getFiniteStrings(automaton, maxGraphExpansions);
+        for (IntsRef path : paths) {
+
+          Util.toBytesRef(path, scratch);
+          
+          // length of the analyzed text (FST input)
+          short analyzedLength = (short) scratch.length;
+          // compute the required length:
+          // analyzed sequence + 12 (separator) + weight (4) + surface + analyzedLength (short)
+          int requiredLength = analyzedLength + 2 + 4 + surfaceForm.length + 2;
+          
+          buffer = ArrayUtil.grow(buffer, requiredLength);
+          
+          output.reset(buffer);
+          output.writeBytes(scratch.bytes, scratch.offset, scratch.length);
+          output.writeByte((byte)0); // separator: not used, just for sort order
+          output.writeByte((byte)0); // separator: not used, just for sort order
+
+          // NOTE: important that writeInt is big-endian,
+          // because this means we sort secondarily by
+          // cost ascending (= weight descending) so that
+          // when we discard too many surface forms for a
+          // single analyzed form we are discarding the
+          // least weight ones:
+          output.writeInt(encodeWeight(iterator.weight()));
+
+          output.writeBytes(surfaceForm.bytes, surfaceForm.offset, surfaceForm.length);
+          output.writeShort(analyzedLength);
+          writer.write(buffer, 0, output.getPosition());
+        }
+      }
+      writer.close();
+
+      // Sort all input/output pairs (required by FST.Builder):
+      new Sort().sort(tempInput, tempSorted);
+      reader = new Sort.ByteSequencesReader(tempSorted);
+     
+      PairOutputs<Long,BytesRef> outputs = new PairOutputs<Long,BytesRef>(PositiveIntOutputs.getSingleton(true), ByteSequenceOutputs.getSingleton());
+      Builder<Pair<Long,BytesRef>> builder = new Builder<Pair<Long,BytesRef>>(FST.INPUT_TYPE.BYTE1, outputs);
+
+      // Build FST:
+      BytesRef previous = null;
+      BytesRef analyzed = new BytesRef();
+      BytesRef surface = new BytesRef();
+      IntsRef scratchInts = new IntsRef();
+      ByteArrayDataInput input = new ByteArrayDataInput();
+
+      int dedup = 0;
+      while (reader.read(scratch)) {
+        input.reset(scratch.bytes, scratch.offset, scratch.length);
+        input.setPosition(input.length()-2);
+        short analyzedLength = input.readShort();
+
+        analyzed.bytes = scratch.bytes;
+        analyzed.offset = scratch.offset;
+        analyzed.length = analyzedLength;
+        
+        input.setPosition(analyzedLength + 2); // analyzed sequence + separator
+        long cost = input.readInt();
+   
+        surface.bytes = scratch.bytes;
+        surface.offset = input.getPosition();
+        surface.length = input.length() - input.getPosition() - 2;
+
+        if (previous == null) {
+          previous = new BytesRef();
+          previous.copyBytes(analyzed);
+        } else if (analyzed.equals(previous)) {
+          dedup++;
+          if (dedup >= maxSurfaceFormsPerAnalyzedForm) {
+            // More than maxSurfaceFormsPerAnalyzedForm
+            // dups: skip the rest:
+            continue;
+          }
+        } else {
+          dedup = 0;
+          previous.copyBytes(analyzed);
+        }
+
+        analyzed.grow(analyzed.length+2);
+
+        // TODO: I think we can avoid the extra 2 bytes when
+        // there is no dup (dedup==0), but we'd have to fix
+        // the exactFirst logic ... which would be sort of
+        // hairy because we'd need to special case the two
+        // (dup/not dup)...
+
+        // NOTE: must be byte 0 so we sort before whatever
+        // is next
+        analyzed.bytes[analyzed.length] = 0;
+        analyzed.bytes[analyzed.length+1] = (byte) dedup;
+        analyzed.length += 2;
+
+        Util.toIntsRef(analyzed, scratchInts);
+        //System.out.println("ADD: " + scratchInts + " -> " + cost + ": " + surface.utf8ToString());
+        builder.add(scratchInts, outputs.newPair(cost, BytesRef.deepCopyOf(surface)));
+      }
+      fst = builder.finish();
+
+      //Util.dotToFile(fst, "/tmp/suggest.dot");
+      
+      success = true;
+    } finally {
+      if (success) {
+        IOUtils.close(reader, writer);
+      } else {
+        IOUtils.closeWhileHandlingException(reader, writer);
+      }
+      
+      tempInput.delete();
+      tempSorted.delete();
+    }
+  }
+

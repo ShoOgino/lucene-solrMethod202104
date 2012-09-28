@@ -1,0 +1,88 @@
+  /** Pulls the graph (including {@link
+   *  PositionLengthAttribute}) from the provided {@link
+   *  TokenStream}, and creates the corresponding
+   *  automaton where arcs are bytes from each term. */
+  public Automaton toAutomaton(TokenStream in) throws IOException {
+    final Automaton a = new Automaton();
+
+    final TermToBytesRefAttribute termBytesAtt = in.addAttribute(TermToBytesRefAttribute.class);
+    final PositionIncrementAttribute posIncAtt = in.addAttribute(PositionIncrementAttribute.class);
+    final PositionLengthAttribute posLengthAtt = in.addAttribute(PositionLengthAttribute.class);
+    final BytesRef term = termBytesAtt.getBytesRef();
+
+    in.reset();
+
+    // Only temporarily holds states ahead of our current
+    // position:
+
+    final RollingBuffer<Position> positions = new Positions();
+
+    int pos = -1;
+    Position posData = null;
+
+    while (in.incrementToken()) {
+      int posInc = posIncAtt.getPositionIncrement();
+      assert pos > -1 || posInc > 0;
+
+      if (posInc > 0) {
+
+        // New node:
+        pos += posInc;
+
+        posData = positions.get(pos);
+        assert posData.leaving == null;
+
+        if (posData.arriving == null) {
+          // No token ever arrived to this position
+          if (pos == 0) {
+            // OK: this is the first token
+            posData.leaving = a.getInitialState();
+          } else {
+            // This means there's a hole (eg, StopFilter
+            // does this):
+            posData.leaving = new State();
+            addHoles(a.getInitialState(), positions, pos);
+          }
+        } else {
+          posData.leaving = new State();
+          posData.arriving.addTransition(new Transition(POS_SEP, posData.leaving));
+          if (posInc > 1) {
+            // A token spanned over a hole; add holes
+            // "under" it:
+            addHoles(a.getInitialState(), positions, pos);
+          }
+        }
+        positions.freeBefore(pos);
+      }
+
+      final int endPos = pos + posLengthAtt.getPositionLength();
+
+      termBytesAtt.fillBytesRef();
+      final BytesRef term2 = changeToken(term);
+      final Position endPosData = positions.get(endPos);
+      if (endPosData.arriving == null) {
+        endPosData.arriving = new State();
+      }
+
+      State state = posData.leaving;
+      for(int byteIDX=0;byteIDX<term2.length;byteIDX++) {
+        final State nextState = byteIDX == term2.length-1 ? endPosData.arriving : new State();
+        state.addTransition(new Transition(term2.bytes[term2.offset + byteIDX] & 0xff, nextState));
+        state = nextState;
+      }
+    }
+
+    pos++;
+    while (pos <= positions.getMaxPos()) {
+      posData = positions.get(pos);
+      if (posData.arriving != null) {
+        posData.arriving.setAccept(true);
+      }
+      pos++;
+    }
+
+    //toDot(a);
+
+    return a;
+  }
+

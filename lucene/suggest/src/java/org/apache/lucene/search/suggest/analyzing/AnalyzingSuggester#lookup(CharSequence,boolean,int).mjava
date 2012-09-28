@@ -1,0 +1,151 @@
+  @Override
+  public List<LookupResult> lookup(final CharSequence key, boolean onlyMorePopular, int num) {
+    assert num > 0;
+
+    //System.out.println("lookup key=" + key + " num=" + num);
+
+    try {
+
+      // TODO: is there a Reader from a CharSequence?
+      // Turn tokenstream into automaton:
+      TokenStream ts = queryAnalyzer.tokenStream("", new StringReader(key.toString()));
+      Automaton automaton = (new EscapingTokenStreamToAutomaton()).toAutomaton(ts);
+      ts.end();
+      ts.close();
+
+      // TODO: we could use the end offset to "guess"
+      // whether the final token was a partial token; this
+      // would only be a heuristic ... but maybe an OK one.
+      // This way we could eg differentiate "net" from "net ",
+      // which we can't today...
+
+      replaceSep(automaton);
+
+      // TODO: we can optimize this somewhat by determinizing
+      // while we convert
+      automaton = Automaton.minimize(automaton);
+
+      final CharsRef spare = new CharsRef();
+
+      //System.out.println("  now intersect exactFirst=" + exactFirst);
+    
+      // Intersect automaton w/ suggest wFST and get all
+      // prefix starting nodes & their outputs:
+      final List<FSTUtil.Path<Pair<Long,BytesRef>>> prefixPaths;
+      prefixPaths = FSTUtil.intersectPrefixPaths(automaton, fst);
+
+      //System.out.println("  prefixPaths: " + prefixPaths.size());
+
+      BytesReader bytesReader = fst.getBytesReader(0);
+
+      FST.Arc<Pair<Long,BytesRef>> scratchArc = new FST.Arc<Pair<Long,BytesRef>>();
+
+      List<LookupResult> results = new ArrayList<LookupResult>();
+
+      if (exactFirst) {
+
+        Util.TopNSearcher<Pair<Long,BytesRef>> searcher;
+        searcher = new Util.TopNSearcher<Pair<Long,BytesRef>>(fst, num, weightComparator);
+
+        int count = 0;
+        for (FSTUtil.Path<Pair<Long,BytesRef>> path : prefixPaths) {
+          if (fst.findTargetArc(END_BYTE, path.fstNode, scratchArc, bytesReader) != null) {
+            // This node has END_BYTE arc leaving, meaning it's an
+            // "exact" match:
+            count++;
+          }
+        }
+
+        searcher = new Util.TopNSearcher<Pair<Long,BytesRef>>(fst, count * maxSurfaceFormsPerAnalyzedForm, weightComparator);
+
+        // NOTE: we could almost get away with only using
+        // the first start node.  The only catch is if
+        // maxSurfaceFormsPerAnalyzedForm had kicked in and
+        // pruned our exact match from one of these nodes
+        // ...:
+        for (FSTUtil.Path<Pair<Long,BytesRef>> path : prefixPaths) {
+          if (fst.findTargetArc(END_BYTE, path.fstNode, scratchArc, bytesReader) != null) {
+            // This node has END_BYTE arc leaving, meaning it's an
+            // "exact" match:
+            searcher.addStartPaths(scratchArc, fst.outputs.add(path.output, scratchArc.output), false, path.input);
+          }
+        }
+
+        MinResult<Pair<Long,BytesRef>> completions[] = searcher.search();
+
+        // NOTE: this is rather inefficient: we enumerate
+        // every matching "exactly the same analyzed form"
+        // path, and then do linear scan to see if one of
+        // these exactly matches the input.  It should be
+        // possible (though hairy) to do something similar
+        // to getByOutput, since the surface form is encoded
+        // into the FST output, so we more efficiently hone
+        // in on the exact surface-form match.  Still, I
+        // suspect very little time is spent in this linear
+        // seach: it's bounded by how many prefix start
+        // nodes we have and the
+        // maxSurfaceFormsPerAnalyzedForm:
+        for(MinResult<Pair<Long,BytesRef>> completion : completions) {
+          spare.grow(completion.output.output2.length);
+          UnicodeUtil.UTF8toUTF16(completion.output.output2, spare);
+          if (CHARSEQUENCE_COMPARATOR.compare(spare, key) == 0) {
+            results.add(new LookupResult(spare.toString(), decodeWeight(completion.output.output1)));
+            break;
+          }
+        }
+
+        if (results.size() == num) {
+          // That was quick:
+          return results;
+        }
+      }
+
+      Util.TopNSearcher<Pair<Long,BytesRef>> searcher;
+      searcher = new Util.TopNSearcher<Pair<Long,BytesRef>>(fst,
+                                                            num - results.size(),
+                                                            weightComparator) {
+        private final Set<BytesRef> seen = new HashSet<BytesRef>();
+
+        @Override
+        protected boolean acceptResult(IntsRef input, Pair<Long,BytesRef> output) {
+          
+          // Dedup: when the input analyzes to a graph we
+          // can get duplicate surface forms:
+          if (seen.contains(output.output2)) {
+            return false;
+          }
+          seen.add(output.output2);
+          
+          if (!exactFirst) {
+            return true;
+          } else {
+            // In exactFirst mode, don't accept any paths
+            // matching the surface form since that will
+            // create duplicate results:
+            spare.grow(output.output2.length);
+            UnicodeUtil.UTF8toUTF16(output.output2, spare);
+            return CHARSEQUENCE_COMPARATOR.compare(spare, key) != 0;
+          }
+        }
+      };
+
+      for (FSTUtil.Path<Pair<Long,BytesRef>> path : prefixPaths) {
+        searcher.addStartPaths(path.fstNode, path.output, true, path.input);
+      }
+
+      MinResult<Pair<Long,BytesRef>> completions[] = searcher.search();
+
+      for(MinResult<Pair<Long,BytesRef>> completion : completions) {
+        spare.grow(completion.output.output2.length);
+        UnicodeUtil.UTF8toUTF16(completion.output.output2, spare);
+        LookupResult result = new LookupResult(spare.toString(), decodeWeight(completion.output.output1));
+        //System.out.println("    result=" + result);
+        results.add(result);
+      }
+
+      return results;
+    } catch (IOException bogus) {
+      throw new RuntimeException(bogus);
+    }
+  }
+

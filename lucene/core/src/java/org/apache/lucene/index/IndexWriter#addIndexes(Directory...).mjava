@@ -55,31 +55,62 @@
       flush(false, true);
 
       List<SegmentInfoPerCommit> infos = new ArrayList<SegmentInfoPerCommit>();
-      for (Directory dir : dirs) {
-        if (infoStream.isEnabled("IW")) {
-          infoStream.message("IW", "addIndexes: process directory " + dir);
-        }
-        SegmentInfos sis = new SegmentInfos(); // read infos from dir
-        sis.read(dir);
 
-        for (SegmentInfoPerCommit info : sis) {
-          assert !infos.contains(info): "dup info dir=" + info.info.dir + " name=" + info.info.name;
-
-          String newSegName = newSegmentName();
-          String dsName = info.info.name;
-
+      boolean success = false;
+      try {
+        for (Directory dir : dirs) {
           if (infoStream.isEnabled("IW")) {
-            infoStream.message("IW", "addIndexes: process segment origName=" + info.info.name + " newName=" + newSegName + " dsName=" + dsName + " info=" + info);
+            infoStream.message("IW", "addIndexes: process directory " + dir);
           }
+          SegmentInfos sis = new SegmentInfos(); // read infos from dir
+          sis.read(dir);
 
-          IOContext context = new IOContext(new MergeInfo(info.info.getDocCount(), info.info.sizeInBytes(), true, -1));
+          for (SegmentInfoPerCommit info : sis) {
+            assert !infos.contains(info): "dup info dir=" + info.info.dir + " name=" + info.info.name;
+
+            String newSegName = newSegmentName();
+            String dsName = info.info.name;
+
+            if (infoStream.isEnabled("IW")) {
+              infoStream.message("IW", "addIndexes: process segment origName=" + info.info.name + " newName=" + newSegName + " dsName=" + dsName + " info=" + info);
+            }
+
+            IOContext context = new IOContext(new MergeInfo(info.info.getDocCount(), info.info.sizeInBytes(), true, -1));
           
-          infos.add(copySegmentAsIs(info, newSegName, context));
+            infos.add(copySegmentAsIs(info, newSegName, context));
+          }
+        }
+        success = true;
+      } finally {
+        if (!success) {
+          for(SegmentInfoPerCommit sipc : infos) {
+            for(String file : sipc.files()) {
+              try {
+                directory.deleteFile(file);
+              } catch (Throwable t) {
+              }
+            }
+          }
         }
       }
 
       synchronized (this) {
-        ensureOpen();
+        success = false;
+        try {
+          ensureOpen();
+          success = true;
+        } finally {
+          if (!success) {
+            for(SegmentInfoPerCommit sipc : infos) {
+              for(String file : sipc.files()) {
+                try {
+                  directory.deleteFile(file);
+                } catch (Throwable t) {
+                }
+              }
+            }
+          }
+        }
         segmentInfos.addAll(infos);
         checkpoint();
       }

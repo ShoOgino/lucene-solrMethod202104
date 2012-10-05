@@ -1,0 +1,63 @@
+  /**
+   * Uncompress at least <code>uncompressedLen</code> bytes into <code>destBytes</code>.
+   * Please note that <code>destBytes</code> must be large enough to be able to hold
+   * <b>all</b> uncompressed data plus 8 bytes (meaning that you need to know the total
+   * uncompressed length).
+   */
+  public static void uncompress(DataInput compressed, int uncompressedLen, BytesRef destBytes) throws IOException {
+    final byte[] dest = destBytes.bytes;
+    final int destEnd = dest.length;
+    int dOff = 0;
+
+    while (dOff < uncompressedLen) {
+      // literals
+      final int token = compressed.readByte() & 0xFF;
+      int literalLen = token >>> 4;
+
+      if (literalLen != 0) {
+        if (literalLen == 0x0F) {
+          byte len;
+          while ((len = compressed.readByte()) == (byte) 0xFF) {
+            literalLen += 0xFF;
+          }
+          literalLen += len & 0xFF;
+        }
+        compressed.readBytes(dest, dOff, literalLen);
+        dOff += literalLen;
+      }
+
+      if (dOff >= uncompressedLen) {
+        break;
+      }
+
+      // matchs
+      final int matchDec = (compressed.readByte() & 0xFF) | ((compressed.readByte() & 0xFF) << 8);
+      assert matchDec > 0;
+
+      int matchLen = token & 0x0F;
+      if (matchLen == 0x0F) {
+        int len;
+        while ((len = compressed.readByte()) == (byte) 0xFF) {
+          matchLen += 0xFF;
+        }
+        matchLen += len & 0xFF;
+      }
+      matchLen += MIN_MATCH;
+
+      // copying a multiple of 8 bytes can make uncompression from 5% to 10% faster
+      final int fastLen = ((matchLen - 1) & 0xFFFFFFF8) + 8;
+      if (matchDec < matchLen || dOff + fastLen > destEnd) {
+        // overlap -> naive incremental copy
+        for (int ref = dOff - matchDec, end = dOff + matchLen; dOff < end; ++ref, ++dOff) {
+          dest[dOff] = dest[ref];
+        }
+      } else {
+        // no overlap -> arraycopy
+        System.arraycopy(dest, dOff - matchDec, dest, dOff, fastLen);
+        dOff += matchLen;
+      }
+    }
+    destBytes.offset = 0;
+    destBytes.length = dOff;
+  }
+

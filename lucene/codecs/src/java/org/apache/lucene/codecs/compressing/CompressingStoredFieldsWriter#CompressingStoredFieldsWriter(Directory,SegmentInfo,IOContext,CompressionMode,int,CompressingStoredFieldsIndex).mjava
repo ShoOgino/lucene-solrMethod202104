@@ -1,0 +1,39 @@
+  public CompressingStoredFieldsWriter(Directory directory, SegmentInfo si,
+      IOContext context, CompressionMode compressionMode, int chunkSize, CompressingStoredFieldsIndex storedFieldsIndex) throws IOException {
+    assert directory != null;
+    this.directory = directory;
+    this.segment = si.name;
+    this.compressionMode = compressionMode;
+    this.compressor = compressionMode.newCompressor();
+    this.chunkSize = chunkSize;
+    this.docBase = 0;
+    this.bufferedDocs = new GrowableByteArrayDataOutput(chunkSize);
+    this.endOffsets = new int[16];
+    this.numBufferedDocs = 0;
+
+    boolean success = false;
+    IndexOutput indexStream = directory.createOutput(IndexFileNames.segmentFileName(segment, "", FIELDS_INDEX_EXTENSION), context);
+    try {
+      fieldsStream = directory.createOutput(IndexFileNames.segmentFileName(segment, "", FIELDS_EXTENSION), context);
+
+      CodecUtil.writeHeader(indexStream, CODEC_NAME_IDX, VERSION_CURRENT);
+      CodecUtil.writeHeader(fieldsStream, CODEC_NAME_DAT, VERSION_CURRENT);
+      assert HEADER_LENGTH_IDX == indexStream.getFilePointer();
+      assert HEADER_LENGTH_DAT == fieldsStream.getFilePointer();
+
+      indexStream.writeVInt(storedFieldsIndex.getId());
+      indexWriter = storedFieldsIndex.newWriter(indexStream);
+      indexStream = null;
+
+      fieldsStream.writeVInt(PackedInts.VERSION_CURRENT);
+      fieldsStream.writeVInt(compressionMode.getId());
+
+      success = true;
+    } finally {
+      if (!success) {
+        IOUtils.closeWhileHandlingException(indexStream);
+        abort();
+      }
+    }
+  }
+

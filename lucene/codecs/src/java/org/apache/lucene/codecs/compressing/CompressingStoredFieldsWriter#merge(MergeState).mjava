@@ -1,0 +1,85 @@
+  @Override
+  public int merge(MergeState mergeState) throws IOException {
+    int docCount = 0;
+    int idx = 0;
+
+    for (AtomicReader reader : mergeState.readers) {
+      final SegmentReader matchingSegmentReader = mergeState.matchingSegmentReaders[idx++];
+      CompressingStoredFieldsReader matchingFieldsReader = null;
+      if (matchingSegmentReader != null) {
+        final StoredFieldsReader fieldsReader = matchingSegmentReader.getFieldsReader();
+        // we can only bulk-copy if the matching reader is also a CompressingStoredFieldsReader
+        if (fieldsReader != null && fieldsReader instanceof CompressingStoredFieldsReader) {
+          matchingFieldsReader = (CompressingStoredFieldsReader) fieldsReader;
+        }
+      }
+
+      final int maxDoc = reader.maxDoc();
+      final Bits liveDocs = reader.getLiveDocs();
+
+      if (matchingFieldsReader == null) {
+        // naive merge...
+        for (int i = nextLiveDoc(0, liveDocs, maxDoc); i < maxDoc; i = nextLiveDoc(i + 1, liveDocs, maxDoc)) {
+          StoredDocument doc = reader.document(i);
+          addDocument(doc, mergeState.fieldInfos);
+          ++docCount;
+          mergeState.checkAbort.work(300);
+        }
+      } else {
+        int docID = nextLiveDoc(0, liveDocs, maxDoc);
+        if (docID < maxDoc) {
+          // not all docs were deleted
+          final ChunkIterator it = matchingFieldsReader.chunkIterator(docID);
+          int[] startOffsets = new int[0];
+          do {
+            // go to the next chunk that contains docID
+            it.next(docID);
+            // transform lengths into offsets
+            if (startOffsets.length < it.chunkDocs) {
+              startOffsets = new int[ArrayUtil.oversize(it.chunkDocs, 4)];
+            }
+            for (int i = 1; i < it.chunkDocs; ++i) {
+              startOffsets[i] = startOffsets[i - 1] + it.lengths[i - 1];
+            }
+
+            if (compressionMode == matchingFieldsReader.getCompressionMode() // same compression mode
+                && (numBufferedDocs == 0 || bufferedDocs.length >= chunkSize) // starting a new chunk
+                && startOffsets[it.chunkDocs - 1] < chunkSize // chunk is small enough
+                && startOffsets[it.chunkDocs - 1] + it.lengths[it.chunkDocs - 1] >= chunkSize // chunk is large enough
+                && nextDeletedDoc(it.docBase, liveDocs, it.docBase + it.chunkDocs) == it.docBase + it.chunkDocs) { // no deletion in the chunk
+              assert docID == it.docBase;
+
+              // no need to uncompress, just copy data
+              endWithPreviousDocument();
+              if (bufferedDocs.length >= chunkSize) {
+                flush();
+              }
+              indexWriter.writeIndex(it.chunkDocs, fieldsStream.getFilePointer());
+              writeHeader(this.docBase, it.chunkDocs, it.lengths);
+              it.copyCompressedData(fieldsStream);
+              this.docBase += it.chunkDocs;
+              docID = nextLiveDoc(it.docBase + it.chunkDocs, liveDocs, maxDoc);
+              docCount += it.chunkDocs;
+              mergeState.checkAbort.work(300 * it.chunkDocs);
+            } else {
+              // uncompress
+              it.uncompress();
+              if (startOffsets[it.chunkDocs - 1] + it.lengths[it.chunkDocs - 1] != it.bytes.length) {
+                throw new CorruptIndexException("Corrupted: expected chunk size=" + startOffsets[it.chunkDocs - 1] + it.lengths[it.chunkDocs - 1] + ", got " + it.bytes.length);
+              }
+              // copy non-deleted docs
+              for (; docID < it.docBase + it.chunkDocs; docID = nextLiveDoc(docID + 1, liveDocs, maxDoc)) {
+                final int diff = docID - it.docBase;
+                addRawDocument(it.bytes.bytes, it.bytes.offset + startOffsets[diff], it.lengths[diff]);
+                ++docCount;
+                mergeState.checkAbort.work(300);
+              }
+            }
+          } while (docID < maxDoc);
+        }
+      }
+    }
+    finish(mergeState.fieldInfos, docCount);
+    return docCount;
+  }
+

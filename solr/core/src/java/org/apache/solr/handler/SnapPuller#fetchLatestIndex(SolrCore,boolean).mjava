@@ -7,9 +7,12 @@
    * @return true on success, false if slave is already in sync
    * @throws IOException if an exception occurs
    */
-  boolean fetchLatestIndex(SolrCore core, boolean forceReplication) throws IOException, InterruptedException {
+  boolean fetchLatestIndex(final SolrCore core, boolean forceReplication) throws IOException, InterruptedException {
     successfulInstall = false;
     replicationStartTime = System.currentTimeMillis();
+    Directory tmpIndexDir = null;
+    Directory indexDir = null;
+    boolean deleteTmpIdxDir = true;
     try {
       //get the current 'replicateable' index version in the master
       NamedList response = null;
@@ -78,28 +81,34 @@
       // if the generateion of master is older than that of the slave , it means they are not compatible to be copied
       // then a new index direcory to be created and all the files need to be copied
       boolean isFullCopyNeeded = IndexDeletionPolicyWrapper.getCommitTimestamp(commit) >= latestVersion || forceReplication;
-      File tmpIndexDir = createTempindexDir(core);
-      if (isIndexStale()) {
-        isFullCopyNeeded = true;
-      }
-      LOG.info("Starting download to " + tmpIndexDir + " fullCopy=" + isFullCopyNeeded);
-      successfulInstall = false;
-      boolean deleteTmpIdxDir = true;
+      
+      String tmpIdxDirName = "index." + new SimpleDateFormat(SnapShooter.DATE_FMT, Locale.ROOT).format(new Date());
+      String tmpIndex = createTempindexDir(core, tmpIdxDirName);
 
+      tmpIndexDir = core.getDirectoryFactory().get(tmpIndex, null);
+      
       // make sure it's the newest known index dir...
-      final File indexDir = new File(core.getNewIndexDir());
+      indexDir = core.getDirectoryFactory().get(core.getNewIndexDir(), null);
       Directory oldDirectory = null;
+
       try {
+        
+        if (isIndexStale(indexDir)) {
+          isFullCopyNeeded = true;
+        }
+        LOG.info("Starting download to " + tmpIndexDir + " fullCopy=" + isFullCopyNeeded);
+        successfulInstall = false;
+        
         downloadIndexFiles(isFullCopyNeeded, tmpIndexDir, latestGeneration);
         LOG.info("Total time taken for download : " + ((System.currentTimeMillis() - replicationStartTime) / 1000) + " secs");
         Collection<Map<String, Object>> modifiedConfFiles = getModifiedConfFiles(confFilesToDownload);
         if (!modifiedConfFiles.isEmpty()) {
           downloadConfFiles(confFilesToDownload, latestGeneration);
           if (isFullCopyNeeded) {
-            successfulInstall = modifyIndexProps(tmpIndexDir.getName());
-            deleteTmpIdxDir =  false;
+            successfulInstall = modifyIndexProps(tmpIdxDirName);
+            deleteTmpIdxDir  =  false;
           } else {
-            successfulInstall = copyIndexFiles(tmpIndexDir, indexDir);
+            successfulInstall = moveIndexFiles(tmpIndexDir, indexDir);
           }
           if (successfulInstall) {
             LOG.info("Configuration files are modified, core will be reloaded");
@@ -109,7 +118,7 @@
         } else {
           terminateAndWaitFsyncService();
           if (isFullCopyNeeded) {
-            successfulInstall = modifyIndexProps(tmpIndexDir.getName());
+            successfulInstall = modifyIndexProps(tmpIdxDirName);
             deleteTmpIdxDir =  false;
             RefCounted<IndexWriter> iw = core.getUpdateHandler().getSolrCoreState().getIndexWriter(core);
             try {
@@ -118,7 +127,7 @@
               iw.decref();
             }
           } else {
-            successfulInstall = copyIndexFiles(tmpIndexDir, indexDir);
+            successfulInstall = moveIndexFiles(tmpIndexDir, indexDir);
           }
           if (successfulInstall) {
             logReplicationTimeAndConfFiles(modifiedConfFiles, successfulInstall);
@@ -127,17 +136,28 @@
         
         if (isFullCopyNeeded) {
           // we have to do this before commit
+          final Directory freezeIndexDir = indexDir;
           core.getDirectoryFactory().addCloseListener(oldDirectory, new CloseListener(){
 
             @Override
-            public void onClose() {
-              LOG.info("removing old index directory " + indexDir);
-              delTree(indexDir);
+            public void preClose() {
+              LOG.info("removing old index files " + freezeIndexDir);
+              DirectoryFactory.empty(freezeIndexDir);
+            }
+            
+            @Override
+            public void postClose() {
+              LOG.info("removing old index directory " + freezeIndexDir);
+              try {
+                core.getDirectoryFactory().remove(freezeIndexDir);
+              } catch (IOException e) {
+                SolrException.log(LOG, "Error removing directory " + freezeIndexDir, e);
+              }
             }
             
           });
         }
-        
+
         if (successfulInstall) {
           if (isFullCopyNeeded) {
             // let the system know we are changing dir's and the old one
@@ -160,21 +180,39 @@
         throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Index fetch failed : ", e);
       } finally {
         if (deleteTmpIdxDir) {
-          LOG.info("removing temporary index download directory " + tmpIndexDir);
-          delTree(tmpIndexDir);
+          LOG.info("removing temporary index download directory files " + tmpIndexDir);
+          DirectoryFactory.empty(tmpIndexDir);
         } 
       }
     } finally {
-      if (!successfulInstall) {
-        logReplicationTimeAndConfFiles(null, successfulInstall);
+      try {
+        if (!successfulInstall) {
+          logReplicationTimeAndConfFiles(null, successfulInstall);
+        }
+        filesToDownload = filesDownloaded = confFilesDownloaded = confFilesToDownload = null;
+        replicationStartTime = 0;
+        dirFileFetcher = null;
+        localFileFetcher = null;
+        if (fsyncService != null && !fsyncService.isShutdown()) fsyncService
+            .shutdownNow();
+        fsyncService = null;
+        stop = false;
+        fsyncException = null;
+      } finally {
+        if (tmpIndexDir != null) {
+          core.getDirectoryFactory().release(tmpIndexDir);
+        }
+        if (deleteTmpIdxDir && tmpIndexDir != null) {
+          try {
+            core.getDirectoryFactory().remove(tmpIndexDir);
+          } catch (IOException e) {
+            SolrException.log(LOG, "Error removing directory " + tmpIndexDir, e);
+          }
+        }
+        if (indexDir != null) {
+          core.getDirectoryFactory().release(indexDir);
+        }
       }
-      filesToDownload = filesDownloaded = confFilesDownloaded = confFilesToDownload = null;
-      replicationStartTime = 0;
-      fileFetcher = null;
-      if (fsyncService != null && !fsyncService.isShutdown()) fsyncService.shutdownNow();
-      fsyncService = null;
-      stop = false;
-      fsyncException = null;
     }
   }
 

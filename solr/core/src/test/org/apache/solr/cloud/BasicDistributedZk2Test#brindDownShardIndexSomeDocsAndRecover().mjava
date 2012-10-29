@@ -9,9 +9,13 @@
 
     query("q", "*:*", "sort", "n_tl1 desc");
     
+    int oldLiveNodes = cloudClient.getZkStateReader().getZkClient().getChildren(ZkStateReader.LIVE_NODES_ZKNODE, null, true).size();
+    
+    assertEquals(5, oldLiveNodes);
+    
     // kill a shard
     CloudJettyRunner deadShard = chaosMonkey.stopShard(SHARD2, 0);
-    cloudClient.connect();
+
 
     // we are careful to make sure the downed node is no longer in the state,
     // because on some systems (especially freebsd w/ blackhole enabled), trying
@@ -20,10 +24,23 @@
     jetties.addAll(shardToJetty.get(SHARD2));
     jetties.remove(deadShard);
     
+    // wait till live nodes drops by 1
+    int liveNodes = cloudClient.getZkStateReader().getZkClient().getChildren(ZkStateReader.LIVE_NODES_ZKNODE, null, true).size();
+    int tries = 50;
+    while(oldLiveNodes == liveNodes) {
+      Thread.sleep(100);
+      if (tries-- == 0) {
+        fail("We expected a node to drop...");
+      }
+      liveNodes = cloudClient.getZkStateReader().getZkClient().getChildren(ZkStateReader.LIVE_NODES_ZKNODE, null, true).size();
+    }
+    assertEquals(4, liveNodes);
+
+    int cnt = 0;
     for (CloudJettyRunner cjetty : jetties) {
       waitToSeeNotLive(((SolrDispatchFilter) cjetty.jetty.getDispatchFilter()
           .getFilter()).getCores().getZkController().getZkStateReader(),
-          deadShard);
+          deadShard, cnt++);
     }
     waitToSeeNotLive(cloudClient.getZkStateReader(), deadShard);
 
@@ -37,6 +54,9 @@
     }
     
     commit();
+    
+    printLayout();
+    
     query("q", "*:*", "sort", "n_tl1 desc");
     
     // long cloudClientDocs = cloudClient.query(new

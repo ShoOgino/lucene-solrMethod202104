@@ -7,27 +7,10 @@
     }
 
     //System.out.println("lookup key=" + key + " num=" + num);
-
+    final BytesRef utf8Key = new BytesRef(key);
     try {
 
-      // TODO: is there a Reader from a CharSequence?
-      // Turn tokenstream into automaton:
-      TokenStream ts = queryAnalyzer.tokenStream("", new StringReader(key.toString()));
-      Automaton automaton = getTokenStreamToAutomaton().toAutomaton(ts);
-      ts.end();
-      ts.close();
-
-      // TODO: we could use the end offset to "guess"
-      // whether the final token was a partial token; this
-      // would only be a heuristic ... but maybe an OK one.
-      // This way we could eg differentiate "net" from "net ",
-      // which we can't today...
-
-      replaceSep(automaton);
-
-      // TODO: we can optimize this somewhat by determinizing
-      // while we convert
-      BasicOperations.determinize(automaton);
+      Automaton lookupAutomaton = toLookupAutomaton(key);
 
       final CharsRef spare = new CharsRef();
 
@@ -35,8 +18,7 @@
     
       // Intersect automaton w/ suggest wFST and get all
       // prefix starting nodes & their outputs:
-      final List<FSTUtil.Path<Pair<Long,BytesRef>>> prefixPaths;
-      prefixPaths = FSTUtil.intersectPrefixPaths(automaton, fst);
+      //final PathIntersector intersector = getPathIntersector(lookupAutomaton, fst);
 
       //System.out.println("  prefixPaths: " + prefixPaths.size());
 
@@ -45,6 +27,8 @@
       FST.Arc<Pair<Long,BytesRef>> scratchArc = new FST.Arc<Pair<Long,BytesRef>>();
 
       final List<LookupResult> results = new ArrayList<LookupResult>();
+
+      List<FSTUtil.Path<Pair<Long,BytesRef>>> prefixPaths = FSTUtil.intersectPrefixPaths(lookupAutomaton, fst);
 
       if (exactFirst) {
 
@@ -90,9 +74,9 @@
         // nodes we have and the
         // maxSurfaceFormsPerAnalyzedForm:
         for(MinResult<Pair<Long,BytesRef>> completion : completions) {
-          spare.grow(completion.output.output2.length);
-          UnicodeUtil.UTF8toUTF16(completion.output.output2, spare);
-          if (CHARSEQUENCE_COMPARATOR.compare(spare, key) == 0) {
+          if (utf8Key.bytesEquals(completion.output.output2)) {
+            spare.grow(completion.output.output2.length);
+            UnicodeUtil.UTF8toUTF16(completion.output.output2, spare);
             results.add(new LookupResult(spare.toString(), decodeWeight(completion.output.output1)));
             break;
           }
@@ -127,9 +111,7 @@
             // In exactFirst mode, don't accept any paths
             // matching the surface form since that will
             // create duplicate results:
-            spare.grow(output.output2.length);
-            UnicodeUtil.UTF8toUTF16(output.output2, spare);
-            if (CHARSEQUENCE_COMPARATOR.compare(spare, key) == 0) {
+            if (utf8Key.bytesEquals(output.output2)) {
               // We found exact match, which means we should
               // have already found it in the first search:
               assert results.size() == 1;
@@ -141,6 +123,8 @@
         }
       };
 
+      prefixPaths = getFullPrefixPaths(prefixPaths, lookupAutomaton, fst);
+      
       for (FSTUtil.Path<Pair<Long,BytesRef>> path : prefixPaths) {
         searcher.addStartPaths(path.fstNode, path.output, true, path.input);
       }
@@ -151,6 +135,10 @@
         spare.grow(completion.output.output2.length);
         UnicodeUtil.UTF8toUTF16(completion.output.output2, spare);
         LookupResult result = new LookupResult(spare.toString(), decodeWeight(completion.output.output1));
+
+        // TODO: for fuzzy case would be nice to return
+        // how many edits were required
+
         //System.out.println("    result=" + result);
         results.add(result);
 

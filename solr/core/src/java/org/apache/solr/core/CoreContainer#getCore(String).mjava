@@ -4,12 +4,43 @@
    * @return the core if found
    */
   public SolrCore getCore(String name) {
-    name= checkDefault(name);
-    synchronized(cores) {
-      SolrCore core = cores.get(name);
-      if (core != null)
-        core.open();  // increment the ref count while still synchronized
-      return core;
+    name = checkDefault(name);
+    // Do this in two phases since we don't want to lock access to the cores over a load.
+    SolrCore core;
+
+    synchronized (cores) {
+      core = cores.get(name);
+      if (core != null) {
+        core.open();
+        return core;
+      }
     }
+
+    if (dynamicDescriptors.size() == 0) return null; // Nobody even tried to define any swappable cores, so we're done.
+
+    // Now look for already loaded swappable cores.
+    synchronized (swappableCores) {
+      core = swappableCores.get(name);
+      if (core != null) {
+        core.open();
+        return core;
+      }
+    }
+    CoreDescriptor desc =  dynamicDescriptors.get(name);
+    if (desc == null) { //Nope, no swappable core with this name
+      return null;
+    }
+    try {
+      core = create(desc); // This should throw an error if it fails.
+      core.open();
+      if (desc.isSwappable()) {
+        registerLazyCore(name, core, false);    // This is a swappable core
+      } else {
+        register(name, core, false); // This is a "permanent", although deferred-load core
+      }
+    } catch (Exception ex) {
+      throw recordAndThrow(name, "Unable to create core" + name, ex);
+    }
+    return core;
   }
 

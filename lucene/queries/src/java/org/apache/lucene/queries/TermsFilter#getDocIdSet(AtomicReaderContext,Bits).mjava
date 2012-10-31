@@ -1,39 +1,41 @@
   @Override
   public DocIdSet getDocIdSet(AtomicReaderContext context, Bits acceptDocs) throws IOException {
-    AtomicReader reader = context.reader();
-    FixedBitSet result = new FixedBitSet(reader.maxDoc());
-    Fields fields = reader.fields();
-
+    final AtomicReader reader = context.reader();
+    FixedBitSet result = null;  // lazy init if needed - no need to create a big bitset ahead of time
+    final Fields fields = reader.fields();
+    final BytesRef spare = new BytesRef(this.termsBytes);
     if (fields == null) {
       return result;
     }
-
-    BytesRef br = new BytesRef();
-    String lastField = null;
-    Terms termsC;
+    Terms terms = null;
     TermsEnum termsEnum = null;
     DocsEnum docs = null;
-    for (Term term : terms) {
-      if (!term.field().equals(lastField)) {
-        termsC = fields.terms(term.field());
-        if (termsC == null) {
-          return result;
-        }
-        termsEnum = termsC.iterator(null);
-        lastField = term.field();
-      }
-
-      if (terms != null) { // TODO this check doesn't make sense, decide which variable its supposed to be for
-        br.copyBytes(term.bytes());
-        assert termsEnum != null;
-        if (termsEnum.seekExact(br,true)) {
-          docs = termsEnum.docs(acceptDocs, docs, 0);
-          while (docs.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
-            result.set(docs.docID());
+    for (TermsAndField termsAndField : this.termsAndFields) {
+      if ((terms = fields.terms(termsAndField.field)) != null) {
+        termsEnum = terms.iterator(termsEnum); // this won't return null
+        for (int i = termsAndField.start; i < termsAndField.end; i++) {
+          spare.offset = offsets[i];
+          spare.length = offsets[i+1] - offsets[i];
+          if (termsEnum.seekExact(spare, false)) { // don't use cache since we could pollute the cache here easily
+            docs = termsEnum.docs(acceptDocs, docs, 0); // no freq since we don't need them
+            if (result == null) {
+              if (docs.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
+                result = new FixedBitSet(reader.maxDoc());
+                // lazy init but don't do it in the hot loop since we could read many docs
+                result.set(docs.docID());
+              }
+            }
+            while (docs.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
+              result.set(docs.docID());
+            }
           }
         }
       }
     }
+    /*
+     * TODO: we should explore if it is worth to build the union of the terms in
+     * an automaton an call intersect on the termsenum if the density is high
+     */
     return result;
   }
 

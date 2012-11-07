@@ -5,31 +5,63 @@
 
     final int docBase = fieldsStream.readVInt();
     final int chunkDocs = fieldsStream.readVInt();
-    final int bitsPerValue = fieldsStream.readVInt();
     if (docID < docBase
         || docID >= docBase + chunkDocs
-        || docBase + chunkDocs > numDocs
-        || bitsPerValue > 31) {
+        || docBase + chunkDocs > numDocs) {
       throw new CorruptIndexException("Corrupted: docID=" + docID
           + ", docBase=" + docBase + ", chunkDocs=" + chunkDocs
-          + ", numDocs=" + numDocs + ", bitsPerValue=" + bitsPerValue);
+          + ", numDocs=" + numDocs);
     }
 
-    final long filePointer = fieldsStream.getFilePointer();
-    final PackedInts.ReaderIterator lengths = PackedInts.getReaderIteratorNoHeader(fieldsStream, PackedInts.Format.PACKED, packedIntsVersion, chunkDocs, bitsPerValue, 1);
-    int offset = 0;
-    for (int i = docBase; i < docID; ++i) {
-      offset += lengths.next();
+    final int numStoredFields, offset, length;
+    if (chunkDocs == 1) {
+      numStoredFields = fieldsStream.readVInt();
+      offset = 0;
+      length = fieldsStream.readVInt();
+    } else {
+      final int bitsPerStoredFields = fieldsStream.readVInt();
+      if (bitsPerStoredFields == 0) {
+        numStoredFields = fieldsStream.readVInt();
+      } else if (bitsPerStoredFields > 31) {
+        throw new CorruptIndexException("bitsPerStoredFields=" + bitsPerStoredFields);
+      } else {
+        final long filePointer = fieldsStream.getFilePointer();
+        final PackedInts.Reader reader = PackedInts.getDirectReaderNoHeader(fieldsStream, PackedInts.Format.PACKED, packedIntsVersion, chunkDocs, bitsPerStoredFields);
+        numStoredFields = (int) (reader.get(docID - docBase));
+        fieldsStream.seek(filePointer + PackedInts.Format.PACKED.byteCount(packedIntsVersion, chunkDocs, bitsPerStoredFields));
+      }
+
+      final int bitsPerLength = fieldsStream.readVInt();
+      if (bitsPerLength == 0) {
+        length = fieldsStream.readVInt();
+        offset = (docID - docBase) * length;
+      } else if (bitsPerStoredFields > 31) {
+        throw new CorruptIndexException("bitsPerLength=" + bitsPerLength);
+      } else {
+        final long filePointer = fieldsStream.getFilePointer();
+        final PackedInts.ReaderIterator it = PackedInts.getReaderIteratorNoHeader(fieldsStream, PackedInts.Format.PACKED, packedIntsVersion, chunkDocs, bitsPerLength, 1);
+        int off = 0;
+        for (int i = 0; i < docID - docBase; ++i) {
+          off += it.next();
+        }
+        offset = off;
+        length = (int) it.next();
+        fieldsStream.seek(filePointer + PackedInts.Format.PACKED.byteCount(packedIntsVersion, chunkDocs, bitsPerLength));
+      }
     }
-    final int length = (int) lengths.next();
-    // skip the last values
-    fieldsStream.seek(filePointer + PackedInts.Format.PACKED.byteCount(packedIntsVersion, chunkDocs, bitsPerValue));
+
+    if ((length == 0) != (numStoredFields == 0)) {
+      throw new CorruptIndexException("length=" + length + ", numStoredFields=" + numStoredFields);
+    }
+    if (numStoredFields == 0) {
+      // nothing to do
+      return;
+    }
 
     decompressor.decompress(fieldsStream, offset, length, bytes);
 
     final ByteArrayDataInput documentInput = new ByteArrayDataInput(bytes.bytes, bytes.offset, bytes.length);
-    final int numFields = documentInput.readVInt();
-    for (int fieldIDX = 0; fieldIDX < numFields; fieldIDX++) {
+    for (int fieldIDX = 0; fieldIDX < numStoredFields; fieldIDX++) {
       final long infoAndBits = documentInput.readVLong();
       final int fieldNumber = (int) (infoAndBits >>> TYPE_BITS);
       FieldInfo fieldInfo = fieldInfos.fieldInfo(fieldNumber);
@@ -40,13 +72,16 @@
       switch(visitor.needsField(fieldInfo)) {
         case YES:
           readField(documentInput, visitor, fieldInfo, bits);
+          assert documentInput.getPosition() <= bytes.offset + bytes.length : documentInput.getPosition() + " " + bytes.offset + bytes.length;
           break;
-        case NO: 
+        case NO:
           skipField(documentInput, bits);
+          assert documentInput.getPosition() <= bytes.offset + bytes.length : documentInput.getPosition() + " " + bytes.offset + bytes.length;
           break;
-        case STOP: 
+        case STOP:
           return;
       }
     }
+    assert documentInput.getPosition() == bytes.offset + bytes.length : documentInput.getPosition() + " " + bytes.offset + " " + bytes.length;
   }
 

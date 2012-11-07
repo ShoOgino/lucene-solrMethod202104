@@ -3,26 +3,52 @@
      */
     void next(int doc) throws IOException {
       assert doc >= docBase + chunkDocs : doc + " " + docBase + " " + chunkDocs;
-      // try next chunk
-      int bitsPerValue = readHeader();
-      if (docBase + chunkDocs <= doc) {
-        // doc is not in the next chunk, use seek to skip to the next document chunk
-        fieldsStream.seek(indexReader.getStartPointer(doc));
-        bitsPerValue = readHeader();
+      fieldsStream.seek(indexReader.getStartPointer(doc));
+
+      final int docBase = fieldsStream.readVInt();
+      final int chunkDocs = fieldsStream.readVInt();
+      if (docBase < this.docBase + this.chunkDocs
+          || docBase + chunkDocs > numDocs) {
+        throw new CorruptIndexException("Corrupted: current docBase=" + this.docBase
+            + ", current numDocs=" + this.chunkDocs + ", new docBase=" + docBase
+            + ", new numDocs=" + chunkDocs);
       }
-      if (doc < docBase
-          || doc >= docBase + chunkDocs) {
-        throw new CorruptIndexException("Corrupted: docID=" + doc
-            + ", docBase=" + docBase + ", chunkDocs=" + chunkDocs);
+      this.docBase = docBase;
+      this.chunkDocs = chunkDocs;
+
+      if (chunkDocs > numStoredFields.length) {
+        final int newLength = ArrayUtil.oversize(chunkDocs, 4);
+        numStoredFields = new int[newLength];
+        lengths = new int[newLength];
       }
 
-      // decode lengths
-      if (lengths.length < chunkDocs) {
-        lengths = new int[ArrayUtil.oversize(chunkDocs, 4)];
-      }
-      final PackedInts.ReaderIterator iterator = PackedInts.getReaderIteratorNoHeader(fieldsStream, PackedInts.Format.PACKED, packedIntsVersion, chunkDocs, bitsPerValue, 0);
-      for (int i = 0; i < chunkDocs; ++i) {
-        lengths[i] = (int) iterator.next();
+      if (chunkDocs == 1) {
+        numStoredFields[0] = fieldsStream.readVInt();
+        lengths[0] = fieldsStream.readVInt();
+      } else {
+        final int bitsPerStoredFields = fieldsStream.readVInt();
+        if (bitsPerStoredFields == 0) {
+          Arrays.fill(numStoredFields, 0, chunkDocs, fieldsStream.readVInt());
+        } else if (bitsPerStoredFields > 31) {
+          throw new CorruptIndexException("bitsPerStoredFields=" + bitsPerStoredFields);
+        } else {
+          final PackedInts.ReaderIterator it = PackedInts.getReaderIteratorNoHeader(fieldsStream, PackedInts.Format.PACKED, packedIntsVersion, chunkDocs, bitsPerStoredFields, 1);
+          for (int i = 0; i < chunkDocs; ++i) {
+            numStoredFields[i] = (int) it.next();
+          }
+        }
+
+        final int bitsPerLength = fieldsStream.readVInt();
+        if (bitsPerLength == 0) {
+          Arrays.fill(lengths, 0, chunkDocs, fieldsStream.readVInt());
+        } else if (bitsPerLength > 31) {
+          throw new CorruptIndexException("bitsPerLength=" + bitsPerLength);
+        } else {
+          final PackedInts.ReaderIterator it = PackedInts.getReaderIteratorNoHeader(fieldsStream, PackedInts.Format.PACKED, packedIntsVersion, chunkDocs, bitsPerLength, 1);
+          for (int i = 0; i < chunkDocs; ++i) {
+            lengths[i] = (int) it.next();
+          }
+        }
       }
     }
 

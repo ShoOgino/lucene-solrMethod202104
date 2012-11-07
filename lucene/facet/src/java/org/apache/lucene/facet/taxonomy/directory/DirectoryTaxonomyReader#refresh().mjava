@@ -1,6 +1,7 @@
   // Note that refresh() is synchronized (it is the only synchronized
   // method in this class) to ensure that it never gets called concurrently
   // with itself.
+  @Override
   public synchronized boolean refresh() throws IOException, InconsistentTaxonomyException {
     ensureOpen();
     /*
@@ -19,64 +20,66 @@
     DirectoryReader r2 = DirectoryReader.openIfChanged(indexReader);
     if (r2 == null) {
       return false; // no changes, nothing to do
-    } 
+    }
     
     // validate that a refresh is valid at this point, i.e. that the taxonomy 
     // was not recreated since this reader was last opened or refresshed.
-    String t1 = indexReader.getIndexCommit().getUserData().get(DirectoryTaxonomyWriter.INDEX_CREATE_TIME);
-    String t2 = r2.getIndexCommit().getUserData().get(DirectoryTaxonomyWriter.INDEX_CREATE_TIME);
-    if (t1==null) {
-      if (t2!=null) {
+    String t1 = indexReader.getIndexCommit().getUserData().get(DirectoryTaxonomyWriter.INDEX_EPOCH);
+    String t2 = r2.getIndexCommit().getUserData().get(DirectoryTaxonomyWriter.INDEX_EPOCH);
+    if (t1 == null) {
+      if (t2 != null) {
         r2.close();
-        throw new InconsistentTaxonomyException("Taxonomy was recreated at: "+t2);
+        throw new InconsistentTaxonomyException("Taxonomy was recreated, epoch= " + t2);
       }
     } else if (!t1.equals(t2)) {
+      // t1 != null and t2 cannot be null b/c DirTaxoWriter always puts the commit data.
+      // it's ok to use String.equals because we require the two epoch values to be the same.
       r2.close();
-      throw new InconsistentTaxonomyException("Taxonomy was recreated at: "+t2+"  !=  "+t1);
+      throw new InconsistentTaxonomyException("Taxonomy was recreated epoch = " + t2 + "  !=  " + t1);
     }
     
-      IndexReader oldreader = indexReader;
-      // we can close the old searcher, but need to synchronize this
-      // so that we don't close it in the middle that another routine
-      // is reading from it.
-      indexReaderLock.writeLock().lock();
-      indexReader = r2;
-      indexReaderLock.writeLock().unlock();
-      // We can close the old reader, but need to be certain that we
-      // don't close it while another method is reading from it.
-      // Luckily, we can be certain of that even without putting the
-      // oldreader.close() in the locked section. The reason is that
-      // after lock() succeeded above, we know that all existing readers
-      // had finished (this is what a read-write lock ensures). New
-      // readers, starting after the unlock() we just did, already got
-      // the new indexReader we set above. So nobody can be possibly
-      // using the old indexReader, and we can close it:
-      oldreader.close();
-
-      // We prefetch some of the arrays to make requests much faster.
-      // Let's refresh these prefetched arrays; This refresh is much
-      // is made more efficient by assuming that it is enough to read
-      // the values for new categories (old categories could not have been
-      // changed or deleted)
-      // Note that this this done without the write lock being held,
-      // which means that it is possible that during a refresh(), a
-      // reader will have some methods (like getOrdinal and getCategory)
-      // return fresh information, while getParent()
-      // (only to be prefetched now) still return older information.
-      // We consider this to be acceptable. The important thing,
-      // however, is that refreshPrefetchArrays() itself writes to
-      // the arrays in a correct manner (see discussion there)
-      parentArray.refresh(indexReader);
-
-      // Remove any INVALID_ORDINAL values from the ordinal cache,
-      // because it is possible those are now answered by the new data!
-      Iterator<Entry<String, Integer>> i = ordinalCache.entrySet().iterator();
-      while (i.hasNext()) {
-        Entry<String, Integer> e = i.next();
-        if (e.getValue().intValue() == INVALID_ORDINAL) {
-          i.remove();
-        }
+    IndexReader oldreader = indexReader;
+    // we can close the old searcher, but need to synchronize this
+    // so that we don't close it in the middle that another routine
+    // is reading from it.
+    indexReaderLock.writeLock().lock();
+    indexReader = r2;
+    indexReaderLock.writeLock().unlock();
+    // We can close the old reader, but need to be certain that we
+    // don't close it while another method is reading from it.
+    // Luckily, we can be certain of that even without putting the
+    // oldreader.close() in the locked section. The reason is that
+    // after lock() succeeded above, we know that all existing readers
+    // had finished (this is what a read-write lock ensures). New
+    // readers, starting after the unlock() we just did, already got
+    // the new indexReader we set above. So nobody can be possibly
+    // using the old indexReader, and we can close it:
+    oldreader.close();
+    
+    // We prefetch some of the arrays to make requests much faster.
+    // Let's refresh these prefetched arrays; This refresh is much
+    // is made more efficient by assuming that it is enough to read
+    // the values for new categories (old categories could not have been
+    // changed or deleted)
+    // Note that this this done without the write lock being held,
+    // which means that it is possible that during a refresh(), a
+    // reader will have some methods (like getOrdinal and getCategory)
+    // return fresh information, while getParent()
+    // (only to be prefetched now) still return older information.
+    // We consider this to be acceptable. The important thing,
+    // however, is that refreshPrefetchArrays() itself writes to
+    // the arrays in a correct manner (see discussion there)
+    parentArray.refresh(indexReader);
+    
+    // Remove any INVALID_ORDINAL values from the ordinal cache,
+    // because it is possible those are now answered by the new data!
+    Iterator<Entry<String, Integer>> i = ordinalCache.entrySet().iterator();
+    while (i.hasNext()) {
+      Entry<String, Integer> e = i.next();
+      if (e.getValue().intValue() == INVALID_ORDINAL) {
+        i.remove();
       }
-      return true;
     }
+    return true;
+  }
 

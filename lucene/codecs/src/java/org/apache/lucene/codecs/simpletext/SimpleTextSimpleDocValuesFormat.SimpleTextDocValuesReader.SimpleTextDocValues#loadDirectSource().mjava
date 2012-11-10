@@ -25,7 +25,7 @@
         } else if (DocValues.isBytes(dvType)) {
           return new Source(dvType) {
             @Override
-            public BytesRef getBytes(int docID, BytesRef bytesIn) {
+            public BytesRef getBytes(int docID, BytesRef result) {
               try {
                 // nocommit bounds check docID?  spooky
                 // because if we don't you can maybe get
@@ -39,21 +39,72 @@
                 } catch (ParseException pe) {
                   throw new RuntimeException(pe);
                 }
-                byte[] bytes = new byte[len];
-                in.readBytes(bytes, 0, bytes.length);
-                // nocommit MUST i reuse the incoming
-                // arg....?  we should clarify semantics
-                return new BytesRef(bytes);
+                result.bytes = new byte[len];
+                result.offset = 0;
+                result.length = len;
+                in.readBytes(result.bytes, 0, len);
+                return result;
               } catch (IOException ioe) {
+                // nocommit should .get() just throw IOE...
                 throw new RuntimeException(ioe);
               }
             }
           };
         } else if (DocValues.isSortedBytes(dvType)) {
+
+          final DecimalFormat ordDecoder = new DecimalFormat(field.ordPattern, new DecimalFormatSymbols(Locale.ROOT));
+
+          return new SortedSource(dvType, BytesRef.getUTF8SortedAsUnicodeComparator()) {
+            @Override
+            public int ord(int docID) {
+              try {
+                in.seek(field.dataStartFilePointer + field.numValues * (9 + field.pattern.length() + field.maxLength) + (1 + field.ordPattern.length()) * docID);
+                SimpleTextUtil.readLine(in, scratch);
+                return ordDecoder.parse(scratch.utf8ToString(), pos).intValue();
+              } catch (IOException ioe) {
+                // nocommit should .get() just throw IOE...
+                throw new RuntimeException(ioe);
+              }
+            }
+
+            @Override
+            public BytesRef getByOrd(int ord, BytesRef result) {
+              try {
+                in.seek(field.dataStartFilePointer + ord * (9 + field.pattern.length() + field.maxLength));
+                SimpleTextUtil.readLine(in, scratch);
+                assert StringHelper.startsWith(scratch, LENGTH);
+                int len;
+                try {
+                  len = decoder.parse(new String(scratch.bytes, scratch.offset + LENGTH.length, scratch.length - LENGTH.length, "UTF-8")).intValue();
+                } catch (ParseException pe) {
+                  throw new RuntimeException(pe);
+                }
+                result.bytes = new byte[len];
+                result.offset = 0;
+                result.length = len;
+                in.readBytes(result.bytes, 0, len);
+                return result;
+              } catch (IOException ioe) {
+                // nocommit should .get() just throw IOE...
+                throw new RuntimeException(ioe);
+              }
+            }
+
+            @Override
+            public int getValueCount() {
+              return field.numValues;
+            }
+
+            @Override
+            public PackedInts.Reader getDocToOrd() {
+              return null;
+            }
+          };
+        } else if (DocValues.isFloat(dvType)) {
           // nocommit
           return null;
+        } else {
+          throw new AssertionError();
         }
-        // nocommit
-        return null;
       }
 

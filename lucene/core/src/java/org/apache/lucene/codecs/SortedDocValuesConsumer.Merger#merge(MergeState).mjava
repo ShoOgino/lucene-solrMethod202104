@@ -1,0 +1,78 @@
+    public void merge(MergeState mergeState) throws IOException {
+
+      // First pass: mark "live" terms
+      for (AtomicReader reader : mergeState.readers) {
+        DocValues docvalues = reader.docValues(mergeState.fieldInfo.name);
+        final SortedSource source;
+        int maxDoc = reader.maxDoc();
+        if (docvalues == null) {
+          source = DocValues.getDefaultSortedSource(mergeState.fieldInfo.getDocValuesType(), maxDoc);
+        } else {
+          source = (SortedSource) docvalues.getDirectSource();
+        }
+
+        SegmentState state = new SegmentState();
+        state.reader = reader;
+        state.source = source;
+        segStates.add(state);
+        assert source.getValueCount() < Integer.MAX_VALUE;
+        if (reader.hasDeletions()) {
+          state.liveTerms = new FixedBitSet(source.getValueCount());
+          Bits liveDocs = reader.getLiveDocs();
+          for(int docID=0;docID<maxDoc;docID++) {
+            if (liveDocs.get(docID)) {
+              state.liveTerms.set(source.ord(docID));
+            }
+          }
+        }
+
+        // nocommit we can unload the bits to disk to reduce
+        // transient ram spike...
+      }
+
+      // Second pass: merge only the live terms
+
+      TermMergeQueue q = new TermMergeQueue(segStates.size());
+      for(SegmentState segState : segStates) {
+        if (segState.nextTerm() != null) {
+
+          // nocommit we could defer this to 3rd pass (and
+          // reduce transient RAM spike) but then
+          // we'd spend more effort computing the mapping...:
+          segState.segOrdToMergedOrd = new int[segState.source.getValueCount()];
+          q.add(segState);
+        }
+      }
+
+      BytesRef lastTerm = null;
+      boolean first = true;
+      int ord = 0;
+      while (q.size() != 0) {
+        SegmentState top = q.top();
+        if (lastTerm == null || !lastTerm.equals(top.scratch)) {
+          lastTerm = BytesRef.deepCopyOf(top.scratch);
+          // nocommit we could spill this to disk instead of
+          // RAM, and replay on finish...
+          mergedTerms.add(lastTerm);
+          if (lastTerm == null) {
+            fixedLength = lastTerm.length;
+          } else {
+            ord++;
+            if (lastTerm.length != fixedLength) {
+              fixedLength = -1;
+            }
+          }
+          maxLength = Math.max(maxLength, lastTerm.length);
+        }
+
+        top.segOrdToMergedOrd[top.ord] = ord;
+        if (top.nextTerm() == null) {
+          q.pop();
+        } else {
+          q.updateTop();
+        }
+      }
+
+      numMergedTerms = ord;
+    }
+

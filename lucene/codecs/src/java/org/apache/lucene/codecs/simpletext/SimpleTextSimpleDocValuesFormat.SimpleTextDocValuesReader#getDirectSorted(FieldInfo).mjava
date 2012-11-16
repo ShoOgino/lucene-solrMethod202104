@@ -1,0 +1,63 @@
+    @Override
+    public SortedDocValues getDirectSorted(FieldInfo fieldInfo) throws IOException {
+      final OneField field = fields.get(fieldInfo.name);
+
+      // SegmentCoreReaders already verifies this field is
+      // valid:
+      assert field != null;
+
+      final IndexInput in = data.clone();
+      final BytesRef scratch = new BytesRef();
+      final DecimalFormat decoder = new DecimalFormat(field.pattern, new DecimalFormatSymbols(Locale.ROOT));
+      final DecimalFormat ordDecoder = new DecimalFormat(field.ordPattern, new DecimalFormatSymbols(Locale.ROOT));
+
+      return new SortedDocValues() {
+        @Override
+        public int getOrd(int docID) {
+          try {
+            in.seek(field.dataStartFilePointer + field.numValues * (9 + field.pattern.length() + field.maxLength) + docID * (1 + field.ordPattern.length()));
+            SimpleTextUtil.readLine(in, scratch);
+            try {
+              return ordDecoder.parse(scratch.utf8ToString()).intValue();
+            } catch (ParseException pe) {
+              CorruptIndexException e = new CorruptIndexException("failed to parse ord");
+              e.initCause(pe);
+              throw e;
+            }
+          } catch (IOException ioe) {
+            // nocommit should .get() just throw IOE...
+            throw new RuntimeException(ioe);
+          }
+        }
+
+        @Override
+        public void lookupOrd(int ord, BytesRef result) {
+          try {
+            in.seek(field.dataStartFilePointer + ord * (9 + field.pattern.length() + field.maxLength));
+            SimpleTextUtil.readLine(in, scratch);
+            assert StringHelper.startsWith(scratch, LENGTH);
+            int len;
+            try {
+              len = decoder.parse(new String(scratch.bytes, scratch.offset + LENGTH.length, scratch.length - LENGTH.length, "UTF-8")).intValue();
+            } catch (ParseException pe) {
+              CorruptIndexException e = new CorruptIndexException("failed to parse int length");
+              e.initCause(pe);
+              throw e;
+            }
+            result.bytes = new byte[len];
+            result.offset = 0;
+            result.length = len;
+            in.readBytes(result.bytes, 0, len);
+          } catch (IOException ioe) {
+            // nocommit should .get() just throw IOE...
+            throw new RuntimeException(ioe);
+          }
+        }
+
+        @Override
+        public int getValueCount() {
+          return field.numValues;
+        }
+      };
+    }
+

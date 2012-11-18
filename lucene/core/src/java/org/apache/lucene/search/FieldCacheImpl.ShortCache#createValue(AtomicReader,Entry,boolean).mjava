@@ -1,56 +1,38 @@
     @Override
     protected Object createValue(AtomicReader reader, Entry entryKey, boolean setDocsWithField)
         throws IOException {
-      String field = entryKey.field;
+
       ShortParser parser = (ShortParser) entryKey.custom;
       if (parser == null) {
-        return wrapper.getShorts(reader, field, FieldCache.DEFAULT_SHORT_PARSER, setDocsWithField);
+        // Confusing: must delegate to wrapper (vs simply
+        // setting parser = DEFAULT_SHORT_PARSER) so cache
+        // key includes DEFAULT_SHORT_PARSER:
+        return wrapper.getShorts(reader, entryKey.field, DEFAULT_SHORT_PARSER, setDocsWithField);
       }
-      final int maxDoc = reader.maxDoc();
-      final short[] retArray = new short[maxDoc];
-      Terms terms = reader.terms(field);
-      FixedBitSet docsWithField = null;
-      if (terms != null) {
-        if (setDocsWithField) {
-          final int termsDocCount = terms.getDocCount();
-          assert termsDocCount <= maxDoc;
-          if (termsDocCount == maxDoc) {
-            // Fast case: all docs have this field:
-            wrapper.setDocsWithField(reader, field, new Bits.MatchAllBits(maxDoc));
-            setDocsWithField = false;
-          }
+
+      final ShortParser finalParser = parser;
+
+      final short[] values = new short[reader.maxDoc()];
+      Uninvert u = new Uninvert() {
+        private short currentValue;
+
+        @Override
+        public void visitTerm(BytesRef term) {
+          currentValue = finalParser.parseShort(term);
         }
-        final TermsEnum termsEnum = terms.iterator(null);
-        DocsEnum docs = null;
-        try {
-          while(true) {
-            final BytesRef term = termsEnum.next();
-            if (term == null) {
-              break;
-            }
-            final short termval = parser.parseShort(term);
-            docs = termsEnum.docs(null, docs, 0);
-            while (true) {
-              final int docID = docs.nextDoc();
-              if (docID == DocIdSetIterator.NO_MORE_DOCS) {
-                break;
-              }
-              retArray[docID] = termval;
-              if (setDocsWithField) {
-                if (docsWithField == null) {
-                  // Lazy init
-                  docsWithField = new FixedBitSet(maxDoc);
-                }
-                docsWithField.set(docID);
-              }
-            }
-          }
-        } catch (FieldCache.StopFillCacheException stop) {
+
+        @Override
+        public void visitDoc(int docID) {
+          values[docID] = currentValue;
         }
-      }
+      };
+
+      u.uninvert(reader, entryKey.field, setDocsWithField);
+
       if (setDocsWithField) {
-        wrapper.setDocsWithField(reader, field, docsWithField);
+        wrapper.setDocsWithField(reader, entryKey.field, u.docsWithField);
       }
-      return retArray;
+
+      return new ShortsFromArray(values);
     }
 

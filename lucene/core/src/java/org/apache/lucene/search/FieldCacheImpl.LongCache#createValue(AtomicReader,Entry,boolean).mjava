@@ -1,71 +1,45 @@
     @Override
     protected Object createValue(AtomicReader reader, Entry entryKey, boolean setDocsWithField)
         throws IOException {
-      String field = entryKey.field;
-      FieldCache.LongParser parser = (FieldCache.LongParser) entryKey.custom;
+      LongParser parser = (LongParser) entryKey.custom;
       if (parser == null) {
+        // Confusing: must delegate to wrapper (vs simply
+        // setting parser =
+        // DEFAULT_LONG_PARSER/NUMERIC_UTILS_LONG_PARSER) so
+        // cache key includes
+        // DEFAULT_LONG_PARSER/NUMERIC_UTILS_LONG_PARSER:
         try {
-          return wrapper.getLongs(reader, field, DEFAULT_LONG_PARSER, setDocsWithField);
+          return wrapper.getLongs(reader, entryKey.field, DEFAULT_LONG_PARSER, setDocsWithField);
         } catch (NumberFormatException ne) {
-          return wrapper.getLongs(reader, field, NUMERIC_UTILS_LONG_PARSER, setDocsWithField);
-        }
-      }
-      final int maxDoc = reader.maxDoc();
-      long[] retArray = null;
-
-      Terms terms = reader.terms(field);
-      FixedBitSet docsWithField = null;
-      if (terms != null) {
-        if (setDocsWithField) {
-          final int termsDocCount = terms.getDocCount();
-          assert termsDocCount <= maxDoc;
-          if (termsDocCount == maxDoc) {
-            // Fast case: all docs have this field:
-            wrapper.setDocsWithField(reader, field, new Bits.MatchAllBits(maxDoc));
-            setDocsWithField = false;
-          }
-        }
-        final TermsEnum termsEnum = terms.iterator(null);
-        DocsEnum docs = null;
-        try {
-          while(true) {
-            final BytesRef term = termsEnum.next();
-            if (term == null) {
-              break;
-            }
-            final long termval = parser.parseLong(term);
-            if (retArray == null) {
-              // late init so numeric fields don't double allocate
-              retArray = new long[maxDoc];
-            }
-
-            docs = termsEnum.docs(null, docs, 0);
-            while (true) {
-              final int docID = docs.nextDoc();
-              if (docID == DocIdSetIterator.NO_MORE_DOCS) {
-                break;
-              }
-              retArray[docID] = termval;
-              if (setDocsWithField) {
-                if (docsWithField == null) {
-                  // Lazy init
-                  docsWithField = new FixedBitSet(maxDoc);
-                }
-                docsWithField.set(docID);
-              }
-            }
-          }
-        } catch (FieldCache.StopFillCacheException stop) {
+          return wrapper.getLongs(reader, entryKey.field, NUMERIC_UTILS_LONG_PARSER, setDocsWithField);
         }
       }
 
-      if (retArray == null) {
-        // no values
-        retArray = new long[maxDoc];
-      }
+      final LongParser finalParser = parser;
+      // nocommit how to avoid double alloc in numeric field
+      // case ...
+      final long[] values = new long[reader.maxDoc()];
+
+      Uninvert u = new Uninvert() {
+        private long currentValue;
+
+        @Override
+        public void visitTerm(BytesRef term) {
+          currentValue = finalParser.parseLong(term);
+        }
+
+        @Override
+        public void visitDoc(int docID) {
+          values[docID] = currentValue;
+        }
+      };
+
+      u.uninvert(reader, entryKey.field, setDocsWithField);
+
       if (setDocsWithField) {
-        wrapper.setDocsWithField(reader, field, docsWithField);
+        wrapper.setDocsWithField(reader, entryKey.field, u.docsWithField);
       }
-      return retArray;
+
+      return new LongsFromArray(values);
     }
 

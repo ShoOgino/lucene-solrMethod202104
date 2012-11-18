@@ -1,0 +1,58 @@
+    @Override
+    protected Object createValue(AtomicReader reader, CacheKey key, boolean setDocsWithField)
+        throws IOException {
+      int maxDoc = reader.maxDoc();
+      final double[] values;
+
+      NumericDocValues valuesIn = reader.getNumericDocValues(key.field);
+      if (valuesIn != null) {
+        // nocommit should we throw exc if parser isn't
+        // null?  if setDocsWithField is true?
+        values = new double[maxDoc];
+        for(int docID=0;docID<maxDoc;docID++) {
+          // nocommit somewhat dangerous ... eg if user had
+          // indexed as DV.BYTE ...
+          values[docID] = Double.longBitsToDouble(valuesIn.get(docID));
+        }
+      } else {
+        final DoubleParser parser = (DoubleParser) key.custom;
+        if (parser == null) {
+          // Confusing: must delegate to wrapper (vs simply
+          // setting parser =
+          // DEFAULT_DOUBLE_PARSER/NUMERIC_UTILS_DOUBLE_PARSER) so
+          // cache key includes
+          // DEFAULT_DOUBLE_PARSER/NUMERIC_UTILS_DOUBLE_PARSER:
+          try {
+            return wrapper.getDoubles(reader, key.field, DEFAULT_DOUBLE_PARSER, setDocsWithField);
+          } catch (NumberFormatException ne) {
+            return wrapper.getDoubles(reader, key.field, NUMERIC_UTILS_DOUBLE_PARSER, setDocsWithField);
+          }
+        }
+
+        // nocommit how to avoid double alloc in numeric field
+        // case ...
+        values = new double[reader.maxDoc()];
+
+        Uninvert u = new Uninvert() {
+            private double currentValue;
+
+            @Override
+            public void visitTerm(BytesRef term) {
+              currentValue = parser.parseDouble(term);
+            }
+
+            @Override
+            public void visitDoc(int docID) {
+              values[docID] = currentValue;
+            }
+          };
+
+        u.uninvert(reader, key.field, setDocsWithField);
+
+        if (setDocsWithField) {
+          wrapper.setDocsWithField(reader, key.field, u.docsWithField);
+        }
+      }
+      return new DoublesFromArray(values);
+    }
+

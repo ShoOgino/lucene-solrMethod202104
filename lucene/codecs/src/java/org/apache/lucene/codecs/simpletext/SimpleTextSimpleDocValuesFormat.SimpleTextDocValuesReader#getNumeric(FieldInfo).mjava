@@ -1,0 +1,40 @@
+    @Override
+    public NumericDocValues getNumeric(FieldInfo fieldInfo) throws IOException {
+      final OneField field = fields.get(fieldInfo.name);
+
+      // SegmentCoreReaders already verifies this field is
+      // valid:
+      assert field != null;
+
+      final IndexInput in = data.clone();
+      final BytesRef scratch = new BytesRef();
+      final DecimalFormat decoder = new DecimalFormat(field.pattern, new DecimalFormatSymbols(Locale.ROOT));
+
+      decoder.setParseBigDecimal(true);
+
+      return new NumericDocValues() {
+        @Override
+        public long get(int docID) {
+          try {
+            // nocommit bounds check docID?  spooky
+            // because if we don't you can maybe get
+            // value from the wrong field ...
+            in.seek(field.dataStartFilePointer + (1+field.pattern.length())*docID);
+            SimpleTextUtil.readLine(in, scratch);
+            //System.out.println("parsing delta: " + scratch.utf8ToString());
+            BigDecimal bd;
+            try {
+              bd = (BigDecimal) decoder.parse(scratch.utf8ToString());
+            } catch (ParseException pe) {
+              CorruptIndexException e = new CorruptIndexException("failed to parse BigDecimal value");
+              e.initCause(pe);
+              throw e;
+            }
+            return BigInteger.valueOf(field.minValue).add(bd.toBigIntegerExact()).longValue();
+          } catch (IOException ioe) {
+            throw new RuntimeException(ioe);
+          }
+        }
+      };
+    }
+

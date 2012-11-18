@@ -1,0 +1,56 @@
+    @Override
+    protected Object createValue(AtomicReader reader, CacheKey key, boolean setDocsWithField)
+        throws IOException {
+
+      int maxDoc = reader.maxDoc();
+      final long[] values;
+      NumericDocValues valuesIn = reader.getNumericDocValues(key.field);
+      if (valuesIn != null) {
+        // nocommit should we throw exc if parser isn't
+        // null?  if setDocsWithField is true?
+        values = new long[maxDoc];
+        for(int docID=0;docID<maxDoc;docID++) {
+          values[docID] = valuesIn.get(docID);
+        }
+      } else {
+        final LongParser parser = (LongParser) key.custom;
+        if (parser == null) {
+          // Confusing: must delegate to wrapper (vs simply
+          // setting parser =
+          // DEFAULT_LONG_PARSER/NUMERIC_UTILS_LONG_PARSER) so
+          // cache key includes
+          // DEFAULT_LONG_PARSER/NUMERIC_UTILS_LONG_PARSER:
+          try {
+            return wrapper.getLongs(reader, key.field, DEFAULT_LONG_PARSER, setDocsWithField);
+          } catch (NumberFormatException ne) {
+            return wrapper.getLongs(reader, key.field, NUMERIC_UTILS_LONG_PARSER, setDocsWithField);
+          }
+        }
+
+        // nocommit how to avoid double alloc in numeric field
+        // case ...
+        values = new long[reader.maxDoc()];
+
+        Uninvert u = new Uninvert() {
+            private long currentValue;
+
+            @Override
+            public void visitTerm(BytesRef term) {
+              currentValue = parser.parseLong(term);
+            }
+
+            @Override
+            public void visitDoc(int docID) {
+              values[docID] = currentValue;
+            }
+          };
+
+        u.uninvert(reader, key.field, setDocsWithField);
+
+        if (setDocsWithField) {
+          wrapper.setDocsWithField(reader, key.field, u.docsWithField);
+        }
+      }
+      return new LongsFromArray(values);
+    }
+

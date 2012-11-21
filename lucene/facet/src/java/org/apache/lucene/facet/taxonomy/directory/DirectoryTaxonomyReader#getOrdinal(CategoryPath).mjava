@@ -1,43 +1,45 @@
   @Override
   public int getOrdinal(CategoryPath categoryPath) throws IOException {
     ensureOpen();
-    if (categoryPath.length()==0) {
+    if (categoryPath.length() == 0) {
       return ROOT_ORDINAL;
     }
     String path = categoryPath.toString(delimiter);
 
     // First try to find the answer in the LRU cache:
-    synchronized(ordinalCache) {
+    synchronized (ordinalCache) {
       Integer res = ordinalCache.get(path);
-      if (res!=null) {
-        return res.intValue();
+      if (res != null) {
+        if (res.intValue() < indexReader.maxDoc()) {
+          // Since the cache is shared with DTR instances allocated from
+          // doOpenIfChanged, we need to ensure that the ordinal is one that
+          // this DTR instance recognizes.
+          return res.intValue();
+        } else {
+          // if we get here, it means that the category was found in the cache,
+          // but is not recognized by this TR instance. Therefore there's no
+          // need to continue search for the path on disk, because we won't find
+          // it there too.
+          return TaxonomyReader.INVALID_ORDINAL;
+        }
       }
     }
 
     // If we're still here, we have a cache miss. We need to fetch the
     // value from disk, and then also put it in the cache:
     int ret = TaxonomyReader.INVALID_ORDINAL;
-    try {
-      indexReaderLock.readLock().lock();
-      // TODO (Facet): avoid Multi*?
-      Bits liveDocs = MultiFields.getLiveDocs(indexReader);
-      DocsEnum docs = MultiFields.getTermDocsEnum(indexReader, liveDocs, Consts.FULL, new BytesRef(path), 0);
-      if (docs != null && docs.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
-        ret = docs.docID();
+    DocsEnum docs = MultiFields.getTermDocsEnum(indexReader, null, Consts.FULL, new BytesRef(path), 0);
+    if (docs != null && docs.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
+      ret = docs.docID();
+      
+      // we only store the fact that a category exists, not its inexistence.
+      // This is required because the caches are shared with new DTR instances
+      // that are allocated from doOpenIfChanged. Therefore, if we only store
+      // information about found categories, we cannot accidently tell a new
+      // generation of DTR that a category does not exist.
+      synchronized (ordinalCache) {
+        ordinalCache.put(path, Integer.valueOf(ret));
       }
-    } finally {
-      indexReaderLock.readLock().unlock();
-    }
-
-    // Put the new value in the cache. Note that it is possible that while
-    // we were doing the above fetching (without the cache locked), some
-    // other thread already added the same category to the cache. We do
-    // not care about this possibilty, as LRUCache replaces previous values
-    // of the same keys (it doesn't store duplicates).
-    synchronized(ordinalCache) {
-      // GB: new Integer(int); creates a new object each and every time.
-      // Integer.valueOf(int) might not (See JavaDoc). 
-      ordinalCache.put(path, Integer.valueOf(ret));
     }
 
     return ret;

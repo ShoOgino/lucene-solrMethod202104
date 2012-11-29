@@ -1,0 +1,73 @@
+  public void split(AtomicReader originalIndex, Directory trainingIndex, Directory testIndex, Directory crossValidationIndex,
+                    Analyzer analyzer, String... fieldNames) throws IOException {
+
+    // TODO : check that the passed fields are stored in the original index
+
+    // create IWs for train / test / cv IDXs
+    IndexWriter testWriter = new IndexWriter(testIndex, new IndexWriterConfig(Version.LUCENE_50, analyzer));
+    IndexWriter cvWriter = new IndexWriter(crossValidationIndex, new IndexWriterConfig(Version.LUCENE_50, analyzer));
+    IndexWriter trainingWriter = new IndexWriter(trainingIndex, new IndexWriterConfig(Version.LUCENE_50, analyzer));
+
+    try {
+      int size = originalIndex.maxDoc();
+
+      IndexSearcher indexSearcher = new IndexSearcher(originalIndex);
+      TopDocs topDocs = indexSearcher.search(new MatchAllDocsQuery(), Integer.MAX_VALUE);
+
+      // set the type to be indexed, stored, with term vectors
+      FieldType ft = new FieldType(TextField.TYPE_STORED);
+      ft.setStoreTermVectors(true);
+      ft.setStoreTermVectorOffsets(true);
+      ft.setStoreTermVectorPositions(true);
+
+      int b = 0;
+
+      // iterate over existing documents
+      for (ScoreDoc scoreDoc : topDocs.scoreDocs) {
+
+        // create a new document for indexing
+        Document doc = new Document();
+        if (fieldNames != null && fieldNames.length > 0) {
+          for (String fieldName : fieldNames) {
+            doc.add(new Field(fieldName, originalIndex.document(scoreDoc.doc).getField(fieldName).stringValue(), ft));
+          }
+        } else {
+          for (StorableField storableField : originalIndex.document(scoreDoc.doc).getFields()) {
+            if (storableField.readerValue()!= null){
+              doc.add(new Field(storableField.name(), storableField.readerValue(), ft));
+            }
+            else if (storableField.binaryValue()!= null){
+              doc.add(new Field(storableField.name(), storableField.binaryValue(), ft));
+            }
+            else if (storableField.stringValue()!= null){
+              doc.add(new Field(storableField.name(), storableField.stringValue(), ft));
+            }
+            else if (storableField.numericValue()!= null){
+              doc.add(new Field(storableField.name(), storableField.numericValue().toString(), ft));
+            }
+          }
+        }
+
+        // add it to one of the IDXs
+        if (b % 2 == 0 && testWriter.maxDoc() < size * testRatio) {
+          testWriter.addDocument(doc);
+          testWriter.commit();
+        } else if (cvWriter.maxDoc() < size * crossValidationRatio) {
+          cvWriter.addDocument(doc);
+          cvWriter.commit();
+        } else {
+          trainingWriter.addDocument(doc);
+          trainingWriter.commit();
+        }
+        b++;
+      }
+    } catch (Exception e) {
+      throw new IOException(e);
+    } finally {
+      // close IWs
+      testWriter.close();
+      cvWriter.close();
+      trainingWriter.close();
+    }
+  }
+

@@ -1,0 +1,111 @@
+  /** Walk through all files referenced by the current
+   *  segmentInfos and ask the Directory to sync each file,
+   *  if it wasn't already.  If that succeeds, then we
+   *  prepare a new segments_N file but do not fully commit
+   *  it. */
+  private void startCommit(final SegmentInfos toSync) throws IOException {
+
+    assert testPoint("startStartCommit");
+    assert pendingCommit == null;
+
+    if (hitOOM) {
+      throw new IllegalStateException("this writer hit an OutOfMemoryError; cannot commit");
+    }
+
+    try {
+
+      if (infoStream.isEnabled("IW")) {
+        infoStream.message("IW", "startCommit(): start");
+      }
+
+      synchronized(this) {
+
+        assert lastCommitChangeCount <= changeCount: "lastCommitChangeCount=" + lastCommitChangeCount + " changeCount=" + changeCount;
+
+        if (pendingCommitChangeCount == lastCommitChangeCount) {
+          if (infoStream.isEnabled("IW")) {
+            infoStream.message("IW", "  skip startCommit(): no changes pending");
+          }
+          deleter.decRef(filesToCommit);
+          filesToCommit = null;
+          return;
+        }
+
+        if (infoStream.isEnabled("IW")) {
+          infoStream.message("IW", "startCommit index=" + segString(toLiveInfos(toSync)) + " changeCount=" + changeCount);
+        }
+
+        assert filesExist(toSync);
+      }
+
+      assert testPoint("midStartCommit");
+
+      boolean pendingCommitSet = false;
+
+      try {
+
+        assert testPoint("midStartCommit2");
+
+        synchronized(this) {
+
+          assert pendingCommit == null;
+
+          assert segmentInfos.getGeneration() == toSync.getGeneration();
+
+          // Exception here means nothing is prepared
+          // (this method unwinds everything it did on
+          // an exception)
+          toSync.prepareCommit(directory);
+          //System.out.println("DONE prepareCommit");
+
+          pendingCommitSet = true;
+          pendingCommit = toSync;
+        }
+
+        // This call can take a long time -- 10s of seconds
+        // or more.  We do it without syncing on this:
+        boolean success = false;
+        final Collection<String> filesToSync;
+        try {
+          filesToSync = toSync.files(directory, false);
+          directory.sync(filesToSync);
+          success = true;
+        } finally {
+          if (!success) {
+            pendingCommitSet = false;
+            pendingCommit = null;
+            toSync.rollbackCommit(directory);
+          }
+        }
+
+        if (infoStream.isEnabled("IW")) {
+          infoStream.message("IW", "done all syncs: " + filesToSync);
+        }
+
+        assert testPoint("midStartCommitSuccess");
+
+      } finally {
+        synchronized(this) {
+          // Have our master segmentInfos record the
+          // generations we just prepared.  We do this
+          // on error or success so we don't
+          // double-write a segments_N file.
+          segmentInfos.updateGeneration(toSync);
+
+          if (!pendingCommitSet) {
+            if (infoStream.isEnabled("IW")) {
+              infoStream.message("IW", "hit exception committing segments file");
+            }
+
+            // Hit exception
+            deleter.decRef(filesToCommit);
+            filesToCommit = null;
+          }
+        }
+      }
+    } catch (OutOfMemoryError oom) {
+      handleOOM(oom, "startCommit");
+    }
+    assert testPoint("finishStartCommit");
+  }
+

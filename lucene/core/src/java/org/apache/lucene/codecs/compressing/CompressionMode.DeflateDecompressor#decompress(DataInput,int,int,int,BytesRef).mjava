@@ -1,0 +1,39 @@
+    @Override
+    public void decompress(DataInput in, int originalLength, int offset, int length, BytesRef bytes) throws IOException {
+      assert offset + length <= originalLength;
+      if (length == 0) {
+        bytes.length = 0;
+        return;
+      }
+      final int compressedLength = in.readVInt();
+      if (compressedLength > compressed.length) {
+        compressed = new byte[ArrayUtil.oversize(compressedLength, 1)];
+      }
+      in.readBytes(compressed, 0, compressedLength);
+
+      decompressor.reset();
+      decompressor.setInput(compressed, 0, compressedLength);
+
+      bytes.offset = bytes.length = 0;
+      while (true) {
+        final int count;
+        try {
+          final int remaining = bytes.bytes.length - bytes.length;
+          count = decompressor.inflate(bytes.bytes, bytes.length, remaining);
+        } catch (DataFormatException e) {
+          throw new IOException(e);
+        }
+        bytes.length += count;
+        if (decompressor.finished()) {
+          break;
+        } else {
+          bytes.bytes = ArrayUtil.grow(bytes.bytes);
+        }
+      }
+      if (bytes.length != originalLength) {
+        throw new CorruptIndexException("Lengths mismatch: " + bytes.length + " != " + originalLength);
+      }
+      bytes.offset = offset;
+      bytes.length = length;
+    }
+

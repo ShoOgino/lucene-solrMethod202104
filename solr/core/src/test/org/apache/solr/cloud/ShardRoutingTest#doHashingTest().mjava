@@ -1,0 +1,79 @@
+  private void doHashingTest() throws Exception {
+    assertEquals(4, cloudClient.getZkStateReader().getClusterState().getCollection(DEFAULT_COLLECTION).getSlices().size());
+    String shardKeys = ShardParams.SHARD_KEYS;
+    // for now,  we know how ranges will be distributed to shards.
+    // may have to look it up in clusterstate if that assumption changes.
+
+    String bucket1 = "shard1";      // shard1: top bits:10  80000000:bfffffff
+    String bucket2 = "shard2";      // shard2: top bits:11  c0000000:ffffffff
+    String bucket3 = "shard3";      // shard3: top bits:00  00000000:3fffffff
+    String bucket4 = "shard4";      // shard4: top bits:01  40000000:7fffffff
+
+    doAddDoc("b!doc1");
+    doAddDoc("c!doc2");
+    doAddDoc("d!doc3");
+    doAddDoc("e!doc4");
+
+    doRTG("b!doc1");
+    doRTG("c!doc2");
+    doRTG("d!doc3");
+    doRTG("e!doc4");
+    doRTG("b!doc1,c!doc2");
+    doRTG("d!doc3,e!doc4");
+
+    commit();
+
+    doQuery("b!doc1,c!doc2,d!doc3,e!doc4", "q","*:*");
+    doQuery("b!doc1,c!doc2,d!doc3,e!doc4", "q","*:*", "shards","shard1,shard2,shard3,shard4");
+    doQuery("b!doc1,c!doc2,d!doc3,e!doc4", "q","*:*", shardKeys,"b!,c!,d!,e!");
+    doQuery("b!doc1", "q","*:*", shardKeys,"b!");
+    doQuery("c!doc2", "q","*:*", shardKeys,"c!");
+    doQuery("d!doc3", "q","*:*", shardKeys,"d!");
+    doQuery("e!doc4", "q","*:*", shardKeys,"e!");
+
+    // try using shards parameter
+    doQuery("b!doc1", "q","*:*", "shards",bucket1);
+    doQuery("c!doc2", "q","*:*", "shards",bucket2);
+    doQuery("d!doc3", "q","*:*", "shards",bucket3);
+    doQuery("e!doc4", "q","*:*", "shards",bucket4);
+
+
+    doQuery("b!doc1,c!doc2", "q","*:*", shardKeys,"b!,c!");
+    doQuery("b!doc1,e!doc4", "q","*:*", shardKeys,"b!,e!");
+
+    doQuery("b!doc1,c!doc2", "q","*:*", shardKeys,"b,c");     // query shards that would contain *documents* "b" and "c" (i.e. not prefixes).  The upper bits are the same, so the shards should be the same.
+
+    doQuery("b!doc1,c!doc2", "q","*:*", shardKeys,"b/1!");   // top bit of hash(b)==1, so shard1 and shard2
+    doQuery("d!doc3,e!doc4", "q","*:*", shardKeys,"d/1!");   // top bit of hash(b)==0, so shard3 and shard4
+
+    doQuery("b!doc1,c!doc2", "q","*:*", shardKeys,"b!,c!");
+
+    doQuery("b!doc1,c!doc2,d!doc3,e!doc4", "q","*:*", shardKeys,"foo/0!");
+
+    // test targeting deleteByQuery at only certain shards
+    doDBQ("*:*", shardKeys,"b!");
+    commit();
+    doQuery("c!doc2,d!doc3,e!doc4", "q","*:*");
+    doAddDoc("b!doc1");
+
+    doDBQ("*:*", shardKeys,"c!");
+    commit();
+    doQuery("b!doc1,d!doc3,e!doc4", "q","*:*");
+    doAddDoc("c!doc2");
+
+    doDBQ("*:*", shardKeys,"c!");
+    commit();
+    doQuery("b!doc1,d!doc3,e!doc4", "q","*:*");
+    doAddDoc("c!doc2");
+
+    doDBQ("*:*", shardKeys,"d!,e!");
+    commit();
+    doQuery("b!doc1,c!doc2", "q","*:*");
+    doAddDoc("d!doc3");
+    doAddDoc("e!doc4");
+
+    commit();
+
+
+  }
+

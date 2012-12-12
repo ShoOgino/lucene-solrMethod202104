@@ -1,0 +1,69 @@
+  public void test() throws Exception {
+    Directory dir = newDirectory();
+    Directory taxoDir = newDirectory();
+    writer = new RandomIndexWriter(random(), dir);
+
+    // Writes facet ords to a separate directory from the
+    // main index:
+    taxoWriter = new DirectoryTaxonomyWriter(taxoDir, IndexWriterConfig.OpenMode.CREATE);
+
+    // Reused across documents, to add the necessary facet
+    // fields:
+    docBuilder = new CategoryDocumentBuilder(taxoWriter);
+
+    add("Author/Bob", "Publish Date/2010/10/15");
+    add("Author/Lisa", "Publish Date/2010/10/20");
+    add("Author/Lisa", "Publish Date/2012/1/1");
+    add("Author/Susan", "Publish Date/2012/1/7");
+    add("Author/Frank", "Publish Date/1999/5/5");
+
+    // NRT open
+    IndexSearcher searcher = newSearcher(writer.getReader());
+    writer.close();
+
+    // NRT open
+    TaxonomyReader taxoReader = new DirectoryTaxonomyReader(taxoWriter);
+    taxoWriter.close();
+
+    // Holds all configuration for a facet request:
+    FacetSearchParams fsp = new FacetSearchParams();
+
+    // Count both "Publish Date" and "Author" dimensions:
+    fsp.addFacetRequest(new CountFacetRequest(new CategoryPath("Publish Date"), 10));
+    fsp.addFacetRequest(new CountFacetRequest(new CategoryPath("Author"), 10));
+
+    // Aggregatses the facet counts:
+    FacetsCollector c = new FacetsCollector(fsp, searcher.getIndexReader(), taxoReader);
+
+    // MatchAllDocsQuery is for "browsing" (counts facets
+    // for all non-deleted docs in the index); normally
+    // you'd use a "normal" query, and use MultiCollector to
+    // wrap collecting the "normal" hits and also facets:
+    searcher.search(new MatchAllDocsQuery(), c);
+
+    // Retrieve & verify results:
+    List<FacetResult> results = c.getFacetResults();
+    assertEquals(2, results.size());
+    assertEquals("Publish Date (5)\n  2012 (2)\n  2010 (2)\n  1999 (1)\n",
+                 toSimpleString(results.get(0)));
+    assertEquals("Author (5)\n  Lisa (2)\n  Frank (1)\n  Susan (1)\n  Bob (1)\n",
+                 toSimpleString(results.get(1)));
+
+    
+    // Now user drills down on Publish Date/2010:
+    fsp = new FacetSearchParams();
+    Query q2 = DrillDown.query(fsp, new MatchAllDocsQuery(), new CategoryPath("Publish Date/2010", '/'));
+    fsp.addFacetRequest(new CountFacetRequest(new CategoryPath("Author"), 10));
+    c = new FacetsCollector(fsp, searcher.getIndexReader(), taxoReader);
+    searcher.search(q2, c);
+    results = c.getFacetResults();
+    assertEquals(1, results.size());
+    assertEquals("Author (2)\n  Lisa (1)\n  Bob (1)\n",
+                 toSimpleString(results.get(0)));
+
+    taxoReader.close();
+    searcher.getIndexReader().close();
+    dir.close();
+    taxoDir.close();
+  }
+

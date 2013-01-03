@@ -7,13 +7,37 @@
       // We have new deletes
       assert liveDocs.length() == info.info.getDocCount();
 
+      // Do this so we can delete any created files on
+      // exception; this saves all codecs from having to do
+      // it:
+      TrackingDirectoryWrapper trackingDir = new TrackingDirectoryWrapper(dir);
+
       // We can write directly to the actual name (vs to a
       // .tmp & renaming it) because the file is not live
       // until segments file is written:
-      info.info.getCodec().liveDocsFormat().writeLiveDocs((MutableBits)liveDocs, dir, info, pendingDeleteCount, IOContext.DEFAULT);
+      boolean success = false;
+      try {
+        info.info.getCodec().liveDocsFormat().writeLiveDocs((MutableBits)liveDocs, trackingDir, info, pendingDeleteCount, IOContext.DEFAULT);
+        success = true;
+      } finally {
+        if (!success) {
+          // Advance only the nextWriteDelGen so that a 2nd
+          // attempt to write will write to a new file
+          info.advanceNextWriteDelGen();
+
+          // Delete any partially created file(s):
+          for(String fileName : trackingDir.getCreatedFiles()) {
+            try {
+              dir.deleteFile(fileName);
+            } catch (Throwable t) {
+              // Ignore so we throw only the first exc
+            }
+          }
+        }
+      }
 
       // If we hit an exc in the line above (eg disk full)
-      // then info remains pointing to the previous
+      // then info's delGen remains pointing to the previous
       // (successfully written) del docs:
       info.advanceDelGen();
       info.setDelCount(info.getDelCount() + pendingDeleteCount);

@@ -1,0 +1,48 @@
+  private void flush() throws IOException {
+    assert off > 0;
+    long min = Long.MAX_VALUE, max = Long.MIN_VALUE;
+    for (int i = 0; i < off; ++i) {
+      min = Math.min(values[i], min);
+      max = Math.max(values[i], max);
+    }
+
+    final long delta = max - min;
+    final int bitsRequired = delta < 0 ? 64 : delta == 0L ? 0 : PackedInts.bitsRequired(delta);
+    if (bitsRequired == 64) {
+      // no need to delta-encode
+      min = 0L;
+    } else if (min > 0L) {
+      // make min as small as possible so that writeVLong requires fewer bytes
+      min = Math.max(0L, max - PackedInts.maxValue(bitsRequired));
+    }
+
+    final int token = (bitsRequired << BPV_SHIFT) | (min == 0 ? MIN_VALUE_EQUALS_0 : 0);
+    out.writeByte((byte) token);
+
+    if (min != 0) {
+      writeVLong(out, zigZagEncode(min) - 1);
+    }
+
+    if (bitsRequired > 0) {
+      if (min != 0) {
+        for (int i = 0; i < off; ++i) {
+          values[i] -= min;
+        }
+      }
+      final PackedInts.Encoder encoder = PackedInts.getEncoder(PackedInts.Format.PACKED, PackedInts.VERSION_CURRENT, bitsRequired);
+      final int iterations = values.length / encoder.valueCount();
+      final int blockSize = encoder.blockCount() * 8 * iterations;
+      if (blocks == null || blocks.length < blockSize) {
+        blocks = new byte[blockSize];
+      }
+      if (off < values.length) {
+        Arrays.fill(values, off, values.length, 0L);
+      }
+      encoder.encode(values, 0, blocks, 0, iterations);
+      final int blockCount = (int) PackedInts.Format.PACKED.byteCount(PackedInts.VERSION_CURRENT, off, bitsRequired);
+      out.writeBytes(blocks, blockCount);
+    }
+
+    off = 0;
+  }
+

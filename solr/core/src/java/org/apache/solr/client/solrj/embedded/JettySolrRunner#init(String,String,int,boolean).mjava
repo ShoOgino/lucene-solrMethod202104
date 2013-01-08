@@ -10,18 +10,29 @@
     }
     System.setProperty("solr.solr.home", solrHome);
     if (System.getProperty("jetty.testMode") != null) {
-      SelectChannelConnector connector = new SelectChannelConnector();
+      final String connectorName = System.getProperty("tests.jettyConnector", "SelectChannel");
+      final Connector connector;
+      final QueuedThreadPool threadPool;
+      if ("SelectChannel".equals(connectorName)) {
+        final SelectChannelConnector c = new SelectChannelConnector();
+        c.setReuseAddress(true);
+        c.setLowResourcesMaxIdleTime(1500);
+        connector = c;
+        threadPool = (QueuedThreadPool) c.getThreadPool();
+      } else if ("Socket".equals(connectorName)) {
+        final SocketConnector c = new SocketConnector();
+        c.setReuseAddress(true);
+        connector = c;
+        threadPool = (QueuedThreadPool) c.getThreadPool();
+      } else {
+        throw new IllegalArgumentException("Illegal value for system property 'tests.jettyConnector': " + connectorName);
+      }
       connector.setPort(port);
-      connector.setReuseAddress(true);
-      connector.setLowResourcesMaxIdleTime(1500);
-      QueuedThreadPool threadPool = (QueuedThreadPool) connector
-          .getThreadPool();
+      connector.setHost("127.0.0.1");
       if (threadPool != null) {
         threadPool.setMaxThreads(10000);
         threadPool.setMaxIdleTimeMs(5000);
-        if (!stopAtShutdown) {
-          threadPool.setMaxStopTimeMs(100);
-        }
+        threadPool.setMaxStopTimeMs(30000);
       }
       
       server.setConnectors(new Connector[] {connector});
@@ -56,12 +67,15 @@
     root.setHandler(new GzipHandler());
     server.addLifeCycleListener(new LifeCycle.Listener() {
 
+      @Override
       public void lifeCycleStopping(LifeCycle arg0) {
         System.clearProperty("hostPort");
       }
 
+      @Override
       public void lifeCycleStopped(LifeCycle arg0) {}
 
+      @Override
       public void lifeCycleStarting(LifeCycle arg0) {
         synchronized (JettySolrRunner.this) {
           waitOnSolr = true;
@@ -69,6 +83,7 @@
         }
       }
 
+      @Override
       public void lifeCycleStarted(LifeCycle arg0) {
         lastPort = getFirstConnectorPort();
         System.setProperty("hostPort", Integer.toString(lastPort));
@@ -78,12 +93,14 @@
             schemaFilename);
 //        SolrDispatchFilter filter = new SolrDispatchFilter();
 //        FilterHolder fh = new FilterHolder(filter);
+        debugFilter = root.addFilter(DebugFilter.class, "*", EnumSet.of(DispatcherType.REQUEST) );
         dispatchFilter = root.addFilter(SolrDispatchFilter.class, "*", EnumSet.of(DispatcherType.REQUEST) );
         if (solrConfigFilename != null) System.clearProperty("solrconfig");
         if (schemaFilename != null) System.clearProperty("schema");
         System.clearProperty("solr.solr.home");
       }
 
+      @Override
       public void lifeCycleFailure(LifeCycle arg0, Throwable arg1) {
         System.clearProperty("hostPort");
       }

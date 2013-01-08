@@ -2,6 +2,7 @@
       final CurrentCoreDescriptorProvider registerOnReconnect, boolean updateLastPublished) {
     List<CoreDescriptor> descriptors = registerOnReconnect
         .getCurrentDescriptors();
+    if (isClosed) return;
     if (descriptors != null) {
       // before registering as live, make sure everyone is in a
       // down state
@@ -12,6 +13,9 @@
           descriptor.getCloudDescriptor().isLeader = false;
           publish(descriptor, ZkStateReader.DOWN, updateLastPublished);
         } catch (Exception e) {
+          if (isClosed) {
+            return;
+          }
           try {
             Thread.sleep(1000);
           } catch (InterruptedException e1) {
@@ -24,10 +28,39 @@
             continue;
           }
         }
+        
+        // if it looks like we are going to be the leader, we don't
+        // want to wait for the following stuff
+        CloudDescriptor cloudDesc = descriptor.getCloudDescriptor();
+        String collection = cloudDesc.getCollectionName();
+        String slice = cloudDesc.getShardId();
+        try {
+          
+          int children = zkStateReader
+              .getZkClient()
+              .getChildren(
+                  ZkStateReader.COLLECTIONS_ZKNODE + "/" + collection
+                      + "/leader_elect/" + slice + "/election", null, true).size();
+          if (children == 0) {
+            return;
+          }
+
+        } catch (NoNodeException e) {
+         return;
+        } catch (InterruptedException e2) {
+          Thread.currentThread().interrupt();
+        } catch (KeeperException e) {
+          log.warn("", e);
+          Thread.currentThread().interrupt();
+        }
+        
         try {
           waitForLeaderToSeeDownState(descriptor, coreZkNodeName);
         } catch (Exception e) {
           SolrException.log(log, "", e);
+          if (isClosed) {
+            return;
+          }
           try {
             Thread.sleep(5000);
           } catch (InterruptedException e1) {

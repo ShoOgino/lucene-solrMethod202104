@@ -28,6 +28,8 @@
     // now.
     cfg.substituteProperties();
     
+    initShardHandler(cfg);
+    
     allocateLazyCores(cfg);
     
     // Initialize Logging
@@ -53,6 +55,9 @@
       if (fname != null) {
         if ("JUL".equalsIgnoreCase(fname)) {
           logging = new JulWatcher(slf4jImpl);
+//      else if( "Log4j".equals(fname) ) {
+//        logging = new Log4jWatcher(slf4jImpl);
+//      }
         } else {
           try {
             logging = loader.newInstance(fname, LogWatcher.class);
@@ -86,6 +91,9 @@
     shareSchema = cfg.getBool("solr/cores/@shareSchema", DEFAULT_SHARE_SCHEMA);
     zkClientTimeout = cfg.getInt("solr/cores/@zkClientTimeout",
         DEFAULT_ZK_CLIENT_TIMEOUT);
+    
+    distribUpdateConnTimeout = cfg.getInt("solr/cores/@distribUpdateConnTimeout", 0);
+    distribUpdateSoTimeout = cfg.getInt("solr/cores/@distribUpdateSoTimeout", 0);
     
     hostPort = cfg.get("solr/cores/@hostPort", DEFAULT_HOST_PORT);
     
@@ -136,14 +144,11 @@
         XPathConstants.NODESET);
     
     // setup executor to load cores in parallel
-    coreLoadExecutor = new ThreadPoolExecutor(0, Integer.MAX_VALUE, 5,
-        TimeUnit.SECONDS, new SynchronousQueue<Runnable>(),
+    coreLoadExecutor = new ThreadPoolExecutor(coreLoadThreads, coreLoadThreads, 1,
+        TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(),
         new DefaultSolrThreadFactory("coreLoadExecutor"));
     try {
-      // 4 threads at a time max
-      final AdjustableSemaphore semaphore = new AdjustableSemaphore(
-          coreLoadThreads);
-      
+
       CompletionService<SolrCore> completionService = new ExecutorCompletionService<SolrCore>(
           coreLoadExecutor);
       Set<Future<SolrCore>> pending = new HashSet<Future<SolrCore>>();
@@ -202,49 +207,42 @@
                 .equalsIgnoreCase(opt)) ? true : false);
           }
           
-          opt = DOMUtil.getAttr(node, CORE_SWAPPABLE, null);
+          opt = DOMUtil.getAttr(node, CORE_TRANSIENT, null);
           if (opt != null) {
-            p.setSwappable(("true".equalsIgnoreCase(opt) || "on"
+            p.setTransient(("true".equalsIgnoreCase(opt) || "on"
                 .equalsIgnoreCase(opt)) ? true : false);
           }
           
-          if (!p.isSwappable() && p.isLoadOnStartup()) { // Just like current
-                                                         // case.
+          if (p.isLoadOnStartup()) { // The normal case
+
             Callable<SolrCore> task = new Callable<SolrCore>() {
+              @Override
               public SolrCore call() {
                 SolrCore c = null;
                 try {
                   c = create(p);
-                  register(name, c, false);
+                  if (p.isTransient()) {
+                    registerLazyCore(name, c, false);
+                  } else {
+                    register(name, c, false);
+                  }
+
                 } catch (Throwable t) {
                   SolrException.log(log, null, t);
                   if (c != null) {
                     c.close();
                   }
                 }
-                semaphore.release();
-                
                 return c;
               }
             };
-            
-            try {
-              semaphore.acquire();
-            } catch (InterruptedException e) {
-              Thread.currentThread().interrupt();
-              throw new SolrException(ErrorCode.SERVER_ERROR,
-                  "Interrupted while loading SolrCore(s)", e);
-            }
-            
-            try {
-              pending.add(completionService.submit(task));
-            } catch (RejectedExecutionException e) {
-              semaphore.release();
-              throw e;
-            }
+
+
+            pending.add(completionService.submit(task));
+
             
           } else {
-            // Store it away for later use. includes non-swappable but not
+            // Store it away for later use. includes non-transient but not
             // loaded at startup cores.
             dynamicDescriptors.put(rawName, p);
           }
@@ -266,14 +264,12 @@
               coreToOrigName.put(c, c.getName());
             }
           } catch (ExecutionException e) {
-            // shouldn't happen since we catch exceptions ourselves
-            SolrException.log(SolrCore.log,
-                "error sending update request to shard", e);
+            SolrException.log(SolrCore.log, "error loading core", e);
           }
           
         } catch (InterruptedException e) {
           throw new SolrException(SolrException.ErrorCode.SERVICE_UNAVAILABLE,
-              "interrupted waiting for shard update response", e);
+              "interrupted while loading core", e);
         }
       }
     } finally {

@@ -1,0 +1,102 @@
+  public ZkController(final CoreContainer cc, String zkServerAddress, int zkClientTimeout, int zkClientConnectTimeout, String localHost, String locaHostPort,
+      String localHostContext, String leaderVoteWait, int distribUpdateConnTimeout, int distribUpdateSoTimeout, final CurrentCoreDescriptorProvider registerOnReconnect) throws InterruptedException,
+      TimeoutException, IOException {
+    if (cc == null) throw new IllegalArgumentException("CoreContainer cannot be null.");
+    this.cc = cc;
+
+    // be forgiving and strip this off leading/trailing slashes
+    // this allows us to support users specifying hostContext="/" in 
+    // solr.xml to indicate the root context, instead of hostContext="" 
+    // which means the default of "solr"
+    localHostContext = trimLeadingAndTrailingSlashes(localHostContext);
+    
+    updateShardHandler = new UpdateShardHandler(distribUpdateConnTimeout, distribUpdateSoTimeout);
+    
+    this.zkServerAddress = zkServerAddress;
+    this.localHostPort = locaHostPort;
+    this.localHostContext = localHostContext;
+    this.localHost = getHostAddress(localHost);
+    this.baseURL = this.localHost + ":" + this.localHostPort + 
+      (this.localHostContext.isEmpty() ? "" : ("/" + this.localHostContext));
+
+    this.hostName = getHostNameFromAddress(this.localHost);
+    this.nodeName = generateNodeName(this.hostName, 
+                                     this.localHostPort, 
+                                     this.localHostContext);
+
+    this.leaderVoteWait = leaderVoteWait;
+    this.clientTimeout = zkClientTimeout;
+    zkClient = new SolrZkClient(zkServerAddress, zkClientTimeout, zkClientConnectTimeout,
+        // on reconnect, reload cloud info
+        new OnReconnect() {
+
+          @Override
+          public void command() {
+            try {
+              markAllAsNotLeader(registerOnReconnect);
+              
+              // this is troublesome - we dont want to kill anything the old leader accepted
+              // though I guess sync will likely get those updates back? But only if
+              // he is involved in the sync, and he certainly may not be
+            //  ExecutorUtil.shutdownAndAwaitTermination(cc.getCmdDistribExecutor());
+              // we need to create all of our lost watches
+              
+              // seems we dont need to do this again...
+              //Overseer.createClientNodes(zkClient, getNodeName());
+              ShardHandler shardHandler;
+              String adminPath;
+              shardHandler = cc.getShardHandlerFactory().getShardHandler();
+              adminPath = cc.getAdminPath();
+
+              cc.cancelCoreRecoveries();
+              
+              registerAllCoresAsDown(registerOnReconnect, false);
+
+              ZkController.this.overseer = new Overseer(shardHandler, adminPath, zkStateReader);
+              ElectionContext context = new OverseerElectionContext(zkClient, overseer, getNodeName());
+              overseerElector.joinElection(context, true);
+              zkStateReader.createClusterStateWatchersAndUpdate();
+              
+              // we have to register as live first to pick up docs in the buffer
+              createEphemeralLiveNode();
+              
+              List<CoreDescriptor> descriptors = registerOnReconnect.getCurrentDescriptors();
+              // re register all descriptors
+              if (descriptors  != null) {
+                for (CoreDescriptor descriptor : descriptors) {
+                  // TODO: we need to think carefully about what happens when it was
+                  // a leader that was expired - as well as what to do about leaders/overseers
+                  // with connection loss
+                  try {
+                    register(descriptor.getName(), descriptor, true, true);
+                  } catch (Throwable t) {
+                    SolrException.log(log, "Error registering SolrCore", t);
+                  }
+                }
+              }
+  
+            } catch (InterruptedException e) {
+              // Restore the interrupted status
+              Thread.currentThread().interrupt();
+              throw new ZooKeeperException(
+                  SolrException.ErrorCode.SERVER_ERROR, "", e);
+            } catch (Exception e) {
+              SolrException.log(log, "", e);
+              throw new ZooKeeperException(
+                  SolrException.ErrorCode.SERVER_ERROR, "", e);
+            }
+
+          }
+
+ 
+        });
+    
+    this.overseerJobQueue = Overseer.getInQueue(zkClient);
+    this.overseerCollectionQueue = Overseer.getCollectionQueue(zkClient);
+    cmdExecutor = new ZkCmdExecutor(zkClientTimeout);
+    leaderElector = new LeaderElector(zkClient);
+    zkStateReader = new ZkStateReader(zkClient);
+    
+    init(registerOnReconnect);
+  }
+

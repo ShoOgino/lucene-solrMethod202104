@@ -1,18 +1,32 @@
   @Override
   public CategoryPath getPath(int ordinal) throws IOException {
     ensureOpen();
-    // TODO (Facet): Currently, the LRU cache we use (getCategoryCache) holds
-    // strings with delimiters, not CategoryPath objects, so even if
-    // we have a cache hit, we need to process the string and build a new
-    // CategoryPath object every time. What is preventing us from putting
-    // the actual CategoryPath object in the cache is the fact that these
-    // objects are mutable. So we should create an immutable (read-only)
-    // interface that CategoryPath implements, and this method should
-    // return this interface, not the writable CategoryPath.
-    String label = getLabel(ordinal);
-    if (label == null) {
+    
+    // Since the cache is shared with DTR instances allocated from
+    // doOpenIfChanged, we need to ensure that the ordinal is one that this DTR
+    // instance recognizes. Therefore we do this check up front, before we hit
+    // the cache.
+    if (ordinal < 0 || ordinal >= indexReader.maxDoc()) {
       return null;
     }
-    return new CategoryPath(label, delimiter);
+    
+    // TODO: can we use an int-based hash impl, such as IntToObjectMap,
+    // wrapped as LRU?
+    Integer catIDInteger = Integer.valueOf(ordinal);
+    synchronized (categoryCache) {
+      CategoryPath res = categoryCache.get(catIDInteger);
+      if (res != null) {
+        return res;
+      }
+    }
+    
+    final LoadFullPathOnly loader = new LoadFullPathOnly();
+    indexReader.document(ordinal, loader);
+    CategoryPath ret = new CategoryPath(loader.getFullPath(), delimiter);
+    synchronized (categoryCache) {
+      categoryCache.put(catIDInteger, ret);
+    }
+    
+    return ret;
   }
 

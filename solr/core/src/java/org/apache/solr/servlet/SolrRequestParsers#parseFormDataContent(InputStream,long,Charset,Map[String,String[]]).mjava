@@ -1,0 +1,63 @@
+  /**
+   * Given a url-encoded form from POST content (as InputStream), map it into the given map.
+   * The given InputStream should be buffered!
+   * @param postContent to be parsed
+   * @param charset to be used to decode resulting bytes after %-decoding
+   * @param map place all parameters in this map
+   */
+  @SuppressWarnings("fallthrough")
+  static long parseFormDataContent(final InputStream postContent, final long maxLen, final Charset charset, final Map<String,String[]> map) throws IOException {
+    final CharsetDecoder charsetDecoder = charset.newDecoder()
+      .onMalformedInput(CodingErrorAction.REPORT)
+      .onUnmappableCharacter(CodingErrorAction.REPORT);
+    long len = 0L, keyPos = 0L, valuePos = 0L;
+    final ByteArrayOutputStream2 keyStream = new ByteArrayOutputStream2(),
+      valueStream = new ByteArrayOutputStream2();
+    ByteArrayOutputStream2 currentStream = keyStream;
+    for(;;) {
+      int b = postContent.read();
+      switch (b) {
+        case -1: // end of stream
+        case '&': // separator
+          if (keyStream.size() > 0) {
+            final String key = decodeChars(keyStream, keyPos, charsetDecoder), value = decodeChars(valueStream, valuePos, charsetDecoder);
+            MultiMapSolrParams.addParam(key, value, map);
+          } else if (valueStream.size() > 0) {
+            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "application/x-www-form-urlencoded invalid: missing key");
+          }
+          keyStream.reset();
+          valueStream.reset();
+          keyPos = valuePos = len + 1;
+          currentStream = keyStream;
+          break;
+        case '+': // space replacement
+          currentStream.write(' ');
+          break;
+        case '%': // escape
+          final int upper = digit16(b = postContent.read());
+          len++;
+          final int lower = digit16(b = postContent.read());
+          len++;
+          currentStream.write(((upper << 4) + lower));
+          break;
+        case '=': // kv separator
+          if (currentStream == keyStream) {
+            valuePos = len + 1;
+            currentStream = valueStream;
+            break;
+          }
+          // fall-through
+        default:
+          currentStream.write(b);
+      }
+      if (b == -1) {
+        break;
+      }
+      len++;
+      if (len > maxLen) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "application/x-www-form-urlencoded content exceeds upload limit of " + (maxLen/1024L) + " KB");
+      }
+    }
+    return len;
+  }
+

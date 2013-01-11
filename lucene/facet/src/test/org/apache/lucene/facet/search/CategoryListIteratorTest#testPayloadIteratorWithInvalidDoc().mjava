@@ -4,8 +4,8 @@
   @Test
   public void testPayloadIteratorWithInvalidDoc() throws Exception {
     Directory dir = newDirectory();
-    DataTokenStream dts = new DataTokenStream("1",new SortingIntEncoder(
-        new UniqueValuesIntEncoder(new DGapIntEncoder(new VInt8IntEncoder()))));
+    final IntEncoder encoder = new SortingIntEncoder(new UniqueValuesIntEncoder(new DGapIntEncoder(new VInt8IntEncoder())));
+    DataTokenStream dts = new DataTokenStream("1", encoder);
     // this test requires that no payloads ever be randomly present!
     final Analyzer noPayloadsAnalyzer = new Analyzer() {
       @Override
@@ -31,30 +31,27 @@
     IndexReader reader = writer.getReader();
     writer.close();
 
-    CategoryListIterator cli = new PayloadIntDecodingIterator(reader, new Term(
-        "f","1"), dts.encoder.createMatchingDecoder());
+    IntsRef ordinals = new IntsRef();
+    CategoryListIterator cli = new PayloadCategoryListIteraor(reader, new Term("f","1"), encoder.createMatchingDecoder());
     assertTrue("Failed to initialize payload iterator", cli.init());
-    int totalCats = 0;
+    int totalCategories = 0;
     for (int i = 0; i < data.length; i++) {
-      // doc no. i
       Set<Integer> values = new HashSet<Integer>();
       for (int j = 0; j < data[i].length; j++) {
-        values.add(data[i][j]);
+        values.add(data[i].ints[j]);
       }
-      boolean hasDoc = cli.skipTo(i);
-      if (hasDoc) {
-        assertTrue("Document " + i + " must not have a payload!", i == 0);
-        long cat;
-        while ((cat = cli.nextCategory()) < Integer.MAX_VALUE) {
-          assertTrue("expected category not found: " + cat, values.contains((int) cat));
-          ++totalCats;
+      cli.getOrdinals(i, ordinals);
+      if (i == 0) {
+        assertTrue("document 0 must have a payload", ordinals.length > 0);
+        for (int j = 0; j < ordinals.length; j++) {
+          assertTrue("expected category not found: " + ordinals.ints[j], values.contains(ordinals.ints[j]));
         }
+        totalCategories += ordinals.length;
       } else {
-        assertFalse("Document " + i + " must have a payload!", i == 0);
+        assertTrue("only document 0 should have a payload", ordinals.length == 0);
       }
-
     }
-    assertEquals("Wrong number of total categories!", 2, totalCats);
+    assertEquals("Wrong number of total categories!", 2, totalCategories);
 
     reader.close();
     dir.close();

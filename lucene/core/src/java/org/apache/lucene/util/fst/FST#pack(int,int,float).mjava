@@ -27,6 +27,9 @@
       throw new IllegalArgumentException("this FST was not built with willPackFST=true");
     }
 
+    final RAMOutputStream buffer = new RAMOutputStream();
+    byte[] bufferBytes = new byte[64];
+
     Arc<T> arc = new Arc<T>();
 
     final BytesReader r = getBytesReader(0);
@@ -61,23 +64,21 @@
       //System.out.println("map node=" + n.node + " inCount=" + n.count + " to newID=" + downTo);
     }
 
-    final FST<T> fst = new FST<T>(inputType, null, outputs);
-
-    final BytesWriter writer = fst.writer;
-
     // +1 because node ords start at 1 (0 is reserved as stop node):
     final GrowableWriter newNodeAddress = new GrowableWriter(
-        PackedInts.bitsRequired(bytes.length), 1 + nodeCount, acceptableOverheadRatio);
+                    PackedInts.bitsRequired(this.bytes.getPosition()), 1 + nodeCount, acceptableOverheadRatio);
 
     // Fill initial coarse guess:
     for(int node=1;node<=nodeCount;node++) {
-      newNodeAddress.set(node, 1 + bytes.length - nodeAddress.get(node));
+      newNodeAddress.set(node, 1 + this.bytes.getPosition() - nodeAddress.get(node));
     }
 
     int absCount;
     int deltaCount;
     int topCount;
     int nextCount;
+
+    FST<T> fst;
 
     // Iterate until we converge:
     while(true) {
@@ -88,7 +89,10 @@
       // for assert:
       boolean negDelta = false;
 
-      writer.setPosition(0);
+      fst = new FST<T>(inputType, outputs);
+      
+      final BytesStore writer = fst.bytes;
+
       // Skip 0 byte since 0 is reserved target:
       writer.writeByte((byte) 0);
 
@@ -110,6 +114,7 @@
       for(int node=nodeCount;node>=1;node--) {
         fst.nodeCount++;
         final int address = writer.getPosition();
+
         //System.out.println("  node: " + node + " address=" + address);
         if (address != newNodeAddress.get(node)) {
           addressError = address - (int) newNodeAddress.get(node);
@@ -131,7 +136,8 @@
         // this is an array'd node and bytesPerArc changes:
         writeNode:
         while(true) { // retry writing this node
-
+          assert buffer.getFilePointer() == 0;
+          //System.out.println("  cycle: retry");
           readFirstRealTargetArc(node, arc, r);
 
           final boolean useArcArray = arc.bytesPerArc != 0;
@@ -140,18 +146,18 @@
             if (bytesPerArc == 0) {
               bytesPerArc = arc.bytesPerArc;
             }
-            writer.writeByte(ARCS_AS_FIXED_ARRAY);
-            writer.writeVInt(arc.numArcs);
-            writer.writeVInt(bytesPerArc);
+            buffer.writeByte(ARCS_AS_FIXED_ARRAY);
+            buffer.writeVInt(arc.numArcs);
+            buffer.writeVInt(bytesPerArc);
             //System.out.println("node " + node + ": " + arc.numArcs + " arcs");
           }
 
           int maxBytesPerArc = 0;
           //int wasted = 0;
           while(true) {  // iterate over all arcs for this node
+            //System.out.println("    cycle next arc");
 
-            //System.out.println("    arc label=" + arc.label + " target=" + arc.target + " pos=" + writer.posWrite);
-            final int arcStartPos = writer.getPosition();
+            final int arcStartPos = (int) buffer.getFilePointer();
             nodeArcCount++;
 
             byte flags = 0;
@@ -198,7 +204,7 @@
                 absPtr = topNodeMap.size() + (int) newNodeAddress.get(arc.target) + addressError;
               }
 
-              int delta = (int) newNodeAddress.get(arc.target) + addressError - writer.getPosition() - 2;
+              int delta = (int) (newNodeAddress.get(arc.target) + addressError - buffer.getFilePointer() - address - 2);
               if (delta < 0) {
                 //System.out.println("neg: " + delta);
                 anyNegDelta = true;
@@ -213,22 +219,22 @@
               absPtr = 0;
             }
 
-            writer.writeByte(flags);
-            fst.writeLabel(arc.label);
+            buffer.writeByte(flags);
+            fst.writeLabel(buffer, arc.label);
 
             if (arc.output != NO_OUTPUT) {
-              outputs.write(arc.output, writer);
+              outputs.write(arc.output, buffer);
               if (!retry) {
                 fst.arcWithOutputCount++;
               }
             }
             if (arc.nextFinalOutput != NO_OUTPUT) {
-              outputs.writeFinalOutput(arc.nextFinalOutput, writer);
+              outputs.writeFinalOutput(arc.nextFinalOutput, buffer);
             }
 
             if (doWriteTarget) {
 
-              int delta = (int) newNodeAddress.get(arc.target) + addressError - writer.getPosition();
+              int delta = (int) (newNodeAddress.get(arc.target) + addressError - buffer.getFilePointer() - address);
               if (delta < 0) {
                 anyNegDelta = true;
                 //System.out.println("neg: " + delta);
@@ -237,7 +243,7 @@
 
               if (flag(flags, BIT_TARGET_DELTA)) {
                 //System.out.println("        delta");
-                writer.writeVInt(delta);
+                buffer.writeVInt(delta);
                 if (!retry) {
                   deltaCount++;
                 }
@@ -249,7 +255,7 @@
                   System.out.println("        abs");
                 }
                 */
-                writer.writeVInt(absPtr);
+                buffer.writeVInt(absPtr);
                 if (!retry) {
                   if (absPtr >= topNodeMap.size()) {
                     absCount++;
@@ -261,7 +267,7 @@
             }
 
             if (useArcArray) {
-              final int arcBytes = writer.getPosition() - arcStartPos;
+              final int arcBytes = (int) (buffer.getFilePointer() - arcStartPos);
               //System.out.println("  " + arcBytes + " bytes");
               maxBytesPerArc = Math.max(maxBytesPerArc, arcBytes);
               // NOTE: this may in fact go "backwards", if
@@ -271,7 +277,11 @@
               // will retry (below) so it's OK to ovewrite
               // bytes:
               //wasted += bytesPerArc - arcBytes;
-              writer.setPosition(arcStartPos + bytesPerArc);
+              int skip = (int) (arcStartPos + bytesPerArc - buffer.getFilePointer());
+              while(skip > 0) {
+                buffer.writeByte((byte) 0);
+                skip--;
+              }
             }
 
             if (arc.isLast()) {
@@ -296,11 +306,19 @@
 
           // Retry:
           bytesPerArc = maxBytesPerArc;
-          writer.setPosition(address);
+          buffer.reset();
           nodeArcCount = 0;
           retry = true;
           anyNegDelta = false;
         }
+
+        if (bufferBytes.length < (int) buffer.getFilePointer()) {
+          bufferBytes = ArrayUtil.grow(bufferBytes, (int) buffer.getFilePointer());
+        }
+        buffer.writeTo(bufferBytes, 0);
+        writer.writeBytes(bufferBytes, 0, (int) buffer.getFilePointer());
+        buffer.reset();
+
         negDelta |= anyNegDelta;
 
         fst.arcCount += nodeArcCount;
@@ -331,7 +349,6 @@
     }
     fst.nodeRefToAddress = nodeRefToAddressIn;
     
-
     fst.startNode = (int) newNodeAddress.get(startNode);
     //System.out.println("new startNode=" + fst.startNode + " old startNode=" + startNode);
 
@@ -342,11 +359,8 @@
     assert fst.nodeCount == nodeCount: "fst.nodeCount=" + fst.nodeCount + " nodeCount=" + nodeCount;
     assert fst.arcCount == arcCount;
     assert fst.arcWithOutputCount == arcWithOutputCount: "fst.arcWithOutputCount=" + fst.arcWithOutputCount + " arcWithOutputCount=" + arcWithOutputCount;
-    
-    final byte[] finalBytes = new byte[writer.getPosition()];
-    //System.out.println("resize " + fst.bytes.length + " down to " + writer.posWrite);
-    System.arraycopy(fst.bytes, 0, finalBytes, 0, writer.getPosition());
-    fst.bytes = finalBytes;
+
+    fst.bytes.finish();
     fst.cacheRootArcs();
 
     //final int size = fst.sizeInBytes();

@@ -1,23 +1,29 @@
   /** Load a previously saved FST. */
   public FST(DataInput in, Outputs<T> outputs) throws IOException {
     this.outputs = outputs;
-    writer = null;
     // NOTE: only reads most recent format; we don't have
     // back-compat promise for FSTs (they are experimental):
     CodecUtil.checkHeader(in, FILE_FORMAT_NAME, VERSION_PACKED, VERSION_PACKED);
     packed = in.readByte() == 1;
     if (in.readByte() == 1) {
       // accepts empty string
+      // 1 KB blocks:
+      BytesStore emptyBytes = new BytesStore(10);
       int numBytes = in.readVInt();
-      bytes = new byte[numBytes];
-      in.readBytes(bytes, 0, numBytes);
-      
+      emptyBytes.copyBytes(in, numBytes);
+
       // De-serialize empty-string output:
       BytesReader reader;
       if (packed) {
-        reader = new ForwardBytesReader(bytes, 0);
+        reader = emptyBytes.getForwardReader();
       } else {
-        reader = new ReverseBytesReader(bytes, bytes.length-1);
+        reader = emptyBytes.getReverseReader();
+        // NoOutputs uses 0 bytes when writing its output,
+        // so we have to check here else BytesStore gets
+        // angry:
+        if (numBytes > 0) {
+          reader.setPosition(numBytes-1);
+        }
       }
       emptyOutput = outputs.readFinalOutput(reader);
     } else {
@@ -47,8 +53,9 @@
     arcCount = in.readVInt();
     arcWithOutputCount = in.readVInt();
 
-    bytes = new byte[in.readVInt()];
-    in.readBytes(bytes, 0, bytes.length);
+    int numBytes = in.readVInt();
+    bytes = new BytesStore(in, numBytes, Integer.MAX_VALUE);
+    
     NO_OUTPUT = outputs.getNoOutput();
 
     cacheRootArcs();

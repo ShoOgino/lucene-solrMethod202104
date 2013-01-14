@@ -1,6 +1,7 @@
   // serializes new node by appending its bytes to the end
   // of the current byte[]
-  int addNode(Builder.UnCompiledNode<T> nodeIn) throws IOException {
+  long addNode(Builder.UnCompiledNode<T> nodeIn) throws IOException {
+
     //System.out.println("FST.addNode pos=" + bytes.getPosition() + " numArcs=" + nodeIn.numArcs);
     if (nodeIn.numArcs == 0) {
       if (nodeIn.isFinal) {
@@ -10,10 +11,10 @@
       }
     }
 
-    final int startAddress = bytes.getPosition();
+    final long startAddress = bytes.getPosition();
     //System.out.println("  startAddr=" + startAddress);
 
-    boolean doFixedArray = shouldExpand(nodeIn);
+    final boolean doFixedArray = shouldExpand(nodeIn);
     if (doFixedArray) {
       //System.out.println("  fixedArray");
       if (bytesPerArc.length < nodeIn.numArcs) {
@@ -25,7 +26,7 @@
     
     final int lastArc = nodeIn.numArcs-1;
 
-    int lastArcStart = bytes.getPosition();
+    long lastArcStart = bytes.getPosition();
     int maxBytesPerArc = 0;
     for(int arcIdx=0;arcIdx<nodeIn.numArcs;arcIdx++) {
       final Builder.Arc<T> arc = nodeIn.arcs[arcIdx];
@@ -58,7 +59,7 @@
       if (!targetHasArcs) {
         flags += BIT_STOP_NODE;
       } else if (inCounts != null) {
-        inCounts.set(target.node, inCounts.get(target.node) + 1);
+        inCounts.set((int) target.node, inCounts.get((int) target.node) + 1);
       }
 
       if (arc.output != NO_OUTPUT) {
@@ -84,14 +85,14 @@
       if (targetHasArcs && (flags & BIT_TARGET_NEXT) == 0) {
         assert target.node > 0;
         //System.out.println("    write target");
-        bytes.writeVInt(target.node);
+        bytes.writeVLong(target.node);
       }
 
       // just write the arcs "like normal" on first pass,
       // but record how many bytes each one took, and max
       // byte size:
       if (doFixedArray) {
-        bytesPerArc[arcIdx] = bytes.getPosition() - lastArcStart;
+        bytesPerArc[arcIdx] = (int) (bytes.getPosition() - lastArcStart);
         lastArcStart = bytes.getPosition();
         maxBytesPerArc = Math.max(maxBytesPerArc, bytesPerArc[arcIdx]);
         //System.out.println("    bytes=" + bytesPerArc[arcIdx]);
@@ -123,7 +124,6 @@
       assert maxBytesPerArc > 0;
       // 2nd pass just "expands" all arcs to take up a fixed
       // byte size
-      assert ((long) startAddress+MAX_HEADER_SIZE) + ((long) nodeIn.numArcs) * maxBytesPerArc < Integer.MAX_VALUE: "FST too large (> 2.1 GB)";
 
       //System.out.println("write int @pos=" + (fixedArrayStart-4) + " numArcs=" + nodeIn.numArcs);
       // create the header
@@ -136,14 +136,14 @@
       bad.writeVInt(maxBytesPerArc);
       int headerLen = bad.getPosition();
       
-      final int fixedArrayStart = startAddress + headerLen;
+      final long fixedArrayStart = startAddress + headerLen;
 
       // expand the arcs in place, backwards
-      int srcPos = bytes.getPosition();
-      int destPos = fixedArrayStart + nodeIn.numArcs*maxBytesPerArc;
+      long srcPos = bytes.getPosition();
+      long destPos = fixedArrayStart + nodeIn.numArcs*maxBytesPerArc;
       assert destPos >= srcPos;
       if (destPos > srcPos) {
-        bytes.skipBytes(destPos - srcPos);
+        bytes.skipBytes((int) (destPos - srcPos));
         for(int arcIdx=nodeIn.numArcs-1;arcIdx>=0;arcIdx--) {
           destPos -= maxBytesPerArc;
           srcPos -= bytesPerArc[arcIdx];
@@ -160,19 +160,26 @@
       bytes.writeBytes(startAddress, header, 0, headerLen);
     }
 
-    final int thisNodeAddress = bytes.getPosition()-1;
+    final long thisNodeAddress = bytes.getPosition()-1;
 
     bytes.reverse(startAddress, thisNodeAddress);
 
+    // PackedInts uses int as the index, so we cannot handle
+    // > 2.1B nodes when packing:
+    if (nodeAddress != null && nodeCount == Integer.MAX_VALUE) {
+      throw new IllegalStateException("cannot create a packed FST with more than 2.1 billion nodes");
+    }
+
     nodeCount++;
-    final int node;
+    final long node;
     if (nodeAddress != null) {
+
       // Nodes are addressed by 1+ord:
-      if (nodeCount == nodeAddress.size()) {
+      if ((int) nodeCount == nodeAddress.size()) {
         nodeAddress = nodeAddress.resize(ArrayUtil.oversize(nodeAddress.size() + 1, nodeAddress.getBitsPerValue()));
         inCounts = inCounts.resize(ArrayUtil.oversize(inCounts.size() + 1, inCounts.getBitsPerValue()));
       }
-      nodeAddress.set(nodeCount, thisNodeAddress);
+      nodeAddress.set((int) nodeCount, thisNodeAddress);
       // System.out.println("  write nodeAddress[" + nodeCount + "] = " + endAddress);
       node = nodeCount;
     } else {

@@ -12,6 +12,9 @@
    */
   FST<T> pack(int minInCountDeref, int maxDerefNodes, float acceptableOverheadRatio) throws IOException {
 
+    // NOTE: maxDerefNodes is intentionally int: we cannot
+    // support > 2.1B deref nodes
+
     // TODO: other things to try
     //   - renumber the nodes to get more next / better locality?
     //   - allow multiple input labels on an arc, so
@@ -63,7 +66,7 @@
 
     // +1 because node ords start at 1 (0 is reserved as stop node):
     final GrowableWriter newNodeAddress = new GrowableWriter(
-                    PackedInts.bitsRequired(this.bytes.getPosition()), 1 + nodeCount, acceptableOverheadRatio);
+                       PackedInts.bitsRequired(this.bytes.getPosition()), (int) (1 + nodeCount), acceptableOverheadRatio);
 
     // Fill initial coarse guess:
     for(int node=1;node<=nodeCount;node++) {
@@ -86,7 +89,7 @@
       // for assert:
       boolean negDelta = false;
 
-      fst = new FST<T>(inputType, outputs);
+      fst = new FST<T>(inputType, outputs, bytes.getBlockBits());
       
       final BytesStore writer = fst.bytes;
 
@@ -101,20 +104,20 @@
 
       int changedCount = 0;
 
-      int addressError = 0;
+      long addressError = 0;
 
       //int totWasted = 0;
 
       // Since we re-reverse the bytes, we now write the
       // nodes backwards, so that BIT_TARGET_NEXT is
       // unchanged:
-      for(int node=nodeCount;node>=1;node--) {
+      for(int node=(int)nodeCount;node>=1;node--) {
         fst.nodeCount++;
-        final int address = writer.getPosition();
+        final long address = writer.getPosition();
 
         //System.out.println("  node: " + node + " address=" + address);
         if (address != newNodeAddress.get(node)) {
-          addressError = address - (int) newNodeAddress.get(node);
+          addressError = address - newNodeAddress.get(node);
           //System.out.println("    change: " + (address - newNodeAddress[node]));
           changed = true;
           newNodeAddress.set(node, address);
@@ -154,7 +157,7 @@
           while(true) {  // iterate over all arcs for this node
             //System.out.println("    cycle next arc");
 
-            final int arcStartPos = writer.getPosition();
+            final long arcStartPos = writer.getPosition();
             nodeArcCount++;
 
             byte flags = 0;
@@ -189,19 +192,18 @@
               flags += BIT_ARC_HAS_OUTPUT;
             }
 
-            final Integer ptr;
-            final int absPtr;
+            final long absPtr;
             final boolean doWriteTarget = targetHasArcs(arc) && (flags & BIT_TARGET_NEXT) == 0;
             if (doWriteTarget) {
 
-              ptr = topNodeMap.get(arc.target);
+              final Integer ptr = topNodeMap.get(arc.target);
               if (ptr != null) {
                 absPtr = ptr;
               } else {
-                absPtr = topNodeMap.size() + (int) newNodeAddress.get(arc.target) + addressError;
+                absPtr = topNodeMap.size() + newNodeAddress.get((int) arc.target) + addressError;
               }
 
-              int delta = (int) (newNodeAddress.get(arc.target) + addressError - writer.getPosition() - 2);
+              long delta = newNodeAddress.get((int) arc.target) + addressError - writer.getPosition() - 2;
               if (delta < 0) {
                 //System.out.println("neg: " + delta);
                 anyNegDelta = true;
@@ -212,7 +214,6 @@
                 flags |= BIT_TARGET_DELTA;
               }
             } else {
-              ptr = null;
               absPtr = 0;
             }
 
@@ -233,7 +234,7 @@
 
             if (doWriteTarget) {
 
-              int delta = (int) (newNodeAddress.get(arc.target) + addressError - writer.getPosition());
+              long delta = newNodeAddress.get((int) arc.target) + addressError - writer.getPosition();
               if (delta < 0) {
                 anyNegDelta = true;
                 //System.out.println("neg: " + delta);
@@ -242,7 +243,7 @@
 
               if (flag(flags, BIT_TARGET_DELTA)) {
                 //System.out.println("        delta");
-                writer.writeVInt(delta);
+                writer.writeVLong(delta);
                 if (!retry) {
                   deltaCount++;
                 }
@@ -254,7 +255,7 @@
                   System.out.println("        abs");
                 }
                 */
-                writer.writeVInt(absPtr);
+                writer.writeVLong(absPtr);
                 if (!retry) {
                   if (absPtr >= topNodeMap.size()) {
                     absCount++;
@@ -266,7 +267,7 @@
             }
 
             if (useArcArray) {
-              final int arcBytes = writer.getPosition() - arcStartPos;
+              final int arcBytes = (int) (writer.getPosition() - arcStartPos);
               //System.out.println("  " + arcBytes + " bytes");
               maxBytesPerArc = Math.max(maxBytesPerArc, arcBytes);
               // NOTE: this may in fact go "backwards", if
@@ -276,7 +277,7 @@
               // will retry (below) so it's OK to ovewrite
               // bytes:
               //wasted += bytesPerArc - arcBytes;
-              writer.skipBytes(arcStartPos + bytesPerArc - writer.getPosition());
+              writer.skipBytes((int) (arcStartPos + bytesPerArc - writer.getPosition()));
             }
 
             if (arc.isLast()) {
@@ -326,8 +327,8 @@
     }
 
     long maxAddress = 0;
-    for (int key : topNodeMap.keySet()) {
-      maxAddress = Math.max(maxAddress, newNodeAddress.get(key));
+    for (long key : topNodeMap.keySet()) {
+      maxAddress = Math.max(maxAddress, newNodeAddress.get((int) key));
     }
 
     PackedInts.Mutable nodeRefToAddressIn = PackedInts.getMutable(topNodeMap.size(),
@@ -337,7 +338,7 @@
     }
     fst.nodeRefToAddress = nodeRefToAddressIn;
     
-    fst.startNode = (int) newNodeAddress.get(startNode);
+    fst.startNode = newNodeAddress.get((int) startNode);
     //System.out.println("new startNode=" + fst.startNode + " old startNode=" + startNode);
 
     if (emptyOutput != null) {

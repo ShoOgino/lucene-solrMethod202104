@@ -1,7 +1,8 @@
   // serializes new node by appending its bytes to the end
   // of the current byte[]
-  int addNode(Builder.UnCompiledNode<T> nodeIn) throws IOException {
-    //System.out.println("FST.addNode pos=" + writer.posWrite + " numArcs=" + nodeIn.numArcs);
+  long addNode(Builder.UnCompiledNode<T> nodeIn) throws IOException {
+
+    //System.out.println("FST.addNode pos=" + bytes.getPosition() + " numArcs=" + nodeIn.numArcs);
     if (nodeIn.numArcs == 0) {
       if (nodeIn.isFinal) {
         return FINAL_END_NODE;
@@ -10,38 +11,28 @@
       }
     }
 
-    int startAddress = writer.getPosition();
+    final long startAddress = bytes.getPosition();
     //System.out.println("  startAddr=" + startAddress);
 
     final boolean doFixedArray = shouldExpand(nodeIn);
-    final int fixedArrayStart;
     if (doFixedArray) {
+      //System.out.println("  fixedArray");
       if (bytesPerArc.length < nodeIn.numArcs) {
         bytesPerArc = new int[ArrayUtil.oversize(nodeIn.numArcs, 1)];
       }
-      // write a "false" first arc:
-      writer.writeByte(ARCS_AS_FIXED_ARRAY);
-      writer.writeVInt(nodeIn.numArcs);
-      // placeholder -- we'll come back and write the number
-      // of bytes per arc (int) here:
-      // TODO: we could make this a vInt instead
-      writer.writeInt(0);
-      fixedArrayStart = writer.getPosition();
-      //System.out.println("  do fixed arcs array arcsStart=" + fixedArrayStart);
-    } else {
-      fixedArrayStart = 0;
     }
 
     arcCount += nodeIn.numArcs;
     
     final int lastArc = nodeIn.numArcs-1;
 
-    int lastArcStart = writer.getPosition();
+    long lastArcStart = bytes.getPosition();
     int maxBytesPerArc = 0;
     for(int arcIdx=0;arcIdx<nodeIn.numArcs;arcIdx++) {
       final Builder.Arc<T> arc = nodeIn.arcs[arcIdx];
       final Builder.CompiledNode target = (Builder.CompiledNode) arc.target;
       int flags = 0;
+      //System.out.println("  arc " + arcIdx + " label=" + arc.label + " -> target=" + target.node);
 
       if (arcIdx == lastArc) {
         flags += BIT_LAST_ARC;
@@ -68,111 +59,135 @@
       if (!targetHasArcs) {
         flags += BIT_STOP_NODE;
       } else if (inCounts != null) {
-        inCounts.set(target.node, inCounts.get(target.node) + 1);
+        inCounts.set((int) target.node, inCounts.get((int) target.node) + 1);
       }
 
       if (arc.output != NO_OUTPUT) {
         flags += BIT_ARC_HAS_OUTPUT;
       }
 
-      writer.writeByte((byte) flags);
-      writeLabel(arc.label);
+      bytes.writeByte((byte) flags);
+      writeLabel(bytes, arc.label);
 
-      // System.out.println("  write arc: label=" + (char) arc.label + " flags=" + flags + " target=" + target.node + " pos=" + writer.posWrite + " output=" + outputs.outputToString(arc.output));
+      // System.out.println("  write arc: label=" + (char) arc.label + " flags=" + flags + " target=" + target.node + " pos=" + bytes.getPosition() + " output=" + outputs.outputToString(arc.output));
 
       if (arc.output != NO_OUTPUT) {
-        outputs.write(arc.output, writer);
+        outputs.write(arc.output, bytes);
         //System.out.println("    write output");
         arcWithOutputCount++;
       }
 
       if (arc.nextFinalOutput != NO_OUTPUT) {
         //System.out.println("    write final output");
-        outputs.writeFinalOutput(arc.nextFinalOutput, writer);
+        outputs.writeFinalOutput(arc.nextFinalOutput, bytes);
       }
 
       if (targetHasArcs && (flags & BIT_TARGET_NEXT) == 0) {
         assert target.node > 0;
         //System.out.println("    write target");
-        writer.writeInt(target.node);
+        bytes.writeVLong(target.node);
       }
 
       // just write the arcs "like normal" on first pass,
       // but record how many bytes each one took, and max
       // byte size:
       if (doFixedArray) {
-        bytesPerArc[arcIdx] = writer.getPosition() - lastArcStart;
-        lastArcStart = writer.getPosition();
+        bytesPerArc[arcIdx] = (int) (bytes.getPosition() - lastArcStart);
+        lastArcStart = bytes.getPosition();
         maxBytesPerArc = Math.max(maxBytesPerArc, bytesPerArc[arcIdx]);
         //System.out.println("    bytes=" + bytesPerArc[arcIdx]);
       }
     }
-
-    // TODO: if arc'd arrays will be "too wasteful" by some
-    // measure, eg if arcs have vastly different sized
-    // outputs, then we should selectively disable array for
-    // such cases
+    
+    // TODO: try to avoid wasteful cases: disable doFixedArray in that case
+    /* 
+     * 
+     * LUCENE-4682: what is a fair heuristic here?
+     * It could involve some of these:
+     * 1. how "busy" the node is: nodeIn.inputCount relative to frontier[0].inputCount?
+     * 2. how much binSearch saves over scan: nodeIn.numArcs
+     * 3. waste: numBytes vs numBytesExpanded
+     * 
+     * the one below just looks at #3
+    if (doFixedArray) {
+      // rough heuristic: make this 1.25 "waste factor" a parameter to the phd ctor????
+      int numBytes = lastArcStart - startAddress;
+      int numBytesExpanded = maxBytesPerArc * nodeIn.numArcs;
+      if (numBytesExpanded > numBytes*1.25) {
+        doFixedArray = false;
+      }
+    }
+    */
 
     if (doFixedArray) {
-      //System.out.println("  doFixedArray");
+      final int MAX_HEADER_SIZE = 11; // header(byte) + numArcs(vint) + numBytes(vint)
       assert maxBytesPerArc > 0;
       // 2nd pass just "expands" all arcs to take up a fixed
       // byte size
-      final int sizeNeeded = fixedArrayStart + nodeIn.numArcs * maxBytesPerArc;
-      assert ((long) fixedArrayStart) + ((long) nodeIn.numArcs) * maxBytesPerArc < Integer.MAX_VALUE: "FST too large (> 2.1 GB)";
 
-      bytes = ArrayUtil.grow(bytes, sizeNeeded);
-      // TODO: we could make this a vInt instead
-      bytes[fixedArrayStart-4] = (byte) (maxBytesPerArc >> 24);
-      bytes[fixedArrayStart-3] = (byte) (maxBytesPerArc >> 16);
-      bytes[fixedArrayStart-2] = (byte) (maxBytesPerArc >> 8);
-      bytes[fixedArrayStart-1] = (byte) maxBytesPerArc;
+      //System.out.println("write int @pos=" + (fixedArrayStart-4) + " numArcs=" + nodeIn.numArcs);
+      // create the header
+      // TODO: clean this up: or just rewind+reuse and deal with it
+      byte header[] = new byte[MAX_HEADER_SIZE]; 
+      ByteArrayDataOutput bad = new ByteArrayDataOutput(header);
+      // write a "false" first arc:
+      bad.writeByte(ARCS_AS_FIXED_ARRAY);
+      bad.writeVInt(nodeIn.numArcs);
+      bad.writeVInt(maxBytesPerArc);
+      int headerLen = bad.getPosition();
+      
+      final long fixedArrayStart = startAddress + headerLen;
 
       // expand the arcs in place, backwards
-      int srcPos = writer.getPosition();
-      int destPos = fixedArrayStart + nodeIn.numArcs*maxBytesPerArc;
-      writer.setPosition(destPos);
-      for(int arcIdx=nodeIn.numArcs-1;arcIdx>=0;arcIdx--) {
-        //System.out.println("  repack arcIdx=" + arcIdx + " srcPos=" + srcPos + " destPos=" + destPos);
-        destPos -= maxBytesPerArc;
-        srcPos -= bytesPerArc[arcIdx];
-        if (srcPos != destPos) {
-          assert destPos > srcPos: "destPos=" + destPos + " srcPos=" + srcPos + " arcIdx=" + arcIdx + " maxBytesPerArc=" + maxBytesPerArc + " bytesPerArc[arcIdx]=" + bytesPerArc[arcIdx] + " nodeIn.numArcs=" + nodeIn.numArcs;
-          System.arraycopy(bytes, srcPos, bytes, destPos, bytesPerArc[arcIdx]);
+      long srcPos = bytes.getPosition();
+      long destPos = fixedArrayStart + nodeIn.numArcs*maxBytesPerArc;
+      assert destPos >= srcPos;
+      if (destPos > srcPos) {
+        bytes.skipBytes((int) (destPos - srcPos));
+        for(int arcIdx=nodeIn.numArcs-1;arcIdx>=0;arcIdx--) {
+          destPos -= maxBytesPerArc;
+          srcPos -= bytesPerArc[arcIdx];
+          //System.out.println("  repack arcIdx=" + arcIdx + " srcPos=" + srcPos + " destPos=" + destPos);
+          if (srcPos != destPos) {
+            //System.out.println("  copy len=" + bytesPerArc[arcIdx]);
+            assert destPos > srcPos: "destPos=" + destPos + " srcPos=" + srcPos + " arcIdx=" + arcIdx + " maxBytesPerArc=" + maxBytesPerArc + " bytesPerArc[arcIdx]=" + bytesPerArc[arcIdx] + " nodeIn.numArcs=" + nodeIn.numArcs;
+            bytes.copyBytes(srcPos, destPos, bytesPerArc[arcIdx]);
+          }
         }
       }
+      
+      // now write the header
+      bytes.writeBytes(startAddress, header, 0, headerLen);
     }
 
-    // reverse bytes in-place; we do this so that the
-    // "BIT_TARGET_NEXT" opto can work, ie, it reads the
-    // node just before the current one
-    final int endAddress = writer.getPosition() - 1;
+    final long thisNodeAddress = bytes.getPosition()-1;
 
-    int left = startAddress;
-    int right = endAddress;
-    while (left < right) {
-      final byte b = bytes[left];
-      bytes[left++] = bytes[right];
-      bytes[right--] = b;
+    bytes.reverse(startAddress, thisNodeAddress);
+
+    // PackedInts uses int as the index, so we cannot handle
+    // > 2.1B nodes when packing:
+    if (nodeAddress != null && nodeCount == Integer.MAX_VALUE) {
+      throw new IllegalStateException("cannot create a packed FST with more than 2.1 billion nodes");
     }
-    //System.out.println("  endAddress=" + endAddress);
 
     nodeCount++;
-    final int node;
+    final long node;
     if (nodeAddress != null) {
+
       // Nodes are addressed by 1+ord:
-      if (nodeCount == nodeAddress.size()) {
+      if ((int) nodeCount == nodeAddress.size()) {
         nodeAddress = nodeAddress.resize(ArrayUtil.oversize(nodeAddress.size() + 1, nodeAddress.getBitsPerValue()));
         inCounts = inCounts.resize(ArrayUtil.oversize(inCounts.size() + 1, inCounts.getBitsPerValue()));
       }
-      nodeAddress.set(nodeCount, endAddress);
+      nodeAddress.set((int) nodeCount, thisNodeAddress);
       // System.out.println("  write nodeAddress[" + nodeCount + "] = " + endAddress);
       node = nodeCount;
     } else {
-      node = endAddress;
+      node = thisNodeAddress;
     }
     lastFrozenNode = node;
 
+    //System.out.println("  ret node=" + node + " address=" + thisNodeAddress + " nodeAddress=" + nodeAddress);
     return node;
   }
 

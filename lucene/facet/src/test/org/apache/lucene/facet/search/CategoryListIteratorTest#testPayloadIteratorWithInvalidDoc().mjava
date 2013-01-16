@@ -2,24 +2,17 @@
   public void testPayloadIteratorWithInvalidDoc() throws Exception {
     Directory dir = newDirectory();
     final IntEncoder encoder = new SortingIntEncoder(new UniqueValuesIntEncoder(new DGapIntEncoder(new VInt8IntEncoder())));
-    DataTokenStream dts = new DataTokenStream("1", encoder);
-    // this test requires that no payloads ever be randomly present!
-    final Analyzer noPayloadsAnalyzer = new Analyzer() {
-      @Override
-      public TokenStreamComponents createComponents(String fieldName, Reader reader) {
-        return new TokenStreamComponents(new MockTokenizer(reader, MockTokenizer.KEYWORD, false));
-      }
-    };
     // NOTE: test is wired to LogMP... because test relies on certain docids having payloads
     RandomIndexWriter writer = new RandomIndexWriter(random(), dir, 
-        newIndexWriterConfig(TEST_VERSION_CURRENT, noPayloadsAnalyzer).setMergePolicy(newLogMergePolicy()));
+        newIndexWriterConfig(TEST_VERSION_CURRENT, new MockAnalyzer(random())).setMergePolicy(newLogMergePolicy()));
     for (int i = 0; i < data.length; i++) {
       Document doc = new Document();
       if (i == 0) {
-        dts.setIdx(i);
-        doc.add(new TextField("f", dts)); // only doc 0 has payloads!
+        BytesRef buf = new BytesRef();
+        encoder.encode(IntsRef.deepCopyOf(data[i]), buf );
+        doc.add(new StraightBytesDocValuesField("f", buf));
       } else {
-        doc.add(new TextField("f", "1", Field.Store.NO));
+        doc.add(new StraightBytesDocValuesField("f", new BytesRef()));
       }
       writer.addDocument(doc);
       writer.commit();
@@ -30,9 +23,9 @@
 
     int totalCategories = 0;
     IntsRef ordinals = new IntsRef();
-    CategoryListIterator cli = new PayloadCategoryListIteraor(new Term("f","1"), encoder.createMatchingDecoder());
+    CategoryListIterator cli = new DocValuesCategoryListIterator("f", encoder.createMatchingDecoder());
     for (AtomicReaderContext context : reader.leaves()) {
-      cli.setNextReader(context);
+      assertTrue("failed to initalize iterator", cli.setNextReader(context));
       int maxDoc = context.reader().maxDoc();
       int dataIdx = context.docBase;
       for (int doc = 0; doc < maxDoc; doc++, dataIdx++) {
@@ -42,13 +35,13 @@
         }
         cli.getOrdinals(doc, ordinals);
         if (dataIdx == 0) {
-          assertTrue("document 0 must have a payload", ordinals.length > 0);
+          assertTrue("document 0 must have ordinals", ordinals.length > 0);
           for (int j = 0; j < ordinals.length; j++) {
             assertTrue("expected category not found: " + ordinals.ints[j], values.contains(ordinals.ints[j]));
           }
           totalCategories += ordinals.length;
         } else {
-          assertTrue("only document 0 should have a payload", ordinals.length == 0);
+          assertTrue("only document 0 should have ordinals", ordinals.length == 0);
         }
       }
     }

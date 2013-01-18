@@ -1,0 +1,55 @@
+  public static SortedDocValues getSortedValues(final IndexReader r, final String field) throws IOException {
+    final List<AtomicReaderContext> leaves = r.leaves();
+    if (leaves.size() == 1) {
+      return leaves.get(0).reader().getSortedDocValues(field);
+    }
+    boolean anyReal = false;
+
+    for(AtomicReaderContext ctx : leaves) {
+      SortedDocValues values = ctx.reader().getSortedDocValues(field);
+
+      if (values != null) {
+        anyReal = true;
+      }
+    }
+
+    if (!anyReal) {
+      return null;
+    } else {
+      // its called slow-wrapper for a reason right?
+      final Directory scratch = new RAMDirectory();
+      IndexWriterConfig config = new IndexWriterConfig(Version.LUCENE_50, null);
+      config.setCodec(Codec.forName("SimpleText"));
+      IndexWriter writer = new IndexWriter(scratch, config);
+      List<AtomicReader> newLeaves = new ArrayList<AtomicReader>();
+      for (AtomicReaderContext ctx : leaves) {
+        final AtomicReader a = ctx.reader();
+        newLeaves.add(new FilterAtomicReader(a) {
+          @Override
+          public Bits getLiveDocs() {
+            return null; // lie
+          }
+          @Override
+          public int numDocs() {
+            return maxDoc(); // lie
+          }
+          @Override
+          public boolean hasDeletions() {
+            return false; // lie
+          }
+        });
+      }
+      writer.addIndexes(newLeaves.toArray(new AtomicReader[0]));
+      writer.close();
+      final IndexReader newR = DirectoryReader.open(scratch);
+      assert newR.leaves().size() == 1;
+      r.addReaderClosedListener(new ReaderClosedListener() {
+        @Override
+        public void onClose(IndexReader reader) {
+          IOUtils.closeWhileHandlingException(newR, scratch);
+        }
+      });
+      return newR.leaves().get(0).reader().getSortedDocValues(field);
+    }
+  }
+

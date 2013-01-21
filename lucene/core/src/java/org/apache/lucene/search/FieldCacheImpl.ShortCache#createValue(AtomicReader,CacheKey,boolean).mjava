@@ -2,46 +2,36 @@
     protected Object createValue(AtomicReader reader, CacheKey key, boolean setDocsWithField)
         throws IOException {
 
-      final NumericDocValues valuesIn = reader.getNumericDocValues(key.field);
-      if (valuesIn != null) {
-        return new Shorts() {
+      int maxDoc = reader.maxDoc();
+      final short[] values;
+      final ShortParser parser = (ShortParser) key.custom;
+      if (parser == null) {
+        // Confusing: must delegate to wrapper (vs simply
+        // setting parser = DEFAULT_SHORT_PARSER) so cache
+        // key includes DEFAULT_SHORT_PARSER:
+        return wrapper.getShorts(reader, key.field, DEFAULT_SHORT_PARSER, setDocsWithField);
+      }
+
+      values = new short[maxDoc];
+      Uninvert u = new Uninvert() {
+          private short currentValue;
+
           @Override
-          public short get(int docID) {
-            return (short) valuesIn.get(docID);
+          public void visitTerm(BytesRef term) {
+            currentValue = parser.parseShort(term);
+          }
+
+          @Override
+          public void visitDoc(int docID) {
+            values[docID] = currentValue;
           }
         };
-      } else {
-        int maxDoc = reader.maxDoc();
-        final short[] values;
-        final ShortParser parser = (ShortParser) key.custom;
-        if (parser == null) {
-          // Confusing: must delegate to wrapper (vs simply
-          // setting parser = DEFAULT_SHORT_PARSER) so cache
-          // key includes DEFAULT_SHORT_PARSER:
-          return wrapper.getShorts(reader, key.field, DEFAULT_SHORT_PARSER, setDocsWithField);
-        }
 
-        values = new short[maxDoc];
-        Uninvert u = new Uninvert() {
-            private short currentValue;
+      u.uninvert(reader, key.field, setDocsWithField);
 
-            @Override
-            public void visitTerm(BytesRef term) {
-              currentValue = parser.parseShort(term);
-            }
-
-            @Override
-            public void visitDoc(int docID) {
-              values[docID] = currentValue;
-            }
-          };
-
-        u.uninvert(reader, key.field, setDocsWithField);
-
-        if (setDocsWithField) {
-          wrapper.setDocsWithField(reader, key.field, u.docsWithField);
-        }
-        return new ShortsFromArray(values);
+      if (setDocsWithField) {
+        wrapper.setDocsWithField(reader, key.field, u.docsWithField);
       }
+      return new ShortsFromArray(values);
     }
 

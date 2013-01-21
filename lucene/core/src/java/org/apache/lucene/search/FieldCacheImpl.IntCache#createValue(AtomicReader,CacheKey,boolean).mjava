@@ -2,54 +2,44 @@
     protected Object createValue(final AtomicReader reader, CacheKey key, boolean setDocsWithField)
         throws IOException {
 
-      final NumericDocValues valuesIn = reader.getNumericDocValues(key.field);
-      if (valuesIn != null) {
-        return new Ints() {
+      final int[] values;
+      final IntParser parser = (IntParser) key.custom;
+      if (parser == null) {
+        // Confusing: must delegate to wrapper (vs simply
+        // setting parser =
+        // DEFAULT_INT_PARSER/NUMERIC_UTILS_INT_PARSER) so
+        // cache key includes
+        // DEFAULT_INT_PARSER/NUMERIC_UTILS_INT_PARSER:
+        try {
+          return wrapper.getInts(reader, key.field, DEFAULT_INT_PARSER, setDocsWithField);
+        } catch (NumberFormatException ne) {
+          return wrapper.getInts(reader, key.field, NUMERIC_UTILS_INT_PARSER, setDocsWithField);
+        }
+      }
+
+      // nocommit how to avoid double alloc in numeric field
+      // case ...
+      values = new int[reader.maxDoc()];
+
+      Uninvert u = new Uninvert() {
+          private int currentValue;
+
           @Override
-          public int get(int docID) {
-            return (int) valuesIn.get(docID);
+          public void visitTerm(BytesRef term) {
+            currentValue = parser.parseInt(term);
+          }
+
+          @Override
+          public void visitDoc(int docID) {
+            values[docID] = currentValue;
           }
         };
-      } else {
-        final int[] values;
-        final IntParser parser = (IntParser) key.custom;
-        if (parser == null) {
-          // Confusing: must delegate to wrapper (vs simply
-          // setting parser =
-          // DEFAULT_INT_PARSER/NUMERIC_UTILS_INT_PARSER) so
-          // cache key includes
-          // DEFAULT_INT_PARSER/NUMERIC_UTILS_INT_PARSER:
-          try {
-            return wrapper.getInts(reader, key.field, DEFAULT_INT_PARSER, setDocsWithField);
-          } catch (NumberFormatException ne) {
-            return wrapper.getInts(reader, key.field, NUMERIC_UTILS_INT_PARSER, setDocsWithField);
-          }
-        }
 
-        // nocommit how to avoid double alloc in numeric field
-        // case ...
-        values = new int[reader.maxDoc()];
+      u.uninvert(reader, key.field, setDocsWithField);
 
-        Uninvert u = new Uninvert() {
-            private int currentValue;
-
-            @Override
-            public void visitTerm(BytesRef term) {
-              currentValue = parser.parseInt(term);
-            }
-
-            @Override
-            public void visitDoc(int docID) {
-              values[docID] = currentValue;
-            }
-          };
-
-        u.uninvert(reader, key.field, setDocsWithField);
-
-        if (setDocsWithField) {
-          wrapper.setDocsWithField(reader, key.field, u.docsWithField);
-        }
-        return new IntsFromArray(values);
+      if (setDocsWithField) {
+        wrapper.setDocsWithField(reader, key.field, u.docsWithField);
       }
+      return new IntsFromArray(values);
     }
 

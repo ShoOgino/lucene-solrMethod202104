@@ -1,31 +1,28 @@
   @Override
   public void addBinaryField(FieldInfo field, Iterable<BytesRef> values) throws IOException {
     // examine the values to determine best type to use
-    // TODO: would be cool to write the deref types in this impersonator too
+    HashSet<BytesRef> uniqueValues = new HashSet<BytesRef>();
     int minLength = Integer.MAX_VALUE;
     int maxLength = Integer.MIN_VALUE;
     for (BytesRef b : values) {
       minLength = Math.min(minLength, b.length);
       maxLength = Math.max(maxLength, b.length);
-    }
-    
-    if (minLength == maxLength) {
-      // fixed byte[]
-      String fileName = IndexFileNames.segmentFileName(state.segmentInfo.name, Integer.toString(field.number), "dat");
-      IndexOutput data = dir.createOutput(fileName, state.context);
-      boolean success = false;
-      try {
-        addFixedStraightBytesField(field, data, values, minLength);
-        success = true;
-      } finally {
-        if (success) {
-          IOUtils.close(data);
-        } else {
-          IOUtils.closeWhileHandlingException(data);
+      if (uniqueValues != null) {
+        if (uniqueValues.add(BytesRef.deepCopyOf(b))) {
+          if (uniqueValues.size() > 256) {
+            uniqueValues = null;
+          }
         }
       }
-    } else {
-      // variable byte[]
+    }
+    
+    int maxDoc = state.segmentInfo.getDocCount();
+    final boolean fixed = minLength == maxLength;
+    // nocommit
+    final boolean dedup = fixed && (uniqueValues != null && uniqueValues.size() * 2 < maxDoc);
+    
+    if (dedup) {
+      // we will deduplicate and deref values
       boolean success = false;
       IndexOutput data = null;
       IndexOutput index = null;
@@ -34,13 +31,54 @@
       try {
         data = dir.createOutput(dataName, state.context);
         index = dir.createOutput(indexName, state.context);
-        addVarStraightBytesField(field, data, index, values);
+        if (fixed) {
+          addFixedDerefBytesField(field, data, index, values, minLength);
+        } else {
+          assert false; // nocommit
+        }
         success = true;
       } finally {
         if (success) {
           IOUtils.close(data, index);
         } else {
           IOUtils.closeWhileHandlingException(data, index);
+        }
+      }
+    } else {
+      // we dont deduplicate, just write values straight
+      if (fixed) {
+        // fixed byte[]
+        String fileName = IndexFileNames.segmentFileName(state.segmentInfo.name, Integer.toString(field.number), "dat");
+        IndexOutput data = dir.createOutput(fileName, state.context);
+        boolean success = false;
+        try {
+          addFixedStraightBytesField(field, data, values, minLength);
+          success = true;
+        } finally {
+          if (success) {
+            IOUtils.close(data);
+          } else {
+            IOUtils.closeWhileHandlingException(data);
+          }
+        }
+      } else {
+        // variable byte[]
+        boolean success = false;
+        IndexOutput data = null;
+        IndexOutput index = null;
+        String dataName = IndexFileNames.segmentFileName(state.segmentInfo.name, Integer.toString(field.number), "dat");
+        String indexName = IndexFileNames.segmentFileName(state.segmentInfo.name, Integer.toString(field.number), "idx");
+        try {
+          data = dir.createOutput(dataName, state.context);
+          index = dir.createOutput(indexName, state.context);
+          addVarStraightBytesField(field, data, index, values);
+          success = true;
+        } finally {
+          if (success) {
+            IOUtils.close(data, index);
+          } else {
+            IOUtils.closeWhileHandlingException(data, index);
+          }
         }
       }
     }

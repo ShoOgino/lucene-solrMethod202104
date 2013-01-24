@@ -2,7 +2,6 @@
     protected Object createValue(final AtomicReader reader, CacheKey key, boolean setDocsWithField)
         throws IOException {
 
-      final int[] values;
       final IntParser parser = (IntParser) key.custom;
       if (parser == null) {
         // Confusing: must delegate to wrapper (vs simply
@@ -17,16 +16,23 @@
         }
       }
 
-      // nocommit how to avoid double alloc in numeric field
-      // case ...
-      values = new int[reader.maxDoc()];
+      final HoldsOneThing<int[]> valuesRef = new HoldsOneThing<int[]>();
 
       Uninvert u = new Uninvert() {
           private int currentValue;
+          private int[] values;
 
           @Override
           public void visitTerm(BytesRef term) {
             currentValue = parser.parseInt(term);
+            if (values == null) {
+              // Lazy alloc so for the numeric field case
+              // (which will hit a NumberFormatException
+              // when we first try the DEFAULT_INT_PARSER),
+              // we don't double-alloc:
+              values = new int[reader.maxDoc()];
+              valuesRef.set(values);
+            }
           }
 
           @Override
@@ -39,6 +45,10 @@
 
       if (setDocsWithField) {
         wrapper.setDocsWithField(reader, key.field, u.docsWithField);
+      }
+      int[] values = valuesRef.get();
+      if (values == null) {
+        values = new int[reader.maxDoc()];
       }
       return new IntsFromArray(values);
     }

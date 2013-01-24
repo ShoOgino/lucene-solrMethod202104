@@ -1,8 +1,7 @@
     @Override
-    protected Object createValue(AtomicReader reader, CacheKey key, boolean setDocsWithField)
+    protected Object createValue(final AtomicReader reader, CacheKey key, boolean setDocsWithField)
         throws IOException {
 
-      final float[] values;
       final FloatParser parser = (FloatParser) key.custom;
       if (parser == null) {
         // Confusing: must delegate to wrapper (vs simply
@@ -17,16 +16,23 @@
         }
       }
 
-      // nocommit how to avoid double alloc in numeric field
-      // case ...
-      values = new float[reader.maxDoc()];
+      final HoldsOneThing<float[]> valuesRef = new HoldsOneThing<float[]>();
 
       Uninvert u = new Uninvert() {
           private float currentValue;
+          private float[] values;
 
           @Override
           public void visitTerm(BytesRef term) {
             currentValue = parser.parseFloat(term);
+            if (values == null) {
+              // Lazy alloc so for the numeric field case
+              // (which will hit a NumberFormatException
+              // when we first try the DEFAULT_INT_PARSER),
+              // we don't double-alloc:
+              values = new float[reader.maxDoc()];
+              valuesRef.set(values);
+            }
           }
 
           @Override
@@ -41,6 +47,10 @@
         wrapper.setDocsWithField(reader, key.field, u.docsWithField);
       }
 
+      float[] values = valuesRef.get();
+      if (values == null) {
+        values = new float[reader.maxDoc()];
+      }
       return new FloatsFromArray(values);
     }
 

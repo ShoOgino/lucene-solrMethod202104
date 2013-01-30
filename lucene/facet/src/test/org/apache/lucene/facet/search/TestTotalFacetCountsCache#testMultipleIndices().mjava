@@ -6,46 +6,52 @@
    */
   @Test
   public void testMultipleIndices() throws IOException {
-    // Create temporary RAMDirectories
-    Directory[][] dirs = FacetTestUtils.createIndexTaxonomyDirs(2);
+    Directory indexDir1 = newDirectory(), indexDir2 = newDirectory();
+    Directory taxoDir1 = newDirectory(), taxoDir2 = newDirectory();
+    
     // Create our index/taxonomy writers
-    IndexTaxonomyWriterPair[] writers = FacetTestUtils.createIndexTaxonomyWriterPair(dirs);
+    IndexWriter indexWriter1 = new IndexWriter(indexDir1, newIndexWriterConfig(TEST_VERSION_CURRENT, null));
+    IndexWriter indexWriter2 = new IndexWriter(indexDir2, newIndexWriterConfig(TEST_VERSION_CURRENT, null));
+    TaxonomyWriter taxoWriter1 = new DirectoryTaxonomyWriter(taxoDir1);
+    TaxonomyWriter taxoWriter2 = new DirectoryTaxonomyWriter(taxoDir2);
     FacetIndexingParams iParams = FacetIndexingParams.ALL_PARENTS;
 
     // Add a facet to the index
-    addFacets(iParams, writers[0].indexWriter, writers[0].taxWriter, "a", "b");
-    addFacets(iParams, writers[1].indexWriter, writers[1].taxWriter, "d", "e");
+    addFacets(iParams, indexWriter1, taxoWriter1, "a", "b");
+    addFacets(iParams, indexWriter1, taxoWriter1, "d", "e");
     // Commit Changes
-    writers[0].indexWriter.commit();
-    writers[0].taxWriter.commit();
-    writers[1].indexWriter.commit();
-    writers[1].taxWriter.commit();
+    indexWriter1.commit();
+    indexWriter2.commit();
+    taxoWriter1.commit();
+    taxoWriter2.commit();
 
     // Open two readers
-    IndexTaxonomyReaderPair[] readers = FacetTestUtils.createIndexTaxonomyReaderPair(dirs);
+    DirectoryReader indexReader1 = DirectoryReader.open(indexDir1);
+    DirectoryReader indexReader2 = DirectoryReader.open(indexDir2);
+    TaxonomyReader taxoReader1 = new DirectoryTaxonomyReader(taxoDir1);
+    TaxonomyReader taxoReader2 = new DirectoryTaxonomyReader(taxoDir2);
 
     // As this is the first time we have invoked the TotalFacetCountsManager, we
     // should expect to compute.
-    TotalFacetCounts totalCounts0 = 
-      TFC.getTotalCounts(readers[0].indexReader, readers[0].taxReader, iParams);
+    TotalFacetCounts totalCounts0 = TFC.getTotalCounts(indexReader1, taxoReader1, iParams);
     int prevGen = -1;
     prevGen = assertRecomputed(totalCounts0, prevGen, "after attempt 1");
     assertTrue("attempt 1b for same input [0] shout find it in cache",
-        totalCounts0 == TFC.getTotalCounts(readers[0].indexReader, readers[0].taxReader, iParams));
+        totalCounts0 == TFC.getTotalCounts(indexReader1, taxoReader1, iParams));
     
     // 2nd Reader - As this is the first time we have invoked the
     // TotalFacetCountsManager, we should expect a state of NEW to be returned.
-    TotalFacetCounts totalCounts1 = TFC.getTotalCounts(readers[1].indexReader, readers[1].taxReader, iParams);
+    TotalFacetCounts totalCounts1 = TFC.getTotalCounts(indexReader2, taxoReader2, iParams);
     prevGen = assertRecomputed(totalCounts1, prevGen, "after attempt 2");
     assertTrue("attempt 2b for same input [1] shout find it in cache",
-        totalCounts1 == TFC.getTotalCounts(readers[1].indexReader, readers[1].taxReader, iParams));
+        totalCounts1 == TFC.getTotalCounts(indexReader2, taxoReader2, iParams));
 
     // Right now cache size is one, so first TFC is gone and should be recomputed  
-    totalCounts0 = TFC.getTotalCounts(readers[0].indexReader, readers[0].taxReader, iParams);
+    totalCounts0 = TFC.getTotalCounts(indexReader1, taxoReader1, iParams);
     prevGen = assertRecomputed(totalCounts0, prevGen, "after attempt 3");
     
     // Similarly will recompute the second result  
-    totalCounts1 = TFC.getTotalCounts(readers[1].indexReader, readers[1].taxReader, iParams);
+    totalCounts1 = TFC.getTotalCounts(indexReader2, taxoReader2, iParams);
     prevGen = assertRecomputed(totalCounts1, prevGen, "after attempt 4");
 
     // Now we set the cache size to two, meaning both should exist in the
@@ -53,22 +59,18 @@
     TFC.setCacheSize(2);
 
     // Re-compute totalCounts0 (was evicted from the cache when the cache was smaller)
-    totalCounts0 = TFC.getTotalCounts(readers[0].indexReader, readers[0].taxReader, iParams);
+    totalCounts0 = TFC.getTotalCounts(indexReader1, taxoReader1, iParams);
     prevGen = assertRecomputed(totalCounts0, prevGen, "after attempt 5");
 
     // now both are in the larger cache and should not be recomputed 
-    totalCounts1 = TFC.getTotalCounts(readers[1].indexReader, readers[1].taxReader, iParams);
+    totalCounts1 = TFC.getTotalCounts(indexReader2, taxoReader2, iParams);
     assertTrue("with cache of size 2 res no. 0 should come from cache",
-        totalCounts0 == TFC.getTotalCounts(readers[0].indexReader, readers[0].taxReader, iParams));
+        totalCounts0 == TFC.getTotalCounts(indexReader1, taxoReader1, iParams));
     assertTrue("with cache of size 2 res no. 1 should come from cache",
-        totalCounts1 == TFC.getTotalCounts(readers[1].indexReader, readers[1].taxReader, iParams));
+        totalCounts1 == TFC.getTotalCounts(indexReader2, taxoReader2, iParams));
     
-    writers[0].close();
-    writers[1].close();
-    readers[0].close();
-    readers[1].close();
-    for (Directory[] dirset : dirs) {
-      IOUtils.close(dirset);
-    }
+    IOUtils.close(indexWriter1, indexWriter2, taxoWriter1, taxoWriter2);
+    IOUtils.close(indexReader1, indexReader2, taxoReader1, taxoReader2);
+    IOUtils.close(indexDir1, indexDir2, taxoDir1, taxoDir2);
   }
 

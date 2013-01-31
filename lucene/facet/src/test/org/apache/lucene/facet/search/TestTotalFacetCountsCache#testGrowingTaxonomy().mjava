@@ -7,10 +7,12 @@
    */
   @Test
   public void testGrowingTaxonomy() throws Exception {
-    // Create temporary RAMDirectories
-    Directory[][] dirs = FacetTestUtils.createIndexTaxonomyDirs(1);
+    Directory indexDir = newDirectory();
+    Directory taxoDir = newDirectory();
+    
     // Create our index/taxonomy writers
-    IndexTaxonomyWriterPair[] writers = FacetTestUtils.createIndexTaxonomyWriterPair(dirs);
+    IndexWriter indexWriter = new IndexWriter(indexDir, newIndexWriterConfig(TEST_VERSION_CURRENT, null));
+    TaxonomyWriter taxoWriter = new DirectoryTaxonomyWriter(taxoDir);
     FacetIndexingParams iParams = new FacetIndexingParams() {
       @Override
       public int getPartitionSize() {
@@ -18,36 +20,37 @@
       }
     };
     // Add a facet to the index
-    addFacets(iParams, writers[0].indexWriter, writers[0].taxWriter, "a", "b");
+    addFacets(iParams, indexWriter, taxoWriter, "a", "b");
     // Commit Changes
-    writers[0].indexWriter.commit();
-    writers[0].taxWriter.commit();
+    indexWriter.commit();
+    taxoWriter.commit();
 
-    IndexTaxonomyReaderPair[] readers = FacetTestUtils.createIndexTaxonomyReaderPair(dirs);
+    DirectoryReader indexReader = DirectoryReader.open(indexDir);
+    TaxonomyReader taxoReader = new DirectoryTaxonomyReader(taxoDir);
 
     // Create TFC and write cache to disk
     File outputFile = _TestUtil.createTempFile("test", "tmp", TEMP_DIR);
-    TFC.store(outputFile, readers[0].indexReader, readers[0].taxReader, iParams);
+    TFC.store(outputFile, indexReader, taxoReader, iParams);
     
     // Make the taxonomy grow without touching the index
     for (int i = 0; i < 10; i++) {
-      writers[0].taxWriter.addCategory(new CategoryPath("foo", Integer.toString(i)));
+      taxoWriter.addCategory(new CategoryPath("foo", Integer.toString(i)));
     }
-    writers[0].taxWriter.commit();
-    DirectoryTaxonomyReader newTaxoReader = TaxonomyReader.openIfChanged(readers[0].taxReader);
+    taxoWriter.commit();
+    TaxonomyReader newTaxoReader = TaxonomyReader.openIfChanged(taxoReader);
     assertNotNull(newTaxoReader);
-    readers[0].taxReader.close();
-    readers[0].taxReader = newTaxoReader;
+    taxoReader.close();
+    taxoReader = newTaxoReader;
 
     initCache();
 
     // With the bug, this next call should result in an exception
-    TFC.load(outputFile, readers[0].indexReader, readers[0].taxReader, iParams);
-    TotalFacetCounts totalCounts = TFC.getTotalCounts(readers[0].indexReader, readers[0].taxReader, iParams);
+    TFC.load(outputFile, indexReader, taxoReader, iParams);
+    TotalFacetCounts totalCounts = TFC.getTotalCounts(indexReader, taxoReader, iParams);
     assertReadFromDisc(totalCounts, 0, "after reading from disk.");
+    
     outputFile.delete();
-    writers[0].close();
-    readers[0].close();
-    IOUtils.close(dirs[0]);
+    IOUtils.close(indexWriter, taxoWriter, indexReader, taxoReader);
+    IOUtils.close(indexDir, taxoDir);
   }
 

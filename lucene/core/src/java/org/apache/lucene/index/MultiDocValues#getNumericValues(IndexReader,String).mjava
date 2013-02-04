@@ -1,17 +1,33 @@
-  /** returns a NumericDocValues for a reader's docvalues (potentially merging on-the-fly) */
+  /** Returns a NumericDocValues for a reader's docvalues (potentially merging on-the-fly) 
+   * <p>
+   * This is a slow way to access numeric values. Instead, access them per-segment
+   * with {@link AtomicReader#getNumericDocValues(String)}
+   * </p> 
+   * */
   public static NumericDocValues getNumericValues(final IndexReader r, final String field) throws IOException {
     final List<AtomicReaderContext> leaves = r.leaves();
-    if (leaves.size() == 1) {
+    final int size = leaves.size();
+    if (size == 0) {
+      return null;
+    } else if (size == 1) {
       return leaves.get(0).reader().getNumericDocValues(field);
     }
-    boolean anyReal = false;
-    for(AtomicReaderContext ctx : leaves) {
-      NumericDocValues values = ctx.reader().getNumericDocValues(field);
 
-      if (values != null) {
+    boolean anyReal = false;
+    final NumericDocValues[] values = new NumericDocValues[size];
+    final int[] starts = new int[size+1];
+    for (int i = 0; i < size; i++) {
+      AtomicReaderContext context = leaves.get(i);
+      NumericDocValues v = context.reader().getNumericDocValues(field);
+      if (v == null) {
+        v = NumericDocValues.EMPTY;
+      } else {
         anyReal = true;
       }
+      values[i] = v;
+      starts[i] = context.docBase;
     }
+    starts[size] = r.maxDoc();
 
     if (!anyReal) {
       return null;
@@ -19,18 +35,8 @@
       return new NumericDocValues() {
         @Override
         public long get(int docID) {
-          int subIndex = ReaderUtil.subIndex(docID, leaves);
-          NumericDocValues values;
-          try {
-            values = leaves.get(subIndex).reader().getNumericDocValues(field);
-          } catch (IOException ioe) {
-            throw new RuntimeException(ioe);
-          }
-          if (values == null) {
-            return 0;
-          } else {
-            return values.get(docID - leaves.get(subIndex).docBase);
-          }
+          int subIndex = ReaderUtil.subIndex(docID, starts);
+          return values[subIndex].get(docID - starts[subIndex]);
         }
       };
     }

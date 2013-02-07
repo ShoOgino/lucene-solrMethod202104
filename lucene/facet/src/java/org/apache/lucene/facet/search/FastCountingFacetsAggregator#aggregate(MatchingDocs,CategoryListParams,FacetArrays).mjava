@@ -1,0 +1,37 @@
+  @Override
+  public final void aggregate(MatchingDocs matchingDocs, CategoryListParams clp, FacetArrays facetArrays) 
+      throws IOException {
+    assert clp.createEncoder().createMatchingDecoder().getClass() == DGapVInt8IntDecoder.class 
+        : "this aggregator assumes ordinals were encoded as dgap+vint";
+    
+    final BinaryDocValues dv = matchingDocs.context.reader().getBinaryDocValues(clp.field);
+    if (dv == null) { // this reader does not have DocValues for the requested category list
+      return;
+    }
+    
+    final int length = matchingDocs.bits.length();
+    final int[] counts = facetArrays.getIntArray();
+    int doc = 0;
+    while (doc < length && (doc = matchingDocs.bits.nextSetBit(doc)) != -1) {
+      dv.get(doc, buf);
+      if (buf.length > 0) {
+        // this document has facets
+        final int upto = buf.offset + buf.length;
+        int ord = 0;
+        int offset = buf.offset;
+        int prev = 0;
+        while (offset < upto) {
+          byte b = buf.bytes[offset++];
+          if (b >= 0) {
+            prev = ord = ((ord << 7) | b) + prev;
+            ++counts[ord];
+            ord = 0;
+          } else {
+            ord = (ord << 7) | (b & 0x7F);
+          }
+        }
+      }
+      ++doc;
+    }
+  }
+

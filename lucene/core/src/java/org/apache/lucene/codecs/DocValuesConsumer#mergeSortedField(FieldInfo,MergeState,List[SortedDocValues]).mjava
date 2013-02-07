@@ -1,0 +1,125 @@
+  /**
+   * Merges the sorted docvalues from <code>toMerge</code>.
+   * <p>
+   * The default implementation calls {@link #addSortedField}, passing
+   * an Iterable that merges ordinals and values and filters deleted documents .
+   */
+  public void mergeSortedField(FieldInfo fieldInfo, final MergeState mergeState, List<SortedDocValues> toMerge) throws IOException {
+    final SortedBytesMerger merger = new SortedBytesMerger();
+
+    // Does the heavy lifting to merge sort all "live" ords:
+    merger.merge(mergeState, toMerge);
+
+    addSortedField(fieldInfo,
+
+                   // ord -> value
+                   new Iterable<BytesRef>() {
+                     @Override
+                     public Iterator<BytesRef> iterator() {
+                       // for each next(), tells us what reader to go to
+                       final AppendingLongBuffer.Iterator readerIDs = merger.ordToReaderId.iterator();
+                       // for each next(), gives us the original ord
+                       final AppendingLongBuffer.Iterator ordDeltas[] = new AppendingLongBuffer.Iterator[merger.segStates.size()];
+                       final int lastOrds[] = new int[ordDeltas.length];
+                       
+                       for (int i = 0; i < ordDeltas.length; i++) {
+                         ordDeltas[i] = merger.segStates.get(i).ordDeltas.iterator();
+                       }
+
+                       final BytesRef scratch = new BytesRef();
+                       
+                       return new Iterator<BytesRef>() {
+                         int ordUpto;
+
+                         @Override
+                         public boolean hasNext() {
+                           return ordUpto < merger.numMergedTerms;
+                         }
+
+                         @Override
+                         public void remove() {
+                           throw new UnsupportedOperationException();
+                         }
+
+                         @Override
+                         public BytesRef next() {
+                           if (!hasNext()) {
+                             throw new NoSuchElementException();
+                           }
+                           int readerID = (int) readerIDs.next();
+                           int ord = lastOrds[readerID] + (int) ordDeltas[readerID].next();
+                           merger.segStates.get(readerID).values.lookupOrd(ord, scratch);
+                           lastOrds[readerID] = ord;
+                           ordUpto++;
+                           return scratch;
+                         }
+                       };
+                     }
+                   },
+
+                   // doc -> ord
+                    new Iterable<Number>() {
+                      @Override
+                      public Iterator<Number> iterator() {
+                        return new Iterator<Number>() {
+                          int readerUpto = -1;
+                          int docIDUpto;
+                          int nextValue;
+                          SortedBytesMerger.SegmentState currentReader;
+                          Bits currentLiveDocs;
+                          boolean nextIsSet;
+
+                          @Override
+                          public boolean hasNext() {
+                            return nextIsSet || setNext();
+                          }
+
+                          @Override
+                          public void remove() {
+                            throw new UnsupportedOperationException();
+                          }
+
+                          @Override
+                          public Number next() {
+                            if (!hasNext()) {
+                              throw new NoSuchElementException();
+                            }
+                            assert nextIsSet;
+                            nextIsSet = false;
+                            // TODO make a mutable number
+                            return nextValue;
+                          }
+
+                          private boolean setNext() {
+                            while (true) {
+                              if (readerUpto == merger.segStates.size()) {
+                                return false;
+                              }
+
+                              if (currentReader == null || docIDUpto == currentReader.reader.maxDoc()) {
+                                readerUpto++;
+                                if (readerUpto < merger.segStates.size()) {
+                                  currentReader = merger.segStates.get(readerUpto);
+                                  currentLiveDocs = currentReader.reader.getLiveDocs();
+                                }
+                                docIDUpto = 0;
+                                continue;
+                              }
+
+                              if (currentLiveDocs == null || currentLiveDocs.get(docIDUpto)) {
+                                nextIsSet = true;
+                                int segOrd = currentReader.values.getOrd(docIDUpto);
+                                nextValue = (int) (segOrd + currentReader.segOrdToMergedOrd.get(segOrd));
+                                docIDUpto++;
+                                return true;
+                              }
+
+                              docIDUpto++;
+                            }
+                          }
+                        };
+                      }
+                    });
+
+  }
+

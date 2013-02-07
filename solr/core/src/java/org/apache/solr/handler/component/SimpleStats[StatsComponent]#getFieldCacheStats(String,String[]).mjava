@@ -2,7 +2,7 @@
   public NamedList<?> getFieldCacheStats(String fieldName, String[] facet ) {
     SchemaField sf = searcher.getSchema().getField(fieldName);
     
-    FieldCache.DocTermsIndex si;
+    SortedDocValues si;
     try {
       si = FieldCache.DEFAULT.getTermsIndex(searcher.getAtomicReader(), fieldName);
     } 
@@ -10,12 +10,12 @@
       throw new RuntimeException( "failed to open field cache for: "+fieldName, e );
     }
     StatsValues allstats = StatsValuesFactory.createStatsValues(sf);
-    final int nTerms = si.numOrd();
+    final int nTerms = si.getValueCount();
     if ( nTerms <= 0 || docs.size() <= 0 ) return allstats.getStatsValues();
 
     // don't worry about faceting if no documents match...
     List<FieldFacetStats> facetStats = new ArrayList<FieldFacetStats>();
-    FieldCache.DocTermsIndex facetTermsIndex;
+    SortedDocValues facetTermsIndex;
     for( String facetField : facet ) {
       SchemaField fsf = searcher.getSchema().getField(facetField);
 
@@ -23,7 +23,7 @@
         throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
           "Stats can only facet on single-valued fields, not: " + facetField );
       }
-
+      
       try {
         facetTermsIndex = FieldCache.DEFAULT.getTermsIndex(searcher.getAtomicReader(), facetField);
       }
@@ -38,11 +38,20 @@
     DocIterator iter = docs.iterator();
     while (iter.hasNext()) {
       int docID = iter.nextDoc();
-      BytesRef raw = si.lookup(si.getOrd(docID), tempBR);
-      if( raw.length > 0 ) {
-        allstats.accumulate(raw);
-      } else {
+      int docOrd = si.getOrd(docID);
+      BytesRef raw;
+      if (docOrd == -1) {
         allstats.missing();
+        tempBR.length = 0;
+        raw = tempBR;
+      } else {
+        raw = tempBR;
+        si.lookupOrd(docOrd, tempBR);
+        if( tempBR.length > 0 ) {
+          allstats.accumulate(tempBR);
+        } else {
+          allstats.missing();
+        }
       }
 
       // now update the facets

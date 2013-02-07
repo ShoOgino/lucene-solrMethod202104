@@ -1,0 +1,61 @@
+    @Override
+    protected Object createValue(final AtomicReader reader, CacheKey key, boolean setDocsWithField)
+        throws IOException {
+
+      final FloatParser parser = (FloatParser) key.custom;
+      if (parser == null) {
+        // Confusing: must delegate to wrapper (vs simply
+        // setting parser =
+        // DEFAULT_FLOAT_PARSER/NUMERIC_UTILS_FLOAT_PARSER) so
+        // cache key includes
+        // DEFAULT_FLOAT_PARSER/NUMERIC_UTILS_FLOAT_PARSER:
+        try {
+          return wrapper.getFloats(reader, key.field, DEFAULT_FLOAT_PARSER, setDocsWithField);
+        } catch (NumberFormatException ne) {
+          return wrapper.getFloats(reader, key.field, NUMERIC_UTILS_FLOAT_PARSER, setDocsWithField);
+        }
+      }
+
+      final HoldsOneThing<float[]> valuesRef = new HoldsOneThing<float[]>();
+
+      Uninvert u = new Uninvert() {
+          private float currentValue;
+          private float[] values;
+
+          @Override
+          public void visitTerm(BytesRef term) {
+            currentValue = parser.parseFloat(term);
+            if (values == null) {
+              // Lazy alloc so for the numeric field case
+              // (which will hit a NumberFormatException
+              // when we first try the DEFAULT_INT_PARSER),
+              // we don't double-alloc:
+              values = new float[reader.maxDoc()];
+              valuesRef.set(values);
+            }
+          }
+
+          @Override
+          public void visitDoc(int docID) {
+            values[docID] = currentValue;
+          }
+          
+          @Override
+          protected TermsEnum termsEnum(Terms terms) throws IOException {
+            return parser.termsEnum(terms);
+          }
+        };
+
+      u.uninvert(reader, key.field, setDocsWithField);
+
+      if (setDocsWithField) {
+        wrapper.setDocsWithField(reader, key.field, u.docsWithField);
+      }
+
+      float[] values = valuesRef.get();
+      if (values == null) {
+        values = new float[reader.maxDoc()];
+      }
+      return new FloatsFromArray(values);
+    }
+

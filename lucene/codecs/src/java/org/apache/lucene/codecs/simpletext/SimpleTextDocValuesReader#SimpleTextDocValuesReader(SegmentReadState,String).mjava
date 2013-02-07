@@ -1,0 +1,67 @@
+  public SimpleTextDocValuesReader(SegmentReadState state, String ext) throws IOException {
+    //System.out.println("dir=" + state.directory + " seg=" + state.segmentInfo.name + " ext=" + ext);
+    data = state.directory.openInput(IndexFileNames.segmentFileName(state.segmentInfo.name, state.segmentSuffix, ext), state.context);
+    maxDoc = state.segmentInfo.getDocCount();
+    while(true) {
+      readLine();
+      //System.out.println("READ field=" + scratch.utf8ToString());
+      if (scratch.equals(END)) {
+        break;
+      }
+      assert startsWith(FIELD) : scratch.utf8ToString();
+      String fieldName = stripPrefix(FIELD);
+      //System.out.println("  field=" + fieldName);
+      FieldInfo fieldInfo = state.fieldInfos.fieldInfo(fieldName);
+      assert fieldInfo != null;
+
+      OneField field = new OneField();
+      fields.put(fieldName, field);
+
+      readLine();
+      assert startsWith(TYPE) : scratch.utf8ToString();
+
+      DocValuesType dvType = DocValuesType.valueOf(stripPrefix(TYPE));
+      assert dvType != null;
+      if (dvType == DocValuesType.NUMERIC) {
+        readLine();
+        assert startsWith(MINVALUE): "got " + scratch.utf8ToString() + " field=" + fieldName + " ext=" + ext;
+        field.minValue = Long.parseLong(stripPrefix(MINVALUE));
+        readLine();
+        assert startsWith(PATTERN);
+        field.pattern = stripPrefix(PATTERN);
+        field.dataStartFilePointer = data.getFilePointer();
+        data.seek(data.getFilePointer() + (1+field.pattern.length()) * maxDoc);
+      } else if (dvType == DocValuesType.BINARY) {
+        readLine();
+        assert startsWith(MAXLENGTH);
+        field.maxLength = Integer.parseInt(stripPrefix(MAXLENGTH));
+        readLine();
+        assert startsWith(PATTERN);
+        field.pattern = stripPrefix(PATTERN);
+        field.dataStartFilePointer = data.getFilePointer();
+        data.seek(data.getFilePointer() + (9+field.pattern.length()+field.maxLength) * maxDoc);
+      } else if (dvType == DocValuesType.SORTED) {
+        readLine();
+        assert startsWith(NUMVALUES);
+        field.numValues = Integer.parseInt(stripPrefix(NUMVALUES));
+        readLine();
+        assert startsWith(MAXLENGTH);
+        field.maxLength = Integer.parseInt(stripPrefix(MAXLENGTH));
+        readLine();
+        assert startsWith(PATTERN);
+        field.pattern = stripPrefix(PATTERN);
+        readLine();
+        assert startsWith(ORDPATTERN);
+        field.ordPattern = stripPrefix(ORDPATTERN);
+        field.dataStartFilePointer = data.getFilePointer();
+        data.seek(data.getFilePointer() + (9+field.pattern.length()+field.maxLength) * field.numValues + (1+field.ordPattern.length())*maxDoc);
+      } else {
+        throw new AssertionError();
+      }
+    }
+
+    // We should only be called from above if at least one
+    // field has DVs:
+    assert !fields.isEmpty();
+  }
+

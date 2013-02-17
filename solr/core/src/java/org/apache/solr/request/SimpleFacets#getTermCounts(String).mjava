@@ -24,7 +24,8 @@
     boolean enumMethod = FacetParams.FACET_METHOD_enum.equals(method);
 
     // TODO: default to per-segment or not?
-    boolean per_segment = FacetParams.FACET_METHOD_fcs.equals(method);
+    boolean per_segment = FacetParams.FACET_METHOD_fcs.equals(method) // explicit
+        || (ft.getNumericType() != null && sf.hasDocValues()); // numeric doc values are per-segment by default
 
     if (method == null && ft instanceof BoolField) {
       // Always use filters for booleans... we know the number of values is very small.
@@ -53,10 +54,18 @@
           // TODO: future logic could use filters instead of the fieldcache if
           // the number of terms in the field is small enough.
           if (per_segment) {
-            PerSegmentSingleValuedFaceting ps = new PerSegmentSingleValuedFaceting(searcher, docs, field, offset,limit, mincount, missing, sort, prefix);
-            Executor executor = threads == 0 ? directExecutor : facetExecutor;
-            ps.setNumThreads(threads);
-            counts = ps.getFacetCounts(executor);
+            if (ft.getNumericType() != null && !sf.multiValued()) {
+              // force numeric faceting
+              if (prefix != null && !prefix.isEmpty()) {
+                throw new SolrException(ErrorCode.BAD_REQUEST, FacetParams.FACET_PREFIX + " is not supported on numeric types");
+              }
+              counts = NumericFacets.getCounts(searcher, docs, field, offset, limit, mincount, missing, sort);
+            } else {
+              PerSegmentSingleValuedFaceting ps = new PerSegmentSingleValuedFaceting(searcher, docs, field, offset,limit, mincount, missing, sort, prefix);
+              Executor executor = threads == 0 ? directExecutor : facetExecutor;
+              ps.setNumThreads(threads);
+              counts = ps.getFacetCounts(executor);
+            }
           } else {
             counts = getFieldCacheCounts(searcher, docs, field, offset,limit, mincount, missing, sort, prefix);
           }

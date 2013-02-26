@@ -1,0 +1,75 @@
+    public DocIdSet getDocIdSet() throws IOException {
+      assert curVNode == null : "Called more than once?";
+      if (termsEnum == null)
+        return null;
+      //advance
+      if ((thisTerm = termsEnum.next()) == null)
+        return null; // all done
+
+      curVNode = new VNode(null);
+      curVNode.reset(grid.getWorldNode());
+
+      start();
+
+      addIntersectingChildren();
+
+      main: while (thisTerm != null) {//terminates for other reasons too!
+
+        //Advance curVNode pointer
+        if (curVNode.children != null) {
+          //-- HAVE CHILDREN: DESCEND
+          assert curVNode.children.hasNext();//if we put it there then it has something
+          preSiblings(curVNode);
+          curVNode = curVNode.children.next();
+        } else {
+          //-- NO CHILDREN: ADVANCE TO NEXT SIBLING
+          VNode parentVNode = curVNode.parent;
+          while (true) {
+            if (parentVNode == null)
+              break main; // all done
+            if (parentVNode.children.hasNext()) {
+              //advance next sibling
+              curVNode = parentVNode.children.next();
+              break;
+            } else {
+              //reached end of siblings; pop up
+              postSiblings(parentVNode);
+              parentVNode.children = null;//GC
+              parentVNode = parentVNode.parent;
+            }
+          }
+        }
+
+        //Seek to curVNode's cell (or skip if termsEnum has moved beyond)
+        curVNodeTerm.bytes = curVNode.cell.getTokenBytes();
+        curVNodeTerm.length = curVNodeTerm.bytes.length;
+        int compare = termsEnum.getComparator().compare(thisTerm, curVNodeTerm);
+        if (compare > 0) {
+          // leap frog (termsEnum is beyond where we would otherwise seek)
+          assert ! context.reader().terms(fieldName).iterator(null).seekExact(curVNodeTerm, false) : "should be absent";
+        } else {
+          if (compare < 0) {
+            // Seek !
+            TermsEnum.SeekStatus seekStatus = termsEnum.seekCeil(curVNodeTerm, true);
+            if (seekStatus == TermsEnum.SeekStatus.END)
+              break; // all done
+            thisTerm = termsEnum.term();
+            if (seekStatus == TermsEnum.SeekStatus.NOT_FOUND) {
+              continue; // leap frog
+            }
+          }
+          // Visit!
+          boolean descend = visit(curVNode.cell);
+          //advance
+          if ((thisTerm = termsEnum.next()) == null)
+            break; // all done
+          if (descend)
+            addIntersectingChildren();
+
+        }
+
+      }//main loop
+
+      return finish();
+    }
+

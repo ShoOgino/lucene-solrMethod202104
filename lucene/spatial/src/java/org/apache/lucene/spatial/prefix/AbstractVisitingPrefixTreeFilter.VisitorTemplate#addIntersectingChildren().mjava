@@ -1,0 +1,45 @@
+    /** Called initially, and whenever {@link #visit(org.apache.lucene.spatial.prefix.tree.Node)}
+     * returns true. */
+    private void addIntersectingChildren() throws IOException {
+      assert thisTerm != null;
+      Node cell = curVNode.cell;
+      if (cell.getLevel() >= detailLevel)
+        throw new IllegalStateException("Spatial logic error");
+
+      //Check for adjacent leaf (happens for indexed non-point shapes)
+      assert !cell.isLeaf();
+      if (hasIndexedLeaves && cell.getLevel() != 0) {
+        //If the next indexed term just adds a leaf marker ('+') to cell,
+        // then add all of those docs
+        assert StringHelper.startsWith(thisTerm, curVNodeTerm);
+        scanCell = grid.getNode(thisTerm.bytes, thisTerm.offset, thisTerm.length, scanCell);
+        if (scanCell.getLevel() == cell.getLevel() && scanCell.isLeaf()) {
+          visitLeaf(scanCell);
+          //advance
+          if ((thisTerm = termsEnum.next()) == null)
+            return; // all done
+        }
+      }
+
+      //Decide whether to continue to divide & conquer, or whether it's time to
+      // scan through terms beneath this cell.
+      // Scanning is a performance optimization trade-off.
+
+      //TODO use termsEnum.docFreq() as heuristic
+      boolean scan = cell.getLevel() >= prefixGridScanLevel;//simple heuristic
+
+      if (!scan) {
+        //Divide & conquer (ultimately termsEnum.seek())
+
+        Iterator<Node> subCellsIter = findSubCellsToVisit(cell);
+        if (!subCellsIter.hasNext())//not expected
+          return;
+        curVNode.children = new VNodeCellIterator(subCellsIter, new VNode(curVNode));
+
+      } else {
+        //Scan (loop of termsEnum.next())
+
+        scan(detailLevel);
+      }
+    }
+

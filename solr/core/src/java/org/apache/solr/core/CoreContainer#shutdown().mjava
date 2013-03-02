@@ -15,35 +15,35 @@
         log.warn("", e);
       }
     }
-    
     isShutDown = true;
-    
+
     if (isZooKeeperAware()) {
+      coreMaps.publishCoresAsDown(zkController);
       cancelCoreRecoveries();
     }
-    
-    try {
-      synchronized (cores) {
 
-        for (SolrCore core : cores.values()) {
-          try {
-            core.close();
-          } catch (Throwable t) {
-            SolrException.log(log, "Error shutting down core", t);
-          }
-        }
-        cores.clear();
+
+    try {
+      // First allow the closer thread to drain all the pending closes it can.
+      synchronized (coreMaps.getLocker()) {
+        coreMaps.getLocker().notifyAll(); // wake up anyone waiting
       }
-      synchronized (transientCores) {
-        for (SolrCore core : transientCores.values()) {
-          try {
-            core.close();
-          } catch (Throwable t) {
-            SolrException.log(log, "Error shutting down core", t);
-          }
+      if (backgroundCloser != null) { // Doesn't seem right, but tests get in here without initializing the core.
+        try {
+          backgroundCloser.join();
+        } catch (InterruptedException e) {
+          ; // Don't much care if this gets interrupted
         }
-        transientCores.clear();
       }
+      // Now clear all the cores that are being operated upon.
+      coreMaps.clearMaps(cfg);
+
+      // It's still possible that one of the pending dynamic load operation is waiting, so wake it up if so.
+      // Since all the pending operations queues have been drained, there should be nothing to do.
+      synchronized (coreMaps.getLocker()) {
+        coreMaps.getLocker().notifyAll(); // wake up the thread
+      }
+
     } finally {
       if (shardHandlerFactory != null) {
         shardHandlerFactory.close();
@@ -56,7 +56,6 @@
       if (zkServer != null) {
         zkServer.stop();
       }
-      
     }
   }
 

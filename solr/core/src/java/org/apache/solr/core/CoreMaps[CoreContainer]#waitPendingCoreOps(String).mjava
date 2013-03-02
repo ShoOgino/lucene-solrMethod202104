@@ -1,0 +1,45 @@
+  // We get here when we're being loaded, and the presumption is that we're not in the list yet.
+  protected SolrCore waitPendingCoreOps(String name) {
+
+    // Keep multiple threads from opening or closing a core at one time.
+    SolrCore ret = null;
+
+    synchronized (locker) {
+      boolean pending;
+      do { // We're either loading or unloading this core,
+        pending = pendingDynamicLoads.contains(name); // wait for the core to be loaded
+        if (! pending) {
+          // Check pending closes. This is a linear search is inefficient, but maps don't work without a lot of complexity,
+          // we'll live with it unless it proves to be a bottleneck. In the "usual" case, this list shouldn't be
+          // very long. In the stress test associated with SOLR-4196, this hovered around 0-3, occasionally spiking
+          // very briefly to around 30.
+          for (SolrCore core : pendingDynamicCloses) {
+            if (core.getName().equals(name)) {
+              pending = true;
+              break;
+            }
+          }
+        }
+
+        if (container.isShutDown()) return null; // Just stop already.
+
+        if (pending) {
+          try {
+            locker.wait();
+          } catch (InterruptedException e) {
+            return null; // Seems best not to do anything at all if the thread is interrupted
+          }
+        }
+      } while (pending);
+
+      if (!container.isShutDown()) {
+        ret = getCoreFromAnyList(name); // we might have been _unloading_ the core, so check.
+        if (ret == null) {
+          pendingDynamicLoads.add(name); // the caller is going to load us. If we happen to be shutting down, we don't care.
+        }
+      }
+    }
+
+    return ret;
+  }
+

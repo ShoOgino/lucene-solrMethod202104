@@ -4,56 +4,34 @@
    * @return the core if found
    */
   public SolrCore getCore(String name) {
+
     name = checkDefault(name);
     // Do this in two phases since we don't want to lock access to the cores over a load.
-    SolrCore core = getCoreFromAnyList(name);
+    SolrCore core = coreMaps.getCoreFromAnyList(name);
 
     if (core != null) return core;
 
     // OK, it's not presently in any list, is it in the list of dynamic cores but not loaded yet? If so, load it.
-    CoreDescriptor desc =  dynamicDescriptors.get(name);
+    CoreDescriptor desc = coreMaps.getDynamicDescriptor(name);
     if (desc == null) { //Nope, no transient core with this name
       return null;
     }
 
-    // Keep multiple threads from loading the same core at the same time.
-    try {
-      boolean isPending;
-      synchronized (pendingDynamicCoreLoads) {
-        isPending = pendingDynamicCoreLoads.contains(name);
-        if (! isPending) {
-          pendingDynamicCoreLoads.add(name);
-        }
-      }
+    core = coreMaps.waitPendingCoreOps(name); // This will put an entry in pending core ops if the core isn't loaded
 
-      while (isPending) {
-        try {
-          Thread.sleep(100);
-        } catch (InterruptedException e) {
-          return null; // Seems best not to do anything at all if the thread is interrupted
-        }
+    if (isShutDown) return null; // We're quitting, so stop. This needs to be after the wait above since we may come off
+                                 // the wait as a consequence of shutting down.
 
-        synchronized (pendingDynamicCoreLoads) {
-          if (!pendingDynamicCoreLoads.contains(name)) {
-            // NOTE: If, for some reason, the load failed, we'll return null here and presumably the log will show
-            // why. We'll fail all over again next time if the problem isn't corrected.
-            return getCoreFromAnyList(name);
-          }
-        }
-      }
+    if (core == null) {
       try {
         core = create(desc); // This should throw an error if it fails.
         core.open();
-        if (desc.isTransient()) {
-          registerLazyCore(name, core, false);    // This is a transient core
-        } else {
-          register(name, core, false); // This is a "permanent", although deferred-load core
-        }
+        registerCore(desc.isTransient(), name, core, false);
       } catch (Exception ex) {
-        throw recordAndThrow(name, "Unable to create core" + name, ex);
+        throw recordAndThrow(name, "Unable to create core: " + name, ex);
+      } finally {
+        coreMaps.releasePending(name);
       }
-    } finally {
-      pendingDynamicCoreLoads.remove(name);
     }
     return core;
   }

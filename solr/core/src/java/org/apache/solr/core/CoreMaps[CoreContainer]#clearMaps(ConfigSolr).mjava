@@ -1,0 +1,44 @@
+  // We are shutting down. We don't want to risk deadlock, so do this manipulation the expensive way. Note, I've
+  // already deadlocked with closing/opening cores while keeping locks here....
+  protected void clearMaps(ConfigSolr cfg) {
+    List<String> coreNames;
+    List<String> transientNames;
+    List<SolrCore> pendingClosers;
+    synchronized (locker) {
+      coreNames = new ArrayList(cores.keySet());
+      transientNames = new ArrayList(transientCores.keySet());
+      pendingClosers = new ArrayList(pendingDynamicCloses);
+    }
+    for (String coreName : coreNames) {
+      SolrCore core = cores.get(coreName);
+      if (core != null) {
+        try {
+          addPersistOneCore(cfg, core, container.loader);
+
+          core.close();
+        } catch (Throwable t) {
+          SolrException.log(CoreContainer.log, "Error shutting down core", t);
+        }
+      }
+    }
+    cores.clear();
+
+    for (String coreName : transientNames) {
+      SolrCore core = transientCores.get(coreName);
+      if (core != null) {
+        try {
+          core.close();
+        } catch (Throwable t) {
+          SolrException.log(CoreContainer.log, "Error shutting down core", t);
+        }
+      }
+    }
+    transientCores.clear();
+
+    // We might have some cores that we were _thinking_ about shutting down, so take care of those too.
+    for (SolrCore core : pendingClosers) {
+      core.close();
+    }
+
+  }
+

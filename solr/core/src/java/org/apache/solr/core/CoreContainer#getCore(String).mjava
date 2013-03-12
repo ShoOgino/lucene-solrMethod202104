@@ -9,7 +9,10 @@
     // Do this in two phases since we don't want to lock access to the cores over a load.
     SolrCore core = coreMaps.getCoreFromAnyList(name);
 
-    if (core != null) return core;
+    if (core != null) {
+      core.open();
+      return core;
+    }
 
     // OK, it's not presently in any list, is it in the list of dynamic cores but not loaded yet? If so, load it.
     CoreDescriptor desc = coreMaps.getDynamicDescriptor(name);
@@ -17,22 +20,25 @@
       return null;
     }
 
-    core = coreMaps.waitPendingCoreOps(name); // This will put an entry in pending core ops if the core isn't loaded
+    // This will put an entry in pending core ops if the core isn't loaded
+    core = coreMaps.waitAddPendingCoreOps(name);
 
     if (isShutDown) return null; // We're quitting, so stop. This needs to be after the wait above since we may come off
                                  // the wait as a consequence of shutting down.
-
-    if (core == null) {
-      try {
+    try {
+      if (core == null) {
         core = create(desc); // This should throw an error if it fails.
         core.open();
         registerCore(desc.isTransient(), name, core, false);
-      } catch (Exception ex) {
-        throw recordAndThrow(name, "Unable to create core: " + name, ex);
-      } finally {
-        coreMaps.releasePending(name);
+      } else {
+        core.open();
       }
+    } catch(Exception ex){
+      throw recordAndThrow(name, "Unable to create core: " + name, ex);
+    } finally {
+      coreMaps.removeFromPendingOps(name);
     }
+
     return core;
   }
 

@@ -4,14 +4,21 @@
     File directory = Sort.defaultTempDir();
     File tempInput = File.createTempFile(prefix, ".input", directory);
     File tempSorted = File.createTempFile(prefix, ".sorted", directory);
-    
+
+    TermFreqPayloadIterator payloads;
+    if (iterator instanceof TermFreqPayloadIterator) {
+      payloads = (TermFreqPayloadIterator) iterator;
+    } else {
+      payloads = null;
+    }
+    hasPayloads = payloads != null;
+
     Sort.ByteSequencesWriter writer = new Sort.ByteSequencesWriter(tempInput);
     Sort.ByteSequencesReader reader = null;
     BytesRef scratch = new BytesRef();
 
     TokenStreamToAutomaton ts2a = getTokenStreamToAutomaton();
 
-    // analyzed sequence + 0(byte) + weight(int) + surface + analyzedLength(short) 
     boolean success = false;
     byte buffer[] = new byte[8];
     try {
@@ -36,6 +43,19 @@
           // compute the required length:
           // analyzed sequence + weight (4) + surface + analyzedLength (short)
           int requiredLength = analyzedLength + 4 + surfaceForm.length + 2;
+
+          BytesRef payload;
+
+          if (hasPayloads) {
+            if (surfaceForm.length > (Short.MAX_VALUE-2)) {
+              throw new IllegalArgumentException("cannot handle surface form > " + (Short.MAX_VALUE-2) + " in length (got " + surfaceForm.length + ")");
+            }
+            payload = payloads.payload();
+            // payload + surfaceLength (short)
+            requiredLength += payload.length + 2;
+          } else {
+            payload = null;
+          }
           
           buffer = ArrayUtil.grow(buffer, requiredLength);
           
@@ -47,7 +67,18 @@
 
           output.writeInt(encodeWeight(iterator.weight()));
 
-          output.writeBytes(surfaceForm.bytes, surfaceForm.offset, surfaceForm.length);
+          if (hasPayloads) {
+            for(int i=0;i<surfaceForm.length;i++) {
+              if (surfaceForm.bytes[i] == PAYLOAD_SEP) {
+                throw new IllegalArgumentException("surface form cannot contain unit separator character U+001F; this character is reserved");
+              }
+            }
+            output.writeShort((short) surfaceForm.length);
+            output.writeBytes(surfaceForm.bytes, surfaceForm.offset, surfaceForm.length);
+            output.writeBytes(payload.bytes, payload.offset, payload.length);
+          } else {
+            output.writeBytes(surfaceForm.bytes, surfaceForm.offset, surfaceForm.length);
+          }
 
           assert output.getPosition() == requiredLength: output.getPosition() + " vs " + requiredLength;
 
@@ -57,7 +88,7 @@
       writer.close();
 
       // Sort all input/output pairs (required by FST.Builder):
-      new Sort(sortComparator).sort(tempInput, tempSorted);
+      new Sort(new AnalyzingComparator(payloads != null)).sort(tempInput, tempSorted);
 
       // Free disk space:
       tempInput.delete();
@@ -91,8 +122,13 @@
         long cost = input.readInt();
 
         surface.bytes = scratch.bytes;
-        surface.offset = input.getPosition();
-        surface.length = scratch.length - surface.offset;
+        if (hasPayloads) {
+          surface.length = input.readShort();
+          surface.offset = input.getPosition();
+        } else {
+          surface.offset = input.getPosition();
+          surface.length = scratch.length - surface.offset;
+        }
         
         if (previousAnalyzed == null) {
           previousAnalyzed = new BytesRef();
@@ -130,7 +166,18 @@
 
         Util.toIntsRef(analyzed, scratchInts);
         //System.out.println("ADD: " + scratchInts + " -> " + cost + ": " + surface.utf8ToString());
-        builder.add(scratchInts, outputs.newPair(cost, BytesRef.deepCopyOf(surface)));
+        if (!hasPayloads) {
+          builder.add(scratchInts, outputs.newPair(cost, BytesRef.deepCopyOf(surface)));
+        } else {
+          int payloadOffset = input.getPosition() + surface.length;
+          int payloadLength = scratch.length - payloadOffset;
+          BytesRef br = new BytesRef(surface.length + 1 + payloadLength);
+          System.arraycopy(surface.bytes, surface.offset, br.bytes, 0, surface.length);
+          br.bytes[surface.length] = PAYLOAD_SEP;
+          System.arraycopy(scratch.bytes, payloadOffset, br.bytes, surface.length+1, payloadLength);
+          br.length = br.bytes.length;
+          builder.add(scratchInts, outputs.newPair(cost, br));
+        }
       }
       fst = builder.finish();
 

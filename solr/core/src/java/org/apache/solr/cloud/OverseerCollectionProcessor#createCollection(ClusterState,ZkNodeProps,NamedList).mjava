@@ -1,8 +1,7 @@
-  private boolean createCollection(ClusterState clusterState, ZkNodeProps message) {
+  private void createCollection(ClusterState clusterState, ZkNodeProps message, NamedList results) {
     String collectionName = message.getStr("name");
     if (clusterState.getCollections().contains(collectionName)) {
-      SolrException.log(log, "collection already exists: " + collectionName);
-      return false;
+      throw new SolrException(ErrorCode.BAD_REQUEST, "collection already exists: " + collectionName);
     }
     
     try {
@@ -17,12 +16,11 @@
       
       if (repFactor <= 0) {
         SolrException.log(log, REPLICATION_FACTOR + " must be > 0");
-        return false;
+        throw new SolrException(ErrorCode.BAD_REQUEST, "collection already exists: " + collectionName);
       }
       
       if (numSlices < 0) {
-        SolrException.log(log, NUM_SLICES + " must be > 0");
-        return false;
+        throw new SolrException(ErrorCode.BAD_REQUEST, NUM_SLICES + " must be > 0");
       }
       
       String configName = message.getStr("collection.configName");
@@ -41,9 +39,8 @@
       Collections.shuffle(nodeList);
       
       if (nodeList.size() <= 0) {
-        log.error("Cannot create collection " + collectionName
-            + ". No live Solr-instaces" + ((createNodeList != null)?" among Solr-instances specified in " + CREATE_NODE_SET:""));
-        return false;
+        throw new SolrException(ErrorCode.BAD_REQUEST, "Cannot create collection " + collectionName
+            + ". No live Solr-instances" + ((createNodeList != null)?" among Solr-instances specified in " + CREATE_NODE_SET + ":" + createNodeSetStr:""));
       }
       
       if (repFactor > nodeList.size()) {
@@ -61,7 +58,7 @@
       int maxShardsAllowedToCreate = maxShardsPerNode * nodeList.size();
       int requestedShardsToCreate = numSlices * repFactor;
       if (maxShardsAllowedToCreate < requestedShardsToCreate) {
-        log.error("Cannot create collection " + collectionName + ". Value of "
+        throw new SolrException(ErrorCode.BAD_REQUEST, "Cannot create collection " + collectionName + ". Value of "
             + MAX_SHARDS_PER_NODE + " is " + maxShardsPerNode
             + ", and the number of live nodes is " + nodeList.size()
             + ". This allows a maximum of " + maxShardsAllowedToCreate
@@ -69,7 +66,6 @@
             + " and value of " + REPLICATION_FACTOR + " is " + repFactor
             + ". This requires " + requestedShardsToCreate
             + " shards to be created (higher than the allowed number)");
-        return false;
       }
       
       for (int i = 1; i <= numSlices; i++) {
@@ -92,6 +88,7 @@
           params.set(ZkStateReader.NUM_SHARDS_PROP, numSlices);
           
           ShardRequest sreq = new ShardRequest();
+          sreq.nodeName = nodeName;
           params.set("qt", adminPath);
           sreq.purpose = 1;
           String replica = zkStateReader.getZkClient()
@@ -106,32 +103,21 @@
         }
       }
       
-      int failed = 0;
       ShardResponse srsp;
       do {
         srsp = shardHandler.takeCompletedOrError();
         if (srsp != null) {
-          Throwable e = srsp.getException();
-          if (e != null) {
-            // should we retry?
-            // TODO: we should return errors to the client
-            // TODO: what if one fails and others succeed?
-            failed++;
-            log.error("Error talking to shard: " + srsp.getShard(), e);
-          }
+          processResponse(results, srsp);
         }
       } while (srsp != null);
-      
-      // if all calls succeeded, return true
-      if (failed > 0) {
-        return false;
-      }
-      log.info("Successfully created all shards for collection "
+
+      log.info("Finished create command on all shards for collection: "
           + collectionName);
-      return true;
+
+    } catch (SolrException ex) {
+      throw ex;
     } catch (Exception ex) {
-      // Expecting that the necessary logging has already been performed
-      return false;
+      throw new SolrException(ErrorCode.SERVER_ERROR, null, ex);
     }
   }
 

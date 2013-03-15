@@ -1,0 +1,90 @@
+  @Override
+  public FacetsAggregator getAggregator() {
+
+    return new FacetsAggregator() {
+
+      @Override
+      public void aggregate(MatchingDocs matchingDocs, CategoryListParams clp, FacetArrays facetArrays) throws IOException {
+
+        SortedSetDocValues segValues = matchingDocs.context.reader().getSortedSetDocValues(field);
+        if (segValues == null) {
+          return;
+        }
+
+        final int[] counts = facetArrays.getIntArray();
+        final int maxDoc = matchingDocs.context.reader().maxDoc();
+        assert maxDoc == matchingDocs.bits.length();
+
+        if (dv instanceof MultiSortedSetDocValues) {
+          MultiDocValues.OrdinalMap ordinalMap = ((MultiSortedSetDocValues) dv).mapping;
+          int segOrd = matchingDocs.context.ord;
+
+          int numSegOrds = (int) segValues.getValueCount();
+
+          if (matchingDocs.totalHits < numSegOrds/10) {
+            // Remap every ord to global ord as we iterate:
+            final int[] segCounts = new int[numSegOrds];
+            int doc = 0;
+            while (doc < maxDoc && (doc = matchingDocs.bits.nextSetBit(doc)) != -1) {
+              segValues.setDocument(doc);
+              int term = (int) segValues.nextOrd();
+              while (term != SortedSetDocValues.NO_MORE_ORDS) {
+                counts[(int) ordinalMap.getGlobalOrd(segOrd, term)]++;
+                term = (int) segValues.nextOrd();
+              }
+              ++doc;
+            }
+          } else {
+
+            // First count in seg-ord space:
+            final int[] segCounts = new int[numSegOrds];
+            int doc = 0;
+            while (doc < maxDoc && (doc = matchingDocs.bits.nextSetBit(doc)) != -1) {
+              segValues.setDocument(doc);
+              int term = (int) segValues.nextOrd();
+              while (term != SortedSetDocValues.NO_MORE_ORDS) {
+                segCounts[term]++;
+                term = (int) segValues.nextOrd();
+              }
+              ++doc;
+            }
+
+            // Then, migrate to global ords:
+            for(int ord=0;ord<numSegOrds;ord++) {
+              int count = segCounts[ord];
+              if (count != 0) {
+                counts[(int) ordinalMap.getGlobalOrd(segOrd, ord)] += count;
+              }
+            }
+          }
+        } else {
+          // No ord mapping (e.g., single segment index):
+          // just aggregate directly into counts:
+
+          int doc = 0;
+          while (doc < maxDoc && (doc = matchingDocs.bits.nextSetBit(doc)) != -1) {
+            segValues.setDocument(doc);
+            int term = (int) segValues.nextOrd();
+            while (term != SortedSetDocValues.NO_MORE_ORDS) {
+              counts[term]++;
+              term = (int) segValues.nextOrd();
+            }
+            ++doc;
+          }
+        }
+      }
+
+      @Override
+      public void rollupValues(FacetRequest fr, int ordinal, int[] children, int[] siblings, FacetArrays facetArrays) {
+        // Nothing to do here: we only support flat (dim +
+        // label) facets, and in accumulate we sum up the
+        // count for the dimension.
+      }
+
+      @Override
+      public boolean requiresDocScores() {
+        return false;
+      }
+    };
+  }
+

@@ -1,5 +1,7 @@
   public void testRandom() throws Exception {
 
+    boolean canUseDV = defaultCodecSupportsSortedSet();
+
     while (aChance == 0.0) {
       aChance = random().nextDouble();
     }
@@ -34,13 +36,14 @@
         String s;
         while (true) {
           s = _TestUtil.randomRealisticUnicodeString(random());
-          // We cannot include this character else the label
-          // is silently truncated:
-          if (s.indexOf(FacetIndexingParams.DEFAULT_FACET_DELIM_CHAR) == -1) {
+          //s = _TestUtil.randomSimpleString(random());
+          // We cannot include this character else we hit
+          // IllegalArgExc: 
+          if (s.indexOf(FacetIndexingParams.DEFAULT_FACET_DELIM_CHAR) == -1 &&
+              (!canUseDV || s.indexOf('/') == -1)) {
             break;
           }
         }
-        //String s = _TestUtil.randomSimpleString(random());
         if (s.length() > 0) {
           values.add(s);
         }
@@ -105,24 +108,33 @@
       for(int dim=0;dim<numDims;dim++) {
         int dimValue = rawDoc.dims[dim];
         if (dimValue != -1) {
-          paths.add(new CategoryPath("dim" + dim, dimValues[dim][dimValue]));
+          CategoryPath cp = new CategoryPath("dim" + dim, dimValues[dim][dimValue]);
+          paths.add(cp);
           doc.add(new StringField("dim" + dim, dimValues[dim][dimValue], Field.Store.YES));
           if (VERBOSE) {
             System.out.println("    dim" + dim + "=" + new BytesRef(dimValues[dim][dimValue]));
           }
+          if (canUseDV) {
+            doc.add(new SortedSetDocValuesFacetField(cp));
+          }
         }
         int dimValue2 = rawDoc.dims2[dim];
         if (dimValue2 != -1) {
-          paths.add(new CategoryPath("dim" + dim, dimValues[dim][dimValue2]));
+          CategoryPath cp = new CategoryPath("dim" + dim, dimValues[dim][dimValue2]);
+          paths.add(cp);
           doc.add(new StringField("dim" + dim, dimValues[dim][dimValue2], Field.Store.YES));
           if (VERBOSE) {
             System.out.println("      dim" + dim + "=" + new BytesRef(dimValues[dim][dimValue2]));
+          }
+          if (canUseDV) {
+            doc.add(new SortedSetDocValuesFacetField(cp));
           }
         }
       }
       if (!paths.isEmpty()) {
         facetFields.addFields(doc, paths);
       }
+
       w.addDocument(doc);
     }
 
@@ -154,6 +166,14 @@
     }
     IndexReader r = w.getReader();
     w.close();
+
+    final SortedSetDocValuesReaderState sortedSetDVState;
+    if (canUseDV) {
+      sortedSetDVState = new SortedSetDocValuesReaderState(r);
+    } else {
+      sortedSetDVState = null;
+    }
+
     if (VERBOSE) {
       System.out.println("r.numDocs() = " + r.numDocs());
     }
@@ -162,23 +182,25 @@
     TaxonomyReader tr = new DirectoryTaxonomyReader(tw);
     tw.close();
 
-    List<FacetRequest> requests = new ArrayList<FacetRequest>();
-    for(int i=0;i<numDims;i++) {
-      requests.add(new CountFacetRequest(new CategoryPath("dim" + i), dimValues[numDims-1].length));
-    }
-
-    FacetSearchParams fsp = new FacetSearchParams(requests);
     IndexSearcher s = new IndexSearcher(r);
 
     int numIters = atLeast(10);
 
     for(int iter=0;iter<numIters;iter++) {
+      List<FacetRequest> requests = new ArrayList<FacetRequest>();
+      for(int i=0;i<numDims;i++) {
+        requests.add(new CountFacetRequest(new CategoryPath("dim" + i), dimValues[numDims-1].length));
+      }
+
+      FacetSearchParams fsp = new FacetSearchParams(requests);
       String contentToken = random().nextInt(30) == 17 ? null : randomContentToken(true);
       int numDrillDown = _TestUtil.nextInt(random(), 1, Math.min(4, numDims));
       String[][] drillDowns = new String[numDims][];
+      boolean useSortedSetDV = canUseDV && random().nextBoolean();
       if (VERBOSE) {
-        System.out.println("\nTEST: iter=" + iter + " baseQuery=" + contentToken + " numDrillDown=" + numDrillDown);
+        System.out.println("\nTEST: iter=" + iter + " baseQuery=" + contentToken + " numDrillDown=" + numDrillDown + " useSortedSetDV=" + useSortedSetDV);
       }
+
       int count = 0;
       while (count < numDrillDown) {
         int dim = random().nextInt(numDims);
@@ -259,7 +281,9 @@
         filter = null;
       }
 
-      // Verify docs are always collected in order:
+      // Verify docs are always collected in order.  If we
+      // had an AssertingScorer it could catch it when
+      // Weight.scoresDocsOutOfOrder lies!:
       new DrillSideways(s, tr).search(ddq,
                            new Collector() {
                              int lastDocID;
@@ -288,15 +312,42 @@
       SimpleFacetResult expected = slowDrillSidewaysSearch(s, docs, contentToken, drillDowns, dimValues, filter);
 
       Sort sort = new Sort(new SortField("id", SortField.Type.STRING));
-      DrillSidewaysResult actual = new DrillSideways(s, tr).search(ddq, filter, null, numDocs, sort, true, true, fsp);
+      DrillSideways ds;
+      if (useSortedSetDV) {
+        ds = new DrillSideways(s, null) {
+            @Override
+            protected FacetsAccumulator getDrillDownAccumulator(FacetSearchParams fsp) throws IOException {
+              return new SortedSetDocValuesAccumulator(fsp, sortedSetDVState);
+            }
+
+            @Override
+            protected FacetsAccumulator getDrillSidewaysAccumulator(String dim, FacetSearchParams fsp) throws IOException {
+              return new SortedSetDocValuesAccumulator(fsp, sortedSetDVState);
+            }
+          };
+      } else {
+        ds = new DrillSideways(s, tr);
+      }
+
+      DrillSidewaysResult actual = ds.search(ddq, filter, null, numDocs, sort, true, true, fsp);
 
       TopDocs hits = s.search(baseQuery, numDocs);
       Map<String,Float> scores = new HashMap<String,Float>();
       for(ScoreDoc sd : hits.scoreDocs) {
         scores.put(s.doc(sd.doc).get("id"), sd.score);
       }
-      
-      verifyEquals(dimValues, s, expected, actual, scores);
+      verifyEquals(dimValues, s, expected, actual, scores, -1, useSortedSetDV);
+
+      // Make sure topN works:
+      int topN = _TestUtil.nextInt(random(), 1, 20);
+
+      requests = new ArrayList<FacetRequest>();
+      for(int i=0;i<numDims;i++) {
+        requests.add(new CountFacetRequest(new CategoryPath("dim" + i), topN));
+      }
+      fsp = new FacetSearchParams(requests);
+      actual = ds.search(ddq, filter, null, numDocs, sort, true, true, fsp);
+      verifyEquals(dimValues, s, expected, actual, scores, topN, useSortedSetDV);
 
       // Make sure drill down doesn't change score:
       TopDocs ddqHits = s.search(ddq, filter, numDocs);

@@ -9,22 +9,50 @@
         }
       }
     }
-    try {
-      log.info("Closing directory: " + cacheValue.path);
-      cacheValue.directory.close();
-    } catch (Throwable t) {
-      SolrException.log(log, "Error closing directory", t);
-    }
+    
+    cacheValue.closeDirectoryCalled = true;
     
     if (cacheValue.deleteOnClose) {
-      try {
-        log.info("Removing directory: " + cacheValue.path);
-        removeDirectory(cacheValue);
-      } catch (Throwable t) {
-        SolrException.log(log, "Error closing directory", t);
+      
+      // see if we are a subpath
+      Collection<CacheValue> values = byPathCache.values();
+      
+      Collection<CacheValue> cacheValues = new ArrayList<CacheValue>();
+      cacheValues.addAll(values);
+      cacheValues.remove(cacheValue);
+      for (CacheValue otherCacheValue : cacheValues) {
+        // if we are a parent path and all our sub children are not already closed,
+        // get a sub path to close us later
+        if (otherCacheValue.path.startsWith(cacheValue.path) && !otherCacheValue.closeDirectoryCalled) {
+          // we let the sub dir remove and close us
+          otherCacheValue.removeEntries.addAll(cacheValue.removeEntries);
+          otherCacheValue.closeEntries.addAll(cacheValue.closeEntries);
+          cacheValue.closeEntries.clear();
+          break;
+        }
       }
     }
     
+    for (CacheValue val : cacheValue.removeEntries) {
+      try {
+        log.info("Removing directory: " + val.path);
+        removeDirectory(val);
+        
+      } catch (Throwable t) {
+        SolrException.log(log, "Error removing directory", t);
+      }
+    }
+    
+    for (CacheValue val : cacheValue.closeEntries) {
+      try {
+        log.info("Closing directory: " + val.path);
+        val.directory.close();
+      } catch (Throwable t) {
+        SolrException.log(log, "Error closing directory", t);
+      }
+      
+    }
+
     if (listeners != null) {
       for (CloseListener listener : listeners) {
         try {

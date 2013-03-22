@@ -1,0 +1,48 @@
+  private void evaluateSmallestDocInHeap() throws IOException {
+    // within heap, subScorer[0] now contains the next candidate doc
+    doc = subScorers[0].docID();
+    if (doc == NO_MORE_DOCS) {
+      nrMatchers = Integer.MAX_VALUE; // stop looping
+      return;
+    }
+    // 1. score and count number of matching subScorers within heap
+    score = subScorers[0].score();
+    nrMatchers = 1;
+    countMatches(1);
+    countMatches(2);
+    // 2. score and count number of matching subScorers within stack,
+    //    short-circuit: stop when mm can't be reached for current doc, then perform on heap next() TODO advance() might be possible, but complicates things
+    for (int i = mm-2; i >= 0; i--) { // advance first sparsest subScorer as indicated by next doc
+      if (mmStack[i].docID() >= doc || mmStack[i].advance(doc) != NO_MORE_DOCS) {
+        if (mmStack[i].docID() == doc) { // either it was already on doc, or got there via advance()
+          nrMatchers++;
+          score += mmStack[i].score();
+        } else { // scorer advanced to next after doc, check if enough scorers left for current doc
+          if (nrMatchers + i < mm) { // too few subScorers left, abort advancing
+            return; // continue looping TODO consider advance() here
+          }
+        }
+      } else { // subScorer exhausted
+        numScorers--;
+        if (numScorers < mm) { // too few subScorers left
+          doc = NO_MORE_DOCS;
+          nrMatchers = Integer.MAX_VALUE; // stop looping
+          return;
+        }
+        if (mm-2-i > 0) {
+          // shift RHS of array left, TODO consider double-linked list as data structure
+          System.arraycopy(mmStack, i+1, mmStack, i, mm-2-i);
+        }
+        // find next most costly subScorer within heap
+        while (!minheapRemove(sortedSubScorers[sortedSubScorersIdx++])) // TODO this is O((# clauses)^2), find most costly subScorer within heap in O(n)
+          ;
+        // add the subScorer removed from heap to stack
+        mmStack[mm-2] = sortedSubScorers[sortedSubScorersIdx-1];
+        
+        if (nrMatchers + i < mm) { // too few subScorers left, abort advancing
+          return; // continue looping TODO consider advance() here
+        }
+      }
+    }
+  }
+

@@ -6,9 +6,9 @@
   @Override
   public void close() throws IOException {
     synchronized (this) {
+      log.info("Closing " + this.getClass().getSimpleName() + " - " + byDirectoryCache.size() + " directories currently being tracked");
       this.closed = true;
-      Collection<CacheValue> values = new ArrayList<CacheValue>();
-      values.addAll(byDirectoryCache.values());
+      Collection<CacheValue> values = byDirectoryCache.values();
       for (CacheValue val : values) {
         try {
           // if there are still refs out, we have to wait for them
@@ -16,9 +16,12 @@
           while(val.refCnt != 0) {
             wait(100);
             
-            if (cnt++ >= 1200) {
-              log.error("Timeout waiting for all directory ref counts to be released");
-              break;
+            if (cnt++ >= 120) {
+              String msg = "Timeout waiting for all directory ref counts to be released - gave up waiting on " + val;
+              log.error(msg);
+              // debug
+              // val.originTrace.printStackTrace();
+              throw new SolrException(ErrorCode.SERVER_ERROR, msg);
             }
           }
           assert val.refCnt == 0 : val.refCnt;
@@ -28,22 +31,33 @@
       }
       
       values = byDirectoryCache.values();
+      Set<CacheValue> closedDirs = new HashSet<CacheValue>();
       for (CacheValue val : values) {
         try {
-          assert val.refCnt == 0 : val.refCnt;
-          log.info("Closing directory when closing factory: " + val.path);
-          closeDirectory(val);
+          for (CacheValue v : val.closeEntries) {
+            assert v.refCnt == 0 : val.refCnt;
+            log.debug("Closing directory when closing factory: " + v.path);
+            boolean cl = closeCacheValue(v);
+            if (cl) {
+              closedDirs.add(v);
+            }
+          }
         } catch (Throwable t) {
           SolrException.log(log, "Error closing directory", t);
         }
       }
-      
-      byDirectoryCache.clear();
-      byPathCache.clear();
-      
+
       for (CacheValue val : removeEntries) {
-        log.info("Removing directory: " + val.path);
-        removeDirectory(val);
+        log.info("Removing directory after core close: " + val.path);
+        try {
+          removeDirectory(val);
+        } catch (Throwable t) {
+          SolrException.log(log, "Error removing directory", t);
+        }
+      }
+      
+      for (CacheValue v : closedDirs) {
+        removeFromCache(v);
       }
     }
   }

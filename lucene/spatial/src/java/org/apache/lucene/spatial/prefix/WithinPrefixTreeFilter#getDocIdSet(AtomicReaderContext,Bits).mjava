@@ -1,0 +1,66 @@
+  @Override
+  public DocIdSet getDocIdSet(AtomicReaderContext context, Bits acceptDocs) throws IOException {
+    return new VisitorTemplate(context, acceptDocs, true) {
+      private FixedBitSet inside;
+      private FixedBitSet outside;
+      private SpatialRelation visitRelation;
+
+      @Override
+      protected void start() {
+        inside = new FixedBitSet(maxDoc);
+        outside = new FixedBitSet(maxDoc);
+      }
+
+      @Override
+      protected DocIdSet finish() {
+        inside.andNot(outside);
+        return inside;
+      }
+
+      @Override
+      protected Iterator<Node> findSubCellsToVisit(Node cell) {
+        //use buffered query shape instead of orig.  Works with null too.
+        return cell.getSubCells(bufferedQueryShape).iterator();
+      }
+
+      @Override
+      protected boolean visit(Node cell) throws IOException {
+        //cell.relate is based on the bufferedQueryShape; we need to examine what
+        // the relation is against the queryShape
+        visitRelation = cell.getShape().relate(queryShape);
+        if (visitRelation == SpatialRelation.WITHIN) {
+          collectDocs(inside);
+          return false;
+        } else if (visitRelation == SpatialRelation.DISJOINT) {
+          collectDocs(outside);
+          return false;
+        } else if (cell.getLevel() == detailLevel) {
+          collectDocs(inside);
+          return false;
+        }
+        return true;
+      }
+
+      @Override
+      protected void visitLeaf(Node cell) throws IOException {
+        SpatialRelation relation = visitRelation;
+        assert visitRelation == cell.getShape().relate(queryShape);
+        if (relation.intersects()) {
+          collectDocs(inside);
+        } else {
+          collectDocs(outside);
+        }
+      }
+
+      @Override
+      protected void visitScanned(Node cell) throws IOException {
+        if (queryShape.relate(cell.getShape()).intersects()) {
+          collectDocs(inside);
+        } else {
+          collectDocs(outside);
+        }
+      }
+
+    }.getDocIdSet();
+  }
+

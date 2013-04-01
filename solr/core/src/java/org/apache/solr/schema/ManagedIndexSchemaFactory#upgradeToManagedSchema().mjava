@@ -1,0 +1,73 @@
+  /**
+   * Persist the managed schema and rename the non-managed schema 
+   * by appending {@link #UPGRADED_SCHEMA_EXTENSION}.
+   *
+   * Failure to rename the non-managed schema will be logged as a warning,
+   * and no exception will be thrown.
+   */
+  private void upgradeToManagedSchema() {
+    SolrResourceLoader loader = config.getResourceLoader();
+    if (loader instanceof ZkSolrResourceLoader) {
+      zkUgradeToManagedSchema();
+    } else {
+      // Configs are not on ZooKeeper
+      File managedSchemaFile = new File(loader.getConfigDir(), managedSchemaResourceName);
+      OutputStreamWriter writer = null;
+      try {
+        File parentDir = managedSchemaFile.getParentFile();
+        if (!parentDir.isDirectory()) {
+          if (!parentDir.mkdirs()) {
+            final String msg = "Can't create managed schema directory " + parentDir.getAbsolutePath();
+            throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, msg);
+          }
+        }
+        final FileOutputStream out = new FileOutputStream(managedSchemaFile);
+        writer = new OutputStreamWriter(out, "UTF-8");
+        schema.persist(writer);
+        log.info("Upgraded to managed schema at " + managedSchemaFile.getPath());
+      } catch (IOException e) {
+        final String msg = "Error persisting managed schema " + managedSchemaFile;
+        log.error(msg, e);
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, msg, e);
+      } finally {
+        IOUtils.closeQuietly(writer);
+        try {
+          FileUtils.sync(managedSchemaFile);
+        } catch (IOException e) {
+          final String msg = "Error syncing the managed schema file " + managedSchemaFile;
+          log.error(msg, e);
+        }
+      }
+
+      // After successfully persisting the managed schema, rename the non-managed
+      // schema file by appending UPGRADED_SCHEMA_EXTENSION to its name.
+
+      if (resourceName.equals(managedSchemaResourceName)) {
+        log.info("On upgrading to managed schema, did not rename non-managed schema '"
+            + resourceName + "' because it's the same as the managed schema's name.");
+      } else {
+        final File nonManagedSchemaFile = locateConfigFile(resourceName);
+        if (null == nonManagedSchemaFile) {
+          // Don't throw an exception for failure to rename the non-managed schema
+          log.warn("On upgrading to managed schema, did not rename non-managed schema "
+              + resourceName + " because it's neither an absolute file "
+              + "nor under SolrConfig.getConfigDir() or the current directory."
+              + "  PLEASE REMOVE THIS FILE.");
+        } else {
+          File upgradedSchemaFile = new File(nonManagedSchemaFile.getPath() + UPGRADED_SCHEMA_EXTENSION);
+          if (nonManagedSchemaFile.renameTo(upgradedSchemaFile)) {
+            // Set the resource name to the managed schema so that the CoreAdminHandler returns a findable filename 
+            schema.setResourceName(managedSchemaResourceName);
+
+            log.info("After upgrading to managed schema, renamed the non-managed schema "
+                + nonManagedSchemaFile + " to " + upgradedSchemaFile);
+          } else {
+            // Don't throw an exception for failure to rename the non-managed schema
+            log.warn("Can't rename " + nonManagedSchemaFile.toString() + " to "
+                + upgradedSchemaFile.toString() + " - PLEASE REMOVE THIS FILE.");
+          }
+        }
+      }
+    }
+  }
+

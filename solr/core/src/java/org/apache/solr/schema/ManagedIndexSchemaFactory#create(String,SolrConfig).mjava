@@ -1,0 +1,77 @@
+  /**
+   * First, try to locate the managed schema file named in the managedSchemaResourceName
+   * param. If the managed schema file exists and is accessible, it is used to instantiate
+   * an IndexSchema.
+   *
+   * If the managed schema file can't be found, the resource named by the resourceName
+   * parameter is used to instantiate an IndexSchema.
+   *
+   * Once the IndexSchema is instantiated, if the managed schema file does not exist,
+   * the instantiated IndexSchema is persisted to the managed schema file named in the
+   * managedSchemaResourceName param, in the directory given by 
+   * {@link org.apache.solr.core.SolrResourceLoader#getConfigDir()}, or if configs are
+   * in ZooKeeper, under {@link org.apache.solr.cloud.ZkSolrResourceLoader#collectionZkPath}.
+   *
+   * After the managed schema file is persisted, the original schema file is
+   * renamed by appending the extension named in {@link #UPGRADED_SCHEMA_EXTENSION}.
+   */
+  public IndexSchema create(String resourceName, SolrConfig config) {
+    this.resourceName = resourceName;
+    this.config = config;
+    SolrResourceLoader loader = config.getResourceLoader();
+    this.loader = loader;
+    InputStream schemaInputStream = null;
+    boolean shouldUpgrade = false;
+    String loadedResource = null;
+
+    if (null == resourceName) {
+      resourceName = IndexSchema.DEFAULT_SCHEMA_FILE;
+    }
+
+    try {
+      // Attempt to load the managed schema
+      schemaInputStream = loader.openSchema(managedSchemaResourceName);
+      loadedResource = managedSchemaResourceName;
+
+      // Check if the non-managed schema is also present
+      if ( ! resourceName.equals(managedSchemaResourceName)) {
+        if (nonManagedSchemaExists()) {
+          // Warn if the non-managed schema is present
+          log.warn("The schema has been upgraded to managed, but the non-managed schema " + resourceName
+              + " is still loadable.  PLEASE REMOVE THIS FILE.");
+        }
+      }
+    } catch (IOException e) {
+      log.info("SolrConfig.isManagedSchema = true, but managed schema resource " + managedSchemaResourceName
+          + " not found - loading non-managed schema " + resourceName + " instead");
+    }
+    if (null == schemaInputStream) {
+      // The managed schema file could not be found - load the non-managed schema
+      try {
+        schemaInputStream = loader.openSchema(resourceName);
+        loadedResource = resourceName;
+        shouldUpgrade = true;
+      } catch (Exception e) {
+        try {
+          // Retry to load the managed schema, in case it was created since the first attempt
+          schemaInputStream = loader.openSchema(managedSchemaResourceName);
+          loadedResource = managedSchemaResourceName;
+        } catch (IOException e1) {
+          final String msg = "Error loading both non-managed schema '" + resourceName + "' and managed schema '"
+                           + managedSchemaResourceName + "'";
+          log.error(msg, e);
+          throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, msg, e);
+        }
+      }
+    }
+    InputSource inputSource = new InputSource(schemaInputStream);
+    inputSource.setSystemId(SystemIdResolver.createSystemIdFromResourceName(loadedResource));
+    schema = new ManagedIndexSchema(config, loadedResource, inputSource, isMutable);
+
+    if (shouldUpgrade) {
+      // Persist the managed schema if it doesn't already exist
+      upgradeToManagedSchema();
+    }
+    return schema;
+  }
+

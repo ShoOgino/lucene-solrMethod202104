@@ -1,3 +1,8 @@
+  /**
+   * Handle the core admin SPLIT action.
+   * @return true if a modification has resulted that requires persistence 
+   *         of the CoreContainer configuration.
+   */
   protected boolean handleSplitAction(SolrQueryRequest adminReq, SolrQueryResponse rsp) throws IOException {
     SolrParams params = adminReq.getParams();
      // partitions=N    (split into N partitions, leaving it up to solr what the ranges are and where to put them)
@@ -12,6 +17,7 @@
     String[] newCoreNames = params.getParams("targetCore");
 
     String cname = params.get(CoreAdminParams.CORE, "");
+    log.info("Invoked split action for core: " + cname);
     SolrCore core = coreContainer.getCore(cname);
     SolrQueryRequest req = new LocalSolrQueryRequest(core, params);
     List<SolrCore> newCores = null;
@@ -21,14 +27,17 @@
       List<String> paths = null;
       int partitions = pathsArr != null ? pathsArr.length : params.getInt("partitions", 2);
 
-
       // TODO: if we don't know the real range of the current core, we should just
       //  split on every other doc rather than hash.
+      ClusterState clusterState = coreContainer.getZkController().getClusterState();
+      String collectionName = req.getCore().getCoreDescriptor().getCloudDescriptor().getCollectionName();
+      DocCollection collection = clusterState.getCollection(collectionName);
+      String sliceName = req.getCore().getCoreDescriptor().getCloudDescriptor().getShardId();
+      Slice slice = clusterState.getSlice(collectionName, sliceName);
+      DocRouter.Range currentRange = slice.getRange() == null ?
+          new DocRouter.Range(Integer.MIN_VALUE, Integer.MAX_VALUE) : slice.getRange();
 
-      // TODO (cloud): get from the current core
-      DocRouter.Range currentRange = new DocRouter.Range(Integer.MIN_VALUE, Integer.MAX_VALUE);
-
-      DocRouter hp = DocRouter.DEFAULT;  // TODO: get actual doc router for collection if available
+      DocRouter hp = collection.getRouter() != null ? collection.getRouter() : DocRouter.DEFAULT;
       ranges = hp.partitionRange(partitions, currentRange);
 
       if (pathsArr == null) {
@@ -41,9 +50,6 @@
             throw new SolrException(ErrorCode.BAD_REQUEST, "Core with core name " + newCoreName + " expected but doesn't exist.");
           }
         }
-        // TODO (cloud): cores should be registered, should be in recovery / buffering-updates mode, and the shard
-        // leader should be forwarding updates to the new shards *before* we split the current shard
-        // into the new shards.
       } else {
         paths = Arrays.asList(pathsArr);
       }

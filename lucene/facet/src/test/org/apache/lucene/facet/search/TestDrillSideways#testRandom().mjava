@@ -189,18 +189,35 @@
     int numIters = atLeast(10);
 
     for(int iter=0;iter<numIters;iter++) {
-      List<FacetRequest> requests = new ArrayList<FacetRequest>();
-      for(int i=0;i<numDims;i++) {
-        requests.add(new CountFacetRequest(new CategoryPath("dim" + i), dimValues[numDims-1].length));
-      }
 
-      FacetSearchParams fsp = new FacetSearchParams(requests);
       String contentToken = random().nextInt(30) == 17 ? null : randomContentToken(true);
       int numDrillDown = _TestUtil.nextInt(random(), 1, Math.min(4, numDims));
-      String[][] drillDowns = new String[numDims][];
       if (VERBOSE) {
         System.out.println("\nTEST: iter=" + iter + " baseQuery=" + contentToken + " numDrillDown=" + numDrillDown + " useSortedSetDV=" + doUseDV);
       }
+
+      List<FacetRequest> requests = new ArrayList<FacetRequest>();
+      while(true) {
+        for(int i=0;i<numDims;i++) {
+          // LUCENE-4915: sometimes don't request facet
+          // counts on the dim(s) we drill down on
+          if (random().nextDouble() <= 0.9) {
+            if (VERBOSE) {
+              System.out.println("  do facet request on dim=" + i);
+            }
+            requests.add(new CountFacetRequest(new CategoryPath("dim" + i), dimValues[numDims-1].length));
+          } else {
+            if (VERBOSE) {
+              System.out.println("  skip facet request on dim=" + i);
+            }
+          }
+        }
+        if (!requests.isEmpty()) {
+          break;
+        }
+      }
+      FacetSearchParams fsp = new FacetSearchParams(requests);
+      String[][] drillDowns = new String[numDims][];
 
       int count = 0;
       while (count < numDrillDown) {
@@ -310,7 +327,7 @@
                              }
                            }, fsp);
 
-      SimpleFacetResult expected = slowDrillSidewaysSearch(s, docs, contentToken, drillDowns, dimValues, filter);
+      SimpleFacetResult expected = slowDrillSidewaysSearch(s, requests, docs, contentToken, drillDowns, dimValues, filter);
 
       Sort sort = new Sort(new SortField("id", SortField.Type.STRING));
       DrillSideways ds;
@@ -337,18 +354,18 @@
       for(ScoreDoc sd : hits.scoreDocs) {
         scores.put(s.doc(sd.doc).get("id"), sd.score);
       }
-      verifyEquals(dimValues, s, expected, actual, scores, -1, doUseDV);
+      verifyEquals(requests, dimValues, s, expected, actual, scores, -1, doUseDV);
 
       // Make sure topN works:
       int topN = _TestUtil.nextInt(random(), 1, 20);
 
-      requests = new ArrayList<FacetRequest>();
-      for(int i=0;i<numDims;i++) {
-        requests.add(new CountFacetRequest(new CategoryPath("dim" + i), topN));
+      List<FacetRequest> newRequests = new ArrayList<FacetRequest>();
+      for(FacetRequest oldRequest : requests) {
+        newRequests.add(new CountFacetRequest(oldRequest.categoryPath, topN));
       }
-      fsp = new FacetSearchParams(requests);
+      fsp = new FacetSearchParams(newRequests);
       actual = ds.search(ddq, filter, null, numDocs, sort, true, true, fsp);
-      verifyEquals(dimValues, s, expected, actual, scores, topN, doUseDV);
+      verifyEquals(newRequests, dimValues, s, expected, actual, scores, topN, doUseDV);
 
       // Make sure drill down doesn't change score:
       TopDocs ddqHits = s.search(ddq, filter, numDocs);

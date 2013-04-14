@@ -9,14 +9,18 @@
     if (useStraightStandardDirectory) {
       useFactory(null);
     }
+    final String SLAVE_SCHEMA_1 = "schema-replication1.xml";
+    final String SLAVE_SCHEMA_2 = "schema-replication2.xml";
+    String slaveSchema = SLAVE_SCHEMA_1;
+
     try {
       
-      slave
-          .copyConfigFile(CONF_DIR + "solrconfig-slave1.xml", "solrconfig.xml");
+      slave.copyConfigFile(CONF_DIR +"solrconfig-slave1.xml", "solrconfig.xml");
+      slave.copyConfigFile(CONF_DIR +slaveSchema, "schema.xml");
       slaveJetty.stop();
       slaveJetty = createJetty(slave);
       slaveClient = createNewSolrServer(slaveJetty.getLocalPort());
-      
+
       master.copyConfigFile(CONF_DIR + "solrconfig-master3.xml",
           "solrconfig.xml");
       masterJetty.stop();
@@ -33,11 +37,14 @@
       int id = 0;
       for (int x = 0; x < rounds; x++) {
         
-        // we randomly trigger a configuration replication
-        // if (random().nextBoolean()) {
-        master.copyConfigFile(CONF_DIR + "schema-replication"
-            + (random().nextInt(2) + 1) + ".xml", "schema.xml");
-        // }
+        final boolean confCoreReload = random().nextBoolean();
+        if (confCoreReload) {
+          // toggle the schema file used
+
+          slaveSchema = slaveSchema.equals(SLAVE_SCHEMA_1) ? 
+            SLAVE_SCHEMA_2 : SLAVE_SCHEMA_1;
+          master.copyConfigFile(CONF_DIR + slaveSchema, "schema.xml");
+        }
         
         int docs = random().nextInt(maxDocs);
         for (int i = 0; i < docs; i++) {
@@ -53,8 +60,12 @@
         assertEquals(totalDocs, masterQueryResult.getNumFound());
         
         // snappull
+        Date slaveCoreStart = watchCoreStartAt(slaveClient, 30*1000, null);
         pullFromMasterToSlave();
-        
+        if (confCoreReload) {
+          watchCoreStartAt(slaveClient, 30*1000, slaveCoreStart);
+        }
+
         // get docs from slave and check if number is equal to master
         NamedList slaveQueryRsp = rQuery(totalDocs, "*:*", slaveClient);
         SolrDocumentList slaveQueryResult = (SolrDocumentList) slaveQueryRsp

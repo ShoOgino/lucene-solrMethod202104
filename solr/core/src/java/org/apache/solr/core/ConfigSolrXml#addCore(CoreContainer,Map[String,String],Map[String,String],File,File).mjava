@@ -1,0 +1,74 @@
+  private void addCore(CoreContainer container, Map<String, String> seenDirs, Map<String, String> seenCores,
+                       File childFile, File propFile) throws IOException {
+    log.info("Discovered properties file {}, adding to cores", propFile.getAbsolutePath());
+    Properties propsOrig = new Properties();
+    InputStream is = new FileInputStream(propFile);
+    try {
+      propsOrig.load(is);
+    } finally {
+      IOUtils.closeQuietly(is);
+    }
+
+    Properties props = new Properties();
+    for (String prop : propsOrig.stringPropertyNames()) {
+      props.put(prop, PropertiesUtil.substituteProperty(propsOrig.getProperty(prop), null));
+    }
+
+    // Too much of the code depends on this value being here, but it is NOT supported in discovery mode, so
+    // ignore it if present in the core.properties file.
+    props.setProperty(CoreDescriptor.CORE_INSTDIR, childFile.getPath());
+
+    if (props.getProperty(CoreDescriptor.CORE_NAME) == null) {
+      // Should default to this directory
+      props.setProperty(CoreDescriptor.CORE_NAME, childFile.getName());
+    }
+    CoreDescriptor desc = new CoreDescriptor(container, props);
+    CoreDescriptorPlus plus = new CoreDescriptorPlus(propFile.getAbsolutePath(), desc, propsOrig);
+
+    // It's bad to have two cores with the same name or same data dir.
+    if (! seenCores.containsKey(desc.getName()) && ! seenDirs.containsKey(desc.getAbsoluteDataDir())) {
+      coreDescriptorPlusMap.put(desc.getName(), plus);
+      // Use the full path to the prop file so we can unambiguously report the place the error is.
+      seenCores.put(desc.getName(), propFile.getAbsolutePath());
+      seenDirs.put(desc.getAbsoluteDataDir(), propFile.getAbsolutePath());
+      return;
+    }
+
+    // record the appropriate error
+    if (seenCores.containsKey(desc.getName())) {
+      String msg = String.format(Locale.ROOT, "More than one core defined for core named '%s', paths are '%s' and '%s'  Removing both cores.",
+          desc.getName(), propFile.getAbsolutePath(), seenCores.get(desc.getName()));
+      log.error(msg);
+      // Load up as many errors as there are.
+      if (badCores.containsKey(desc.getName())) msg += " " + badCores.get(desc.getName());
+      badCores.put(desc.getName(), msg);
+    }
+    // There's no reason both errors may not have occurred.
+    if (seenDirs.containsKey(desc.getAbsoluteDataDir())) {
+      String msg = String.format(Locale.ROOT, "More than one core points to data dir '%s'. They are in '%s' and '%s'. Removing all offending cores.",
+          desc.getAbsoluteDataDir(), propFile.getAbsolutePath(), seenDirs.get(desc.getAbsoluteDataDir()));
+      if (badCores.containsKey(desc.getName())) msg += " " + badCores.get(desc.getName());
+      log.error(msg);
+      badCores.put(desc.getName(), msg);
+
+      // find the core with this datadir and remove it
+      List<String> badNames = new ArrayList<String>();
+      for (Map.Entry<String, CoreDescriptorPlus> ent : coreDescriptorPlusMap.entrySet()) {
+        if (ent.getValue().getCoreDescriptor().getAbsoluteDataDir().equals(desc.getAbsoluteDataDir())) {
+          badNames.add(ent.getKey());
+          if (! badCores.containsKey(ent.getKey())) {
+            // Record that the first core is also a bad core.
+            badCores.put(ent.getKey(), msg);
+            log.error(msg);
+
+          }
+          break;
+        }
+      }
+      for (String badName : badNames) {
+        coreDescriptorPlusMap.remove(badName);
+      }
+    }
+    coreDescriptorPlusMap.remove(desc.getName());
+  }
+

@@ -1,0 +1,54 @@
+  /**
+   * Persists the managed schema to ZooKeeper using optimistic concurrency.
+   * <p/>
+   * If createOnly is true, success is when the schema is created or if it previously existed.
+   * <p/>
+   * If createOnly is false, success is when the schema is persisted - this will only happen
+   * if schemaZkVersion matches the version in ZooKeeper.
+   * 
+   * @return true on success 
+   */
+  boolean persistManagedSchemaToZooKeeper(boolean createOnly) {
+    final ZkSolrResourceLoader zkLoader = (ZkSolrResourceLoader)loader;
+    final ZkController zkController = zkLoader.getZkController();
+    final SolrZkClient zkClient = zkController.getZkClient();
+    final String managedSchemaPath = zkLoader.getCollectionZkPath() + "/" + managedSchemaResourceName;
+    boolean success = true;
+    try {
+      // Persist the managed schema
+      StringWriter writer = new StringWriter();
+      persist(writer);
+
+      final byte[] data = writer.toString().getBytes("UTF-8");
+      if (createOnly) {
+        try {
+          zkClient.create(managedSchemaPath, data, CreateMode.PERSISTENT, true);
+          schemaZkVersion = 0;
+          log.info("Created and persisted managed schema znode at " + managedSchemaPath);
+        } catch (KeeperException.NodeExistsException e) {
+          // This is okay - do nothing and fall through
+          log.info("Managed schema znode at " + managedSchemaPath + " already exists - no need to create it");
+        }
+      } else {
+        try {
+          // Assumption: the path exists
+          Stat stat = zkClient.setData(managedSchemaPath, data, schemaZkVersion, true);
+          schemaZkVersion = stat.getVersion();
+          log.info("Persisted managed schema at " + managedSchemaPath);
+        } catch (KeeperException.BadVersionException e) {
+          log.info("Failed to persist managed schema at " + managedSchemaPath 
+                  + " - version mismatch");
+          success = false;
+        }
+      }
+    } catch (Exception e) {
+      if (e instanceof InterruptedException) {
+        Thread.currentThread().interrupt(); // Restore the interrupted status
+      }
+      final String msg = "Error persisting managed schema at " + managedSchemaPath;
+      log.error(msg, e);
+      throw new SolrException(ErrorCode.SERVER_ERROR, msg, e);
+    }
+    return success; 
+  }
+

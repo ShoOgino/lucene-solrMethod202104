@@ -1,0 +1,47 @@
+  @Override
+  public ManagedIndexSchema addFields(Collection<SchemaField> newFields) {
+    ManagedIndexSchema newSchema = null;
+    if (isMutable) {
+      boolean success = false;
+      while ( ! success) { // optimistic concurrency
+        // even though fields is volatile, we need to synchronize to avoid two addFields
+        // happening concurrently (and ending up missing one of them)
+        synchronized (getSchemaUpdateLock()) {
+          newSchema = shallowCopy(true);
+          
+          for (SchemaField newField : newFields) {
+            if (null != newSchema.getFieldOrNull(newField.getName())) {
+              String msg = "Field '" + newField.getName() + "' already exists.";
+              throw new SolrException(ErrorCode.BAD_REQUEST, msg);
+            }
+            newSchema.fields.put(newField.getName(), newField);
+
+            if (null != newField.getDefaultValue()) {
+              log.debug(newField.getName() + " contains default value: " + newField.getDefaultValue());
+              newSchema.fieldsWithDefaultValue.add(newField);
+            }
+            if (newField.isRequired()) {
+              log.debug("{} is required in this schema", newField.getName());
+              newSchema.requiredFields.add(newField);
+            }
+          }
+          // Run the callbacks on SchemaAware now that everything else is done
+          for (SchemaAware aware : newSchema.schemaAware) {
+            aware.inform(newSchema);
+          }
+          newSchema.refreshAnalyzers();
+          success = newSchema.persistManagedSchema(false); // don't just create - update it if it already exists
+          if (success) {
+            log.debug("Added field(s): {}", newFields);
+          }
+        }
+        // release the lock between tries to allow the schema reader to update the schema & schemaZkVersion
+      }
+    } else {
+      String msg = "This ManagedIndexSchema is not mutable.";
+      log.error(msg);
+      throw new SolrException(ErrorCode.SERVER_ERROR, msg);
+    }
+    return newSchema;
+  }
+

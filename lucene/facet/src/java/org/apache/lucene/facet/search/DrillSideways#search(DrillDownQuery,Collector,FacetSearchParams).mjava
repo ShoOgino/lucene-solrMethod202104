@@ -15,7 +15,7 @@
     Map<String,Integer> drillDownDims = query.getDims();
 
     if (drillDownDims.isEmpty()) {
-      // Just do ordinary search:
+      // Just do ordinary search when there are no drill-downs:
       FacetsCollector c = FacetsCollector.create(getDrillDownAccumulator(fsp));
       searcher.search(query, MultiCollector.wrap(hitCollector, c));
       return new DrillSidewaysResult(c.getFacetResults(), null);      
@@ -37,25 +37,6 @@
       startClause = 1;
     }
 
-    Term[][] drillDownTerms = new Term[clauses.length-startClause][];
-    for(int i=startClause;i<clauses.length;i++) {
-      Query q = clauses[i].getQuery();
-      assert q instanceof ConstantScoreQuery;
-      q = ((ConstantScoreQuery) q).getQuery();
-      assert q instanceof TermQuery || q instanceof BooleanQuery;
-      if (q instanceof TermQuery) {
-        drillDownTerms[i-startClause] = new Term[] {((TermQuery) q).getTerm()};
-      } else {
-        BooleanQuery q2 = (BooleanQuery) q;
-        BooleanClause[] clauses2 = q2.getClauses();
-        drillDownTerms[i-startClause] = new Term[clauses2.length];
-        for(int j=0;j<clauses2.length;j++) {
-          assert clauses2[j].getQuery() instanceof TermQuery;
-          drillDownTerms[i-startClause][j] = ((TermQuery) clauses2[j].getQuery()).getTerm();
-        }
-      }
-    }
-
     FacetsCollector drillDownCollector = FacetsCollector.create(getDrillDownAccumulator(fsp));
 
     FacetsCollector[] drillSidewaysCollectors = new FacetsCollector[drillDownDims.size()];
@@ -75,9 +56,53 @@
       drillSidewaysCollectors[idx++] = FacetsCollector.create(getDrillSidewaysAccumulator(dim, new FacetSearchParams(fsp.indexingParams, requests)));
     }
 
-    DrillSidewaysQuery dsq = new DrillSidewaysQuery(baseQuery, drillDownCollector, drillSidewaysCollectors, drillDownTerms, scoreSubDocsAtOnce());
+    boolean useCollectorMethod = scoreSubDocsAtOnce();
 
-    searcher.search(dsq, hitCollector);
+    Term[][] drillDownTerms = null;
+
+    if (!useCollectorMethod) {
+      // Optimistic: assume subQueries of the DDQ are either
+      // TermQuery or BQ OR of TermQuery; if this is wrong
+      // then we detect it and fallback to the mome general
+      // but slower DrillSidewaysCollector:
+      drillDownTerms = new Term[clauses.length-startClause][];
+      for(int i=startClause;i<clauses.length;i++) {
+        Query q = clauses[i].getQuery();
+
+        // DrillDownQuery always wraps each subQuery in
+        // ConstantScoreQuery:
+        assert q instanceof ConstantScoreQuery;
+
+        q = ((ConstantScoreQuery) q).getQuery();
+
+        if (q instanceof TermQuery) {
+          drillDownTerms[i-startClause] = new Term[] {((TermQuery) q).getTerm()};
+        } else if (q instanceof BooleanQuery) {
+          BooleanQuery q2 = (BooleanQuery) q;
+          BooleanClause[] clauses2 = q2.getClauses();
+          drillDownTerms[i-startClause] = new Term[clauses2.length];
+          for(int j=0;j<clauses2.length;j++) {
+            if (clauses2[j].getQuery() instanceof TermQuery) {
+              drillDownTerms[i-startClause][j] = ((TermQuery) clauses2[j].getQuery()).getTerm();
+            } else {
+              useCollectorMethod = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (useCollectorMethod) {
+      // TODO: maybe we could push the "collector method"
+      // down into the optimized scorer to have a tighter
+      // integration ... and so TermQuery clauses could
+      // continue to run "optimized"
+      collectorMethod(query, baseQuery, startClause, hitCollector, drillDownCollector, drillSidewaysCollectors);
+    } else {
+      DrillSidewaysQuery dsq = new DrillSidewaysQuery(baseQuery, drillDownCollector, drillSidewaysCollectors, drillDownTerms);
+      searcher.search(dsq, hitCollector);
+    }
 
     int numDims = drillDownDims.size();
     List<FacetResult>[] drillSidewaysResults = new List[numDims];
@@ -96,7 +121,9 @@
           // Lazy init, in case all requests were against
           // drill-sideways dims:
           drillDownResults = drillDownCollector.getFacetResults();
+          //System.out.println("get DD results");
         }
+        //System.out.println("add dd results " + i);
         mergedResults.add(drillDownResults.get(i));
       } else {
         // Drill sideways dim:

@@ -1,0 +1,54 @@
+  @Override
+  public void run() {
+    // TODO: maybe use private thread ticktock timer, in
+    // case clock shift messes up nanoTime?
+    long lastReopenStartNS = System.nanoTime();
+
+    //System.out.println("reopen: start");
+    while (!finish) {
+
+      // TODO: try to guestimate how long reopen might
+      // take based on past data?
+
+      // Loop until we've waiting long enough before the
+      // next reopen:
+      while (!finish) {
+
+        // True if we have someone waiting for reopened searcher:
+        boolean hasWaiting = waitingGen > searchingGen;
+        final long nextReopenStartNS = lastReopenStartNS + (hasWaiting ? targetMinStaleNS : targetMaxStaleNS);
+
+        final long sleepNS = nextReopenStartNS - System.nanoTime();
+
+        if (sleepNS > 0) {
+          reopenLock.lock();
+          try {
+            reopenCond.awaitNanos(sleepNS);
+          } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return;
+          } finally {
+            reopenLock.unlock();
+          }
+        } else {
+          break;
+        }
+      }
+
+      if (finish) {
+        break;
+      }
+
+      lastReopenStartNS = System.nanoTime();
+      // Save the gen as of when we started the reopen; the
+      // listener (HandleRefresh above) copies this to
+      // searchingGen once the reopen completes:
+      refreshStartGen = writer.getAndIncrementGeneration();
+      try {
+        manager.maybeRefreshBlocking();
+      } catch (IOException ioe) {
+        throw new RuntimeException(ioe);
+      }
+    }
+  }
+

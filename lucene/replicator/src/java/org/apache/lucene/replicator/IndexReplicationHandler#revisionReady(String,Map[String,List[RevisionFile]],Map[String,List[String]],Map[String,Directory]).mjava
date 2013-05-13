@@ -1,0 +1,61 @@
+  @Override
+  public void revisionReady(String version, Map<String,List<RevisionFile>> revisionFiles,
+      Map<String,List<String>> copiedFiles, Map<String,Directory> sourceDirectory) throws IOException {
+    if (revisionFiles.size() > 1) {
+      throw new IllegalArgumentException("this handler handles only a single source; got " + revisionFiles.keySet());
+    }
+    
+    Directory clientDir = sourceDirectory.values().iterator().next();
+    List<String> files = copiedFiles.values().iterator().next();
+    String segmentsFile = getSegmentsFile(files, false);
+    
+    boolean success = false;
+    try {
+      // copy files from the client to index directory
+      copyFiles(clientDir, indexDir, files);
+      
+      // fsync all copied files (except segmentsFile)
+      indexDir.sync(files);
+      
+      // now copy and fsync segmentsFile
+      clientDir.copy(indexDir, segmentsFile, segmentsFile, IOContext.READONCE);
+      indexDir.sync(Collections.singletonList(segmentsFile));
+      
+      success = true;
+    } finally {
+      if (!success) {
+        files.add(segmentsFile); // add it back so it gets deleted too
+        cleanupFilesOnFailure(indexDir, files);
+      }
+    }
+
+    // all files have been successfully copied + sync'd. update the handler's state
+    currentRevisionFiles = revisionFiles;
+    currentVersion = version;
+    
+    if (infoStream.isEnabled(INFO_STREAM_COMPONENT)) {
+      infoStream.message(INFO_STREAM_COMPONENT, "revisionReady(): currentVersion=" + currentVersion
+          + " currentRevisionFiles=" + currentRevisionFiles);
+    }
+
+    // update the segments.gen file
+    writeSegmentsGen(segmentsFile, indexDir);
+    
+    // Cleanup the index directory from old and unused index files.
+    // NOTE: we don't use IndexWriter.deleteUnusedFiles here since it may have
+    // side-effects, e.g. if it hits sudden IO errors while opening the index
+    // (and can end up deleting the entire index). It is not our job to protect
+    // against those errors, app will probably hit them elsewhere.
+    cleanupOldIndexFiles(indexDir, segmentsFile);
+
+    // successfully updated the index, notify the callback that the index is
+    // ready.
+    if (callback != null) {
+      try {
+        callback.call();
+      } catch (Exception e) {
+        throw new IOException(e);
+      }
+    }
+  }
+

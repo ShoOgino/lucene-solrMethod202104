@@ -1,0 +1,76 @@
+  @Override
+  public void revisionReady(String version, Map<String,List<RevisionFile>> revisionFiles,
+      Map<String,List<String>> copiedFiles, Map<String,Directory> sourceDirectory) throws IOException {
+    Directory taxoClientDir = sourceDirectory.get(IndexAndTaxonomyRevision.TAXONOMY_SOURCE);
+    Directory indexClientDir = sourceDirectory.get(IndexAndTaxonomyRevision.INDEX_SOURCE);
+    List<String> taxoFiles = copiedFiles.get(IndexAndTaxonomyRevision.TAXONOMY_SOURCE);
+    List<String> indexFiles = copiedFiles.get(IndexAndTaxonomyRevision.INDEX_SOURCE);
+    String taxoSegmentsFile = IndexReplicationHandler.getSegmentsFile(taxoFiles, true);
+    String indexSegmentsFile = IndexReplicationHandler.getSegmentsFile(indexFiles, false);
+    
+    boolean success = false;
+    try {
+      // copy taxonomy files before index files
+      IndexReplicationHandler.copyFiles(taxoClientDir, taxoDir, taxoFiles);
+      IndexReplicationHandler.copyFiles(indexClientDir, indexDir, indexFiles);
+
+      // fsync all copied files (except segmentsFile)
+      if (!taxoFiles.isEmpty()) {
+        taxoDir.sync(taxoFiles);
+      }
+      indexDir.sync(indexFiles);
+      
+      // now copy and fsync segmentsFile, taxonomy first because it is ok if a
+      // reader sees a more advanced taxonomy than the index.
+      if (taxoSegmentsFile != null) {
+        taxoClientDir.copy(taxoDir, taxoSegmentsFile, taxoSegmentsFile, IOContext.READONCE);
+      }
+      indexClientDir.copy(indexDir, indexSegmentsFile, indexSegmentsFile, IOContext.READONCE);
+      
+      if (taxoSegmentsFile != null) {
+        taxoDir.sync(Collections.singletonList(taxoSegmentsFile));
+      }
+      indexDir.sync(Collections.singletonList(indexSegmentsFile));
+      
+      success = true;
+    } finally {
+      if (!success) {
+        taxoFiles.add(taxoSegmentsFile); // add it back so it gets deleted too
+        IndexReplicationHandler.cleanupFilesOnFailure(taxoDir, taxoFiles);
+        indexFiles.add(indexSegmentsFile); // add it back so it gets deleted too
+        IndexReplicationHandler.cleanupFilesOnFailure(indexDir, indexFiles);
+      }
+    }
+
+    // all files have been successfully copied + sync'd. update the handler's state
+    currentRevisionFiles = revisionFiles;
+    currentVersion = version;
+    
+    if (infoStream.isEnabled(INFO_STREAM_COMPONENT)) {
+      infoStream.message(INFO_STREAM_COMPONENT, "revisionReady(): currentVersion=" + currentVersion
+          + " currentRevisionFiles=" + currentRevisionFiles);
+    }
+
+    // update the segments.gen file
+    IndexReplicationHandler.writeSegmentsGen(taxoSegmentsFile, taxoDir);
+    IndexReplicationHandler.writeSegmentsGen(indexSegmentsFile, indexDir);
+    
+    // Cleanup the index directory from old and unused index files.
+    // NOTE: we don't use IndexWriter.deleteUnusedFiles here since it may have
+    // side-effects, e.g. if it hits sudden IO errors while opening the index
+    // (and can end up deleting the entire index). It is not our job to protect
+    // against those errors, app will probably hit them elsewhere.
+    IndexReplicationHandler.cleanupOldIndexFiles(indexDir, indexSegmentsFile);
+    IndexReplicationHandler.cleanupOldIndexFiles(taxoDir, taxoSegmentsFile);
+
+    // successfully updated the index, notify the callback that the index is
+    // ready.
+    if (callback != null) {
+      try {
+        callback.call();
+      } catch (Exception e) {
+        throw new IOException(e);
+      }
+    }
+  }
+

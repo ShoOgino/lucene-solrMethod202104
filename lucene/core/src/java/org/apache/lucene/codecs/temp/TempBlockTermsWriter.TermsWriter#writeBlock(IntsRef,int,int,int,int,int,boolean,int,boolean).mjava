@@ -54,6 +54,11 @@
       final List<FST<BytesRef>> subIndices;
 
       int termCount;
+
+      final int size = postingsWriter.longsSize();
+      long[] lastLongs = new long[size];
+      Arrays.fill(lastLongs, 0);
+
       if (isLeafBlock) {
         subIndices = null;
         for (PendingEntry ent : slice) {
@@ -67,15 +72,23 @@
           //   System.out.println("    write term suffix=" + suffixBytes);
           // }
           // For leaf block we write suffix straight
-          bytesWriter.writeVInt(suffix);
-          bytesWriter.writeBytes(term.term.bytes, prefixLength, suffix);
+          suffixWriter.writeVInt(suffix);
+          suffixWriter.writeBytes(term.term.bytes, prefixLength, suffix);
 
           // Write term stats, to separate byte[] blob:
-          bytesWriter2.writeVInt(term.stats.docFreq);
+          statsWriter.writeVInt(term.stats.docFreq);
           if (fieldInfo.getIndexOptions() != IndexOptions.DOCS_ONLY) {
             assert term.stats.totalTermFreq >= term.stats.docFreq: term.stats.totalTermFreq + " vs " + term.stats.docFreq;
-            bytesWriter2.writeVLong(term.stats.totalTermFreq - term.stats.docFreq);
+            statsWriter.writeVLong(term.stats.totalTermFreq - term.stats.docFreq);
           }
+
+          // Write term meta data
+          for (int pos = 0; pos < size; pos++) {
+            assert term.longs[pos] >= 0;
+            metaWriter.writeVLong(term.longs[pos] - lastLongs[pos]);
+          }
+          lastLongs = term.longs;
+          metaWriter.writeBytes(term.bytes, 0, term.bytes.length);
         }
         termCount = length;
       } else {
@@ -93,15 +106,23 @@
             // }
             // For non-leaf block we borrow 1 bit to record
             // if entry is term or sub-block
-            bytesWriter.writeVInt(suffix<<1);
-            bytesWriter.writeBytes(term.term.bytes, prefixLength, suffix);
+            suffixWriter.writeVInt(suffix<<1);
+            suffixWriter.writeBytes(term.term.bytes, prefixLength, suffix);
 
             // Write term stats, to separate byte[] blob:
-            bytesWriter2.writeVInt(term.stats.docFreq);
+            statsWriter.writeVInt(term.stats.docFreq);
             if (fieldInfo.getIndexOptions() != IndexOptions.DOCS_ONLY) {
               assert term.stats.totalTermFreq >= term.stats.docFreq;
-              bytesWriter2.writeVLong(term.stats.totalTermFreq - term.stats.docFreq);
+              statsWriter.writeVLong(term.stats.totalTermFreq - term.stats.docFreq);
             }
+
+            // Write term meta data
+            for (int pos = 0; pos < size; pos++) {
+              assert term.longs[pos] >= 0;
+              metaWriter.writeVLong(term.longs[pos] - lastLongs[pos]);
+            }
+            lastLongs = term.longs;
+            metaWriter.writeBytes(term.bytes, 0, term.bytes.length);
 
             termCount++;
           } else {
@@ -112,8 +133,8 @@
 
             // For non-leaf block we borrow 1 bit to record
             // if entry is term or sub-block
-            bytesWriter.writeVInt((suffix<<1)|1);
-            bytesWriter.writeBytes(block.prefix.bytes, prefixLength, suffix);
+            suffixWriter.writeVInt((suffix<<1)|1);
+            suffixWriter.writeBytes(block.prefix.bytes, prefixLength, suffix);
             assert block.fp < startFP;
 
             // if (DEBUG) {
@@ -123,7 +144,7 @@
             //   System.out.println("    write sub-block suffix=" + toString(suffixBytes) + " subFP=" + block.fp + " subCode=" + (startFP-block.fp) + " floor=" + block.isFloor);
             // }
 
-            bytesWriter.writeVLong(startFP - block.fp);
+            suffixWriter.writeVLong(startFP - block.fp);
             subIndices.add(block.index);
           }
         }
@@ -136,17 +157,19 @@
       // search on lookup
 
       // Write suffixes byte[] blob to terms dict output:
-      out.writeVInt((int) (bytesWriter.getFilePointer() << 1) | (isLeafBlock ? 1:0));
-      bytesWriter.writeTo(out);
-      bytesWriter.reset();
+      out.writeVInt((int) (suffixWriter.getFilePointer() << 1) | (isLeafBlock ? 1:0));
+      suffixWriter.writeTo(out);
+      suffixWriter.reset();
 
       // Write term stats byte[] blob
-      out.writeVInt((int) bytesWriter2.getFilePointer());
-      bytesWriter2.writeTo(out);
-      bytesWriter2.reset();
+      out.writeVInt((int) statsWriter.getFilePointer());
+      statsWriter.writeTo(out);
+      statsWriter.reset();
 
-      // Write term metadata block
-      flushTermsBlock(futureTermCount+termCount, termCount);
+      // Write term meta data byte[] blob
+      out.writeVInt((int) metaWriter.getFilePointer());
+      metaWriter.writeTo(out);
+      metaWriter.reset();
 
       // Remove slice replaced by block:
       slice.clear();

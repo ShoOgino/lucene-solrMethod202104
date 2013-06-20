@@ -5,22 +5,17 @@
       final IntParser parser = (IntParser) key.custom;
       if (parser == null) {
         // Confusing: must delegate to wrapper (vs simply
-        // setting parser =
-        // DEFAULT_INT_PARSER/NUMERIC_UTILS_INT_PARSER) so
-        // cache key includes
-        // DEFAULT_INT_PARSER/NUMERIC_UTILS_INT_PARSER:
-        try {
-          return wrapper.getInts(reader, key.field, DEFAULT_INT_PARSER, setDocsWithField);
-        } catch (NumberFormatException ne) {
-          return wrapper.getInts(reader, key.field, NUMERIC_UTILS_INT_PARSER, setDocsWithField);
-        }
+        // setting parser = NUMERIC_UTILS_INT_PARSER) so
+        // cache key includes NUMERIC_UTILS_INT_PARSER:
+        return wrapper.getInts(reader, key.field, NUMERIC_UTILS_INT_PARSER, setDocsWithField);
       }
 
-      final HoldsOneThing<int[]> valuesRef = new HoldsOneThing<int[]>();
+      final HoldsOneThing<GrowableWriterAndMinValue> valuesRef = new HoldsOneThing<GrowableWriterAndMinValue>();
 
       Uninvert u = new Uninvert() {
+          private int minValue;
           private int currentValue;
-          private int[] values;
+          private GrowableWriter values;
 
           @Override
           public void visitTerm(BytesRef term) {
@@ -30,16 +25,28 @@
               // (which will hit a NumberFormatException
               // when we first try the DEFAULT_INT_PARSER),
               // we don't double-alloc:
-              values = new int[reader.maxDoc()];
-              valuesRef.set(values);
+              int startBitsPerValue;
+              // Make sure than missing values (0) can be stored without resizing
+              if (currentValue < 0) {
+                minValue = currentValue;
+                startBitsPerValue = PackedInts.bitsRequired((-minValue) & 0xFFFFFFFFL);
+              } else {
+                minValue = 0;
+                startBitsPerValue = PackedInts.bitsRequired(currentValue);
+              }
+              values = new GrowableWriter(startBitsPerValue, reader.maxDoc(), PackedInts.FAST);
+              if (minValue != 0) {
+                values.fill(0, values.size(), (-minValue) & 0xFFFFFFFFL); // default value must be 0
+              }
+              valuesRef.set(new GrowableWriterAndMinValue(values, minValue));
             }
           }
 
           @Override
           public void visitDoc(int docID) {
-            values[docID] = currentValue;
+            values.set(docID, (currentValue - minValue) & 0xFFFFFFFFL);
           }
-          
+
           @Override
           protected TermsEnum termsEnum(Terms terms) throws IOException {
             return parser.termsEnum(terms);
@@ -51,10 +58,10 @@
       if (setDocsWithField) {
         wrapper.setDocsWithField(reader, key.field, u.docsWithField);
       }
-      int[] values = valuesRef.get();
+      GrowableWriterAndMinValue values = valuesRef.get();
       if (values == null) {
-        values = new int[reader.maxDoc()];
+        return new IntsFromArray(new PackedInts.NullReader(reader.maxDoc()), 0);
       }
-      return new IntsFromArray(values);
+      return new IntsFromArray(values.writer.getMutable(), (int) values.minValue);
     }
 

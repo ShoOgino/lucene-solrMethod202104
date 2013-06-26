@@ -1,0 +1,37 @@
+  /* This method is thread safe */
+  @Override
+  public Object lookup(long pos) {
+    // A negative position can result from a log replay (which does not re-log, but does
+    // update the version map.  This is OK since the node won't be ACTIVE when this happens.
+    if (pos < 0) return null;
+
+    try {
+      // make sure any unflushed buffer has been flushed
+      synchronized (this) {
+        // TODO: optimize this by keeping track of what we have flushed up to
+        fos.flushBuffer();
+        
+        // flush to hdfs
+        tlogOutStream.hflush();
+        /***
+         System.out.println("###flushBuffer to " + fos.size() + " raf.length()=" + raf.length() + " pos="+pos);
+        if (fos.size() != raf.length() || pos >= fos.size() ) {
+          throw new RuntimeException("ERROR" + "###flushBuffer to " + fos.size() + " raf.length()=" + raf.length() + " pos="+pos);
+        }
+        ***/
+      }
+
+      FSDataFastInputStream dis = new FSDataFastInputStream(fs.open(tlogFile),
+          pos);
+      try {
+        dis.seek(pos);
+        LogCodec codec = new LogCodec(resolver);
+        return codec.readVal(new FastInputStream(dis));
+      } finally {
+        dis.close();
+      }
+    } catch (IOException e) {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "pos=" + pos, e);
+    }
+  }
+

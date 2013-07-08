@@ -1,16 +1,19 @@
   @Override
   //
-  // Since longs blob is fixed length, when these two are 'comparable'
-  // i.e. when every value in long[] fits the same ordering, the smaller one 
-  // will be the result.
+  // The return value will be the smaller one, when these two are 
+  // 'comparable', i.e. every value in long[] fits the same ordering.
   //
-  // NOTE: only long[] is 'shared', i.e. if there are two byte[] on the successive
-  // arcs, only the last byte[] is valid. (this somewhat saves nodes, but might affect
-  // compression, since we'll have to load metadata block for other terms as well, currently,
-  // we don't support this)
+  // NOTE: 
+  // Only long[] is 'shared', byte[] and term stats simply act 
+  // as 'attachment': when walking on the FST, if we see two byte[] on 
+  // successive arcs, only the second byte[] is valid. 
   //
-  // nocommit: get the byte[] from smaller one as well, so that
-  // byte[] is actually inherited
+  // Therefore, during building, we always make sure that, for most nodes, 
+  // the first output is 'pushed' one step towards root and reduced to 
+  // be NO_OUTPUT, so that we get rid of the 'all zero' long[], and netly
+  // get smaller amount of total outputs. 
+  //
+  // However, when decoding, terms might have to load redundant byte[] blob.
   //
   public TempMetaData common(TempMetaData t1, TempMetaData t2) {
     if (DEBUG) System.out.print("common("+t1+", "+t2+") = ");
@@ -18,14 +21,11 @@
       if (DEBUG) System.out.println("ret:"+NO_OUTPUT);
       return NO_OUTPUT;
     }
-    assert t1.longs != null;
-    assert t2.longs != null;
     assert t1.longs.length == t2.longs.length;
 
-    long accum = 0;
     long[] longs1 = t1.longs, longs2 = t2.longs;
     int pos = 0;
-    boolean order = true;
+    boolean smaller = true;
     TempMetaData ret;
 
     while (pos < longsSize && longs1[pos] == longs2[pos]) {
@@ -33,36 +33,28 @@
     }
     if (pos < longsSize) {
       // unequal
-      order = (longs1[pos] > longs2[pos]);
-      if (order) {
-        // check whether strictly longs1 >= longs2 
-        while (pos < longsSize && longs1[pos] >= longs2[pos]) {
-          accum += longs2[pos];
-          pos++;
-        }
-      } else {
+      smaller = (longs1[pos] < longs2[pos]);
+      if (smaller) {
         // check whether strictly longs1 <= longs2 
         while (pos < longsSize && longs1[pos] <= longs2[pos]) {
-          accum += longs1[pos];
+          pos++;
+        }
+      } else {
+        // check whether strictly longs1 >= longs2 
+        while (pos < longsSize && longs1[pos] >= longs2[pos]) {
           pos++;
         }
       }
-      if (pos < longsSize || accum == 0) {
+      if (pos < longsSize) {  // not fully 'comparable'
         ret = NO_OUTPUT;
-      } else if (order) {
-        ret = new TempMetaData(longs2, null, 0, -1);
+      } else if (smaller) {
+        ret = t1;
       } else {
-        ret = new TempMetaData(longs1, null, 0, -1);
+        ret = t2;
       }
     } else {
-      // equal
-      if (t1.bytes!= null && bytesEqual(t1, t2) && statsEqual(t1, t2)) {  // all fields are equal
-        ret = t1;
-      } else if (accum == 0) { // all zero case
-        ret = NO_OUTPUT;
-      } else {
-        ret = new TempMetaData(longs1, null, 0, -1);
-      }
+      // equal, we won't check byte[] and docFreq
+      ret = t1;
     }
     if (DEBUG) System.out.println("ret:"+ret);
     return ret;

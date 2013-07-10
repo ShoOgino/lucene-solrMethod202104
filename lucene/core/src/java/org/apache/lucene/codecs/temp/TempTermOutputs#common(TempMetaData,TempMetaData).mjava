@@ -4,16 +4,8 @@
   // 'comparable', i.e. every value in long[] fits the same ordering.
   //
   // NOTE: 
-  // Only long[] is 'shared', byte[] and term stats simply act 
-  // as 'attachment': when walking on the FST, if we see two byte[] on 
-  // successive arcs, only the second byte[] is valid. 
-  //
-  // Therefore, during building, we always make sure that, for most nodes, 
-  // the first output is 'pushed' one step towards root and reduced to 
-  // be NO_OUTPUT, so that we get rid of the 'all zero' long[], and netly
-  // get smaller amount of total outputs. 
-  //
-  // However, when decoding, terms might have to load redundant byte[] blob.
+  // Only long[] part is 'shared' and pushed towards root.
+  // byte[] and term stats will be on deeper arcs.
   //
   public TempMetaData common(TempMetaData t1, TempMetaData t2) {
     if (DEBUG) System.out.print("common("+t1+", "+t2+") = ");
@@ -23,38 +15,35 @@
     }
     assert t1.longs.length == t2.longs.length;
 
-    long[] longs1 = t1.longs, longs2 = t2.longs;
+    long[] min = t1.longs, max = t2.longs;
     int pos = 0;
-    boolean smaller = true;
     TempMetaData ret;
 
-    while (pos < longsSize && longs1[pos] == longs2[pos]) {
+    while (pos < longsSize && min[pos] == max[pos]) {
       pos++;
     }
-    if (pos < longsSize) {
-      // unequal
-      smaller = (longs1[pos] < longs2[pos]);
-      if (smaller) {
-        // check whether strictly longs1 <= longs2 
-        while (pos < longsSize && longs1[pos] <= longs2[pos]) {
-          pos++;
-        }
-      } else {
-        // check whether strictly longs1 >= longs2 
-        while (pos < longsSize && longs1[pos] >= longs2[pos]) {
-          pos++;
-        }
+    if (pos < longsSize) {  // unequal long[]
+      if (min[pos] > max[pos]) {
+        min = t2.longs;
+        max = t1.longs;
       }
-      if (pos < longsSize) {  // not fully 'comparable'
+      // check whether strictly smaller
+      while (pos < longsSize && min[pos] <= max[pos]) {
+        pos++;
+      }
+      if (pos < longsSize || allZero(min)) {  // not comparable or all-zero
         ret = NO_OUTPUT;
-      } else if (smaller) {
-        ret = t1;
       } else {
-        ret = t2;
+        ret = new TempMetaData(min, null, 0, -1);
       }
-    } else {
-      // equal, we won't check byte[] and docFreq
-      ret = t1;
+    } else {  // equal long[]
+      if (statsEqual(t1, t2) && (t1.bytes == null || bytesEqual(t1, t2))) {
+        ret = t1;
+      } else if (allZero(min)) {
+        ret = NO_OUTPUT;
+      } else {
+        ret = new TempMetaData(min, null, 0, -1);
+      }
     }
     if (DEBUG) System.out.println("ret:"+ret);
     return ret;

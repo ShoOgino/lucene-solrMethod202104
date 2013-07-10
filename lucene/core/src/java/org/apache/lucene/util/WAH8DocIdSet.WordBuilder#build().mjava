@@ -1,0 +1,41 @@
+    /** Build a new {@link WAH8DocIdSet}. */
+    public WAH8DocIdSet build() {
+      if (lastWordNum == -1) {
+        return EMPTY;
+      }
+      writeSequence(clean);
+      final byte[] data = Arrays.copyOf(out.bytes, out.length);
+
+      // Now build the index
+      final int valueCount = (numSequences - 1) / indexInterval + 1;
+      final PackedInts.Reader indexPositions;
+      final PackedInts.Reader indexWordNums;
+      if (valueCount <= 1) {
+        indexPositions = indexWordNums = EMPTY_READER;
+      } else {
+        // From the tests I ran, there is no need to expose acceptableOverheadRatio, these packed ints are never the bottleneck
+        final PackedInts.Mutable positions = PackedInts.getMutable(valueCount, PackedInts.bitsRequired(data.length - 1), PackedInts.COMPACT);
+        final PackedInts.Mutable wordNums = PackedInts.getMutable(valueCount, PackedInts.bitsRequired(lastWordNum), PackedInts.COMPACT);
+  
+        final Iterator it = new Iterator(data, null, null);
+        assert it.in.getPosition() == 0;
+        assert it.wordNum == -1;
+        for (int i = 1; i < valueCount; ++i) {
+          // skip indexInterval sequences
+          for (int j = 0; j < indexInterval; ++j) {
+            final boolean readSequence = it.readSequence();
+            assert readSequence;
+            it.skipDirtyBytes();
+          }
+          final int position = it.in.getPosition();
+          final int wordNum = it.wordNum;
+          positions.set(i, position);
+          wordNums.set(i, wordNum + 1);
+        }
+        indexPositions = positions;
+        indexWordNums = wordNums;
+      }
+
+      return new WAH8DocIdSet(data, indexPositions, indexWordNums);
+    }
+

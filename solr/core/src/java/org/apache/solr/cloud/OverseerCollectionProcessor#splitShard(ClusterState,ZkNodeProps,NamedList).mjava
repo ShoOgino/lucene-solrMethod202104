@@ -40,13 +40,17 @@
             throw new SolrException(ErrorCode.BAD_REQUEST, "Sub-shard: " + subSlice + " exists in active state. Aborting split shard.");
           } else if (Slice.CONSTRUCTION.equals(oSlice.getState()))  {
             for (Replica replica : oSlice.getReplicas()) {
-              String core = replica.getStr("core");
-              log.info("Unloading core: " + core + " from node: " + replica.getNodeName());
-              ModifiableSolrParams params = new ModifiableSolrParams();
-              params.set(CoreAdminParams.ACTION, CoreAdminAction.UNLOAD.toString());
-              params.set(CoreAdminParams.CORE, core);
-              params.set(CoreAdminParams.DELETE_INDEX, "true");
-              sendShardRequest(replica.getNodeName(), params);
+              if (clusterState.liveNodesContain(replica.getNodeName())) {
+                String core = replica.getStr("core");
+                log.info("Unloading core: " + core + " from node: " + replica.getNodeName());
+                ModifiableSolrParams params = new ModifiableSolrParams();
+                params.set(CoreAdminParams.ACTION, CoreAdminAction.UNLOAD.toString());
+                params.set(CoreAdminParams.CORE, core);
+                params.set(CoreAdminParams.DELETE_INDEX, "true");
+                sendShardRequest(replica.getNodeName(), params);
+              } else  {
+                log.warn("Replica {} exists in shard {} but is not live and cannot be unloaded", replica, oSlice);
+              }
             }
           }
         }
@@ -77,13 +81,19 @@
         //params.set(ZkStateReader.NUM_SHARDS_PROP, numSlices); todo: is it necessary, we're not creating collections?
 
         sendShardRequest(nodeName, params);
+      }
 
+      collectShardResponses(results, true,
+          "SPLTSHARD failed to create subshard leaders");
+
+      for (String subShardName : subShardNames) {
         // wait for parent leader to acknowledge the sub-shard core
         log.info("Asking parent leader to wait for: " + subShardName + " to be alive on: " + nodeName);
+        String coreNodeName = waitForCoreNodeName(collection, zkStateReader.getZkClient().getBaseUrlForNodeName(nodeName), subShardName);
         CoreAdminRequest.WaitForState cmd = new CoreAdminRequest.WaitForState();
         cmd.setCoreName(subShardName);
         cmd.setNodeName(nodeName);
-        cmd.setCoreNodeName(nodeName + "_" + subShardName);
+        cmd.setCoreNodeName(coreNodeName);
         cmd.setState(ZkStateReader.ACTIVE);
         cmd.setCheckLive(true);
         cmd.setOnlyIfLeader(true);
@@ -91,7 +101,7 @@
       }
 
       collectShardResponses(results, true,
-          "SPLTSHARD failed to create subshard leaders or timed out waiting for them to come up");
+          "SPLTSHARD timed out waiting for subshard leaders to come up");
       
       log.info("Successfully created all sub-shards for collection "
           + collectionName + " parent shard: " + slice + " on: " + parentShardLeader);
@@ -186,12 +196,13 @@
 
           sendShardRequest(subShardNodeName, params);
 
+          String coreNodeName = waitForCoreNodeName(collection, zkStateReader.getZkClient().getBaseUrlForNodeName(subShardNodeName), shardName);
           // wait for the replicas to be seen as active on sub shard leader
           log.info("Asking sub shard leader to wait for: " + shardName + " to be alive on: " + subShardNodeName);
           CoreAdminRequest.WaitForState cmd = new CoreAdminRequest.WaitForState();
           cmd.setCoreName(subShardNames.get(i-1));
           cmd.setNodeName(subShardNodeName);
-          cmd.setCoreNodeName(subShardNodeName + "_" + shardName);
+          cmd.setCoreNodeName(coreNodeName);
           cmd.setState(ZkStateReader.ACTIVE);
           cmd.setCheckLive(true);
           cmd.setOnlyIfLeader(true);
@@ -201,6 +212,18 @@
 
       collectShardResponses(results, true,
           "SPLTSHARD failed to create subshard replicas or timed out waiting for them to come up");
+
+      String coreUrl = new ZkCoreNodeProps(parentShardLeader).getCoreUrl();
+      // HttpShardHandler is hard coded to send a QueryRequest hence we go direct
+      // and we force open a searcher so that we have documents to show upon switching states
+      UpdateResponse updateResponse = null;
+      try {
+        updateResponse = commit(coreUrl, true);
+        processResponse(results, null, coreUrl, updateResponse, slice);
+      } catch (Exception e) {
+        processResponse(results, e, coreUrl, updateResponse, slice);
+        throw new SolrException(ErrorCode.SERVER_ERROR, "Unable to call distrib commit on: " + coreUrl, e);
+      }
 
       log.info("Successfully created all replica shards for all sub-slices "
           + subSlices);

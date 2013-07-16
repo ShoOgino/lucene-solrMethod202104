@@ -1,0 +1,144 @@
+  @Override
+  public void build(TermFreqIterator iter) throws IOException {
+
+    if (searcher != null) {
+      searcher.getIndexReader().close();
+      searcher = null;
+    }
+
+    TermFreqPayloadIterator payloads;
+    if (iter instanceof TermFreqPayloadIterator) {
+      payloads = (TermFreqPayloadIterator) iter;
+    } else {
+      payloads = null;
+    }
+    Directory dirTmp = getDirectory(new File(indexPath.toString() + ".tmp"));
+
+    IndexWriter w = null;
+    IndexWriter w2 = null;
+    AtomicReader r = null;
+    boolean success = false;
+    try {
+      Analyzer gramAnalyzer = new AnalyzerWrapper() {
+          @Override
+          protected Analyzer getWrappedAnalyzer(String fieldName) {
+            return indexAnalyzer;
+          }
+
+          @Override
+          protected TokenStreamComponents wrapComponents(String fieldName, TokenStreamComponents components) {
+            if (fieldName.equals("textgrams") && minPrefixChars > 0) {
+              return new TokenStreamComponents(components.getTokenizer(),
+                                               new EdgeNGramTokenFilter(matchVersion,
+                                                                        components.getTokenStream(),
+                                                                        1, minPrefixChars));
+            } else {
+              return components;
+            }
+          }
+        };
+
+      w = new IndexWriter(dirTmp,
+                          getIndexWriterConfig(matchVersion, gramAnalyzer));
+      BytesRef text;
+      Document doc = new Document();
+      FieldType ft = new FieldType(TextField.TYPE_NOT_STORED);
+      ft.setIndexOptions(IndexOptions.DOCS_ONLY);
+      ft.setOmitNorms(true);
+      Field textField = new Field(TEXT_FIELD_NAME, "", ft);
+      doc.add(textField);
+
+      Field textGramField = new Field("textgrams", "", ft);
+      doc.add(textGramField);
+
+      Field textDVField = new BinaryDocValuesField(TEXT_FIELD_NAME, new BytesRef());
+      doc.add(textDVField);
+
+      // TODO: use threads...?
+      Field weightField = new NumericDocValuesField("weight", 0);
+      doc.add(weightField);
+
+      Field payloadField;
+      if (payloads != null) {
+        payloadField = new BinaryDocValuesField("payloads", new BytesRef());
+        doc.add(payloadField);
+      } else {
+        payloadField = null;
+      }
+
+      //long t0 = System.nanoTime();
+      while ((text = iter.next()) != null) {
+        String textString = text.utf8ToString();
+        textField.setStringValue(textString);
+        textGramField.setStringValue(textString);
+        textDVField.setBytesValue(text);
+        weightField.setLongValue(iter.weight());
+        if (payloads != null) {
+          payloadField.setBytesValue(payloads.payload());
+        }
+        w.addDocument(doc);
+      }
+      //System.out.println("initial indexing time: " + ((System.nanoTime()-t0)/1000000) + " msec");
+
+      r = new SlowCompositeReaderWrapper(DirectoryReader.open(w, false));
+      //long t1 = System.nanoTime();
+      w.rollback();
+
+      final int maxDoc = r.maxDoc();
+
+      final NumericDocValues weights = r.getNumericDocValues("weight");
+
+      final Sorter.DocComparator comparator = new Sorter.DocComparator() {
+          @Override
+          public int compare(int docID1, int docID2) {
+            final long v1 = weights.get(docID1);
+            final long v2 = weights.get(docID2);
+            // Reverse sort (highest weight first);
+            // java7 only:
+            //return Long.compare(v2, v1);
+            if (v1 > v2) {
+              return -1;
+            } else if (v1 < v2) {
+              return 1;
+            } else {
+              return 0;
+            }
+          }
+        };
+
+      r = SortingAtomicReader.wrap(r, new Sorter() {
+          @Override
+          public Sorter.DocMap sort(AtomicReader reader) throws IOException {
+            return Sorter.sort(maxDoc, comparator);
+          }
+
+          @Override
+          public String getID() {
+            return "Weight";
+          }
+        });
+      
+      w2 = new IndexWriter(dir,
+                           getIndexWriterConfig(matchVersion, indexAnalyzer));
+      w2.addIndexes(new IndexReader[] {r});
+      r.close();
+
+      //System.out.println("sort time: " + ((System.nanoTime()-t1)/1000000) + " msec");
+
+      searcher = new IndexSearcher(DirectoryReader.open(w2, false));
+      w2.close();
+
+      payloadsDV = MultiDocValues.getBinaryValues(searcher.getIndexReader(), "payloads");
+      weightsDV = MultiDocValues.getNumericValues(searcher.getIndexReader(), "weight");
+      textDV = MultiDocValues.getBinaryValues(searcher.getIndexReader(), TEXT_FIELD_NAME);
+      assert textDV != null;
+      success = true;
+    } finally {
+      if (success) {
+        IOUtils.close(w, w2, r, dirTmp);
+      } else {
+        IOUtils.closeWhileHandlingException(w, w2, r, dirTmp);
+      }
+    }
+  }
+

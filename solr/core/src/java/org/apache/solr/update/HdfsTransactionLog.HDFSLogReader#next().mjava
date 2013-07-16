@@ -1,0 +1,53 @@
+    /** Returns the next object from the log, or null if none available.
+     *
+     * @return The log record, or null if EOF
+     * @throws IOException If there is a low-level I/O error.
+     */
+    public Object next() throws IOException, InterruptedException {
+      long pos = fis.position();
+
+
+      synchronized (HdfsTransactionLog.this) {
+        if (trace) {
+          log.trace("Reading log record.  pos="+pos+" currentSize="+fos.size());
+        }
+
+        if (pos >= fos.size()) {
+          return null;
+        }
+       
+        fos.flushBuffer();
+        tlogOutStream.hflush();
+        
+        // we actually need a new reader
+        fis.close();
+        try {
+          FSDataInputStream fdis = fs.open(tlogFile);
+          fis = new FSDataFastInputStream(fdis, pos);
+        } catch (IOException e) {
+          throw new RuntimeException(e);
+        }
+        
+      }
+      if (pos == 0) {
+        readHeader(fis);
+
+        // shouldn't currently happen - header and first record are currently written at the same time
+        synchronized (HdfsTransactionLog.this) {
+          if (fis.position() >= fos.size()) {
+            return null;
+          }
+          pos = fis.position();
+        }
+      }
+
+      tlogOutStream.hflush();
+      Object o = codec.readVal(fis);
+
+      // skip over record size
+      int size = fis.readInt();
+      assert size == fis.position() - pos - 4;
+
+      return o;
+    }
+

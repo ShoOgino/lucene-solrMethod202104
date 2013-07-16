@@ -1,6 +1,7 @@
     /** Build a new {@link WAH8DocIdSet}. */
     public WAH8DocIdSet build() {
-      if (lastWordNum == -1) {
+      if (cardinality == 0) {
+        assert lastWordNum == -1;
         return EMPTY;
       }
       writeSequence(clean);
@@ -8,16 +9,18 @@
 
       // Now build the index
       final int valueCount = (numSequences - 1) / indexInterval + 1;
-      final PackedInts.Reader indexPositions;
-      final PackedInts.Reader indexWordNums;
+      final MonotonicAppendingLongBuffer indexPositions, indexWordNums;
       if (valueCount <= 1) {
-        indexPositions = indexWordNums = EMPTY_READER;
+        indexPositions = indexWordNums = SINGLE_ZERO_BUFFER;
       } else {
-        // From the tests I ran, there is no need to expose acceptableOverheadRatio, these packed ints are never the bottleneck
-        final PackedInts.Mutable positions = PackedInts.getMutable(valueCount, PackedInts.bitsRequired(data.length - 1), PackedInts.COMPACT);
-        final PackedInts.Mutable wordNums = PackedInts.getMutable(valueCount, PackedInts.bitsRequired(lastWordNum), PackedInts.COMPACT);
-  
-        final Iterator it = new Iterator(data, null, null);
+        final int pageSize = 128;
+        final int initialPageCount = (valueCount + pageSize - 1) / pageSize;
+        final MonotonicAppendingLongBuffer positions = new MonotonicAppendingLongBuffer(initialPageCount, pageSize);
+        final MonotonicAppendingLongBuffer wordNums = new MonotonicAppendingLongBuffer(initialPageCount, pageSize);
+ 
+        positions.add(0L);
+        wordNums.add(0L);
+        final Iterator it = new Iterator(data, cardinality, Integer.MAX_VALUE, SINGLE_ZERO_BUFFER, SINGLE_ZERO_BUFFER);
         assert it.in.getPosition() == 0;
         assert it.wordNum == -1;
         for (int i = 1; i < valueCount; ++i) {
@@ -29,13 +32,15 @@
           }
           final int position = it.in.getPosition();
           final int wordNum = it.wordNum;
-          positions.set(i, position);
-          wordNums.set(i, wordNum + 1);
+          positions.add(position);
+          wordNums.add(wordNum + 1);
         }
+        positions.freeze();
+        wordNums.freeze();
         indexPositions = positions;
         indexWordNums = wordNums;
       }
 
-      return new WAH8DocIdSet(data, indexPositions, indexWordNums);
+      return new WAH8DocIdSet(data, cardinality, indexInterval, indexPositions, indexWordNums);
     }
 

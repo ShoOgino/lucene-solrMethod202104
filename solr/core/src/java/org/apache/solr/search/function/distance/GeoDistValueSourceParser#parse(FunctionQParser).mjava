@@ -1,6 +1,9 @@
   @Override
   public ValueSource parse(FunctionQParser fp) throws SyntaxError {
     // TODO: dispatch through SpatialQueryable in the future?
+
+    //note: parseValueSourceList can't handle a field reference to an AbstractSpatialFieldType,
+    // so those fields are expressly handled via sfield=
     List<ValueSource> sources = fp.parseValueSourceList();
 
     // "m" is a multi-value source, "x" is a single-value source
@@ -63,12 +66,30 @@
     }
 
     // We have all the parameters at this point, now check if one of the points is constant
-    double[] constants;
+    double[] constants;//latLon
     constants = getConstants(mv1);
     MultiValueSource other = mv2;
     if (constants == null) {
       constants = getConstants(mv2);
       other = mv1;
+    }
+
+    // At this point we dispatch to one of:
+    // * SpatialStrategy.makeDistanceValueSource
+    // * HaversineConstFunction
+    // * HaversineFunction
+
+    // sfield can only be in mv2, according to the logic above
+    if (mv2 instanceof SpatialStrategyMultiValueSource) {
+      if (constants == null)
+        throw new SyntaxError("When using AbstractSpatialFieldType (e.g. RPT not LatLonType)," +
+            " the point must be supplied as constants");
+      // note: uses Haversine by default but can be changed via distCalc=...
+      SpatialStrategy strategy = ((SpatialStrategyMultiValueSource) mv2).strategy;
+      Point queryPoint = strategy.getSpatialContext().makePoint(constants[1], constants[0]);
+      //TODO Spatial4j 0.4 will have a direct constant
+      double multiplier = DistanceUtils.degrees2Dist(1, DistanceUtils.EARTH_MEAN_RADIUS_KM);
+      return strategy.makeDistanceValueSource(queryPoint, multiplier);
     }
 
     if (constants != null && other instanceof VectorValueSource) {

@@ -1,0 +1,46 @@
+  /**
+   * Used by {@link FacetsCollector} to build the list of {@link FacetResult
+   * facet results} that match the {@link FacetRequest facet requests} that were
+   * given in the constructor.
+   * 
+   * @param matchingDocs
+   *          the documents that matched the query, per-segment.
+   */
+  @Override
+  public List<FacetResult> accumulate(List<MatchingDocs> matchingDocs) throws IOException {
+    // aggregate facets per category list (usually onle one category list)
+    FacetsAggregator aggregator = getAggregator();
+    for (CategoryListParams clp : groupRequests().keySet()) {
+      for (MatchingDocs md : matchingDocs) {
+        aggregator.aggregate(md, clp, facetArrays);
+      }
+    }
+    
+    ParallelTaxonomyArrays arrays = taxonomyReader.getParallelTaxonomyArrays();
+    
+    // compute top-K
+    final int[] children = arrays.children();
+    final int[] siblings = arrays.siblings();
+    List<FacetResult> res = new ArrayList<FacetResult>();
+    for (FacetRequest fr : searchParams.facetRequests) {
+      int rootOrd = taxonomyReader.getOrdinal(fr.categoryPath);
+      if (rootOrd == TaxonomyReader.INVALID_ORDINAL) { // category does not exist
+        // Add empty FacetResult
+        res.add(emptyResult(rootOrd, fr));
+        continue;
+      }
+      CategoryListParams clp = searchParams.indexingParams.getCategoryListParams(fr.categoryPath);
+      if (fr.categoryPath.length > 0) { // someone might ask to aggregate the ROOT category
+        OrdinalPolicy ordinalPolicy = clp.getOrdinalPolicy(fr.categoryPath.components[0]);
+        if (ordinalPolicy == OrdinalPolicy.NO_PARENTS) {
+          // rollup values
+          aggregator.rollupValues(fr, rootOrd, children, siblings, facetArrays);
+        }
+      }
+      
+      FacetResultsHandler frh = createFacetResultsHandler(fr, aggregator.createOrdinalValueResolver(fr, facetArrays));
+      res.add(frh.compute());
+    }
+    return res;
+  }
+

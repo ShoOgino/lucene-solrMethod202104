@@ -1,0 +1,61 @@
+  SegmentCoreReaders(SegmentReader owner, Directory dir, SegmentInfoPerCommit si, IOContext context) throws IOException {
+    
+    final Codec codec = si.info.getCodec();
+    final Directory cfsDir; // confusing name: if (cfs) its the cfsdir, otherwise its the segment's directory.
+
+    boolean success = false;
+    
+    try {
+      if (si.info.getUseCompoundFile()) {
+        cfsDir = cfsReader = new CompoundFileDirectory(dir, IndexFileNames.segmentFileName(si.info.name, "", IndexFileNames.COMPOUND_FILE_EXTENSION), context, false);
+      } else {
+        cfsReader = null;
+        cfsDir = dir;
+      }
+      fieldInfos = codec.fieldInfosFormat().getFieldInfosReader().read(cfsDir, si.info.name, IOContext.READONCE);
+
+      final PostingsFormat format = codec.postingsFormat();
+      final SegmentReadState segmentReadState = new SegmentReadState(cfsDir, si.info, fieldInfos, context);
+      // Ask codec for its Fields
+      fields = format.fieldsProducer(segmentReadState);
+      assert fields != null;
+      // ask codec for its Norms: 
+      // TODO: since we don't write any norms file if there are no norms,
+      // kinda jaky to assume the codec handles the case of no norms file at all gracefully?!
+
+      if (fieldInfos.hasDocValues()) {
+        dvProducer = codec.docValuesFormat().fieldsProducer(segmentReadState);
+        assert dvProducer != null;
+      } else {
+        dvProducer = null;
+      }
+
+      if (fieldInfos.hasNorms()) {
+        normsProducer = codec.normsFormat().normsProducer(segmentReadState);
+        assert normsProducer != null;
+      } else {
+        normsProducer = null;
+      }
+  
+      fieldsReaderOrig = si.info.getCodec().storedFieldsFormat().fieldsReader(cfsDir, si.info, fieldInfos, context);
+
+      if (fieldInfos.hasVectors()) { // open term vector files only as needed
+        termVectorsReaderOrig = si.info.getCodec().termVectorsFormat().vectorsReader(cfsDir, si.info, fieldInfos, context);
+      } else {
+        termVectorsReaderOrig = null;
+      }
+
+      success = true;
+    } finally {
+      if (!success) {
+        decRef();
+      }
+    }
+    
+    // Must assign this at the end -- if we hit an
+    // exception above core, we don't want to attempt to
+    // purge the FieldCache (will hit NPE because core is
+    // not assigned yet).
+    this.owner = owner;
+  }
+

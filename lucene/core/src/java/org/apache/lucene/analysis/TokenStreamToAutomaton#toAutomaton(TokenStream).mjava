@@ -1,7 +1,8 @@
   /** Pulls the graph (including {@link
    *  PositionLengthAttribute}) from the provided {@link
    *  TokenStream}, and creates the corresponding
-   *  automaton where arcs are bytes from each term. */
+   *  automaton where arcs are bytes (or Unicode code points 
+   *  if unicodeArcs = true) from each term. */
   public Automaton toAutomaton(TokenStream in) throws IOException {
     final Automaton a = new Automaton();
     boolean deterministic = true;
@@ -69,16 +70,34 @@
       final int endPos = pos + posLengthAtt.getPositionLength();
 
       termBytesAtt.fillBytesRef();
-      final BytesRef term2 = changeToken(term);
+      final BytesRef termUTF8 = changeToken(term);
+      int[] termUnicode = null;
       final Position endPosData = positions.get(endPos);
       if (endPosData.arriving == null) {
         endPosData.arriving = new State();
       }
 
       State state = posData.leaving;
-      for(int byteIDX=0;byteIDX<term2.length;byteIDX++) {
-        final State nextState = byteIDX == term2.length-1 ? endPosData.arriving : new State();
-        state.addTransition(new Transition(term2.bytes[term2.offset + byteIDX] & 0xff, nextState));
+      int termLen;
+      if (unicodeArcs) {
+        final String utf16 = termUTF8.utf8ToString();
+        termUnicode = new int[utf16.codePointCount(0, utf16.length())];
+        termLen = termUnicode.length;
+        for (int cp, i = 0, j = 0; i < utf16.length(); i += Character.charCount(cp))
+          termUnicode[j++] = cp = utf16.codePointAt(i);
+      } else {
+        termLen = termUTF8.length;
+      }
+
+      for(int byteIDX=0;byteIDX<termLen;byteIDX++) {
+        final State nextState = byteIDX == termLen-1 ? endPosData.arriving : new State();
+        int c;
+        if (unicodeArcs) {
+          c = termUnicode[byteIDX];
+        } else {
+          c = termUTF8.bytes[termUTF8.offset + byteIDX] & 0xff;
+        }
+        state.addTransition(new Transition(c, nextState));
         state = nextState;
       }
 

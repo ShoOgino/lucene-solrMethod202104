@@ -1,4 +1,4 @@
-  private static void checkSortedSetDocValues(String fieldName, AtomicReader reader, SortedSetDocValues dv) {
+  private static void checkSortedSetDocValues(String fieldName, AtomicReader reader, SortedSetDocValues dv, Bits docsWithField) {
     final long maxOrd = dv.getValueCount()-1;
     OpenBitSet seenOrds = new OpenBitSet(dv.getValueCount());
     long maxOrd2 = -1;
@@ -6,16 +6,28 @@
       dv.setDocument(i);
       long lastOrd = -1;
       long ord;
-      while ((ord = dv.nextOrd()) != SortedSetDocValues.NO_MORE_ORDS) {
-        if (ord <= lastOrd) {
-          throw new RuntimeException("ords out of order: " + ord + " <= " + lastOrd + " for doc: " + i);
+      if (docsWithField.get(i)) {
+        int ordCount = 0;
+        while ((ord = dv.nextOrd()) != SortedSetDocValues.NO_MORE_ORDS) {
+          ordCount++;
+          if (ord <= lastOrd) {
+            throw new RuntimeException("ords out of order: " + ord + " <= " + lastOrd + " for doc: " + i);
+          }
+          if (ord < 0 || ord > maxOrd) {
+            throw new RuntimeException("ord out of bounds: " + ord);
+          }
+          lastOrd = ord;
+          maxOrd2 = Math.max(maxOrd2, ord);
+          seenOrds.set(ord);
         }
-        if (ord < 0 || ord > maxOrd) {
-          throw new RuntimeException("ord out of bounds: " + ord);
+        if (ordCount == 0) {
+          throw new RuntimeException("dv for field: " + fieldName + " has no ordinals but is not marked missing for doc: " + i);
         }
-        lastOrd = ord;
-        maxOrd2 = Math.max(maxOrd2, ord);
-        seenOrds.set(ord);
+      } else {
+        long o = dv.nextOrd();
+        if (o != SortedSetDocValues.NO_MORE_ORDS) {
+          throw new RuntimeException("dv for field: " + fieldName + " is marked missing but has ord=" + o + " for doc: " + i);
+        }
       }
     }
     if (maxOrd != maxOrd2) {

@@ -4,7 +4,7 @@
    * The default implementation calls {@link #addBinaryField}, passing
    * an Iterable that merges and filters deleted documents on the fly.
    */
-  public void mergeBinaryField(FieldInfo fieldInfo, final MergeState mergeState, final List<BinaryDocValues> toMerge) throws IOException {
+  public void mergeBinaryField(FieldInfo fieldInfo, final MergeState mergeState, final List<BinaryDocValues> toMerge, final List<Bits> docsWithField) throws IOException {
 
     addBinaryField(fieldInfo,
                    new Iterable<BytesRef>() {
@@ -14,9 +14,11 @@
                          int readerUpto = -1;
                          int docIDUpto;
                          BytesRef nextValue = new BytesRef();
+                         BytesRef nextPointer; // points to null if missing, or nextValue
                          AtomicReader currentReader;
                          BinaryDocValues currentValues;
                          Bits currentLiveDocs;
+                         Bits currentDocsWithField;
                          boolean nextIsSet;
 
                          @Override
@@ -36,8 +38,7 @@
                            }
                            assert nextIsSet;
                            nextIsSet = false;
-                           // TODO: make a mutable number
-                           return nextValue;
+                           return nextPointer;
                          }
 
                          private boolean setNext() {
@@ -51,6 +52,7 @@
                                if (readerUpto < toMerge.size()) {
                                  currentReader = mergeState.readers.get(readerUpto);
                                  currentValues = toMerge.get(readerUpto);
+                                 currentDocsWithField = docsWithField.get(readerUpto);
                                  currentLiveDocs = currentReader.getLiveDocs();
                                }
                                docIDUpto = 0;
@@ -59,7 +61,12 @@
 
                              if (currentLiveDocs == null || currentLiveDocs.get(docIDUpto)) {
                                nextIsSet = true;
-                               currentValues.get(docIDUpto, nextValue);
+                               if (currentDocsWithField.get(docIDUpto)) {
+                                 currentValues.get(docIDUpto, nextValue);
+                                 nextPointer = nextValue;
+                               } else {
+                                 nextPointer = null;
+                               }
                                docIDUpto++;
                                return true;
                              }

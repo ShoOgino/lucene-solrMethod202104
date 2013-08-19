@@ -1,6 +1,6 @@
   boolean updateDocuments(final Iterable<? extends IndexDocument> docs, final Analyzer analyzer,
                           final Term delTerm) throws IOException {
-    boolean maybeMerge = preUpdate();
+    boolean hasEvents = preUpdate();
 
     final ThreadState perThread = flushControl.obtainAndLock();
     final DocumentsWriterPerThread flushingDWPT;
@@ -10,13 +10,19 @@
         ensureOpen();
         assert false: "perThread is not active but we are still open";
       }
-       
+      ensureInitialized(perThread);
+      assert perThread.isInitialized();
       final DocumentsWriterPerThread dwpt = perThread.dwpt;
+      final int dwptNumDocs = dwpt.getNumDocsInRAM();
       try {
         final int docCount = dwpt.updateDocuments(docs, analyzer, delTerm);
         numDocsInRAM.addAndGet(docCount);
       } finally {
         if (dwpt.checkAndResetHasAborted()) {
+          if (!dwpt.pendingFilesToDelete().isEmpty()) {
+            putEvent(new DeleteNewFilesEvent(dwpt.pendingFilesToDelete()));
+          }
+          subtractFlushedNumDocs(dwptNumDocs);
           flushControl.doOnAbort(perThread);
         }
       }
@@ -26,6 +32,6 @@
       perThread.unlock();
     }
 
-    return postUpdate(flushingDWPT, maybeMerge);
+    return postUpdate(flushingDWPT, hasEvents);
   }
 

@@ -1,25 +1,29 @@
   boolean updateDocument(final IndexDocument doc, final Analyzer analyzer,
       final Term delTerm) throws IOException {
 
-    boolean maybeMerge = preUpdate();
+    boolean hasEvents = preUpdate();
 
     final ThreadState perThread = flushControl.obtainAndLock();
 
     final DocumentsWriterPerThread flushingDWPT;
-    
     try {
-
       if (!perThread.isActive()) {
         ensureOpen();
-        throw new IllegalStateException("perThread is not active but we are still open");
+        assert false: "perThread is not active but we are still open";
       }
-       
+      ensureInitialized(perThread);
+      assert perThread.isInitialized();
       final DocumentsWriterPerThread dwpt = perThread.dwpt;
+      final int dwptNumDocs = dwpt.getNumDocsInRAM();
       try {
         dwpt.updateDocument(doc, analyzer, delTerm); 
         numDocsInRAM.incrementAndGet();
       } finally {
         if (dwpt.checkAndResetHasAborted()) {
+          if (!dwpt.pendingFilesToDelete().isEmpty()) {
+            putEvent(new DeleteNewFilesEvent(dwpt.pendingFilesToDelete()));
+          }
+          subtractFlushedNumDocs(dwptNumDocs);
           flushControl.doOnAbort(perThread);
         }
       }
@@ -29,6 +33,6 @@
       perThread.unlock();
     }
 
-    return postUpdate(flushingDWPT, maybeMerge);
+    return postUpdate(flushingDWPT, hasEvents);
   }
 

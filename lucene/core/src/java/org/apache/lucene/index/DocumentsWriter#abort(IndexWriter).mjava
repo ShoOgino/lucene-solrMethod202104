@@ -1,0 +1,34 @@
+  /** Called if we hit an exception at a bad time (when
+   *  updating the index files) and must discard all
+   *  currently buffered docs.  This resets our state,
+   *  discarding any docs added since last flush. */
+  synchronized void abort(IndexWriter writer) {
+    assert !Thread.holdsLock(writer) : "IndexWriter lock should never be hold when aborting";
+    boolean success = false;
+    final Set<String> newFilesSet = new HashSet<String>();
+    try {
+      deleteQueue.clear();
+      if (infoStream.isEnabled("DW")) {
+        infoStream.message("DW", "abort");
+      }
+      final int limit = perThreadPool.getActiveThreadState();
+      for (int i = 0; i < limit; i++) {
+        final ThreadState perThread = perThreadPool.getThreadState(i);
+        perThread.lock();
+        try {
+          abortThreadState(perThread, newFilesSet);
+        } finally {
+          perThread.unlock();
+        }
+      }
+      flushControl.abortPendingFlushes(newFilesSet);
+      putEvent(new DeleteNewFilesEvent(newFilesSet));
+      flushControl.waitForFlush();
+      success = true;
+    } finally {
+      if (infoStream.isEnabled("DW")) {
+        infoStream.message("DW", "done abort; abortedFiles=" + newFilesSet + " success=" + success);
+      }
+    }
+  }
+

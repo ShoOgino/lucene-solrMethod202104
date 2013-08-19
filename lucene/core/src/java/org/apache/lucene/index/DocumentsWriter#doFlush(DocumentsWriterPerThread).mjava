@@ -1,7 +1,7 @@
   private  boolean doFlush(DocumentsWriterPerThread flushingDWPT) throws IOException {
-    boolean maybeMerge = false;
+    boolean hasEvents = false;
     while (flushingDWPT != null) {
-      maybeMerge = true;
+      hasEvents = true;
       boolean success = false;
       SegmentFlushTicket ticket = null;
       try {
@@ -27,9 +27,24 @@
           // Each flush is assigned a ticket in the order they acquire the ticketQueue lock
           ticket = ticketQueue.addFlushTicket(flushingDWPT);
   
-          // flush concurrently without locking
-          final FlushedSegment newSegment = flushingDWPT.flush();
-          ticketQueue.addSegment(ticket, newSegment);
+          final int flushingDocsInRam = flushingDWPT.getNumDocsInRAM();
+          boolean dwptSuccess = false;
+          try {
+            // flush concurrently without locking
+            final FlushedSegment newSegment = flushingDWPT.flush();
+            ticketQueue.addSegment(ticket, newSegment);
+            dwptSuccess = true;
+          } finally {
+            subtractFlushedNumDocs(flushingDocsInRam);
+            if (!flushingDWPT.pendingFilesToDelete().isEmpty()) {
+              putEvent(new DeleteNewFilesEvent(flushingDWPT.pendingFilesToDelete()));
+              hasEvents = true;
+            }
+            if (!dwptSuccess) {
+              putEvent(new FlushFailedEvent(flushingDWPT.getSegmentInfo()));
+              hasEvents = true;
+            }
+          }
           // flush was successful once we reached this point - new seg. has been assigned to the ticket!
           success = true;
         } finally {
@@ -49,34 +64,35 @@
           // thread in innerPurge can't keep up with all
           // other threads flushing segments.  In this case
           // we forcefully stall the producers.
-          ticketQueue.forcePurge(this);
-        } else {
-          ticketQueue.tryPurge(this);
+          putEvent(ForcedPurgeEvent.INSTANCE);
+          break;
         }
-
       } finally {
         flushControl.doAfterFlush(flushingDWPT);
         flushingDWPT.checkAndResetHasAborted();
-        indexWriter.flushCount.incrementAndGet();
-        indexWriter.doAfterFlush();
       }
      
       flushingDWPT = flushControl.nextPendingFlush();
     }
-
+    if (hasEvents) {
+      putEvent(MergePendingEvent.INSTANCE);
+    }
     // If deletes alone are consuming > 1/2 our RAM
     // buffer, force them all to apply now. This is to
     // prevent too-frequent flushing of a long tail of
     // tiny segments:
-    final double ramBufferSizeMB = indexWriterConfig.getRAMBufferSizeMB();
+    final double ramBufferSizeMB = config.getRAMBufferSizeMB();
     if (ramBufferSizeMB != IndexWriterConfig.DISABLE_AUTO_FLUSH &&
         flushControl.getDeleteBytesUsed() > (1024*1024*ramBufferSizeMB/2)) {
       if (infoStream.isEnabled("DW")) {
         infoStream.message("DW", "force apply deletes bytesUsed=" + flushControl.getDeleteBytesUsed() + " vs ramBuffer=" + (1024*1024*ramBufferSizeMB));
       }
-      applyAllDeletes(deleteQueue);
+      hasEvents = true;
+      if (!this.applyAllDeletes(deleteQueue)) {
+        putEvent(ApplyDeletesEvent.INSTANCE);
+      }
     }
 
-    return maybeMerge;
+    return hasEvents;
   }
 

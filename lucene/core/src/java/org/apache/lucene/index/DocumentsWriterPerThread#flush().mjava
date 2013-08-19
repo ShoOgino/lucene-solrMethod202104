@@ -1,11 +1,11 @@
   /** Flush all pending docs to a new segment */
   FlushedSegment flush() throws IOException {
     assert numDocsInRAM > 0;
-    assert deleteSlice == null : "all deletes must be applied in prepareFlush";
+    assert deleteSlice.isEmpty() : "all deletes must be applied in prepareFlush";
     segmentInfo.setDocCount(numDocsInRAM);
-    flushState = new SegmentWriteState(infoStream, directory, segmentInfo, fieldInfos.finish(),
+    final SegmentWriteState flushState = new SegmentWriteState(infoStream, directory, segmentInfo, fieldInfos.finish(),
         pendingDeletes, new IOContext(new FlushInfo(numDocsInRAM, bytesUsed())));
-    final double startMBUsed = parent.flushControl.netBytes() / 1024. / 1024.;
+    final double startMBUsed = bytesUsed() / 1024. / 1024.;
 
     // Apply delete-by-docID now (delete-byDocID only
     // happens when an exception is hit processing that
@@ -51,15 +51,11 @@
         infoStream.message("DWPT", "flushed codec=" + codec);
       }
 
-      flushedDocCount += flushState.segmentInfo.getDocCount();
-
       final BufferedDeletes segmentDeletes;
       if (pendingDeletes.queries.isEmpty()) {
-        pendingDeletes.clear();
         segmentDeletes = null;
       } else {
         segmentDeletes = pendingDeletes;
-        pendingDeletes = new BufferedDeletes();
       }
 
       if (infoStream.isEnabled("DWPT")) {
@@ -67,7 +63,7 @@
         infoStream.message("DWPT", "flushed: segment=" + segmentInfo.name + 
                 " ramUsed=" + nf.format(startMBUsed) + " MB" +
                 " newFlushedSize(includes docstores)=" + nf.format(newSegmentSize) + " MB" +
-                " docs/MB=" + nf.format(flushedDocCount / newSegmentSize));
+                " docs/MB=" + nf.format(flushState.segmentInfo.getDocCount() / newSegmentSize));
       }
 
       assert segmentInfo != null;
@@ -75,16 +71,12 @@
       FlushedSegment fs = new FlushedSegment(segmentInfoPerCommit, flushState.fieldInfos,
                                              segmentDeletes, flushState.liveDocs, flushState.delCountOnFlush);
       sealFlushedSegment(fs);
-      doAfterFlush();
       success = true;
 
       return fs;
     } finally {
       if (!success) {
-        if (segmentInfo != null) {
-          writer.flushFailed(segmentInfo);
-        }
-        abort();
+        abort(filesToDelete);
       }
     }
   }

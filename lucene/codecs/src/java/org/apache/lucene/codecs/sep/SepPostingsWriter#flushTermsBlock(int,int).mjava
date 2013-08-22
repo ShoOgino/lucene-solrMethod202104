@@ -5,57 +5,60 @@
     final int absStart = pendingTerms.size() - start;
     final List<PendingTerm> slice = pendingTerms.subList(absStart, absStart+count);
 
-    long lastPayloadFP = 0;
-    long lastSkipFP = 0;
-
     if (count == 0) {
       termsOut.writeByte((byte) 0);
       return;
     }
 
-    final PendingTerm firstTerm = slice.get(0);
-    final IntIndexOutput.Index docIndexFlush = firstTerm.docIndex;
-    final IntIndexOutput.Index freqIndexFlush = firstTerm.freqIndex;
-    final IntIndexOutput.Index posIndexFlush = firstTerm.posIndex;
+    long lastSkipFP = 0;
+    long lastPayloadFP = 0;
+
+    boolean isFirstTerm = true;
 
     for(int idx=0;idx<slice.size();idx++) {
-      final boolean isFirstTerm = idx == 0;
+      if (isFirstTerm) {
+        lastState = slice.get(idx);
+      }
       final PendingTerm t = slice.get(idx);
-      //System.out.println("  write idx=" + idx + " docIndex=" + t.docIndex);
-      docIndexFlush.copyFrom(t.docIndex, false);
-      docIndexFlush.write(indexBytesWriter, isFirstTerm);
+      //System.out.println(" last(pure): doc="+lastState.docIndex +" frq=" + lastState.freqIndex+" pos="+lastState.posIndex);
+      lastState.docIndex.copyFrom(t.docIndex, false);
+      lastState.docIndex.write(indexBytesWriter, isFirstTerm);
+      //System.out.print(" doc=" + lastState.docIndex + " 1FP=" + indexBytesWriter.getFilePointer());
       if (indexOptions != IndexOptions.DOCS_ONLY) {
-        freqIndexFlush.copyFrom(t.freqIndex, false);
-        freqIndexFlush.write(indexBytesWriter, isFirstTerm);
-        //System.out.println("    freqIndex=" + t.freqIndex);
+        lastState.freqIndex.copyFrom(t.freqIndex, false);
+        lastState.freqIndex.write(indexBytesWriter, isFirstTerm);
+        //System.out.print(" frq=" + lastState.freqIndex + " 2FP=" + indexBytesWriter.getFilePointer());
         if (indexOptions == IndexOptions.DOCS_AND_FREQS_AND_POSITIONS) {
-          posIndexFlush.copyFrom(t.posIndex, false);
-          posIndexFlush.write(indexBytesWriter, isFirstTerm);
-          //System.out.println("    posIndex=" + t.posIndex);
+          lastState.posIndex.copyFrom(t.posIndex, false);
+          lastState.posIndex.write(indexBytesWriter, isFirstTerm);
+          //System.out.print(" pos=" + lastState.posIndex + " 3FP=" + indexBytesWriter.getFilePointer());
           if (storePayloads) {
-            //System.out.println("    payloadFP=" + t.payloadFP);
             if (isFirstTerm) {
+              //System.out.print(" payFP=" + (t.payloadFP));
               indexBytesWriter.writeVLong(t.payloadFP);
             } else {
+              //System.out.print(" payFP=" + (t.payloadFP - lastPayloadFP));
               indexBytesWriter.writeVLong(t.payloadFP - lastPayloadFP);
             }
             lastPayloadFP = t.payloadFP;
           }
         }
       }
-
       if (t.skipFP != -1) {
         if (isFirstTerm) {
+          //System.out.print(" a.skipFP=" + (t.skipFP));
           indexBytesWriter.writeVLong(t.skipFP);
         } else {
+          //System.out.print(" b.skipFP=" + (t.skipFP - lastSkipFP));
           indexBytesWriter.writeVLong(t.skipFP - lastSkipFP);
         }
         lastSkipFP = t.skipFP;
-        //System.out.println("    skipFP=" + t.skipFP);
       }
+      //System.out.println();
+      //System.out.println(" last(copy): doc="+lastState.docIndex +" frq=" + lastState.freqIndex+" pos="+lastState.posIndex);
+      isFirstTerm = false;
     }
 
-    //System.out.println("  numBytes=" + indexBytesWriter.getFilePointer());
     termsOut.writeVLong((int) indexBytesWriter.getFilePointer());
     indexBytesWriter.writeTo(termsOut);
     indexBytesWriter.reset();

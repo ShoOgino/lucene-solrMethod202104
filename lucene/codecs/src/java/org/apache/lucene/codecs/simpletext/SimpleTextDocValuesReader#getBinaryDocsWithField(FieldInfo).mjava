@@ -1,0 +1,39 @@
+  private Bits getBinaryDocsWithField(FieldInfo fieldInfo) throws IOException {
+    final OneField field = fields.get(fieldInfo.name);
+    final IndexInput in = data.clone();
+    final BytesRef scratch = new BytesRef();
+    final DecimalFormat decoder = new DecimalFormat(field.pattern, new DecimalFormatSymbols(Locale.ROOT));
+
+    return new Bits() {
+      @Override
+      public boolean get(int index) {
+        try {
+          in.seek(field.dataStartFilePointer + (9+field.pattern.length() + field.maxLength+2)*index);
+          SimpleTextUtil.readLine(in, scratch);
+          assert StringHelper.startsWith(scratch, LENGTH);
+          int len;
+          try {
+            len = decoder.parse(new String(scratch.bytes, scratch.offset + LENGTH.length, scratch.length - LENGTH.length, "UTF-8")).intValue();
+          } catch (ParseException pe) {
+            CorruptIndexException e = new CorruptIndexException("failed to parse int length (resource=" + in + ")");
+            e.initCause(pe);
+            throw e;
+          }
+          // skip past bytes
+          byte bytes[] = new byte[len];
+          in.readBytes(bytes, 0, len);
+          SimpleTextUtil.readLine(in, scratch); // newline
+          SimpleTextUtil.readLine(in, scratch); // 'T' or 'F'
+          return scratch.bytes[scratch.offset] == (byte) 'T';
+        } catch (IOException ioe) {
+          throw new RuntimeException(ioe);
+        }
+      }
+
+      @Override
+      public int length() {
+        return maxDoc;
+      }
+    };
+  }
+

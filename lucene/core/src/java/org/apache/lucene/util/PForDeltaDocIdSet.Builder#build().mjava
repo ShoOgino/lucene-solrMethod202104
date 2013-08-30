@@ -1,0 +1,41 @@
+    /** Build the {@link PForDeltaDocIdSet} instance. */
+    public PForDeltaDocIdSet build() {
+      assert bufferSize < BLOCK_SIZE;
+
+      if (cardinality == 0) {
+        assert previousDoc == -1;
+        return EMPTY;
+      }
+
+      encodeBlock();
+      final byte[] dataArr = Arrays.copyOf(data.bytes, data.length + MAX_BYTE_BLOCK_COUNT);
+
+      final int indexSize = (numBlocks - 1) / indexInterval + 1;
+      final MonotonicAppendingLongBuffer docIDs, offsets;
+      if (indexSize <= 1) {
+        docIDs = offsets = SINGLE_ZERO_BUFFER;
+      } else {
+        final int pageSize = 128;
+        final int initialPageCount = (indexSize + pageSize - 1) / pageSize;
+        docIDs = new MonotonicAppendingLongBuffer(initialPageCount, pageSize, PackedInts.COMPACT);
+        offsets = new MonotonicAppendingLongBuffer(initialPageCount, pageSize, PackedInts.COMPACT);
+        // Now build the index
+        final Iterator it = new Iterator(dataArr, cardinality, Integer.MAX_VALUE, SINGLE_ZERO_BUFFER, SINGLE_ZERO_BUFFER);
+        index:
+        for (int k = 0; k < indexSize; ++k) {
+          docIDs.add(it.docID() + 1);
+          offsets.add(it.offset);
+          for (int i = 0; i < indexInterval; ++i) {
+            it.skipBlock();
+            if (it.docID() == DocIdSetIterator.NO_MORE_DOCS) {
+              break index;
+            }
+          }
+        }
+        docIDs.freeze();
+        offsets.freeze();
+      }
+
+      return new PForDeltaDocIdSet(dataArr, cardinality, indexInterval, docIDs, offsets);
+    }
+

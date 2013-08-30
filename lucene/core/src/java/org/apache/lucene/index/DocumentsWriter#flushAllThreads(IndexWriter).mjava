@@ -1,0 +1,47 @@
+  /*
+   * FlushAllThreads is synced by IW fullFlushLock. Flushing all threads is a
+   * two stage operation; the caller must ensure (in try/finally) that finishFlush
+   * is called after this method, to release the flush lock in DWFlushControl
+   */
+  final boolean flushAllThreads(final IndexWriter indexWriter)
+    throws IOException {
+    final DocumentsWriterDeleteQueue flushingDeleteQueue;
+    if (infoStream.isEnabled("DW")) {
+      infoStream.message("DW", Thread.currentThread().getName() + " startFullFlush");
+    }
+    
+    synchronized (this) {
+      pendingChangesInCurrentFullFlush = anyChanges();
+      flushingDeleteQueue = deleteQueue;
+      /* Cutover to a new delete queue.  This must be synced on the flush control
+       * otherwise a new DWPT could sneak into the loop with an already flushing
+       * delete queue */
+      flushControl.markForFullFlush(); // swaps the delQueue synced on FlushControl
+      assert setFlushingDeleteQueue(flushingDeleteQueue);
+    }
+    assert currentFullFlushDelQueue != null;
+    assert currentFullFlushDelQueue != deleteQueue;
+    
+    boolean anythingFlushed = false;
+    try {
+      DocumentsWriterPerThread flushingDWPT;
+      // Help out with flushing:
+      while ((flushingDWPT = flushControl.nextPendingFlush()) != null) {
+        anythingFlushed |= doFlush(flushingDWPT);
+      }
+      // If a concurrent flush is still in flight wait for it
+      flushControl.waitForFlush();  
+      if (!anythingFlushed && flushingDeleteQueue.anyChanges()) { // apply deletes if we did not flush any document
+        if (infoStream.isEnabled("DW")) {
+          infoStream.message("DW", Thread.currentThread().getName() + ": flush naked frozen global deletes");
+        }
+        ticketQueue.addDeletes(flushingDeleteQueue);
+      } 
+      ticketQueue.forcePurge(indexWriter);
+      assert !flushingDeleteQueue.anyChanges() && !ticketQueue.hasTickets();
+    } finally {
+      assert flushingDeleteQueue == currentFullFlushDelQueue;
+    }
+    return anythingFlushed;
+  }
+

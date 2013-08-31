@@ -1,0 +1,58 @@
+  // Write out the cores' config files, both bad schema files, bad config files as well as some good cores.
+  private CoreContainer initGoodAndBad(List<String> goodCores,
+                                       List<String> badSchemaCores,
+                                       List<String> badConfigCores) throws Exception {
+
+    // Don't pollute the log with exception traces when they're expected.
+    ignoreException(Pattern.quote("SAXParseException"));
+
+    if (solrHomeDirectory.exists()) {
+      FileUtils.deleteDirectory(solrHomeDirectory);
+    }
+    assertTrue("Failed to mkdirs workDir", solrHomeDirectory.mkdirs());
+
+    // Create the cores that should be fine.
+    for (String coreName : goodCores) {
+      File coreRoot = new File(solrHomeDirectory, coreName);
+      copyMinConf(coreRoot, "name=" + coreName);
+
+    }
+
+    // Collect the files that we'll write to the config directories.
+    String top = SolrTestCaseJ4.TEST_HOME() + "/collection1/conf";
+    String min_schema = FileUtils.readFileToString(new File(top, "schema-tiny.xml"),
+        Charsets.UTF_8.toString());
+    String min_config = FileUtils.readFileToString(new File(top, "solrconfig-minimal.xml"),
+        Charsets.UTF_8.toString());
+    String rand_snip = FileUtils.readFileToString(new File(top, "solrconfig.snippet.randomindexconfig.xml"),
+        Charsets.UTF_8.toString());
+
+    // Now purposely mess up the config files, introducing stupid syntax errors.
+    String bad_config = min_config.replace("<requestHandler", "<reqsthalr");
+    String bad_schema = min_schema.replace("<field", "<filed");
+
+    // Create the cores with bad configs
+    for (String coreName : badConfigCores) {
+      writeCustomConfig(coreName, bad_config, min_schema, rand_snip);
+    }
+
+    // Create the cores with bad schemas.
+    for (String coreName : badSchemaCores) {
+      writeCustomConfig(coreName, min_config, bad_schema, rand_snip);
+    }
+
+    // Write the solr.xml file. Cute how minimal it can be now....
+    File solrXml = new File(solrHomeDirectory, "solr.xml");
+    FileUtils.write(solrXml, "<solr/>", Charsets.UTF_8.toString());
+
+    SolrResourceLoader loader = new SolrResourceLoader(solrHomeDirectory.getAbsolutePath());
+    ConfigSolrXml config = (ConfigSolrXml) ConfigSolr.fromFile(loader, solrXml);
+
+    CoresLocator locator = new CorePropertiesLocator(solrHomeDirectory.getAbsolutePath());
+
+    // OK this should succeed, but at the end we should have recorded a series of errors.
+    final CoreContainer cores = new CoreContainer(loader, config, locator);
+    cores.load();
+    return cores;
+  }
+

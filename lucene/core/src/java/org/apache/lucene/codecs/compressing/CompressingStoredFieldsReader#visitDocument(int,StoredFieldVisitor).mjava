@@ -63,11 +63,56 @@
       return;
     }
 
-    final BytesRef bytes = totalLength <= BUFFER_REUSE_THRESHOLD ? this.bytes : new BytesRef();
-    decompressor.decompress(fieldsStream, totalLength, offset, length, bytes);
-    assert bytes.length == length;
+    final DataInput documentInput;
+    if (version >= VERSION_BIG_CHUNKS && totalLength >= 2 * chunkSize) {
+      assert chunkSize > 0;
+      assert offset < chunkSize;
 
-    final ByteArrayDataInput documentInput = new ByteArrayDataInput(bytes.bytes, bytes.offset, bytes.length);
+      decompressor.decompress(fieldsStream, chunkSize, offset, Math.min(length, chunkSize - offset), bytes);
+      documentInput = new DataInput() {
+
+        int decompressed = bytes.length;
+
+        void fillBuffer() throws IOException {
+          assert decompressed <= length;
+          if (decompressed == length) {
+            throw new EOFException();
+          }
+          final int toDecompress = Math.min(length - decompressed, chunkSize);
+          decompressor.decompress(fieldsStream, toDecompress, 0, toDecompress, bytes);
+          decompressed += toDecompress;
+        }
+
+        @Override
+        public byte readByte() throws IOException {
+          if (bytes.length == 0) {
+            fillBuffer();
+          }
+          --bytes.length;
+          return bytes.bytes[bytes.offset++];
+        }
+
+        @Override
+        public void readBytes(byte[] b, int offset, int len) throws IOException {
+          while (len > bytes.length) {
+            System.arraycopy(bytes.bytes, bytes.offset, b, offset, bytes.length);
+            len -= bytes.length;
+            offset += bytes.length;
+            fillBuffer();
+          }
+          System.arraycopy(bytes.bytes, bytes.offset, b, offset, len);
+          bytes.offset += len;
+          bytes.length -= len;
+        }
+
+      };
+    } else {
+      final BytesRef bytes = totalLength <= BUFFER_REUSE_THRESHOLD ? this.bytes : new BytesRef();
+      decompressor.decompress(fieldsStream, totalLength, offset, length, bytes);
+      assert bytes.length == length;
+      documentInput = new ByteArrayDataInput(bytes.bytes, bytes.offset, bytes.length);
+    }
+
     for (int fieldIDX = 0; fieldIDX < numStoredFields; fieldIDX++) {
       final long infoAndBits = documentInput.readVLong();
       final int fieldNumber = (int) (infoAndBits >>> TYPE_BITS);
@@ -79,16 +124,13 @@
       switch(visitor.needsField(fieldInfo)) {
         case YES:
           readField(documentInput, visitor, fieldInfo, bits);
-          assert documentInput.getPosition() <= bytes.offset + bytes.length : documentInput.getPosition() + " " + bytes.offset + bytes.length;
           break;
         case NO:
           skipField(documentInput, bits);
-          assert documentInput.getPosition() <= bytes.offset + bytes.length : documentInput.getPosition() + " " + bytes.offset + bytes.length;
           break;
         case STOP:
           return;
       }
     }
-    assert documentInput.getPosition() == bytes.offset + bytes.length : documentInput.getPosition() + " " + bytes.offset + " " + bytes.length;
   }
 

@@ -1,30 +1,42 @@
     private DocValuesConsumer getInstance(FieldInfo field) throws IOException {
-      final DocValuesFormat format = getDocValuesFormatForField(field.name);
+      final DocValuesFormat format;
+      if (segmentWriteState.isFieldUpdate) {
+        final String formatName = field.getAttribute(PER_FIELD_FORMAT_KEY);
+        assert formatName != null : "invalid null FORMAT_KEY for field=\"" + field.name + "\" (field updates)";
+        format = DocValuesFormat.forName(formatName);
+      } else {
+        format = getDocValuesFormatForField(field.name);
+      }
       if (format == null) {
         throw new IllegalStateException("invalid null DocValuesFormat for field=\"" + field.name + "\"");
       }
       final String formatName = format.getName();
       
       String previousValue = field.putAttribute(PER_FIELD_FORMAT_KEY, formatName);
-      assert previousValue == null: "formatName=" + formatName + " prevValue=" + previousValue;
+      assert segmentWriteState.isFieldUpdate || previousValue == null: "formatName=" + formatName + " prevValue=" + previousValue;
       
       Integer suffix;
       
       ConsumerAndSuffix consumer = formats.get(format);
       if (consumer == null) {
         // First time we are seeing this format; create a new instance
-        
-        // bump the suffix
-        suffix = suffixes.get(formatName);
-        if (suffix == null) {
-          suffix = 0;
+
+        if (segmentWriteState.isFieldUpdate) {
+          final String suffixAtt = field.getAttribute(PER_FIELD_SUFFIX_KEY);
+          assert suffixAtt != null : "invalid numm SUFFIX_KEY for field=\"" + field.name + "\" (field updates)";
+          suffix = Integer.valueOf(suffixAtt);
         } else {
-          suffix = suffix + 1;
+          // bump the suffix
+          suffix = suffixes.get(formatName);
+          if (suffix == null) {
+            suffix = 0;
+          } else {
+            suffix = suffix + 1;
+          }
         }
         suffixes.put(formatName, suffix);
         
-        final String segmentSuffix = getFullSegmentSuffix(field.name,
-                                                          segmentWriteState.segmentSuffix,
+        final String segmentSuffix = getFullSegmentSuffix(segmentWriteState.segmentSuffix,
                                                           getSuffix(formatName, Integer.toString(suffix)));
         consumer = new ConsumerAndSuffix();
         consumer.consumer = format.fieldsConsumer(new SegmentWriteState(segmentWriteState, segmentSuffix));
@@ -37,10 +49,10 @@
       }
       
       previousValue = field.putAttribute(PER_FIELD_SUFFIX_KEY, Integer.toString(suffix));
-      assert previousValue == null;
+      assert segmentWriteState.isFieldUpdate || previousValue == null : "suffix=" + Integer.toString(suffix) + " prevValue=" + previousValue;
 
       // TODO: we should only provide the "slice" of FIS
-      // that this PF actually sees ...
+      // that this DVF actually sees ...
       return consumer.consumer;
     }
 

@@ -7,16 +7,41 @@
   public SegmentReader(SegmentInfoPerCommit si, IOContext context) throws IOException {
     this.si = si;
     core = new SegmentCoreReaders(this, si.info.dir, si, context);
+    
     boolean success = false;
+    final Codec codec = si.info.getCodec();
     try {
       if (si.hasDeletions()) {
         // NOTE: the bitvector is stored using the regular directory, not cfs
-        liveDocs = si.info.getCodec().liveDocsFormat().readLiveDocs(directory(), si, IOContext.READONCE);
+        liveDocs = codec.liveDocsFormat().readLiveDocs(directory(), si, IOContext.READONCE);
       } else {
         assert si.getDelCount() == 0;
         liveDocs = null;
       }
       numDocs = si.info.getDocCount() - si.getDelCount();
+      
+      if (core.fieldInfos.hasDocValues()) {
+        final Directory dir = core.cfsReader != null ? core.cfsReader : si.info.dir;
+        final DocValuesFormat dvFormat = codec.docValuesFormat();
+        // initialize the per generation numericDVProducers and put the correct
+        // DVProducer for each field
+        final Map<Long,List<FieldInfo>> genInfos = getGenInfos(si);
+
+        for (Entry<Long,List<FieldInfo>> e : genInfos.entrySet()) {
+          Long gen = e.getKey();
+          List<FieldInfo> infos = e.getValue();
+          RefCount<DocValuesProducer> dvp = genDVProducers.get(gen);
+          if (dvp == null) {
+            dvp = newDocValuesProducer(si, context, dir, dvFormat, gen, infos);
+            assert dvp != null;
+            genDVProducers.put(gen, dvp);
+          }
+          for (FieldInfo fi : infos) {
+            dvProducers.put(fi.name, dvp.get());
+          }
+        }
+      }
+
       success = true;
     } finally {
       // With lock-less commits, it's entirely possible (and
@@ -25,7 +50,7 @@
       // of things that were opened so that we don't have to
       // wait for a GC to do so.
       if (!success) {
-        core.decRef();
+        doClose();
       }
     }
   }

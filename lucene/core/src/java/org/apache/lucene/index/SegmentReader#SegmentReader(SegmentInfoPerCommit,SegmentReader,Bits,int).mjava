@@ -1,0 +1,51 @@
+  /** Create new SegmentReader sharing core from a previous
+   *  SegmentReader and using the provided in-memory
+   *  liveDocs.  Used by IndexWriter to provide a new NRT
+   *  reader */
+  SegmentReader(SegmentInfoPerCommit si, SegmentReader sr, Bits liveDocs, int numDocs) throws IOException {
+    this.si = si;
+    this.liveDocs = liveDocs;
+    this.numDocs = numDocs;
+    this.core = sr.core;
+    core.incRef();
+    
+    // increment refCount of DocValuesProducers that are used by this reader
+    boolean success = false;
+    try {
+      if (core.fieldInfos.hasDocValues()) {
+        final Codec codec = si.info.getCodec();
+        final Directory dir = core.cfsReader != null ? core.cfsReader : si.info.dir;
+        
+        final DocValuesFormat dvFormat = codec.docValuesFormat();
+        final Map<Long,List<FieldInfo>> genInfos = getGenInfos(si);
+        
+        for (Entry<Long,List<FieldInfo>> e : genInfos.entrySet()) {
+          Long gen = e.getKey();
+          List<FieldInfo> infos = e.getValue();
+          RefCount<DocValuesProducer> dvp = genDVProducers.get(gen);
+          if (dvp == null) {
+            // check if this DVP gen is used by the given reader
+            dvp = sr.genDVProducers.get(gen);
+            if (dvp != null) {
+              // gen used by given reader, incRef its DVP
+              dvp.incRef();
+            } else {
+              // this gen is not used by given reader, initialize a new one
+              dvp = newDocValuesProducer(si, IOContext.READ, dir, dvFormat, gen, infos);
+            }
+            assert dvp != null;
+            genDVProducers.put(gen, dvp);
+          }
+          for (FieldInfo fi : infos) {
+            dvProducers.put(fi.name, dvp.get());
+          }
+        }
+      }
+      success = true;
+    } finally {
+      if (!success) {
+        doClose();
+      }
+    }
+  }
+

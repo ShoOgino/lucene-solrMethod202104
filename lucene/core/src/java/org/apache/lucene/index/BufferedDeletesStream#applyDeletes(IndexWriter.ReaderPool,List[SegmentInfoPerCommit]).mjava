@@ -5,7 +5,7 @@
     final long t0 = System.currentTimeMillis();
 
     if (infos.size() == 0) {
-      return new ApplyDeletesResult(false, nextGen++, null);
+      return new ApplyDeletesResult(false, nextGen++, null, false);
     }
 
     assert checkDeleteStats();
@@ -14,7 +14,7 @@
       if (infoStream.isEnabled("BD")) {
         infoStream.message("BD", "applyDeletes: no deletes; skipping");
       }
-      return new ApplyDeletesResult(false, nextGen++, null);
+      return new ApplyDeletesResult(false, nextGen++, null, false);
     }
 
     if (infoStream.isEnabled("BD")) {
@@ -29,6 +29,7 @@
 
     CoalescedDeletes coalescedDeletes = null;
     boolean anyNewDeletes = false;
+    boolean anyNewUpdates = false;
 
     int infosIDX = infos2.size()-1;
     int delIDX = deletes.size()-1;
@@ -43,7 +44,7 @@
       final long segGen = info.getBufferedDeletesGen();
 
       if (packet != null && segGen < packet.delGen()) {
-        //System.out.println("  coalesce");
+//        System.out.println("  coalesce");
         if (coalescedDeletes == null) {
           coalescedDeletes = new CoalescedDeletes();
         }
@@ -66,7 +67,7 @@
         // Lock order: IW -> BD -> RP
         assert readerPool.infoIsLive(info);
         final ReadersAndLiveDocs rld = readerPool.get(info, true);
-        final SegmentReader reader = rld.getReader(IOContext.READ);
+        final SegmentReader reader = rld.getReader(false, IOContext.READ); // don't apply deletes, as we're about to add more!
         int delCount = 0;
         final boolean segAllDeletes;
         try {
@@ -74,11 +75,13 @@
             //System.out.println("    del coalesced");
             delCount += applyTermDeletes(coalescedDeletes.termsIterable(), rld, reader);
             delCount += applyQueryDeletes(coalescedDeletes.queriesIterable(), rld, reader);
+            anyNewUpdates |= applyNumericDocValueUpdates(coalescedDeletes.numericDVUpdates, rld, reader);
           }
           //System.out.println("    del exact");
           // Don't delete by Term here; DocumentsWriterPerThread
           // already did that on flush:
           delCount += applyQueryDeletes(packet.queriesIterable(), rld, reader);
+          anyNewUpdates |= applyNumericDocValueUpdates(Arrays.asList(packet.updates), rld, reader); 
           final int fullDelCount = rld.info.getDelCount() + rld.getPendingDeleteCount();
           assert fullDelCount <= rld.info.info.getDocCount();
           segAllDeletes = fullDelCount == rld.info.info.getDocCount();
@@ -119,12 +122,13 @@
           // Lock order: IW -> BD -> RP
           assert readerPool.infoIsLive(info);
           final ReadersAndLiveDocs rld = readerPool.get(info, true);
-          final SegmentReader reader = rld.getReader(IOContext.READ);
+          final SegmentReader reader = rld.getReader(false, IOContext.READ); // don't apply deletes, as we're about to add more!
           int delCount = 0;
           final boolean segAllDeletes;
           try {
             delCount += applyTermDeletes(coalescedDeletes.termsIterable(), rld, reader);
             delCount += applyQueryDeletes(coalescedDeletes.queriesIterable(), rld, reader);
+            anyNewUpdates |= applyNumericDocValueUpdates(coalescedDeletes.numericDVUpdates, rld, reader);
             final int fullDelCount = rld.info.getDelCount() + rld.getPendingDeleteCount();
             assert fullDelCount <= rld.info.info.getDocCount();
             segAllDeletes = fullDelCount == rld.info.info.getDocCount();
@@ -157,6 +161,6 @@
     }
     // assert infos != segmentInfos || !any() : "infos=" + infos + " segmentInfos=" + segmentInfos + " any=" + any;
 
-    return new ApplyDeletesResult(anyNewDeletes, gen, allDeleted);
+    return new ApplyDeletesResult(anyNewDeletes, gen, allDeleted, anyNewUpdates);
   }
 

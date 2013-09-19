@@ -8,62 +8,19 @@
     for (TermsHashConsumerPerField f : fieldsToFlush.values()) {
       final FreqProxTermsWriterPerField perField = (FreqProxTermsWriterPerField) f;
       if (perField.termsHashPerField.bytesHash.size() > 0) {
+        perField.sortPostings();
+        assert perField.fieldInfo.isIndexed();
         allFields.add(perField);
       }
     }
 
-    final int numAllFields = allFields.size();
-
     // Sort by field name
     CollectionUtil.introSort(allFields);
 
-    final FieldsConsumer consumer = state.segmentInfo.getCodec().postingsFormat().fieldsConsumer(state);
+    Fields fields = new FreqProxFields(allFields);
 
-    boolean success = false;
+    applyDeletes(state, fields);
 
-    try {
-      TermsHash termsHash = null;
-      
-      /*
-    Current writer chain:
-      FieldsConsumer
-        -> IMPL: FormatPostingsTermsDictWriter
-          -> TermsConsumer
-            -> IMPL: FormatPostingsTermsDictWriter.TermsWriter
-              -> DocsConsumer
-                -> IMPL: FormatPostingsDocsWriter
-                  -> PositionsConsumer
-                    -> IMPL: FormatPostingsPositionsWriter
-       */
-      
-      for (int fieldNumber = 0; fieldNumber < numAllFields; fieldNumber++) {
-        final FieldInfo fieldInfo = allFields.get(fieldNumber).fieldInfo;
-        
-        final FreqProxTermsWriterPerField fieldWriter = allFields.get(fieldNumber);
-
-        // If this field has postings then add them to the
-        // segment
-        fieldWriter.flush(fieldInfo.name, consumer, state);
-        
-        TermsHashPerField perField = fieldWriter.termsHashPerField;
-        assert termsHash == null || termsHash == perField.termsHash;
-        termsHash = perField.termsHash;
-        int numPostings = perField.bytesHash.size();
-        perField.reset();
-        perField.shrinkHash(numPostings);
-        fieldWriter.reset();
-      }
-      
-      if (termsHash != null) {
-        termsHash.reset();
-      }
-      success = true;
-    } finally {
-      if (success) {
-        IOUtils.close(consumer);
-      } else {
-        IOUtils.closeWhileHandlingException(consumer);
-      }
-    }
+    state.segmentInfo.getCodec().postingsFormat().fieldsConsumer(state).write(fields);
   }
 

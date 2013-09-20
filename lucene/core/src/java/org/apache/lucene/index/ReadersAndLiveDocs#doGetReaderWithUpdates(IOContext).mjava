@@ -1,26 +1,24 @@
-  private SegmentReader doGetReaderWithUpdates(IOContext context) throws IOException {
+  private synchronized SegmentReader doGetReaderWithUpdates(IOContext context) throws IOException {
+    assert Thread.holdsLock(writer); // when we get here, we should already have the writer lock
     boolean checkpoint = false;
     try {
-      // don't synchronize the entire method because we cannot call
-      // writer.checkpoint() while holding the RLD lock, otherwise we might hit
-      // a deadlock w/ e.g. a concurrent merging thread.
-      synchronized (this) {
-        checkpoint = writeLiveDocs(info.info.dir);
-        if (reader == null) {
-          // We steal returned ref:
-          reader = new SegmentReader(info, context);
-          if (liveDocs == null) {
-            liveDocs = reader.getLiveDocs();
-          }
-        } else if (checkpoint) {
-          // enroll a new reader with the applied updates
-          reopenReader(context);
+      checkpoint = writeLiveDocs(info.info.dir);
+      if (reader == null) {
+        // We steal returned ref:
+//        System.out.println("[" + Thread.currentThread().getName() + "] RLD.doGetReaderWithUpdates: newSR " + info);
+        reader = new SegmentReader(info, context);
+        if (liveDocs == null) {
+          liveDocs = reader.getLiveDocs();
         }
-        
-        // Ref for caller
-        reader.incRef();
-        return reader;
+      } else if (checkpoint) {
+        // enroll a new reader with the applied updates
+//        System.out.println("[" + Thread.currentThread().getName() + "] RLD.doGetReaderWithUpdates: reopenReader " + info);
+        reopenReader(context);
       }
+      
+      // Ref for caller
+      reader.incRef();
+      return reader;
     } finally {
       if (checkpoint) {
         writer.checkpoint();

@@ -11,7 +11,10 @@
     // first segment with NDV
     Document doc = new Document();
     doc.add(new StringField("id", "doc0", Store.NO));
-    doc.add(new NumericDocValuesField("ndv", 5));
+    doc.add(new NumericDocValuesField("ndv", 3));
+    writer.addDocument(doc);
+    doc = new Document();
+    doc.add(new StringField("id", "doc4", Store.NO)); // document without 'ndv' field
     writer.addDocument(doc);
     writer.commit();
     
@@ -19,9 +22,17 @@
     doc = new Document();
     doc.add(new StringField("id", "doc1", Store.NO));
     writer.addDocument(doc);
+    doc = new Document();
+    doc.add(new StringField("id", "doc2", Store.NO)); // document that isn't updated
+    writer.addDocument(doc);
     writer.commit();
     
-    // update document in the second segment
+    // update document in the first segment - should not affect docsWithField of
+    // the document without NDV field
+    writer.updateNumericDocValue(new Term("id", "doc0"), "ndv", 5L);
+    
+    // update document in the second segment - field should be added and we should
+    // be able to handle the other document correctly (e.g. no NPE)
     writer.updateNumericDocValue(new Term("id", "doc1"), "ndv", 5L);
     writer.close();
 
@@ -29,9 +40,12 @@
     for (AtomicReaderContext context : reader.leaves()) {
       AtomicReader r = context.reader();
       NumericDocValues ndv = r.getNumericDocValues("ndv");
-      for (int i = 0; i < r.maxDoc(); i++) {
-        assertEquals(5L, ndv.get(i));
-      }
+      Bits docsWithField = r.getDocsWithField("ndv");
+      assertNotNull(docsWithField);
+      assertTrue(docsWithField.get(0));
+      assertEquals(5L, ndv.get(0));
+      assertFalse(docsWithField.get(1));
+      assertEquals(0L, ndv.get(1));
     }
     reader.close();
 

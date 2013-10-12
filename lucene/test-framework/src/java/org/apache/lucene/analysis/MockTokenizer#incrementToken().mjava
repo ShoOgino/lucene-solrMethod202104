@@ -4,8 +4,16 @@
                             : "incrementToken() called while in wrong state: " + streamState;
     clearAttributes();
     for (;;) {
-      int startOffset = off;
-      int cp = readCodePoint();
+      int startOffset;
+      int cp;
+      if (bufferedCodePoint >= 0) {
+        cp = bufferedCodePoint;
+        startOffset = bufferedOff;
+        bufferedCodePoint = -1;
+      } else {
+        startOffset = off;
+        cp = readCodePoint();
+      }
       if (cp < 0) {
         break;
       } else if (isTokenChar(cp)) {
@@ -21,6 +29,14 @@
           cp = readCodePoint();
         } while (cp >= 0 && isTokenChar(cp));
         
+        if (termAtt.length() < maxTokenLength) {
+          // buffer up, in case the "rejected" char can start a new word of its own
+          bufferedCodePoint = cp;
+          bufferedOff = endOffset;
+        } else {
+          // otherwise, its because we hit term limit.
+          bufferedCodePoint = -1;
+        }
         int correctedStartOffset = correctOffset(startOffset);
         int correctedEndOffset = correctOffset(endOffset);
         assert correctedStartOffset >= 0;
@@ -29,8 +45,11 @@
         lastOffset = correctedStartOffset;
         assert correctedEndOffset >= correctedStartOffset;
         offsetAtt.setOffset(correctedStartOffset, correctedEndOffset);
-        streamState = State.INCREMENT;
-        return true;
+        if (state == -1 || runAutomaton.isAccept(state)) {
+          // either we hit a reject state (longest match), or end-of-text, but in an accept state
+          streamState = State.INCREMENT;
+          return true;
+        }
       }
     }
     streamState = State.INCREMENT_FALSE;

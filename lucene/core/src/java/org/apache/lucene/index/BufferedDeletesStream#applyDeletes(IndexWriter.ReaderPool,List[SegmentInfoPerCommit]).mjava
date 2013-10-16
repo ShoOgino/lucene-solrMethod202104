@@ -5,7 +5,7 @@
     final long t0 = System.currentTimeMillis();
 
     if (infos.size() == 0) {
-      return new ApplyDeletesResult(false, nextGen++, null, false);
+      return new ApplyDeletesResult(false, nextGen++, null);
     }
 
     assert checkDeleteStats();
@@ -14,7 +14,7 @@
       if (infoStream.isEnabled("BD")) {
         infoStream.message("BD", "applyDeletes: no deletes; skipping");
       }
-      return new ApplyDeletesResult(false, nextGen++, null, false);
+      return new ApplyDeletesResult(false, nextGen++, null);
     }
 
     if (infoStream.isEnabled("BD")) {
@@ -29,7 +29,6 @@
 
     CoalescedDeletes coalescedDeletes = null;
     boolean anyNewDeletes = false;
-    boolean anyNewUpdates = false;
 
     int infosIDX = infos2.size()-1;
     int delIDX = deletes.size()-1;
@@ -67,21 +66,25 @@
         // Lock order: IW -> BD -> RP
         assert readerPool.infoIsLive(info);
         final ReadersAndLiveDocs rld = readerPool.get(info, true);
-        final SegmentReader reader = rld.getReader(false, IOContext.READ); // don't apply deletes, as we're about to add more!
+        final SegmentReader reader = rld.getReader(IOContext.READ);
         int delCount = 0;
         final boolean segAllDeletes;
         try {
+          Map<String,NumericFieldUpdates> fieldUpdates = null;
           if (coalescedDeletes != null) {
             //System.out.println("    del coalesced");
             delCount += applyTermDeletes(coalescedDeletes.termsIterable(), rld, reader);
             delCount += applyQueryDeletes(coalescedDeletes.queriesIterable(), rld, reader);
-            anyNewUpdates |= applyNumericDocValueUpdates(coalescedDeletes.numericDVUpdates, rld, reader);
+            fieldUpdates = applyNumericDocValuesUpdates(coalescedDeletes.numericDVUpdates, rld, reader, fieldUpdates);
           }
           //System.out.println("    del exact");
           // Don't delete by Term here; DocumentsWriterPerThread
           // already did that on flush:
           delCount += applyQueryDeletes(packet.queriesIterable(), rld, reader);
-          anyNewUpdates |= applyNumericDocValueUpdates(Arrays.asList(packet.updates), rld, reader); 
+          fieldUpdates = applyNumericDocValuesUpdates(Arrays.asList(packet.updates), rld, reader, fieldUpdates);
+          if (!fieldUpdates.isEmpty()) {
+            rld.writeFieldUpdates(info.info.dir, fieldUpdates);
+          }
           final int fullDelCount = rld.info.getDelCount() + rld.getPendingDeleteCount();
           assert fullDelCount <= rld.info.info.getDocCount();
           segAllDeletes = fullDelCount == rld.info.info.getDocCount();
@@ -122,17 +125,20 @@
           // Lock order: IW -> BD -> RP
           assert readerPool.infoIsLive(info);
           final ReadersAndLiveDocs rld = readerPool.get(info, true);
-          final SegmentReader reader = rld.getReader(false, IOContext.READ); // don't apply deletes, as we're about to add more!
+          final SegmentReader reader = rld.getReader(IOContext.READ);
           int delCount = 0;
           final boolean segAllDeletes;
           try {
             delCount += applyTermDeletes(coalescedDeletes.termsIterable(), rld, reader);
             delCount += applyQueryDeletes(coalescedDeletes.queriesIterable(), rld, reader);
-            anyNewUpdates |= applyNumericDocValueUpdates(coalescedDeletes.numericDVUpdates, rld, reader);
+            Map<String,NumericFieldUpdates> fieldUpdates = applyNumericDocValuesUpdates(coalescedDeletes.numericDVUpdates, rld, reader, null);
+            if (!fieldUpdates.isEmpty()) {
+              rld.writeFieldUpdates(info.info.dir, fieldUpdates);
+            }
             final int fullDelCount = rld.info.getDelCount() + rld.getPendingDeleteCount();
             assert fullDelCount <= rld.info.info.getDocCount();
             segAllDeletes = fullDelCount == rld.info.info.getDocCount();
-          } finally {   
+          } finally {
             rld.release(reader);
             readerPool.release(rld);
           }
@@ -146,7 +152,7 @@
           }
 
           if (infoStream.isEnabled("BD")) {
-            infoStream.message("BD", "seg=" + info + " segGen=" + segGen + " coalesced deletes=[" + (coalescedDeletes == null ? "null" : coalescedDeletes) + "] newDelCount=" + delCount + (segAllDeletes ? " 100% deleted" : ""));
+            infoStream.message("BD", "seg=" + info + " segGen=" + segGen + " coalesced deletes=[" + coalescedDeletes + "] newDelCount=" + delCount + (segAllDeletes ? " 100% deleted" : ""));
           }
         }
         info.setBufferedDeletesGen(gen);
@@ -161,6 +167,6 @@
     }
     // assert infos != segmentInfos || !any() : "infos=" + infos + " segmentInfos=" + segmentInfos + " any=" + any;
 
-    return new ApplyDeletesResult(anyNewDeletes, gen, allDeleted, anyNewUpdates);
+    return new ApplyDeletesResult(anyNewDeletes, gen, allDeleted);
   }
 

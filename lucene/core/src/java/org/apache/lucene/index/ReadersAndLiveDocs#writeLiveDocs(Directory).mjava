@@ -5,13 +5,12 @@
   public synchronized boolean writeLiveDocs(Directory dir) throws IOException {
     assert Thread.holdsLock(writer);
     //System.out.println("rld.writeLiveDocs seg=" + info + " pendingDelCount=" + pendingDeleteCount + " numericUpdates=" + numericUpdates);
-    final boolean hasFieldUpdates = hasFieldUpdates();
-    if (pendingDeleteCount == 0 && !hasFieldUpdates) {
+    if (pendingDeleteCount == 0) {
       return false;
     }
     
-    // We have new deletes or updates
-    assert pendingDeleteCount == 0 || liveDocs.length() == info.info.getDocCount();
+    // We have new deletes
+    assert liveDocs.length() == info.info.getDocCount();
     
     // Do this so we can delete any created files on
     // exception; this saves all codecs from having to do
@@ -21,134 +20,16 @@
     // We can write directly to the actual name (vs to a
     // .tmp & renaming it) because the file is not live
     // until segments file is written:
-    FieldInfos fieldInfos = null;
     boolean success = false;
     try {
       Codec codec = info.info.getCodec();
-      if (pendingDeleteCount > 0) {
-        codec.liveDocsFormat().writeLiveDocs((MutableBits)liveDocs, trackingDir, info, pendingDeleteCount, IOContext.DEFAULT);
-      }
-      
-      // apply numeric updates if there are any
-      if (hasFieldUpdates) {
-        // reader could be null e.g. for a just merged segment (from
-        // IndexWriter.commitMergedDeletes).
-//        if (this.reader == null) System.out.println("[" + Thread.currentThread().getName() + "] RLD.writeLiveDocs: newSR " + info);
-        final SegmentReader reader = this.reader == null ? new SegmentReader(info, IOContext.READONCE) : this.reader;
-        try {
-          // clone FieldInfos so that we can update their dvGen separately from
-          // the reader's infos and write them to a new fieldInfos_gen file
-          FieldInfos.Builder builder = new FieldInfos.Builder(writer.globalFieldNumberMap);
-          // cannot use builder.add(reader.getFieldInfos()) because it does not
-          // clone FI.attributes as well FI.dvGen
-          for (FieldInfo fi : reader.getFieldInfos()) {
-            FieldInfo clone = builder.add(fi);
-            // copy the stuff FieldInfos.Builder doesn't copy
-            if (fi.attributes() != null) {
-              for (Entry<String,String> e : fi.attributes().entrySet()) {
-                clone.putAttribute(e.getKey(), e.getValue());
-              }
-            }
-            clone.setDocValuesGen(fi.getDocValuesGen());
-          }
-          // create new fields or update existing ones to have NumericDV type
-          for (String f : numericUpdates.keySet()) {
-            builder.addOrUpdate(f, NumericDocValuesField.TYPE);
-          }
-          
-          fieldInfos = builder.finish();
-          final long nextFieldInfosGen = info.getNextFieldInfosGen();
-          final String segmentSuffix = Long.toString(nextFieldInfosGen, Character.MAX_RADIX);
-          final SegmentWriteState state = new SegmentWriteState(null, trackingDir, info.info, fieldInfos, null, IOContext.DEFAULT, segmentSuffix);
-          final DocValuesFormat docValuesFormat = codec.docValuesFormat();
-          final DocValuesConsumer fieldsConsumer = docValuesFormat.fieldsConsumer(state);
-          boolean fieldsConsumerSuccess = false;
-          try {
-//            System.out.println("[" + Thread.currentThread().getName() + "] RLD.writeLiveDocs: applying updates; seg=" + info + " updates=" + numericUpdates);
-            for (Entry<String,Map<Integer,Long>> e : numericUpdates.entrySet()) {
-              final String field = e.getKey();
-              final Map<Integer,Long> updates = e.getValue();
-              final FieldInfo fieldInfo = fieldInfos.fieldInfo(field);
-
-              assert fieldInfo != null;
-
-              fieldInfo.setDocValuesGen(nextFieldInfosGen);
-              
-              // write the numeric updates to a new gen'd docvalues file
-              fieldsConsumer.addNumericField(fieldInfo, new Iterable<Number>() {
-                @SuppressWarnings("synthetic-access")
-                final NumericDocValues currentValues = reader.getNumericDocValues(field);
-                final Bits docsWithField = reader.getDocsWithField(field);
-                @Override
-                public Iterator<Number> iterator() {
-                  return new Iterator<Number>() {
-
-                    @SuppressWarnings("synthetic-access")
-                    final int maxDoc = reader.maxDoc();
-                    int curDoc = -1;
-                    
-                    @Override
-                    public boolean hasNext() {
-                      return curDoc < maxDoc - 1;
-                    }
-
-                    @Override
-                    public Number next() {
-                      if (++curDoc >= maxDoc) {
-                        throw new NoSuchElementException("no more documents to return values for");
-                      }
-                      Long updatedValue = updates.get(curDoc);
-                      if (updatedValue == null) {
-                        // only read the current value if the document had a value before
-                        if (currentValues != null && docsWithField.get(curDoc)) {
-                          updatedValue = currentValues.get(curDoc);
-                        }
-                      } else if (updatedValue == NumericUpdate.MISSING) {
-                        updatedValue = null;
-                      }
-                      return updatedValue;
-                    }
-
-                    @Override
-                    public void remove() {
-                      throw new UnsupportedOperationException("this iterator does not support removing elements");
-                    }
-                    
-                  };
-                }
-              });
-            }
-            
-            codec.fieldInfosFormat().getFieldInfosWriter().write(trackingDir, info.info.name, segmentSuffix, fieldInfos, IOContext.DEFAULT);
-            fieldsConsumerSuccess = true;
-          } finally {
-            if (fieldsConsumerSuccess) {
-              fieldsConsumer.close();
-            } else {
-              IOUtils.closeWhileHandlingException(fieldsConsumer);
-            }
-          }
-        } finally {
-          if (reader != this.reader) {
-//            System.out.println("[" + Thread.currentThread().getName() + "] RLD.writeLiveDocs: closeReader " + reader);
-            reader.close();
-          }
-        }
-      }
+      codec.liveDocsFormat().writeLiveDocs((MutableBits)liveDocs, trackingDir, info, pendingDeleteCount, IOContext.DEFAULT);
       success = true;
     } finally {
       if (!success) {
         // Advance only the nextWriteDelGen so that a 2nd
         // attempt to write will write to a new file
-        if (pendingDeleteCount > 0) {
-          info.advanceNextWriteDelGen();
-        }
-        
-        // Advance only the nextWriteDocValuesGen so that a 2nd
-        // attempt to write will write to a new file
-        if (hasFieldUpdates) {
-          info.advanceNextWriteFieldInfosGen();
-        }
+        info.advanceNextWriteDelGen();
         
         // Delete any partially created file(s):
         for (String fileName : trackingDir.getCreatedFiles()) {
@@ -164,38 +45,10 @@
     // If we hit an exc in the line above (eg disk full)
     // then info's delGen remains pointing to the previous
     // (successfully written) del docs:
-    if (pendingDeleteCount > 0) {
-      info.advanceDelGen();
-      info.setDelCount(info.getDelCount() + pendingDeleteCount);
-      pendingDeleteCount = 0;
-    }
+    info.advanceDelGen();
+    info.setDelCount(info.getDelCount() + pendingDeleteCount);
+    pendingDeleteCount = 0;
     
-    if (hasFieldUpdates) {
-      info.advanceFieldInfosGen();
-      // copy all the updates to mergingUpdates, so they can later be applied to the merged segment
-      if (isMerging) {
-        copyUpdatesToMerging();
-      }
-      numericUpdates.clear();
-      
-      // create a new map, keeping only the gens that are in use
-      Map<Long,Set<String>> genUpdatesFiles = info.getUpdatesFiles();
-      Map<Long,Set<String>> newGenUpdatesFiles = new HashMap<Long,Set<String>>();
-      final long fieldInfosGen = info.getFieldInfosGen();
-      for (FieldInfo fi : fieldInfos) {
-        long dvGen = fi.getDocValuesGen();
-        if (dvGen != -1 && !newGenUpdatesFiles.containsKey(dvGen)) {
-          if (dvGen == fieldInfosGen) {
-            newGenUpdatesFiles.put(fieldInfosGen, trackingDir.getCreatedFiles());
-          } else {
-            newGenUpdatesFiles.put(dvGen, genUpdatesFiles.get(dvGen));
-          }
-        }
-      }
-      
-      info.setGenUpdatesFiles(newGenUpdatesFiles);
-    }
-
     return true;
   }
 

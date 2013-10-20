@@ -26,33 +26,41 @@
     // legit
 
     // TODO: we should do this in the background it would seem
-    for (SolrCmdDistributor.Error error : errors) {
+    for (final SolrCmdDistributor.Error error : errors) {
       if (error.req.node instanceof RetryNode) {
         // we don't try to force a leader to recover
         // when we cannot forward to it
         continue;
       }
       // TODO: we should force their state to recovering ??
-      // TODO: could be sent in parallel
       // TODO: do retries??
       // TODO: what if its is already recovering? Right now recoveries queue up -
       // should they?
-      String recoveryUrl = error.req.node.getBaseUrl();
-      HttpSolrServer server;
-      log.info("try and ask " + recoveryUrl + " to recover");
-      try {
-        server = new HttpSolrServer(recoveryUrl);
-        server.setSoTimeout(60000);
-        server.setConnectionTimeout(15000);
-        
-        RequestRecovery recoverRequestCmd = new RequestRecovery();
-        recoverRequestCmd.setAction(CoreAdminAction.REQUESTRECOVERY);
-        recoverRequestCmd.setCoreName(error.req.node.getCoreName());
-        
-        server.request(recoverRequestCmd);
-      } catch (Exception e) {
-        log.info("Could not tell a replica to recover", e);
-      }
+      final String recoveryUrl = error.req.node.getBaseUrl();
+      
+      Thread thread = new Thread() {
+        {
+          setDaemon(true);
+        }
+        @Override
+        public void run() {
+          log.info("try and ask " + recoveryUrl + " to recover");
+          HttpSolrServer server = new HttpSolrServer(recoveryUrl);
+          server.setSoTimeout(60000);
+          server.setConnectionTimeout(15000);
+          
+          RequestRecovery recoverRequestCmd = new RequestRecovery();
+          recoverRequestCmd.setAction(CoreAdminAction.REQUESTRECOVERY);
+          recoverRequestCmd.setCoreName(error.req.node.getCoreName());
+          try {
+            server.request(recoverRequestCmd);
+          } catch (Throwable t) {
+            SolrException.log(log, recoveryUrl + ": Could not tell a replica to recover", t);
+          }
+        }
+      };
+      ExecutorService executor = req.getCore().getCoreDescriptor().getCoreContainer().getUpdateExecutor();
+      executor.execute(thread);
       
     }
   }

@@ -1,0 +1,76 @@
+    private boolean isVersionNewEnoughStoredOnly(BytesRef indexedDocId,
+                                       Object newUserVersion) throws IOException {
+      assert null != indexedDocId;
+      assert null != newUserVersion;
+
+      oldSolrVersion = -1;
+
+      // :TODO: would be nice if a full RTG was not always needed here, ideas...
+      //  - first check fieldCache/docVals - if a versionField exists
+      //    in index that is already greater then this cmd, fail fast 
+      //    (no need to check updateLog, new version already too low)
+      //  - first check if docId is in the updateLog w/o doing the full get, if 
+      //    it's not then check fieldCache/docVals
+      //  - track versionField externally from updateLog (or as a special case 
+      //    that can be looked up by itself - similar to how _version_ is dealt with)
+      //
+      // Depending on if/when/how this is changed, what we assert about
+      // versionField on init will need updated.
+
+
+      newUserVersion = convertFieldValueUsingType(userVersionField, newUserVersion);
+      Object oldUserVersion = null;
+
+
+      SolrInputDocument oldDoc =
+        RealTimeGetComponent.getInputDocument(core, indexedDocId);
+
+      if (null == oldDoc) {
+        return true;
+      }
+      
+      oldUserVersion = oldDoc.getFieldValue(versionFieldName);
+      if ( null == oldUserVersion) {
+        // could happen if they turn this feature on after building an index
+        // w/o the versionField
+        throw new SolrException(SERVER_ERROR,
+                                "Doc exists in index, but has null versionField: "
+                                + versionFieldName);
+      }
+
+      // Make the FieldType resolve any conversion we need.
+      oldUserVersion = convertFieldValueUsingType(userVersionField, oldUserVersion);
+
+      if (! (oldUserVersion instanceof Comparable && newUserVersion instanceof Comparable) ) {
+        throw new SolrException(BAD_REQUEST, 
+                                "old version and new version are not comparable: " +
+                                oldUserVersion.getClass()+" vs "+newUserVersion.getClass());
+      }
+      
+      try { 
+        if (0 < ((Comparable)newUserVersion).compareTo((Comparable) oldUserVersion)) {
+          // since we're going to proceed with this update, we need to find the _version_
+          // so we can use optimistic concurrency.
+
+          Object o = oldDoc.getFieldValue(VersionInfo.VERSION_FIELD);
+          if (o == null) {
+            throw new SolrException(SERVER_ERROR, "No _version_ for document "+ oldDoc);
+          }
+          oldSolrVersion = o instanceof Number ? ((Number) o).longValue() : Long.parseLong(o.toString());
+          return true;
+        }
+        if (ignoreOldUpdates) {
+          return false;
+        } else {
+          throw new SolrException(CONFLICT,
+                                  "user version is not high enough: " + newUserVersion);
+        }
+      } catch (ClassCastException e) {
+        throw new SolrException(BAD_REQUEST, 
+                                "old version and new version are not comparable: " +
+                                oldUserVersion.getClass()+" vs "+newUserVersion.getClass() +
+                                ": " + e.getMessage(), e);
+                                
+      }
+    }
+

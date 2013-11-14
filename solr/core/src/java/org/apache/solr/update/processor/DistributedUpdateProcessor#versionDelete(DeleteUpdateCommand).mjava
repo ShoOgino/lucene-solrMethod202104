@@ -24,6 +24,7 @@
 
     boolean isReplayOrPeersync = (cmd.getFlags() & (UpdateCommand.REPLAY | UpdateCommand.PEER_SYNC)) != 0;
     boolean leaderLogic = isLeader && !isReplayOrPeersync;
+    boolean forwardedFromCollection = cmd.getReq().getParams().get("distrib.from.collection") != null;
 
     if (!leaderLogic && versionOnUpdate==0) {
       throw new SolrException(ErrorCode.BAD_REQUEST, "missing _version_ on update from leader");
@@ -39,6 +40,23 @@
           long bucketVersion = bucket.highest;
 
           if (leaderLogic) {
+
+            if (forwardedFromCollection && ulog.getState() == UpdateLog.State.ACTIVE) {
+              // forwarded from a collection but we are not buffering so strip original version and apply our own
+              // see SOLR-5308
+              log.info("Removing version field from doc: " + cmd.getId());
+              versionOnUpdate = signedVersionOnUpdate = 0;
+            }
+
+            // leaders can also be in buffering state during "migrate" API call, see SOLR-5308
+            if (forwardedFromCollection && ulog.getState() != UpdateLog.State.ACTIVE
+                && (cmd.getFlags() & UpdateCommand.REPLAY) == 0) {
+              // we're not in an active state, and this update isn't from a replay, so buffer it.
+              log.info("Leader logic applied but update log is buffering: " + cmd.getId());
+              cmd.setFlags(cmd.getFlags() | UpdateCommand.BUFFERING);
+              ulog.delete(cmd);
+              return true;
+            }
 
             if (signedVersionOnUpdate != 0) {
               Long lastVersion = vinfo.lookupVersion(cmd.getIndexedId());

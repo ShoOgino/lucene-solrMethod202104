@@ -13,9 +13,9 @@
       w.addDocument(doc);
     }
     IndexReader r = w.getReader();
-    w.close();
 
     IndexSearcher s = newSearcher(r);
+    FacetsConfig config = new FacetsConfig();
     
     int numIters = atLeast(10);
     for(int iter=0;iter<numIters;iter++) {
@@ -57,30 +57,28 @@
         }
       }
 
-      FacetsCollector fc = FacetsCollector.create(new RangeAccumulator(new RangeFacetRequest<DoubleRange>("field", ranges)));
-      s.search(new MatchAllDocsQuery(), fc);
-      List<FacetResult> results = fc.getFacetResults();
-      assertEquals(1, results.size());
-      List<FacetResultNode> nodes = results.get(0).getFacetResultNode().subResults;
-      assertEquals(numRange, nodes.size());
+      SimpleFacetsCollector sfc = new SimpleFacetsCollector();
+      s.search(new MatchAllDocsQuery(), sfc);
+      Facets facets = new RangeFacetCounts("field", sfc, ranges);
+      SimpleFacetResult result = facets.getTopChildren(10, "field");
+      assertEquals(numRange, result.labelValues.length);
       for(int rangeID=0;rangeID<numRange;rangeID++) {
         if (VERBOSE) {
           System.out.println("  range " + rangeID + " expectedCount=" + expectedCounts[rangeID]);
         }
-        FacetResultNode subNode = nodes.get(rangeID);
-        assertEquals("field/r" + rangeID, subNode.label.toString('/'));
-        assertEquals(expectedCounts[rangeID], (int) subNode.value);
+        LabelAndValue subNode = result.labelValues[rangeID];
+        assertEquals("r" + rangeID, subNode.label);
+        assertEquals(expectedCounts[rangeID], subNode.value.intValue());
 
-        DoubleRange range = (DoubleRange) ((RangeFacetRequest<?>) results.get(0).getFacetRequest()).ranges[rangeID];
+        DoubleRange range = ranges[rangeID];
 
         // Test drill-down:
-        DrillDownQuery ddq = new DrillDownQuery(FacetIndexingParams.DEFAULT);
+        SimpleDrillDownQuery ddq = new SimpleDrillDownQuery(config);
         ddq.add("field", NumericRangeQuery.newDoubleRange("field", range.min, range.max, range.minInclusive, range.maxInclusive));
         assertEquals(expectedCounts[rangeID], s.search(ddq, 10).totalHits);
       }
     }
 
-    r.close();
-    dir.close();
+    IOUtils.close(w, r, dir);
   }
 

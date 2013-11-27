@@ -1,10 +1,10 @@
-  private void testOneRetry() throws Exception {
+  private void testRetryNodeWontRetrySocketError() throws Exception {
     final HttpSolrServer solrclient = (HttpSolrServer) clients.get(0);
     long numFoundBefore = solrclient.query(new SolrQuery("*:*")).getResults()
         .getNumFound();
     final MockStreamingSolrServers ss = new MockStreamingSolrServers(updateShardHandler);
     SolrCmdDistributor cmdDistrib = new SolrCmdDistributor(ss, 5, 0);
-    ss.setExp(Exp.CONNECT_EXCEPTION);
+    ss.setExp(Exp.SOCKET_EXCEPTION);
     ArrayList<Node> nodes = new ArrayList<Node>();
 
     ZkNodeProps nodeProps = new ZkNodeProps(ZkStateReader.BASE_URL_PROP, solrclient.getBaseURL(),
@@ -15,7 +15,6 @@
     RetryNode retryNode = new RetryNode(new ZkCoreNodeProps(nodeProps), null, "collection1", "shard1") {
       @Override
       public boolean checkRetry() {
-        ss.setExp(null);
         retries.incrementAndGet();
         return true;
       }
@@ -30,17 +29,20 @@
 
     CommitUpdateCommand ccmd = new CommitUpdateCommand(null, false);
     cmdDistrib.distribAdd(cmd, nodes, params);
+    
+    ss.setExp(null);
     cmdDistrib.distribCommit(ccmd, nodes, params);
     cmdDistrib.finish();
     
+    // it will checkRetry, but not actually do it...
     assertEquals(1, retries.get());
     
     
     long numFoundAfter = solrclient.query(new SolrQuery("*:*")).getResults()
         .getNumFound();
     
-    // we will get java.net.ConnectException which we retry on
-    assertEquals(numFoundBefore + 1, numFoundAfter);
-    assertEquals(0, cmdDistrib.getErrors().size());
+    // we will get java.net.SocketException: Network is unreachable, which we don't retry on
+    assertEquals(numFoundBefore, numFoundAfter);
+    assertEquals(1, cmdDistrib.getErrors().size());
   }
 

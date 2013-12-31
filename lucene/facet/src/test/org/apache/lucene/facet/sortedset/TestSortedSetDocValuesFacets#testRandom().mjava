@@ -1,10 +1,10 @@
   public void testRandom() throws Exception {
+    assumeTrue("Test requires SortedSetDV support", defaultCodecSupportsSortedSet());
     String[] tokens = getRandomTokens(10);
     Directory indexDir = newDirectory();
     Directory taxoDir = newDirectory();
 
     RandomIndexWriter w = new RandomIndexWriter(random(), indexDir);
-    DirectoryTaxonomyWriter tw = new DirectoryTaxonomyWriter(taxoDir);
     FacetsConfig config = new FacetsConfig();
     int numDocs = atLeast(1000);
     int numDims = _TestUtil.nextInt(random(), 1, 7);
@@ -14,17 +14,17 @@
       doc.add(newStringField("content", testDoc.content, Field.Store.NO));
       for(int j=0;j<numDims;j++) {
         if (testDoc.dims[j] != null) {
-          doc.add(new FacetField("dim" + j, testDoc.dims[j]));
+          doc.add(new SortedSetDocValuesFacetField("dim" + j, testDoc.dims[j]));
         }
       }
-      w.addDocument(config.build(tw, doc));
+      w.addDocument(config.build(doc));
     }
 
     // NRT open
     IndexSearcher searcher = newSearcher(w.getReader());
     
-    // NRT open
-    TaxonomyReader tr = new DirectoryTaxonomyReader(tw);
+    // Per-top-reader state:
+    SortedSetDocValuesReaderState state = new SortedSetDocValuesReaderState(searcher.getIndexReader());
 
     int iters = atLeast(100);
     for(int iter=0;iter<iters;iter++) {
@@ -33,8 +33,8 @@
         System.out.println("\nTEST: iter content=" + searchToken);
       }
       FacetsCollector fc = new FacetsCollector();
-      TopDocs hits = FacetsCollector.search(searcher, new TermQuery(new Term("content", searchToken)), 10, fc);
-      Facets facets = getTaxonomyFacetCounts(tr, config, fc);
+      FacetsCollector.search(searcher, new TermQuery(new Term("content", searchToken)), 10, fc);
+      Facets facets = new SortedSetDocValuesFacetCounts(state, fc);
 
       // Slow, yet hopefully bug-free, faceting:
       @SuppressWarnings({"rawtypes","unchecked"}) Map<String,Integer>[] expectedCounts = new HashMap[numDims];
@@ -77,11 +77,11 @@
       List<FacetResult> actual = facets.getAllDims(10);
 
       // Messy: fixup ties
-      sortTies(actual);
+      //sortTies(actual);
 
       assertEquals(expected, actual);
     }
 
-    IOUtils.close(w, tw, searcher.getIndexReader(), tr, indexDir, taxoDir);
+    IOUtils.close(w, searcher.getIndexReader(), indexDir, taxoDir);
   }
 

@@ -1,0 +1,56 @@
+  private void processFacetFields(TaxonomyWriter taxoWriter, Map<String,List<FacetField>> byField, List<Field> addedIndexedFields, List<Field> addedStoredFields) throws IOException {
+
+    for(Map.Entry<String,List<FacetField>> ent : byField.entrySet()) {
+
+      String indexFieldName = ent.getKey();
+      //System.out.println("  indexFieldName=" + indexFieldName + " fields=" + ent.getValue());
+
+      IntsRef ordinals = new IntsRef(32);
+      for(FacetField facetField : ent.getValue()) {
+
+        FacetsConfig.DimConfig ft = getDimConfig(facetField.dim);
+        if (facetField.path.length > 1 && ft.hierarchical == false) {
+          throw new IllegalArgumentException("dimension \"" + facetField.dim + "\" is not hierarchical yet has " + facetField.path.length + " components");
+        }
+      
+        FacetLabel cp = new FacetLabel(facetField.dim, facetField.path);
+
+        checkTaxoWriter(taxoWriter);
+        int ordinal = taxoWriter.addCategory(cp);
+        if (ordinals.length == ordinals.ints.length) {
+          ordinals.grow(ordinals.length+1);
+        }
+        ordinals.ints[ordinals.length++] = ordinal;
+        //System.out.println("ords[" + (ordinals.length-1) + "]=" + ordinal);
+        //System.out.println("  add cp=" + cp);
+
+        if (ft.multiValued && (ft.hierarchical || ft.requireDimCount)) {
+          //System.out.println("  add parents");
+          // Add all parents too:
+          int parent = taxoWriter.getParent(ordinal);
+          while (parent > 0) {
+            if (ordinals.ints.length == ordinals.length) {
+              ordinals.grow(ordinals.length+1);
+            }
+            ordinals.ints[ordinals.length++] = parent;
+            parent = taxoWriter.getParent(parent);
+          }
+
+          if (ft.requireDimCount == false) {
+            // Remove last (dimension) ord:
+            ordinals.length--;
+          }
+        }
+
+        // Drill down:
+        for(int i=1;i<=cp.length;i++) {
+          addedIndexedFields.add(new StringField(indexFieldName, pathToString(cp.components, i), Field.Store.NO));
+        }
+      }
+
+      // Facet counts:
+      // DocValues are considered stored fields:
+      addedStoredFields.add(new BinaryDocValuesField(indexFieldName, dedupAndEncode(ordinals)));
+    }
+  }
+

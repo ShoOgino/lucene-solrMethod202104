@@ -1,0 +1,68 @@
+  /** Returns a new {@link Filter} accepting only documents
+   *  in this range.  Note that this filter is not
+   *  efficient: it's a linear scan of all docs, testing
+   *  each value.  If the {@link ValueSource} is static,
+   *  e.g. an indexed numeric field, then it's more
+   *  efficient to use {@link NumericRangeFilter}. */
+  public Filter getFilter(final ValueSource valueSource) {
+    return new Filter() {
+      @Override
+      public DocIdSet getDocIdSet(AtomicReaderContext context, final Bits acceptDocs) throws IOException {
+
+        // TODO: this is just like ValueSourceScorer,
+        // ValueSourceFilter (spatial),
+        // ValueSourceRangeFilter (solr); also,
+        // https://issues.apache.org/jira/browse/LUCENE-4251
+
+        final FunctionValues values = valueSource.getValues(Collections.emptyMap(), context);
+
+        final int maxDoc = context.reader().maxDoc();
+
+        return new DocIdSet() {
+
+          @Override
+          public DocIdSetIterator iterator() {
+            return new DocIdSetIterator() {
+              int doc = -1;
+
+              @Override
+              public int nextDoc() throws IOException {
+                while (true) {
+                  doc++;
+                  if (doc == maxDoc) {
+                    return doc = NO_MORE_DOCS;
+                  }
+                  if (acceptDocs != null && acceptDocs.get(doc) == false) {
+                    continue;
+                  }
+                  long v = values.longVal(doc);
+                  if (accept(v)) {
+                    return doc;
+                  }
+                }
+              }
+
+              @Override
+              public int advance(int target) throws IOException {
+                doc = target-1;
+                return nextDoc();
+              }
+
+              @Override
+              public int docID() {
+                return doc;
+              }
+
+              @Override
+              public long cost() {
+                // Since we do a linear scan over all
+                // documents, our cost is O(maxDoc):
+                return maxDoc;
+              }
+            };
+          }
+        };
+      }
+    };
+  }
+

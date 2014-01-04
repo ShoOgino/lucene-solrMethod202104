@@ -1,0 +1,45 @@
+  public void testMultiValuedHierarchy() throws Exception {
+    Directory dir = newDirectory();
+    Directory taxoDir = newDirectory();
+    DirectoryTaxonomyWriter taxoWriter = new DirectoryTaxonomyWriter(taxoDir, IndexWriterConfig.OpenMode.CREATE);
+    FacetsConfig config = new FacetsConfig();
+    config.setHierarchical("a", true);
+    config.setMultiValued("a", true);
+    RandomIndexWriter writer = new RandomIndexWriter(random(), dir);
+
+    Document doc = new Document();
+    doc.add(newTextField("field", "text", Field.Store.NO));
+    doc.add(new FacetField("a", "path", "x"));
+    doc.add(new FacetField("a", "path", "y"));
+    writer.addDocument(config.build(taxoWriter, doc));
+
+    // NRT open
+    IndexSearcher searcher = newSearcher(writer.getReader());
+
+    // NRT open
+    TaxonomyReader taxoReader = new DirectoryTaxonomyReader(taxoWriter);
+    
+    // Aggregate the facet counts:
+    FacetsCollector c = new FacetsCollector();
+
+    // MatchAllDocsQuery is for "browsing" (counts facets
+    // for all non-deleted docs in the index); normally
+    // you'd use a "normal" query, and use MultiCollector to
+    // wrap collecting the "normal" hits and also facets:
+    searcher.search(new MatchAllDocsQuery(), c);
+    Facets facets = getTaxonomyFacetCounts(taxoReader, config, c);
+
+    try {
+      facets.getSpecificValue("a");
+      fail("didn't hit expected exception");
+    } catch (IllegalArgumentException iae) {
+      // expected
+    }
+
+    FacetResult result = facets.getTopChildren(10, "a");
+    assertEquals(1, result.labelValues.length);
+    assertEquals(1, result.labelValues[0].value.intValue());
+
+    IOUtils.close(writer, taxoWriter, searcher.getIndexReader(), taxoReader, dir, taxoDir);
+  }
+

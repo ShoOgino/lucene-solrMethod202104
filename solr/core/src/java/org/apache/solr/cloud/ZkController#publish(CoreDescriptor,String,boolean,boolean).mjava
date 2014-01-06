@@ -1,0 +1,52 @@
+  /**
+   * Publish core state to overseer.
+   */
+  public void publish(final CoreDescriptor cd, final String state, boolean updateLastState, boolean forcePublish) throws KeeperException, InterruptedException {
+    if (!forcePublish) {
+      SolrCore core = cc.getCore(cd.getName());
+      if (core == null) {
+        return;
+      }
+      try {
+        if (core.isClosed()) {
+          return;
+        }
+      } finally {
+        core.close();
+      }
+    }
+    log.info("publishing core={} state={}", cd.getName(), state);
+    //System.out.println(Thread.currentThread().getStackTrace()[3]);
+    Integer numShards = cd.getCloudDescriptor().getNumShards();
+    if (numShards == null) { //XXX sys prop hack
+      log.info("numShards not found on descriptor - reading it from system property");
+      numShards = Integer.getInteger(ZkStateReader.NUM_SHARDS_PROP);
+    }
+    
+    assert cd.getCloudDescriptor().getCollectionName() != null && cd.getCloudDescriptor()
+        .getCollectionName().length() > 0;
+    
+    String coreNodeName = cd.getCloudDescriptor().getCoreNodeName();
+    //assert cd.getCloudDescriptor().getShardId() != null;
+    ZkNodeProps m = new ZkNodeProps(Overseer.QUEUE_OPERATION, "state", 
+        ZkStateReader.STATE_PROP, state, 
+        ZkStateReader.BASE_URL_PROP, getBaseUrl(), 
+        ZkStateReader.CORE_NAME_PROP, cd.getName(),
+        ZkStateReader.ROLES_PROP, cd.getCloudDescriptor().getRoles(),
+        ZkStateReader.NODE_NAME_PROP, getNodeName(),
+        ZkStateReader.SHARD_ID_PROP, cd.getCloudDescriptor().getShardId(),
+        ZkStateReader.SHARD_RANGE_PROP, cd.getCloudDescriptor().getShardRange(),
+        ZkStateReader.SHARD_STATE_PROP, cd.getCloudDescriptor().getShardState(),
+        ZkStateReader.SHARD_PARENT_PROP, cd.getCloudDescriptor().getShardParent(),
+        ZkStateReader.COLLECTION_PROP, cd.getCloudDescriptor()
+            .getCollectionName(),
+        ZkStateReader.NUM_SHARDS_PROP, numShards != null ? numShards.toString()
+            : null,
+        ZkStateReader.CORE_NODE_NAME_PROP, coreNodeName != null ? coreNodeName
+            : null);
+    if (updateLastState) {
+      cd.getCloudDescriptor().lastPublished = state;
+    }
+    overseerJobQueue.offer(ZkStateReader.toJSON(m));
+  }
+

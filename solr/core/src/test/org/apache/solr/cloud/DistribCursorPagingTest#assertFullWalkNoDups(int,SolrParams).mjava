@@ -1,0 +1,48 @@
+  /**
+   * <p>
+   * Given a set of params, executes a cursor query using {@link #CURSOR_MARK_START} 
+   * and then continuously walks the results using {@link #CURSOR_MARK_START} as long 
+   * as a non-0 number of docs ar returned.  This method records the the set of all id's
+   * (must be postive ints) encountered and throws an assertion failure if any id is 
+   * encountered more then once, or if the set grows above maxSize
+   * </p>
+   *
+   * <p>
+   * Note that this method explicily uses the "cloudClient" for executing the queries, 
+   * instead of relying on the test infrastructure to execute the queries redundently
+   * aainst both the cloud client as well as a control client.  This is because term stat 
+   * differences in a sharded setup can result in differnent scores for documents compared 
+   * to the control index -- which can affect the sorting in some cases and cause false 
+   * negatives in the response comparisons (even if we don't include "score" in the "fl")
+   * </p>
+   */
+  public SentinelIntSet assertFullWalkNoDups(int maxSize, SolrParams params) throws Exception {
+    SentinelIntSet ids = new SentinelIntSet(maxSize, -1);
+    String cursorMark = CURSOR_MARK_START;
+    int docsOnThisPage = Integer.MAX_VALUE;
+    while (0 < docsOnThisPage) {
+      QueryResponse rsp = cloudClient.query(p(params, CURSOR_MARK_PARAM, cursorMark));
+      String nextCursorMark = assertHashNextCursorMark(rsp);
+      SolrDocumentList docs = extractDocList(rsp);
+      docsOnThisPage = docs.size();
+      if (null != params.getInt(CommonParams.ROWS)) {
+        int rows = params.getInt(CommonParams.ROWS);
+        assertTrue("Too many docs on this page: " + rows + " < " + docsOnThisPage,
+                   docsOnThisPage <= rows);
+      }
+      if (0 == docsOnThisPage) {
+        assertEquals("no more docs, but "+CURSOR_MARK_NEXT+" isn't same",
+                     cursorMark, nextCursorMark);
+      }
+      for (SolrDocument doc : docs) {
+        int id = ((Integer)doc.get("id")).intValue();
+        assertFalse("walk already seen: " + id, ids.exists(id));
+        ids.put(id);
+        assertFalse("id set bigger then max allowed ("+maxSize+"): " + ids.size(),
+                    maxSize < ids.size());
+      }
+      cursorMark = nextCursorMark;
+    }
+    return ids;
+  }
+

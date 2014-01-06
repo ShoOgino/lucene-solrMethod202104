@@ -75,6 +75,7 @@
         key = null;  // we won't be caching the result
       }
     }
+    cmd.setSupersetMaxDoc(supersetMaxDoc);
 
 
     // OK, so now we need to generate an answer.
@@ -97,7 +98,6 @@
       }
     }
 
-    // disable useFilterCache optimization temporarily
     if (useFilterCache) {
       // now actually use the filter cache.
       // for large filters that match few documents, this may be
@@ -110,11 +110,9 @@
       // todo: there could be a sortDocSet that could take a list of
       // the filters instead of anding them first...
       // perhaps there should be a multi-docset-iterator
-      superset = sortDocSet(out.docSet,cmd.getSort(),supersetMaxDoc);
-      out.docList = superset.subset(cmd.getOffset(),cmd.getLen());
+      sortDocSet(qr, cmd);
     } else {
       // do it the normal way...
-      cmd.setSupersetMaxDoc(supersetMaxDoc);
       if ((flags & GET_DOCSET)!=0) {
         // this currently conflates returning the docset for the base query vs
         // the base query and all filters.
@@ -123,11 +121,28 @@
         if (qDocSet!=null && filterCache!=null && !qr.isPartialResults()) filterCache.put(cmd.getQuery(),qDocSet);
       } else {
         getDocListNC(qr,cmd);
-        //Parameters: cmd.getQuery(),theFilt,cmd.getSort(),0,supersetMaxDoc,cmd.getFlags(),cmd.getTimeAllowed(),responseHeader);
       }
+      assert null != out.docList : "docList is null";
+    }
 
+    if (null == cmd.getCursorMark()) {
+      // Kludge...
+      // we can't use DocSlice.subset, even though it should be an identity op
+      // because it gets confused by situations where there are lots of matches, but
+      // less docs in the slice then were requested, (due to the cursor)
+      // so we have to short circuit the call.
+      // None of which is really a problem since we can't use caching with
+      // cursors anyway, but it still looks weird to have to special case this
+      // behavior based on this condition - hence the long explanation.
       superset = out.docList;
       out.docList = superset.subset(cmd.getOffset(),cmd.getLen());
+    } else {
+      // sanity check our cursor assumptions
+      assert null == superset : "cursor: superset isn't null";
+      assert 0 == cmd.getOffset() : "cursor: command offset mismatch";
+      assert 0 == out.docList.offset() : "cursor: docList offset mismatch";
+      assert cmd.getLen() >= supersetMaxDoc : "cursor: superset len mismatch: " +
+        cmd.getLen() + " vs " + supersetMaxDoc;
     }
 
     // lastly, put the superset in the cache if the size is less than or equal

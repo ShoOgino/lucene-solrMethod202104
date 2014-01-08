@@ -1,5 +1,5 @@
   @Override
-  public synchronized void process(WatchedEvent event) {
+  public void process(WatchedEvent event) {
     if (log.isInfoEnabled()) {
       log.info("Watcher " + this + " name:" + name + " got event " + event
           + " path:" + event.getPath() + " type:" + event.getType());
@@ -9,8 +9,9 @@
       log.info("Client->ZooKeeper status change trigger but we are already closed");
       return;
     }
-
+    
     state = event.getState();
+    
     if (state == KeeperState.SyncConnected) {
       connected();
       clientConnected.countDown();
@@ -23,12 +24,16 @@
       
       connected = false;
       likelyExpired = true;
+      
       log.info("Our previous ZooKeeper session was expired. Attempting to reconnect to recover relationship with ZooKeeper...");
+      
       if (beforeReconnect != null) {
         beforeReconnect.command();
       }
+      
       try {
-        connectionStrategy.reconnect(zkServerAddress, client.getZkClientTimeout(), this,
+        connectionStrategy.reconnect(zkServerAddress,
+            client.getZkClientTimeout(), this,
             new ZkClientConnectionStrategy.ZkUpdate() {
               @Override
               public void update(SolrZooKeeper keeper) {
@@ -52,11 +57,21 @@
                   throw new RuntimeException(t);
                 }
                 
-                if (onReconnect != null) {
-                  onReconnect.command();
-                }
-                
                 connected();
+                
+                if (onReconnect != null) {
+                  Thread thread = new Thread() {
+                    @Override
+                    public void run() {
+                      try {
+                        onReconnect.command();
+                      } catch (Exception e) {
+                        log.warn("Exception running onReconnect command", e);
+                      }
+                    }
+                  };
+                  thread.start();
+                }
                 
               }
             });
@@ -71,6 +86,5 @@
     } else {
       disconnected();
     }
-    notifyAll();
   }
 

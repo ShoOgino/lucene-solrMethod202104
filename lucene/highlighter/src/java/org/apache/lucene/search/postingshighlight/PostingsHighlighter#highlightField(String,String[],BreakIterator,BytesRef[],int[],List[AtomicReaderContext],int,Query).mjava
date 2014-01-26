@@ -1,4 +1,4 @@
-  private Map<Integer,Object> highlightField(String field, String contents[], BreakIterator bi, BytesRef terms[], int[] docids, List<AtomicReaderContext> leaves, int maxPassages) throws IOException {  
+  private Map<Integer,Object> highlightField(String field, String contents[], BreakIterator bi, BytesRef terms[], int[] docids, List<AtomicReaderContext> leaves, int maxPassages, Query query) throws IOException {  
     Map<Integer,Object> highlights = new HashMap<Integer,Object>();
     
     // reuse in the real sense... for docs in same segment we just advance our old enum
@@ -9,6 +9,21 @@
     PassageFormatter fieldFormatter = getFormatter(field);
     if (fieldFormatter == null) {
       throw new NullPointerException("PassageFormatter cannot be null");
+    }
+    
+    // check if we should do any multitermprocessing
+    Analyzer analyzer = getIndexAnalyzer(field);
+    CharacterRunAutomaton automata[] = new CharacterRunAutomaton[0];
+    if (analyzer != null) {
+      automata = MultiTermHighlighting.extractAutomata(query, field);
+    }
+    
+    final BytesRef allTerms[];
+    if (automata.length > 0) {
+      allTerms = new BytesRef[terms.length + 1];
+      System.arraycopy(terms, 0, allTerms, 0, terms.length);
+    } else {
+      allTerms = terms;
     }
 
     for (int i = 0; i < docids.length; i++) {
@@ -27,9 +42,14 @@
       }
       if (leaf != lastLeaf) {
         termsEnum = t.iterator(null);
-        postings = new DocsAndPositionsEnum[terms.length];
+        postings = new DocsAndPositionsEnum[allTerms.length];
       }
-      Passage passages[] = highlightDoc(field, terms, content.length(), bi, doc - subContext.docBase, termsEnum, postings, maxPassages);
+      if (automata.length > 0) {
+        DocsAndPositionsEnum dp = MultiTermHighlighting.getDocsEnum(analyzer.tokenStream(field, content), automata);
+        dp.advance(doc - subContext.docBase);
+        postings[terms.length] = dp;
+      }
+      Passage passages[] = highlightDoc(field, allTerms, content.length(), bi, doc - subContext.docBase, termsEnum, postings, maxPassages);
       if (passages.length == 0) {
         passages = getEmptyHighlight(field, bi, maxPassages);
       }

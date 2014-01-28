@@ -3,6 +3,9 @@
     String cursorMark;
     SolrParams params = null;
     
+    final String intsort = "int" + (random().nextBoolean() ? "" : "_dv");
+    final String intmissingsort = defaultCodecSupportsMissingDocValues() ? intsort : "int";
+
     // trivial base case: ensure cursorMark against an empty index doesn't blow up
     cursorMark = CURSOR_MARK_START;
     params = params("q", "*:*", 
@@ -28,7 +31,7 @@
     assertU(adoc("id", "6", "str", "a", "float", "64.5", "int", "7"));
     assertU(adoc("id", "1", "str", "a", "float", "64.5", "int", "7"));
     assertU(adoc("id", "4", "str", "a", "float", "11.1", "int", "6"));
-    assertU(adoc("id", "3", "str", "a", "float", "11.1", "int", "3"));
+    assertU(adoc("id", "3", "str", "a", "float", "11.1")); // int is missing
     assertU(commit());
 
     // base case: ensure cursorMark that matches no docs doesn't blow up
@@ -124,7 +127,7 @@
                     "facet", "true",
                     "facet.field", "str",
                     "json.nl", "map",
-                    "sort", "int asc, id asc");
+                    "sort", intsort + " asc, id asc");
     cursorMark = assertCursor(req(params, CURSOR_MARK_PARAM, cursorMark)
                               ,"/response/numFound==8"
                               ,"/response/start==0"
@@ -150,6 +153,66 @@
                               ,"/response/start==0"
                               ,"/response/docs==[]"
                               ,"/facet_counts/facet_fields/str=={'a':4,'b':1,'c':3}"
+                              ));
+
+    // int missing first sort with dups, id tie breaker
+    cursorMark = CURSOR_MARK_START;
+    params = params("q", "-int:2001 -int:4055", 
+                    "rows","3",
+                    "fl", "id",
+                    "json.nl", "map",
+                    "sort", intmissingsort + "_first asc, id asc");
+    cursorMark = assertCursor(req(params, CURSOR_MARK_PARAM, cursorMark)
+                              ,"/response/numFound==8"
+                              ,"/response/start==0"
+                              ,"/response/docs==[{'id':3},{'id':7},{'id':0}]"
+                              );
+    cursorMark = assertCursor(req(params, CURSOR_MARK_PARAM, cursorMark)
+                              ,"/response/numFound==8"
+                              ,"/response/start==0"
+                              ,"/response/docs==[{'id':4},{'id':1},{'id':6}]"
+                              );
+    cursorMark = assertCursor(req(params, CURSOR_MARK_PARAM, cursorMark)
+                              ,"/response/numFound==8"
+                              ,"/response/start==0"
+                              ,"/response/docs==[{'id':9},{'id':2}]"
+                              );
+    // no more, so no change to cursorMark, and no new docs
+    assertEquals(cursorMark,
+                 assertCursor(req(params, CURSOR_MARK_PARAM, cursorMark)
+                              ,"/response/numFound==8" 
+                              ,"/response/start==0"
+                              ,"/response/docs==[]"
+                              ));
+
+    // int missing last sort with dups, id tie breaker
+    cursorMark = CURSOR_MARK_START;
+    params = params("q", "-int:2001 -int:4055", 
+                    "rows","3",
+                    "fl", "id",
+                    "json.nl", "map",
+                    "sort", intmissingsort + "_last asc, id asc");
+    cursorMark = assertCursor(req(params, CURSOR_MARK_PARAM, cursorMark)
+                              ,"/response/numFound==8"
+                              ,"/response/start==0"
+                              ,"/response/docs==[{'id':7},{'id':0},{'id':4}]"
+                              );
+    cursorMark = assertCursor(req(params, CURSOR_MARK_PARAM, cursorMark)
+                              ,"/response/numFound==8"
+                              ,"/response/start==0"
+                              ,"/response/docs==[{'id':1},{'id':6},{'id':9}]"
+                              );
+    cursorMark = assertCursor(req(params, CURSOR_MARK_PARAM, cursorMark)
+                              ,"/response/numFound==8"
+                              ,"/response/start==0"
+                              ,"/response/docs==[{'id':2},{'id':3}]"
+                              );
+    // no more, so no change to cursorMark, and no new docs
+    assertEquals(cursorMark,
+                 assertCursor(req(params, CURSOR_MARK_PARAM, cursorMark)
+                              ,"/response/numFound==8" 
+                              ,"/response/start==0"
+                              ,"/response/docs==[]"
                               ));
 
     // string sort with dups, id tie breaker
@@ -181,7 +244,7 @@
     params = params("q", "*:*", 
                     "rows","2",
                     "fl", "id",
-                    "sort", "float asc, int desc, id desc");
+                    "sort", "float asc, "+intsort+" desc, id desc");
     cursorMark = assertCursor(req(params, CURSOR_MARK_PARAM, cursorMark)
                               ,"/response/numFound==10"
                               ,"/response/start==0"
@@ -221,7 +284,7 @@
     params = params("q", "id:3 id:7", 
                     "rows","111",
                     "fl", "id",
-                    "sort", "int asc, id asc");
+                    "sort", intsort + " asc, id asc");
     cursorMark = assertCursor(req(params, CURSOR_MARK_PARAM, cursorMark)
                               ,"/response/numFound==2"
                               ,"/response/start==0"
@@ -250,7 +313,7 @@
     ids = assertFullWalkNoDups(9, params("q", "*:*", 
                                          "rows", "3",
                                          "fq", "-id:6",
-                                         "sort", "float desc, id asc, int asc"));
+                                         "sort", "float desc, id asc, "+intsort+" asc"));
     assertEquals(9, ids.size());
     assertFalse("matched on id:6 unexpectedly", ids.exists(6));
     ids = assertFullWalkNoDups(9, params("q", "float:[0 TO *] int:7 id:6", 

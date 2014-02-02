@@ -2,6 +2,7 @@
     int copied = 0;
     boolean escaped = false;
     boolean prefix = false;
+    boolean fuzzy = false;
 
     while (state.index < state.length) {
       if (!escaped) {
@@ -15,18 +16,13 @@
           ++state.index;
 
           continue;
-        } else if ((state.data[state.index] == '"' && (flags & PHRASE_OPERATOR) != 0)
-            || (state.data[state.index] == '|' && (flags & OR_OPERATOR) != 0)
-            || (state.data[state.index] == '+' && (flags & AND_OPERATOR) != 0)
-            || (state.data[state.index] == '(' && (flags & PRECEDENCE_OPERATORS) != 0)
-            || (state.data[state.index] == ')' && (flags & PRECEDENCE_OPERATORS) != 0)
-            || ((state.data[state.index] == ' '
-            || state.data[state.index] == '\t'
-            || state.data[state.index] == '\n'
-            || state.data[state.index] == '\r') && (flags & WHITESPACE_OPERATOR) != 0)) {
+        } else if (tokenFinished(state)) {
           // this should be the end of the term
           // all characters found will used for
           // creating the term query
+          break;
+        } else if (copied > 0 && state.data[state.index] == '~' && (flags & FUZZY_OPERATOR) != 0) {
+          fuzzy = true;
           break;
         }
 
@@ -44,7 +40,17 @@
     if (copied > 0) {
       final Query branch;
 
-      if (prefix) {
+      if (fuzzy && (flags & FUZZY_OPERATOR) != 0) {
+        String token = new String(state.buffer, 0, copied);
+        int fuzziness = parseFuzziness(state);
+        // edit distance has a maximum, limit to the maximum supported
+        fuzziness = Math.min(fuzziness, LevenshteinAutomata.MAXIMUM_SUPPORTED_DISTANCE);
+        if (fuzziness == 0) {
+          branch = newDefaultQuery(token);
+        } else {
+          branch = newFuzzyQuery(token, fuzziness);
+        }
+      } else if (prefix) {
         // if a term is found with a closing '*' it is considered to be a prefix query
         // and will have prefix added as an option
         String token = new String(state.buffer, 0, copied - 1);

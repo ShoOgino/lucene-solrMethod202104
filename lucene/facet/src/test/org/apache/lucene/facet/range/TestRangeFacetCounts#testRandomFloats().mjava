@@ -4,6 +4,8 @@
 
     int numDocs = atLeast(1000);
     float[] values = new float[numDocs];
+    float minValue = Float.POSITIVE_INFINITY;
+    float maxValue = Float.NEGATIVE_INFINITY;
     for(int i=0;i<numDocs;i++) {
       Document doc = new Document();
       float v = random().nextFloat();
@@ -11,6 +13,8 @@
       doc.add(new FloatDocValuesField("field", v));
       doc.add(new FloatField("field", v, Field.Store.NO));
       w.addDocument(doc);
+      minValue = Math.min(minValue, v);
+      maxValue = Math.max(maxValue, v);
     }
     IndexReader r = w.getReader();
 
@@ -25,6 +29,8 @@
       int numRange = _TestUtil.nextInt(random(), 1, 5);
       DoubleRange[] ranges = new DoubleRange[numRange];
       int[] expectedCounts = new int[numRange];
+      float minAcceptedValue = Float.POSITIVE_INFINITY;
+      float maxAcceptedValue = Float.NEGATIVE_INFINITY;
       if (VERBOSE) {
         System.out.println("TEST: " + numRange + " ranges");
       }
@@ -100,13 +106,26 @@
           }
           if (accept) {
             expectedCounts[rangeID]++;
+            minAcceptedValue = Math.min(minAcceptedValue, values[i]);
+            maxAcceptedValue = Math.max(maxAcceptedValue, values[i]);
           }
         }
       }
 
       FacetsCollector sfc = new FacetsCollector();
       s.search(new MatchAllDocsQuery(), sfc);
-      Facets facets = new DoubleRangeFacetCounts("field", new FloatFieldSource("field"), sfc, ranges);
+      Filter fastMatchFilter;
+      if (random().nextBoolean()) {
+        if (random().nextBoolean()) {
+          fastMatchFilter = NumericRangeFilter.newFloatRange("field", minValue, maxValue, true, true);
+        } else {
+          fastMatchFilter = NumericRangeFilter.newFloatRange("field", minAcceptedValue, maxAcceptedValue, true, true);
+        }
+      } else {
+        fastMatchFilter = null;
+      }
+      ValueSource vs = new FloatFieldSource("field");
+      Facets facets = new DoubleRangeFacetCounts("field", vs, sfc, fastMatchFilter, ranges);
       FacetResult result = facets.getTopChildren(10, "field");
       assertEquals(numRange, result.labelValues.length);
       for(int rangeID=0;rangeID<numRange;rangeID++) {
@@ -121,7 +140,15 @@
 
         // Test drill-down:
         DrillDownQuery ddq = new DrillDownQuery(config);
-        ddq.add("field", NumericRangeQuery.newFloatRange("field", (float) range.min, (float) range.max, range.minInclusive, range.maxInclusive));
+        if (random().nextBoolean()) {
+          if (random().nextBoolean()) {
+            ddq.add("field", NumericRangeFilter.newFloatRange("field", (float) range.min, (float) range.max, range.minInclusive, range.maxInclusive));
+          } else {
+            ddq.add("field", NumericRangeQuery.newFloatRange("field", (float) range.min, (float) range.max, range.minInclusive, range.maxInclusive));
+          }
+        } else {
+          ddq.add("field", range.getFilter(fastMatchFilter, vs));
+        }
         assertEquals(expectedCounts[rangeID], s.search(ddq, 10).totalHits);
       }
     }

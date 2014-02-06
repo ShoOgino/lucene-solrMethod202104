@@ -37,55 +37,12 @@
       drillSidewaysCollectors[i] = new FacetsCollector();
     }
 
-    boolean useCollectorMethod = scoreSubDocsAtOnce();
-
-    Term[][] drillDownTerms = null;
-
-    if (!useCollectorMethod) {
-      // Optimistic: assume subQueries of the DDQ are either
-      // TermQuery or BQ OR of TermQuery; if this is wrong
-      // then we detect it and fallback to the mome general
-      // but slower DrillSidewaysCollector:
-      drillDownTerms = new Term[clauses.length-startClause][];
-      for(int i=startClause;i<clauses.length;i++) {
-        Query q = clauses[i].getQuery();
-
-        // DrillDownQuery always wraps each subQuery in
-        // ConstantScoreQuery:
-        assert q instanceof ConstantScoreQuery;
-
-        q = ((ConstantScoreQuery) q).getQuery();
-
-        if (q instanceof TermQuery) {
-          drillDownTerms[i-startClause] = new Term[] {((TermQuery) q).getTerm()};
-        } else if (q instanceof BooleanQuery) {
-          BooleanQuery q2 = (BooleanQuery) q;
-          BooleanClause[] clauses2 = q2.getClauses();
-          drillDownTerms[i-startClause] = new Term[clauses2.length];
-          for(int j=0;j<clauses2.length;j++) {
-            if (clauses2[j].getQuery() instanceof TermQuery) {
-              drillDownTerms[i-startClause][j] = ((TermQuery) clauses2[j].getQuery()).getTerm();
-            } else {
-              useCollectorMethod = true;
-              break;
-            }
-          }
-        } else {
-          useCollectorMethod = true;
-        }
-      }
+    Query[] drillDownQueries = new Query[clauses.length-startClause];
+    for(int i=startClause;i<clauses.length;i++) {
+      drillDownQueries[i-startClause] = clauses[i].getQuery();
     }
-
-    if (useCollectorMethod) {
-      // TODO: maybe we could push the "collector method"
-      // down into the optimized scorer to have a tighter
-      // integration ... and so TermQuery clauses could
-      // continue to run "optimized"
-      collectorMethod(query, baseQuery, startClause, hitCollector, drillDownCollector, drillSidewaysCollectors);
-    } else {
-      DrillSidewaysQuery dsq = new DrillSidewaysQuery(baseQuery, drillDownCollector, drillSidewaysCollectors, drillDownTerms);
-      searcher.search(dsq, hitCollector);
-    }
+    DrillSidewaysQuery dsq = new DrillSidewaysQuery(baseQuery, drillDownCollector, drillSidewaysCollectors, drillDownQueries, scoreSubDocsAtOnce());
+    searcher.search(dsq, hitCollector);
 
     return new DrillSidewaysResult(buildFacetsResult(drillDownCollector, drillSidewaysCollectors, drillDownDims.keySet().toArray(new String[drillDownDims.size()])), null);
   }

@@ -9,7 +9,7 @@
       drillDownCollector.setScorer(this);
       drillDownCollector.setNextReader(context);
     }
-    for(DocsEnumsAndFreq dim : dims) {
+    for (DocsAndCost dim : dims) {
       dim.sidewaysCollector.setScorer(this);
       dim.sidewaysCollector.setNextReader(context);
     }
@@ -21,26 +21,38 @@
 
     // Position all scorers to their first matching doc:
     baseScorer.nextDoc();
-    for(DocsEnumsAndFreq dim : dims) {
-      for (DocsEnum docsEnum : dim.docsEnums) {
-        if (docsEnum != null) {
-          docsEnum.nextDoc();
-        }
+    int numBits = 0;
+    for (DocsAndCost dim : dims) {
+      if (dim.disi != null) {
+        dim.disi.nextDoc();
+      } else if (dim.bits != null) {
+        numBits++;
       }
     }
 
     final int numDims = dims.length;
 
-    DocsEnum[][] docsEnums = new DocsEnum[numDims][];
-    Collector[] sidewaysCollectors = new Collector[numDims];
+    Bits[] bits = new Bits[numBits];
+    Collector[] bitsSidewaysCollectors = new Collector[numBits];
+
+    DocIdSetIterator[] disis = new DocIdSetIterator[numDims-numBits];
+    Collector[] sidewaysCollectors = new Collector[numDims-numBits];
     long drillDownCost = 0;
-    for(int dim=0;dim<numDims;dim++) {
-      docsEnums[dim] = dims[dim].docsEnums;
-      sidewaysCollectors[dim] = dims[dim].sidewaysCollector;
-      for (DocsEnum de : dims[dim].docsEnums) {
-        if (de != null) {
-          drillDownCost += de.cost();
+    int disiUpto = 0;
+    int bitsUpto = 0;
+    for (int dim=0;dim<numDims;dim++) {
+      DocIdSetIterator disi = dims[dim].disi;
+      if (dims[dim].bits == null) {
+        disis[disiUpto] = disi;
+        sidewaysCollectors[disiUpto] = dims[dim].sidewaysCollector;
+        disiUpto++;
+        if (disi != null) {
+          drillDownCost += disi.cost();
         }
+      } else {
+        bits[bitsUpto] = dims[dim].bits;
+        bitsSidewaysCollectors[bitsUpto] = dims[dim].sidewaysCollector;
+        bitsUpto++;
       }
     }
 
@@ -56,15 +68,15 @@
     }
     */
 
-    if (baseQueryCost < drillDownCost/10) {
-      //System.out.println("baseAdvance");
-      doBaseAdvanceScoring(collector, docsEnums, sidewaysCollectors);
-    } else if (numDims > 1 && (dims[1].maxCost < baseQueryCost/10)) {
+    if (bitsUpto > 0 || scoreSubDocsAtOnce || baseQueryCost < drillDownCost/10) {
+      //System.out.println("queryFirst: baseScorer=" + baseScorer + " disis.length=" + disis.length + " bits.length=" + bits.length);
+      doQueryFirstScoring(collector, disis, sidewaysCollectors, bits, bitsSidewaysCollectors);
+    } else if (numDims > 1 && (dims[1].disi == null || dims[1].disi.cost() < baseQueryCost/10)) {
       //System.out.println("drillDownAdvance");
-      doDrillDownAdvanceScoring(collector, docsEnums, sidewaysCollectors);
+      doDrillDownAdvanceScoring(collector, disis, sidewaysCollectors);
     } else {
       //System.out.println("union");
-      doUnionScoring(collector, docsEnums, sidewaysCollectors);
+      doUnionScoring(collector, disis, sidewaysCollectors);
     }
   }
 

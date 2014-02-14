@@ -1,0 +1,106 @@
+  /**
+   * Iterates over the given token stream and adds the resulting terms to the index;
+   * Equivalent to adding a tokenized, indexed, termVectorStored, unstored,
+   * Lucene {@link org.apache.lucene.document.Field}.
+   * Finally closes the token stream. Note that untokenized keywords can be added with this method via 
+   * {@link #keywordTokenStream(Collection)}, the Lucene <code>KeywordTokenizer</code> or similar utilities.
+   * 
+   *
+   * @param fieldName
+   *            a name to be associated with the text
+   * @param stream
+   *            the token stream to retrieve tokens from.
+   * @param boost
+   *            the boost factor for hits for this field
+   * @param positionIncrementGap
+   *            the position increment gap if fields with the same name are added more than once
+   * @param offsetGap
+   *            the offset gap if fields with the same name are added more than once
+   * @see org.apache.lucene.document.Field#setBoost(float)
+   */
+  public void addField(String fieldName, TokenStream stream, float boost, int positionIncrementGap, int offsetGap) {
+    try {
+      if (fieldName == null)
+        throw new IllegalArgumentException("fieldName must not be null");
+      if (stream == null)
+          throw new IllegalArgumentException("token stream must not be null");
+      if (boost <= 0.0f)
+          throw new IllegalArgumentException("boost factor must be greater than 0.0");
+      int numTokens = 0;
+      int numOverlapTokens = 0;
+      int pos = -1;
+      final BytesRefHash terms;
+      final SliceByteStartArray sliceArray;
+      Info info = null;
+      long sumTotalTermFreq = 0;
+      int offset = 0;
+      if ((info = fields.get(fieldName)) != null) {
+        numTokens = info.numTokens;
+        numOverlapTokens = info.numOverlapTokens;
+        pos = info.lastPosition + positionIncrementGap;
+        offset = info.lastOffset + offsetGap;
+        terms = info.terms;
+        boost *= info.boost;
+        sliceArray = info.sliceArray;
+        sumTotalTermFreq = info.sumTotalTermFreq;
+      } else {
+        sliceArray = new SliceByteStartArray(BytesRefHash.DEFAULT_CAPACITY);
+        terms = new BytesRefHash(byteBlockPool, BytesRefHash.DEFAULT_CAPACITY, sliceArray);
+      }
+
+      if (!fieldInfos.containsKey(fieldName)) {
+        fieldInfos.put(fieldName, 
+            new FieldInfo(fieldName, true, fieldInfos.size(), false, false, false, this.storeOffsets ? IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS : IndexOptions.DOCS_AND_FREQS_AND_POSITIONS , null, null, null));
+      }
+      TermToBytesRefAttribute termAtt = stream.getAttribute(TermToBytesRefAttribute.class);
+      PositionIncrementAttribute posIncrAttribute = stream.addAttribute(PositionIncrementAttribute.class);
+      OffsetAttribute offsetAtt = stream.addAttribute(OffsetAttribute.class);
+      BytesRef ref = termAtt.getBytesRef();
+      stream.reset();
+      
+      while (stream.incrementToken()) {
+        termAtt.fillBytesRef();
+//        if (DEBUG) System.err.println("token='" + term + "'");
+        numTokens++;
+        final int posIncr = posIncrAttribute.getPositionIncrement();
+        if (posIncr == 0)
+          numOverlapTokens++;
+        pos += posIncr;
+        int ord = terms.add(ref);
+        if (ord < 0) {
+          ord = (-ord) - 1;
+          postingsWriter.reset(sliceArray.end[ord]);
+        } else {
+          sliceArray.start[ord] = postingsWriter.startNewSlice();
+        }
+        sliceArray.freq[ord]++;
+        sumTotalTermFreq++;
+        if (!storeOffsets) {
+          postingsWriter.writeInt(pos);
+        } else {
+          postingsWriter.writeInt(pos);
+          postingsWriter.writeInt(offsetAtt.startOffset() + offset);
+          postingsWriter.writeInt(offsetAtt.endOffset() + offset);
+        }
+        sliceArray.end[ord] = postingsWriter.getCurrentOffset();
+      }
+      stream.end();
+
+      // ensure infos.numTokens > 0 invariant; needed for correct operation of terms()
+      if (numTokens > 0) {
+        fields.put(fieldName, new Info(terms, sliceArray, numTokens, numOverlapTokens, boost, pos, offsetAtt.endOffset() + offset, sumTotalTermFreq));
+        sortedFields = null;    // invalidate sorted view, if any
+      }
+    } catch (Exception e) { // can never happen
+      throw new RuntimeException(e);
+    } finally {
+      try {
+        if (stream != null) {
+          stream.close();
+        }
+      } catch (IOException e2) {
+        throw new RuntimeException(e2);
+      }
+    }
+  }
+

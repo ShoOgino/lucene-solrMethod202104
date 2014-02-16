@@ -18,7 +18,7 @@
   public Rsp request(Req req) throws SolrServerException, IOException {
     Rsp rsp = new Rsp();
     Exception ex = null;
-
+    boolean isUpdate = req.request instanceof IsUpdateRequest;
     List<ServerWrapper> skipped = new ArrayList<ServerWrapper>(req.getNumDeadServersToTry());
 
     for (String serverStr : req.getServers()) {
@@ -38,25 +38,31 @@
         rsp.rsp = server.request(req.getRequest());
         return rsp; // SUCCESS
       } catch (SolrException e) {
-        // we retry on 404 or 403 or 503 - you can see this on solr shutdown
-        if (e.code() == 404 || e.code() == 403 || e.code() == 503 || e.code() == 500) {
+        // we retry on 404 or 403 or 503 or 500
+        // unless it's an update - then we only retry on connect exceptions
+        if (!isUpdate && RETRY_CODES.contains(e.code())) {
           ex = addZombie(server, e);
         } else {
           // Server is alive but the request was likely malformed or invalid
           throw e;
         }
-       
-       // TODO: consider using below above - currently does cause a problem with distrib updates:
-       // seems to match up against a failed forward to leader exception as well...
-       //     || e.getMessage().contains("java.net.SocketException")
-       //     || e.getMessage().contains("java.net.ConnectException")
       } catch (SocketException e) {
-        ex = addZombie(server, e);
+        if (!isUpdate || e instanceof ConnectException) {
+          ex = addZombie(server, e);
+        } else {
+          throw e;
+        }
       } catch (SocketTimeoutException e) {
-        ex = addZombie(server, e);
+        if (!isUpdate) {
+          ex = addZombie(server, e);
+        } else {
+          throw e;
+        }
       } catch (SolrServerException e) {
         Throwable rootCause = e.getRootCause();
-        if (rootCause instanceof IOException) {
+        if (!isUpdate && rootCause instanceof IOException) {
+          ex = addZombie(server, e);
+        } else if (isUpdate && rootCause instanceof ConnectException) {
           ex = addZombie(server, e);
         } else {
           throw e;
@@ -73,8 +79,9 @@
         zombieServers.remove(wrapper.getKey());
         return rsp; // SUCCESS
       } catch (SolrException e) {
-        // we retry on 404 or 403 or 503 - you can see this on solr shutdown
-        if (e.code() == 404 || e.code() == 403 || e.code() == 503 || e.code() == 500) {
+        // we retry on 404 or 403 or 503 or 500
+        // unless it's an update - then we only retry on connect exceptions
+        if (!isUpdate && RETRY_CODES.contains(e.code())) {
           ex = e;
           // already a zombie, no need to re-add
         } else {
@@ -84,14 +91,23 @@
         }
 
       } catch (SocketException e) {
-        ex = e;
+        if (!isUpdate || e instanceof ConnectException) {
+          ex = e;
+        } else {
+          throw e;
+        }
       } catch (SocketTimeoutException e) {
-        ex = e;
+        if (!isUpdate) {
+          ex = e;
+        } else {
+          throw e;
+        }
       } catch (SolrServerException e) {
         Throwable rootCause = e.getRootCause();
-        if (rootCause instanceof IOException) {
+        if (!isUpdate && rootCause instanceof IOException) {
           ex = e;
-          // already a zombie, no need to re-add
+        } else if (isUpdate && rootCause instanceof ConnectException) {
+          ex = e;
         } else {
           throw e;
         }

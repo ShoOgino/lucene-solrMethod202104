@@ -77,7 +77,9 @@
             + ". This requires " + requestedShardsToCreate
             + " shards to be created (higher than the allowed number)");
       }
-      String configName = createConfNode(collectionName, message);
+      boolean isLegacyCloud =  Overseer.isLegacy(zkStateReader.getClusterProps());
+
+      String configName = createConfNode(collectionName, message, isLegacyCloud);
 
       Overseer.getInQueue(zkStateReader.getZkClient()).offer(ZkStateReader.toJSON(message));
 
@@ -97,16 +99,31 @@
         String sliceName = shardNames.get(i-1);
         for (int j = 1; j <= repFactor; j++) {
           String nodeName = nodeList.get((repFactor * (i - 1) + (j - 1)) % nodeList.size());
-          String shardName = collectionName + "_" + sliceName + "_replica" + j;
-          log.info("Creating shard " + shardName + " as part of slice "
+          String coreName = collectionName + "_" + sliceName + "_replica" + j;
+          log.info("Creating shard " + coreName + " as part of slice "
               + sliceName + " of collection " + collectionName + " on "
               + nodeName);
+
+
+          String baseUrl = zkStateReader.getBaseUrlForNodeName(nodeName);
+          //in the new mode, create the replica in clusterstate prior to creating the core.
+          // Otherwise the core creation fails
+          if(!isLegacyCloud){
+            ZkNodeProps props = new ZkNodeProps(
+                Overseer.QUEUE_OPERATION, CollectionParams.CollectionAction.ADDREPLICA.toString(),
+                ZkStateReader.COLLECTION_PROP, collectionName,
+                ZkStateReader.SHARD_ID_PROP, sliceName,
+                ZkStateReader.CORE_NAME_PROP, coreName,
+                ZkStateReader.STATE_PROP, ZkStateReader.DOWN,
+                ZkStateReader.BASE_URL_PROP,baseUrl);
+                Overseer.getInQueue(zkStateReader.getZkClient()).offer(ZkStateReader.toJSON(props));
+          }
 
           // Need to create new params for each request
           ModifiableSolrParams params = new ModifiableSolrParams();
           params.set(CoreAdminParams.ACTION, CoreAdminAction.CREATE.toString());
 
-          params.set(CoreAdminParams.NAME, shardName);
+          params.set(CoreAdminParams.NAME, coreName);
           params.set(COLL_CONF, configName);
           params.set(CoreAdminParams.COLLECTION, collectionName);
           params.set(CoreAdminParams.SHARD, sliceName);

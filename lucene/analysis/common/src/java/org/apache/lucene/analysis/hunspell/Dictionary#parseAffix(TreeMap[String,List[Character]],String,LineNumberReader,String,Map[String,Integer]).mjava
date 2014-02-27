@@ -1,0 +1,116 @@
+  /**
+   * Parses a specific affix rule putting the result into the provided affix map
+   * 
+   * @param affixes Map where the result of the parsing will be put
+   * @param header Header line of the affix rule
+   * @param reader BufferedReader to read the content of the rule from
+   * @param conditionPattern {@link String#format(String, Object...)} pattern to be used to generate the condition regex
+   *                         pattern
+   * @param seenPatterns map from condition -> index of patterns, for deduplication.
+   * @throws IOException Can be thrown while reading the rule
+   */
+  private void parseAffix(TreeMap<String,List<Character>> affixes,
+                          String header,
+                          LineNumberReader reader,
+                          String conditionPattern,
+                          Map<String,Integer> seenPatterns) throws IOException, ParseException {
+    
+    BytesRef scratch = new BytesRef();
+    String args[] = header.split("\\s+");
+
+    boolean crossProduct = args[2].equals("Y");
+    
+    int numLines = Integer.parseInt(args[3]);
+    affixData = ArrayUtil.grow(affixData, (currentAffix << 3) + (numLines << 3));
+    ByteArrayDataOutput affixWriter = new ByteArrayDataOutput(affixData, currentAffix << 3, numLines << 3);
+    
+    for (int i = 0; i < numLines; i++) {
+      if (currentAffix > Short.MAX_VALUE) {
+        throw new UnsupportedOperationException("Too many affixes, please report this to dev@lucene.apache.org");
+      }
+      assert affixWriter.getPosition() == currentAffix << 3;
+      String line = reader.readLine();
+      String ruleArgs[] = line.split("\\s+");
+
+      if (ruleArgs.length < 5) {
+          throw new ParseException("The affix file contains a rule with less than five elements", reader.getLineNumber());
+      }
+      
+      char flag = flagParsingStrategy.parseFlag(ruleArgs[1]);
+      String strip = ruleArgs[2].equals("0") ? "" : ruleArgs[2];
+      String affixArg = ruleArgs[3];
+      char appendFlags[] = null;
+      
+      int flagSep = affixArg.lastIndexOf('/');
+      if (flagSep != -1) {
+        String flagPart = affixArg.substring(flagSep + 1);
+        affixArg = affixArg.substring(0, flagSep);
+
+        if (aliasCount > 0) {
+          flagPart = getAliasValue(Integer.parseInt(flagPart));
+        } 
+        
+        appendFlags = flagParsingStrategy.parseFlags(flagPart);
+        Arrays.sort(appendFlags);
+      }
+
+      String condition = ruleArgs[4];
+      // at least the gascon affix file has this issue
+      if (condition.startsWith("[") && !condition.endsWith("]")) {
+        condition = condition + "]";
+      }
+      // "dash hasn't got special meaning" (we must escape it)
+      if (condition.indexOf('-') >= 0) {
+        condition = condition.replace("-", "\\-");
+      }
+
+      String regex = String.format(Locale.ROOT, conditionPattern, condition);
+      
+      // deduplicate patterns
+      Integer patternIndex = seenPatterns.get(regex);
+      if (patternIndex == null) {
+        patternIndex = patterns.size();
+        seenPatterns.put(regex, patternIndex);
+        Pattern pattern = Pattern.compile(regex);
+        patterns.add(pattern);
+      }
+      
+      scratch.copyChars(strip);
+      int stripOrd = stripLookup.add(scratch);
+      if (stripOrd < 0) {
+        // already exists in our hash
+        stripOrd = (-stripOrd)-1;
+      }
+
+      if (appendFlags == null) {
+        appendFlags = NOFLAGS;
+      }
+      
+      final int hashCode = encodeFlagsWithHash(scratch, appendFlags);
+      int appendFlagsOrd = flagLookup.add(scratch, hashCode);
+      if (appendFlagsOrd < 0) {
+        // already exists in our hash
+        appendFlagsOrd = (-appendFlagsOrd)-1;
+      } else if (appendFlagsOrd > Short.MAX_VALUE) {
+        // this limit is probably flexible, but its a good sanity check too
+        throw new UnsupportedOperationException("Too many unique flags, please report this to dev@lucene.apache.org");
+      }
+      
+      affixWriter.writeShort((short)flag);
+      affixWriter.writeShort((short)stripOrd);
+      // encode crossProduct into patternIndex
+      int patternOrd = patternIndex.intValue() << 1 | (crossProduct ? 1 : 0);
+      affixWriter.writeShort((short)patternOrd);
+      affixWriter.writeShort((short)appendFlagsOrd);
+      
+      List<Character> list = affixes.get(affixArg);
+      if (list == null) {
+        list = new ArrayList<Character>();
+        affixes.put(affixArg, list);
+      }
+      
+      list.add((char)currentAffix);
+      currentAffix++;
+    }
+  }
+

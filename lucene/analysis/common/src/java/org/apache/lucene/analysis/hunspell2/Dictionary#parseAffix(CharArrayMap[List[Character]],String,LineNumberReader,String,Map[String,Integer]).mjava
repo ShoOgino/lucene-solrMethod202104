@@ -9,7 +9,7 @@
    * @param seenPatterns map from condition -> index of patterns, for deduplication.
    * @throws IOException Can be thrown while reading the rule
    */
-  private void parseAffix(CharArrayMap<List<Affix>> affixes,
+  private void parseAffix(CharArrayMap<List<Character>> affixes,
                           String header,
                           LineNumberReader reader,
                           String conditionPattern,
@@ -21,14 +21,20 @@
     boolean crossProduct = args[2].equals("Y");
     
     int numLines = Integer.parseInt(args[3]);
+    affixData = ArrayUtil.grow(affixData, (currentAffix << 3) + (numLines << 3));
+    ByteArrayDataOutput affixWriter = new ByteArrayDataOutput(affixData, currentAffix << 3, numLines << 3);
+    
     for (int i = 0; i < numLines; i++) {
+      if (currentAffix > Short.MAX_VALUE) {
+        throw new UnsupportedOperationException("Too many affixes, please report this to dev@lucene.apache.org");
+      }
+      assert affixWriter.getPosition() == currentAffix << 3;
       String line = reader.readLine();
       String ruleArgs[] = line.split("\\s+");
 
       if (ruleArgs.length < 5) {
           throw new ParseException("The affix file contains a rule with less than five elements", reader.getLineNumber());
       }
-
       
       char flag = flagParsingStrategy.parseFlag(ruleArgs[1]);
       String strip = ruleArgs[2].equals("0") ? "" : ruleArgs[2];
@@ -69,36 +75,42 @@
         patterns.add(pattern);
       }
       
-      Affix affix = new Affix();
       scratch.copyChars(strip);
-      int ord = stripLookup.add(scratch);
-      if (ord < 0) {
+      int stripOrd = stripLookup.add(scratch);
+      if (stripOrd < 0) {
         // already exists in our hash
-        ord = (-ord)-1;
+        stripOrd = (-stripOrd)-1;
       }
-      affix.setStrip(ord);
-      affix.setFlag(flag);
-      affix.setCondition(patternIndex);
-      affix.setCrossProduct(crossProduct);
+
       if (appendFlags == null) {
         appendFlags = NOFLAGS;
       }
       
       final int hashCode = encodeFlagsWithHash(scratch, appendFlags);
-      ord = flagLookup.add(scratch, hashCode);
-      if (ord < 0) {
+      int appendFlagsOrd = flagLookup.add(scratch, hashCode);
+      if (appendFlagsOrd < 0) {
         // already exists in our hash
-        ord = (-ord)-1;
+        appendFlagsOrd = (-appendFlagsOrd)-1;
+      } else if (appendFlagsOrd > Short.MAX_VALUE) {
+        // this limit is probably flexible, but its a good sanity check too
+        throw new UnsupportedOperationException("Too many unique flags, please report this to dev@lucene.apache.org");
       }
-      affix.setAppendFlags(ord);
       
-      List<Affix> list = affixes.get(affixArg);
+      affixWriter.writeShort((short)flag);
+      affixWriter.writeShort((short)stripOrd);
+      // encode crossProduct into patternIndex
+      int patternOrd = patternIndex.intValue() << 1 | (crossProduct ? 1 : 0);
+      affixWriter.writeShort((short)patternOrd);
+      affixWriter.writeShort((short)appendFlagsOrd);
+      
+      List<Character> list = affixes.get(affixArg);
       if (list == null) {
-        list = new ArrayList<Affix>();
+        list = new ArrayList<Character>();
         affixes.put(affixArg, list);
       }
       
-      list.add(affix);
+      list.add((char)currentAffix);
+      currentAffix++;
     }
   }
 

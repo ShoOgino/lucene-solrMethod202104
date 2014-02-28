@@ -1,9 +1,9 @@
   /** Retrieve suggestions, specifying whether all terms
    *  must match ({@code allTermsRequired}) and whether the hits
    *  should be highlighted ({@code doHighlight}). */
-  public List<LookupResult> lookup(CharSequence key, int num, boolean allTermsRequired, boolean doHighlight) {
+  public List<LookupResult> lookup(CharSequence key, int num, boolean allTermsRequired, boolean doHighlight) throws IOException {
 
-    if (searcher == null) {
+    if (searcherMgr == null) {
       throw new IllegalStateException("suggester was not built");
     }
 
@@ -14,15 +14,19 @@
       occur = BooleanClause.Occur.SHOULD;
     }
 
+    BooleanQuery query;
+    Set<String> matchedTokens = new HashSet<String>();
+    String prefixToken = null;
+
     try (TokenStream ts = queryAnalyzer.tokenStream("", new StringReader(key.toString()))) {
       //long t0 = System.currentTimeMillis();
       ts.reset();
       final CharTermAttribute termAtt = ts.addAttribute(CharTermAttribute.class);
       final OffsetAttribute offsetAtt = ts.addAttribute(OffsetAttribute.class);
       String lastToken = null;
-      BooleanQuery query = new BooleanQuery();
+      query = new BooleanQuery();
       int maxEndOffset = -1;
-      final Set<String> matchedTokens = new HashSet<String>();
+      matchedTokens = new HashSet<String>();
       while (ts.incrementToken()) {
         if (lastToken != null) {  
           matchedTokens.add(lastToken);
@@ -35,7 +39,6 @@
       }
       ts.end();
 
-      String prefixToken = null;
       if (lastToken != null) {
         Query lastQuery;
         if (maxEndOffset == offsetAtt.endOffset()) {
@@ -58,37 +61,43 @@
           query.add(lastQuery, occur);
         }
       }
-      ts.close();
+    }
 
-      // TODO: we could allow blended sort here, combining
-      // weight w/ score.  Now we ignore score and sort only
-      // by weight:
+    // TODO: we could allow blended sort here, combining
+    // weight w/ score.  Now we ignore score and sort only
+    // by weight:
 
-      //System.out.println("INFIX query=" + query);
+    //System.out.println("INFIX query=" + query);
 
-      Query finalQuery = finishQuery(query, allTermsRequired);
+    Query finalQuery = finishQuery(query, allTermsRequired);
 
-      // We sorted postings by weight during indexing, so we
-      // only retrieve the first num hits now:
-      FirstNDocsCollector c = new FirstNDocsCollector(num);
-      try {
-        searcher.search(finalQuery, c);
-      } catch (FirstNDocsCollector.DoneException done) {
-      }
-      TopDocs hits = c.getHits();
+    //System.out.println("finalQuery=" + query);
+
+    // Sort by weight, descending:
+    TopFieldCollector c = TopFieldCollector.create(new Sort(new SortField("weight", SortField.Type.LONG, true)),
+                                                   num, true, false, false, false);
+
+    // We sorted postings by weight during indexing, so we
+    // only retrieve the first num hits now:
+    Collector c2 = new EarlyTerminatingSortingCollector(c, sorter, num);
+    IndexSearcher searcher = searcherMgr.acquire();
+    List<LookupResult> results = null;
+    try {
+      //System.out.println("got searcher=" + searcher);
+      searcher.search(finalQuery, c2);
+
+      TopFieldDocs hits = (TopFieldDocs) c.topDocs();
 
       // Slower way if postings are not pre-sorted by weight:
       // hits = searcher.search(query, null, num, new Sort(new SortField("weight", SortField.Type.LONG, true)));
-
-      List<LookupResult> results = createResults(hits, num, key, doHighlight, matchedTokens, prefixToken);
-
-      //System.out.println((System.currentTimeMillis() - t0) + " msec for infix suggest");
-      //System.out.println(results);
-
-      return results;
-
-    } catch (IOException ioe) {
-      throw new RuntimeException(ioe);
+      results = createResults(searcher, hits, num, key, doHighlight, matchedTokens, prefixToken);
+    } finally {
+      searcherMgr.release(searcher);
     }
+
+    //System.out.println((System.currentTimeMillis() - t0) + " msec for infix suggest");
+    //System.out.println(results);
+
+    return results;
   }
 

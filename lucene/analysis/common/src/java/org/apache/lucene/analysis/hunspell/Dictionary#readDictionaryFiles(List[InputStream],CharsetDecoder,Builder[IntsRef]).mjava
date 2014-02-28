@@ -5,7 +5,7 @@
    * @param decoder CharsetDecoder used to decode the contents of the file
    * @throws IOException Can be thrown while reading from the file
    */
-  private void readDictionaryFiles(List<InputStream> dictionaries, CharsetDecoder decoder, Builder<Long> words) throws IOException {
+  private void readDictionaryFiles(List<InputStream> dictionaries, CharsetDecoder decoder, Builder<IntsRef> words) throws IOException {
     BytesRef flagsScratch = new BytesRef();
     IntsRef scratchInts = new IntsRef();
     
@@ -64,7 +64,13 @@
           }
         }
         
-        return scratch1.compareTo(scratch2);
+        int cmp = scratch1.compareTo(scratch2);
+        if (cmp == 0) {
+          // tie break on whole row
+          return o1.compareTo(o2);
+        } else {
+          return cmp;
+        }
       }
     });
     sorter.sort(unsorted, sorted);
@@ -76,8 +82,8 @@
     // TODO: the flags themselves can be double-chars (long) or also numeric
     // either way the trick is to encode them as char... but they must be parsed differently
     
-    BytesRef currentEntry = new BytesRef();
-    char currentFlags[] = new char[0];
+    String currentEntry = null;
+    IntsRef currentOrds = new IntsRef();
     
     String line;
     while (reader.read(scratchLine)) {
@@ -91,10 +97,14 @@
         entry = line;
       } else {
         // note, there can be comments (morph description) after a flag.
-        // we should really look for any whitespace
+        // we should really look for any whitespace: currently just tab and space
         int end = line.indexOf('\t', flagSep);
         if (end == -1)
           end = line.length();
+        int end2 = line.indexOf(' ', flagSep);
+        if (end2 == -1)
+          end2 = line.length();
+        end = Math.min(end, end2);
         
         String flagPart = line.substring(flagSep + 1, end);
         if (aliasCount > 0) {
@@ -106,34 +116,34 @@
         entry = line.substring(0, flagSep);
       }
 
-      BytesRef scratch = new BytesRef(entry);
-      int cmp = scratch.compareTo(currentEntry);
+      int cmp = currentEntry == null ? 1 : entry.compareTo(currentEntry);
       if (cmp < 0) {
-        throw new IllegalArgumentException("out of order: " + scratch.utf8ToString() + " < " + currentEntry.utf8ToString());
-      } else if (cmp == 0) {
-        currentFlags = merge(currentFlags, wordForm);
+        throw new IllegalArgumentException("out of order: " + entry + " < " + currentEntry);
       } else {
-        final int hashCode = encodeFlagsWithHash(flagsScratch, currentFlags);
+        final int hashCode = encodeFlagsWithHash(flagsScratch, wordForm);
         int ord = flagLookup.add(flagsScratch, hashCode);
         if (ord < 0) {
           // already exists in our hash
           ord = (-ord)-1;
         }
-        UnicodeUtil.UTF8toUTF32(currentEntry, scratchInts);
-        words.add(scratchInts, (long)ord);
-        currentEntry = scratch;
-        currentFlags = wordForm;
+        // finalize current entry, and switch "current" if necessary
+        if (cmp > 0 && currentEntry != null) {
+          Util.toUTF32(currentEntry, scratchInts);
+          words.add(scratchInts, currentOrds);
+        }
+        // swap current
+        if (cmp > 0 || currentEntry == null) {
+          currentEntry = entry;
+          currentOrds = new IntsRef(); // must be this way
+        }
+        currentOrds.grow(currentOrds.length+1);
+        currentOrds.ints[currentOrds.length++] = ord;
       }
     }
     
-    final int hashCode = encodeFlagsWithHash(flagsScratch, currentFlags);
-    int ord = flagLookup.add(flagsScratch, hashCode);
-    if (ord < 0) {
-      // already exists in our hash
-      ord = (-ord)-1;
-    }
-    UnicodeUtil.UTF8toUTF32(currentEntry, scratchInts);
-    words.add(scratchInts, (long)ord);
+    // finalize last entry
+    Util.toUTF32(currentEntry, scratchInts);
+    words.add(scratchInts, currentOrds);
     
     reader.close();
     sorted.delete();

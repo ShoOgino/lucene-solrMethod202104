@@ -1,0 +1,121 @@
+  /**
+   * Generates a list of stems for the provided word
+   *
+   * @param word Word to generate the stems for
+   * @param previous previous affix that was removed (so we dont remove same one twice)
+   * @param prevFlag Flag from a previous stemming step that need to be cross-checked with any affixes in this recursive step
+   * @param prefixFlag flag of the most inner removed prefix, so that when removing a suffix, its also checked against the word
+   * @param recursionDepth current recursiondepth
+   * @param doPrefix true if we should remove prefixes
+   * @param doSuffix true if we should remove suffixes
+   * @param previousWasPrefix true if the previous removal was a prefix:
+   *        if we are removing a suffix, and it has no continuation requirements, its ok.
+   *        but two prefixes (COMPLEXPREFIXES) or two suffixes must have continuation requirements to recurse. 
+   * @return List of stems, or empty list if no stems are found
+   */
+  private List<CharsRef> stem(char word[], int length, int previous, int prevFlag, int prefixFlag, int recursionDepth, boolean doPrefix, boolean doSuffix, boolean previousWasPrefix) {
+    
+    // TODO: allow this stuff to be reused by tokenfilter
+    List<CharsRef> stems = new ArrayList<CharsRef>();
+    
+    if (doPrefix) {
+      for (int i = length - 1; i >= 0; i--) {
+        IntsRef prefixes = dictionary.lookupPrefix(word, 0, i);
+        if (prefixes == null) {
+          continue;
+        }
+        
+        for (int j = 0; j < prefixes.length; j++) {
+          int prefix = prefixes.ints[prefixes.offset + j];
+          if (prefix == previous) {
+            continue;
+          }
+          affixReader.setPosition(8 * prefix);
+          char flag = (char) (affixReader.readShort() & 0xffff);
+          char stripOrd = (char) (affixReader.readShort() & 0xffff);
+          int condition = (char) (affixReader.readShort() & 0xffff);
+          boolean crossProduct = (condition & 1) == 1;
+          condition >>>= 1;
+          char append = (char) (affixReader.readShort() & 0xffff);
+          
+          final boolean compatible;
+          if (recursionDepth == 0) {
+            compatible = true;
+          } else if (crossProduct) {
+            // cross check incoming continuation class (flag of previous affix) against list.
+            dictionary.flagLookup.get(append, scratch);
+            char appendFlags[] = Dictionary.decodeFlags(scratch);
+            assert prevFlag >= 0;
+            compatible = hasCrossCheckedFlag((char)prevFlag, appendFlags, false);
+          } else {
+            compatible = false;
+          }
+          
+          if (compatible) {
+            int deAffixedStart = i;
+            int deAffixedLength = length - deAffixedStart;
+            
+            dictionary.stripLookup.get(stripOrd, scratch);
+            String strippedWord = new StringBuilder().append(scratch.utf8ToString())
+                .append(word, deAffixedStart, deAffixedLength)
+                .toString();
+            
+            List<CharsRef> stemList = applyAffix(strippedWord.toCharArray(), strippedWord.length(), prefix, -1, recursionDepth, true);
+            
+            stems.addAll(stemList);
+          }
+        }
+      }
+    } 
+    
+    if (doSuffix) {
+      for (int i = 0; i < length; i++) {
+        IntsRef suffixes = dictionary.lookupSuffix(word, i, length - i);
+        if (suffixes == null) {
+          continue;
+        }
+        
+        for (int j = 0; j < suffixes.length; j++) {
+          int suffix = suffixes.ints[suffixes.offset + j];
+          if (suffix == previous) {
+            continue;
+          }
+          affixReader.setPosition(8 * suffix);
+          char flag = (char) (affixReader.readShort() & 0xffff);
+          char stripOrd = (char) (affixReader.readShort() & 0xffff);
+          int condition = (char) (affixReader.readShort() & 0xffff);
+          boolean crossProduct = (condition & 1) == 1;
+          condition >>>= 1;
+          char append = (char) (affixReader.readShort() & 0xffff);
+          
+          final boolean compatible;
+          if (recursionDepth == 0) {
+            compatible = true;
+          } else if (crossProduct) {
+            // cross check incoming continuation class (flag of previous affix) against list.
+            dictionary.flagLookup.get(append, scratch);
+            char appendFlags[] = Dictionary.decodeFlags(scratch);
+            assert prevFlag >= 0;
+            compatible = hasCrossCheckedFlag((char)prevFlag, appendFlags, previousWasPrefix);
+          } else {
+            compatible = false;
+          }
+          
+          if (compatible) {
+            int appendLength = length - i;
+            int deAffixedLength = length - appendLength;
+            // TODO: can we do this in-place?
+            dictionary.stripLookup.get(stripOrd, scratch);
+            String strippedWord = new StringBuilder().append(word, 0, deAffixedLength).append(scratch.utf8ToString()).toString();
+            
+            List<CharsRef> stemList = applyAffix(strippedWord.toCharArray(), strippedWord.length(), suffix, prefixFlag, recursionDepth, false);
+            
+            stems.addAll(stemList);
+          }
+        }
+      }
+    }
+
+    return stems;
+  }
+

@@ -23,12 +23,32 @@
 
       // sort ids from lowest to highest so we can access them in order
       int nDocs = docList.size();
-      long[] sortedIds = new long[nDocs];
-      DocIterator it = rb.getResults().docList.iterator();
+      final long[] sortedIds = new long[nDocs];
+      final float[] scores = new float[nDocs]; // doc scores, parallel to sortedIds
+      DocList docs = rb.getResults().docList;
+      DocIterator it = docs.iterator();
       for (int i=0; i<nDocs; i++) {
         sortedIds[i] = (((long)it.nextDoc()) << 32) | i;
+        scores[i] = docs.hasScores() ? it.score() : Float.NaN;
       }
-      Arrays.sort(sortedIds);
+
+      // sort ids and scores together
+      new InPlaceMergeSorter() {
+        @Override
+        protected void swap(int i, int j) {
+          long tmpId = sortedIds[i];
+          float tmpScore = scores[i];
+          sortedIds[i] = sortedIds[j];
+          scores[i] = scores[j];
+          sortedIds[j] = tmpId;
+          scores[j] = tmpScore;
+        }
+
+        @Override
+        protected int compare(int i, int j) {
+          return Long.compare(sortedIds[i], sortedIds[j]);
+        }
+      }.sort(0, sortedIds.length);
 
       SortSpec sortSpec = rb.getSortSpec();
       Sort sort = searcher.weightSort(sortSpec.getSort());
@@ -50,7 +70,9 @@
         int lastIdx = -1;
         int idx = 0;
 
-        for (long idAndPos : sortedIds) {
+        for (int i = 0; i < sortedIds.length; ++i) {
+          long idAndPos = sortedIds[i];
+          float score = scores[i];
           int doc = (int)(idAndPos >>> 32);
           int position = (int)idAndPos;
 
@@ -69,6 +91,7 @@
           }
 
           doc -= currentLeaf.docBase;  // adjust for what segment this is in
+          comparator.setScorer(new FakeScorer(doc, score));
           comparator.copy(0, doc);
           Object val = comparator.value(0);
           if (null != ft) val = ft.marshalSortValue(val); 

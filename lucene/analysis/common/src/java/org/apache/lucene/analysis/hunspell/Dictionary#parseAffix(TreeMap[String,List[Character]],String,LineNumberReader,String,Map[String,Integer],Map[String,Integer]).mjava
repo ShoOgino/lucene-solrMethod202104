@@ -13,7 +13,8 @@
                           String header,
                           LineNumberReader reader,
                           String conditionPattern,
-                          Map<String,Integer> seenPatterns) throws IOException, ParseException {
+                          Map<String,Integer> seenPatterns,
+                          Map<String,Integer> seenStrips) throws IOException, ParseException {
     
     BytesRef scratch = new BytesRef();
     StringBuilder sb = new StringBuilder();
@@ -52,7 +53,10 @@
         
         appendFlags = flagParsingStrategy.parseFlags(flagPart);
         Arrays.sort(appendFlags);
+        twoStageAffix = true;
       }
+      
+      // TODO: add test and fix zero-affix handling!
 
       String condition = ruleArgs.length > 4 ? ruleArgs[4] : ".";
       // at least the gascon affix file has this issue
@@ -64,7 +68,16 @@
         condition = condition.replace("-", "\\-");
       }
 
-      String regex = String.format(Locale.ROOT, conditionPattern, condition);
+      final String regex;
+      if (".".equals(condition)) {
+        regex = ".*"; // Zero condition is indicated by dot
+      } else if (condition.equals(strip)) {
+        regex = ".*"; // TODO: optimize this better:
+                      // if we remove 'strip' from condition, we don't have to append 'strip' to check it...!
+                      // but this is complicated...
+      } else {
+        regex = String.format(Locale.ROOT, conditionPattern, condition);
+      }
       
       // deduplicate patterns
       Integer patternIndex = seenPatterns.get(regex);
@@ -74,17 +87,17 @@
           throw new UnsupportedOperationException("Too many patterns, please report this to dev@lucene.apache.org");          
         }
         seenPatterns.put(regex, patternIndex);
-        Pattern pattern = Pattern.compile(regex);
+        CharacterRunAutomaton pattern = new CharacterRunAutomaton(new RegExp(regex, RegExp.NONE).toAutomaton());
         patterns.add(pattern);
       }
       
-      scratch.copyChars(strip);
-      int stripOrd = stripLookup.add(scratch);
-      if (stripOrd < 0) {
-        // already exists in our hash
-        stripOrd = (-stripOrd)-1;
-      } else if (stripOrd > Character.MAX_VALUE) {
-        throw new UnsupportedOperationException("Too many unique strips, please report this to dev@lucene.apache.org");
+      Integer stripOrd = seenStrips.get(strip);
+      if (stripOrd == null) {
+        stripOrd = seenStrips.size();
+        seenStrips.put(strip, stripOrd);
+        if (stripOrd > Character.MAX_VALUE) {
+          throw new UnsupportedOperationException("Too many unique strips, please report this to dev@lucene.apache.org");
+        }
       }
 
       if (appendFlags == null) {
@@ -102,7 +115,7 @@
       }
       
       affixWriter.writeShort((short)flag);
-      affixWriter.writeShort((short)stripOrd);
+      affixWriter.writeShort((short)stripOrd.intValue());
       // encode crossProduct into patternIndex
       int patternOrd = patternIndex.intValue() << 1 | (crossProduct ? 1 : 0);
       affixWriter.writeShort((short)patternOrd);

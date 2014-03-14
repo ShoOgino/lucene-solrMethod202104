@@ -9,6 +9,11 @@
       // if it does not, find best nodes to create more cores
       
       int repFactor = message.getInt( REPLICATION_FACTOR, 1);
+
+      String async = null;
+      if (message.containsKey("async"))
+        async = message.getStr("async");
+
       Integer numSlices = message.getInt(NUM_SLICES, null);
       String router = message.getStr("router.name", DocRouter.DEFAULT_NAME);
       List<String> shardNames = new ArrayList<>();
@@ -94,6 +99,9 @@
       if (!created)
         throw new SolrException(ErrorCode.SERVER_ERROR, "Could not fully createcollection: " + message.getStr("name"));
 
+      // For tracking async calls.
+      HashMap<String, String> requestMap = new HashMap<String, String>();
+
       log.info("Creating SolrCores for new collection, shardNames {} , replicationFactor : {}", shardNames, repFactor);
       Map<String ,ShardRequest> coresToCreate = new LinkedHashMap<>();
       for (int i = 1; i <= shardNames.size(); i++) {
@@ -129,6 +137,11 @@
           params.set(CoreAdminParams.COLLECTION, collectionName);
           params.set(CoreAdminParams.SHARD, sliceName);
           params.set(ZkStateReader.NUM_SHARDS_PROP, numSlices);
+          String replica = zkStateReader.getBaseUrlForNodeName(nodeName);
+          if (replica.startsWith("http://")) replica = replica.substring(7);
+
+          setupAsyncRequest(async, requestMap, params, nodeName);
+
           addPropertyParams(message, params);
 
           ShardRequest sreq = new ShardRequest();
@@ -156,13 +169,9 @@
         }
       }
 
-      ShardResponse srsp;
-      do {
-        srsp = shardHandler.takeCompletedOrError();
-        if (srsp != null) {
-          processResponse(results, srsp);
-        }
-      } while (srsp != null);
+      processResponses(results);
+
+      completeAsyncRequest(async, requestMap, results);
 
       log.info("Finished create command on all shards for collection: "
           + collectionName);

@@ -7,6 +7,18 @@
               "Core container instance missing");
     }
     //boolean doPersist = false;
+    String taskId = req.getParams().get("async");
+    TaskObject taskObject = new TaskObject(taskId);
+
+    if(taskId != null) {
+      // Put the tasks into the maps for tracking
+      if (getMap(RUNNING).containsKey(taskId) || getMap(COMPLETED).containsKey(taskId) || getMap(FAILED).containsKey(taskId)) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+            "Duplicate request with the same requestid found.");
+      }
+
+      addTask(RUNNING, taskObject);
+    }
 
     // Pick the action
     SolrParams params = req.getParams();
@@ -18,96 +30,15 @@
         this.handleCustomAction(req, rsp);
       }
     }
-    if (action != null) {
-      switch (action) {
-        case CREATE: {
-          this.handleCreateAction(req, rsp);
-          break;
-        }
 
-        case RENAME: {
-          this.handleRenameAction(req, rsp);
-          break;
-        }
-
-        case UNLOAD: {
-          this.handleUnloadAction(req, rsp);
-          break;
-        }
-
-        case STATUS: {
-          this.handleStatusAction(req, rsp);
-          break;
-
-        }
-
-        case PERSIST: {
-          this.handlePersistAction(req, rsp);
-          break;
-        }
-
-        case RELOAD: {
-          this.handleReloadAction(req, rsp);
-          break;
-        }
-
-        case SWAP: {
-          this.handleSwapAction(req, rsp);
-          break;
-        }
-
-        case MERGEINDEXES: {
-          this.handleMergeAction(req, rsp);
-          break;
-        }
-
-        case SPLIT: {
-          this.handleSplitAction(req, rsp);
-          break;
-        }
-
-        case PREPRECOVERY: {
-          this.handleWaitForStateAction(req, rsp);
-          break;
-        }
-        
-        case REQUESTRECOVERY: {
-          this.handleRequestRecoveryAction(req, rsp);
-          break;
-        }
-        
-        case REQUESTSYNCSHARD: {
-          this.handleRequestSyncAction(req, rsp);
-          break;
-        }
-        
-        // todo : Can this be done by the regular RecoveryStrategy route?
-        case REQUESTAPPLYUPDATES: {
-          this.handleRequestApplyUpdatesAction(req, rsp);
-          break;
-        }
-        case REQUESTBUFFERUPDATES:  {
-          this.handleRequestBufferUpdatesAction(req, rsp);
-          break;
-        }
-        case OVERSEEROP:{
-          ZkController zkController = coreContainer.getZkController();
-          if(zkController != null){
-            String op = req.getParams().get("op");
-            if("leader".equals(op)){
-              zkController.forceOverSeer();
-            } else if ("rejoin".equals(op)) zkController.rejoinOverseerElection();
-          }
-          break;
-        }
-        default: {
-          this.handleCustomAction(req, rsp);
-          break;
-        }
-        case LOAD:
-          break;
-      }
+    if (taskId == null) {
+      handleRequestInternal(req, rsp, action);
+    } else {
+      ParallelCoreAdminHandlerThread parallelHandlerThread = new ParallelCoreAdminHandlerThread(req, rsp, action, taskObject);
+      if(parallelExecutor == null || parallelExecutor.isShutdown())
+        parallelExecutor = Executors.newFixedThreadPool(50,
+                  new DefaultSolrThreadFactory("parallelCoreAdminExecutor"));
+        parallelExecutor.execute(parallelHandlerThread);
     }
-    rsp.setHttpCaching(false);
   }
 

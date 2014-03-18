@@ -8,31 +8,29 @@
 
     final boolean biasContains = (operation == SpatialOperation.Contains);
 
+    //Main index loop:
     Map<String, Shape> indexedShapes = new LinkedHashMap<>();
     Map<String, Shape> indexedShapesGS = new LinkedHashMap<>();//grid snapped
     final int numIndexedShapes = randomIntBetween(1, 6);
+    boolean indexedAtLeastOneShapePair = false;
     for (int i = 0; i < numIndexedShapes; i++) {
       String id = "" + i;
       Shape indexedShape;
-      Shape indexedShapeGS; //(grid-snapped)
       int R = random().nextInt(12);
       if (R == 0) {//1 in 12
-        indexedShape = null; //no shape for this doc
-        indexedShapeGS = null;
-      } else if (R % 3 == 0) {//4 in 12 (0,3,6,9)
+        indexedShape = null;
+      } else if (R == 1) {//1 in 12
+        indexedShape = randomPoint();//just one point
+      } else if (R <= 4) {//3 in 12
         //comprised of more than one shape
-        Rectangle shape1 = randomRectangle();
-        Rectangle shape2 = randomRectangle();
-        indexedShape = new ShapePair(shape1, shape2, biasContains);
-        indexedShapeGS = new ShapePair(gridSnap(shape1), gridSnap(shape2), biasContains);
+        indexedShape = randomShapePairRect(biasContains);
+        indexedAtLeastOneShapePair = true;
       } else {
-        //just one shape
-        indexedShape = randomRectangle();
-        indexedShapeGS = gridSnap(indexedShape);
+        indexedShape = randomRectangle();//just one rect
       }
-      //TODO sometimes index a point. Need to fix LUCENE-4978 first though.
+
       indexedShapes.put(id, indexedShape);
-      indexedShapesGS.put(id, indexedShapeGS);
+      indexedShapesGS.put(id, gridSnap(indexedShape));
 
       adoc(id, indexedShape);
 
@@ -53,12 +51,23 @@
 
     commit();
 
+    //Main query loop:
     final int numQueryShapes = atLeast(20);
     for (int i = 0; i < numQueryShapes; i++) {
       int scanLevel = randomInt(grid.getMaxLevels());
       ((RecursivePrefixTreeStrategy) strategy).setPrefixGridScanLevel(scanLevel);
 
-      final Shape queryShape = randomRectangle();
+      final Shape queryShape;
+      switch (randomInt(10)) {
+        case 0: queryShape = randomPoint(); break;
+        case 1:case 2:case 3:
+          if (!indexedAtLeastOneShapePair) { // avoids ShapePair.relate(ShapePair), which isn't reliable
+            queryShape = randomShapePairRect(biasContains);
+            break;
+          }
+        default: queryShape = randomRectangle();
+      }
+      final Shape queryShapeGS = gridSnap(queryShape);
 
       final boolean opIsDisjoint = operation == SpatialOperation.IsDisjointTo;
 
@@ -80,7 +89,7 @@
           if (opIsDisjoint) {
             //if no longer intersect after buffering them, for disjoint, remember this
             indexedShapeCompare = indexedShapesGS.get(id);
-            queryShapeCompare = gridSnap(queryShape);
+            queryShapeCompare = queryShapeGS;
             if (!operation.evaluate(indexedShapeCompare, queryShapeCompare))
               secondaryIds.add(id);
           }
@@ -88,14 +97,14 @@
           //buffer either the indexed or query shape (via gridSnap) and try again
           if (operation == SpatialOperation.Intersects) {
             indexedShapeCompare = indexedShapesGS.get(id);
-            queryShapeCompare = gridSnap(queryShape);
+            queryShapeCompare = queryShapeGS;
             //TODO Unfortunately, grid-snapping both can result in intersections that otherwise
             // wouldn't happen when the grids are adjacent. Not a big deal but our test is just a
             // bit more lenient.
           } else if (operation == SpatialOperation.Contains) {
             indexedShapeCompare = indexedShapesGS.get(id);
           } else if (operation == SpatialOperation.IsWithin) {
-            queryShapeCompare = gridSnap(queryShape);
+            queryShapeCompare = queryShapeGS;
           }
           if (operation.evaluate(indexedShapeCompare, queryShapeCompare))
             secondaryIds.add(id);
@@ -104,6 +113,8 @@
 
       //Search and verify results
       SpatialArgs args = new SpatialArgs(operation, queryShape);
+      if (queryShape instanceof ShapePair)
+        args.setDistErrPct(0.0);//a hack; we want to be more detailed than gridSnap(queryShape)
       Query query = strategy.makeQuery(args);
       SearchResults got = executeQuery(query, 100);
       Set<String> remainingExpectedIds = new LinkedHashSet<>(expectedIds);

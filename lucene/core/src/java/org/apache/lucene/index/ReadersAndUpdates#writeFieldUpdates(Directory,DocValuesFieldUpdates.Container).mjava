@@ -1,0 +1,262 @@
+  // Writes field updates (new _X_N updates files) to the directory
+  public synchronized void writeFieldUpdates(Directory dir, DocValuesFieldUpdates.Container dvUpdates) throws IOException {
+    assert Thread.holdsLock(writer);
+    //System.out.println("rld.writeFieldUpdates: seg=" + info + " numericFieldUpdates=" + numericFieldUpdates);
+    
+    assert dvUpdates.any();
+    
+    // Do this so we can delete any created files on
+    // exception; this saves all codecs from having to do
+    // it:
+    TrackingDirectoryWrapper trackingDir = new TrackingDirectoryWrapper(dir);
+    
+    FieldInfos fieldInfos = null;
+    boolean success = false;
+    try {
+      final Codec codec = info.info.getCodec();
+
+      // reader could be null e.g. for a just merged segment (from
+      // IndexWriter.commitMergedDeletes).
+      final SegmentReader reader = this.reader == null ? new SegmentReader(info, IOContext.READONCE) : this.reader;
+      try {
+        // clone FieldInfos so that we can update their dvGen separately from
+        // the reader's infos and write them to a new fieldInfos_gen file
+        FieldInfos.Builder builder = new FieldInfos.Builder(writer.globalFieldNumberMap);
+        // cannot use builder.add(reader.getFieldInfos()) because it does not
+        // clone FI.attributes as well FI.dvGen
+        for (FieldInfo fi : reader.getFieldInfos()) {
+          FieldInfo clone = builder.add(fi);
+          // copy the stuff FieldInfos.Builder doesn't copy
+          if (fi.attributes() != null) {
+            for (Entry<String,String> e : fi.attributes().entrySet()) {
+              clone.putAttribute(e.getKey(), e.getValue());
+            }
+          }
+          clone.setDocValuesGen(fi.getDocValuesGen());
+        }
+        // create new fields or update existing ones to have NumericDV type
+        for (String f : dvUpdates.numericDVUpdates.keySet()) {
+          builder.addOrUpdate(f, NumericDocValuesField.TYPE);
+        }
+        // create new fields or update existing ones to have BinaryDV type
+        for (String f : dvUpdates.binaryDVUpdates.keySet()) {
+          builder.addOrUpdate(f, BinaryDocValuesField.TYPE);
+        }
+        
+        fieldInfos = builder.finish();
+        final long nextFieldInfosGen = info.getNextFieldInfosGen();
+        final String segmentSuffix = Long.toString(nextFieldInfosGen, Character.MAX_RADIX);
+        final SegmentWriteState state = new SegmentWriteState(null, trackingDir, info.info, fieldInfos, null, IOContext.DEFAULT, segmentSuffix);
+        final DocValuesFormat docValuesFormat = codec.docValuesFormat();
+        final DocValuesConsumer fieldsConsumer = docValuesFormat.fieldsConsumer(state);
+        boolean fieldsConsumerSuccess = false;
+        try {
+//          System.out.println("[" + Thread.currentThread().getName() + "] RLD.writeFieldUpdates: applying numeric updates; seg=" + info + " updates=" + numericFieldUpdates);
+          for (Entry<String,NumericDocValuesFieldUpdates> e : dvUpdates.numericDVUpdates.entrySet()) {
+            final String field = e.getKey();
+            final NumericDocValuesFieldUpdates fieldUpdates = e.getValue();
+            final FieldInfo fieldInfo = fieldInfos.fieldInfo(field);
+            assert fieldInfo != null;
+
+            fieldInfo.setDocValuesGen(nextFieldInfosGen);
+            // write the numeric updates to a new gen'd docvalues file
+            fieldsConsumer.addNumericField(fieldInfo, new Iterable<Number>() {
+              final NumericDocValues currentValues = reader.getNumericDocValues(field);
+              final Bits docsWithField = reader.getDocsWithField(field);
+              final int maxDoc = reader.maxDoc();
+              final NumericDocValuesFieldUpdates.Iterator updatesIter = fieldUpdates.iterator();
+              @Override
+              public Iterator<Number> iterator() {
+                updatesIter.reset();
+                return new Iterator<Number>() {
+
+                  int curDoc = -1;
+                  int updateDoc = updatesIter.nextDoc();
+                  
+                  @Override
+                  public boolean hasNext() {
+                    return curDoc < maxDoc - 1;
+                  }
+
+                  @Override
+                  public Number next() {
+                    if (++curDoc >= maxDoc) {
+                      throw new NoSuchElementException("no more documents to return values for");
+                    }
+                    if (curDoc == updateDoc) { // this document has an updated value
+                      Long value = updatesIter.value(); // either null (unset value) or updated value
+                      updateDoc = updatesIter.nextDoc(); // prepare for next round
+                      return value;
+                    } else {
+                      // no update for this document
+                      assert curDoc < updateDoc;
+                      if (currentValues != null && docsWithField.get(curDoc)) {
+                        // only read the current value if the document had a value before
+                        return currentValues.get(curDoc);
+                      } else {
+                        return null;
+                      }
+                    }
+                  }
+
+                  @Override
+                  public void remove() {
+                    throw new UnsupportedOperationException("this iterator does not support removing elements");
+                  }
+                };
+              }
+            });
+          }
+
+//        System.out.println("[" + Thread.currentThread().getName() + "] RAU.writeFieldUpdates: applying binary updates; seg=" + info + " updates=" + dvUpdates.binaryDVUpdates);
+        for (Entry<String,BinaryDocValuesFieldUpdates> e : dvUpdates.binaryDVUpdates.entrySet()) {
+          final String field = e.getKey();
+          final BinaryDocValuesFieldUpdates dvFieldUpdates = e.getValue();
+          final FieldInfo fieldInfo = fieldInfos.fieldInfo(field);
+          assert fieldInfo != null;
+
+//          System.out.println("[" + Thread.currentThread().getName() + "] RAU.writeFieldUpdates: applying binary updates; seg=" + info + " f=" + dvFieldUpdates + ", updates=" + dvFieldUpdates);
+
+          fieldInfo.setDocValuesGen(nextFieldInfosGen);
+          // write the numeric updates to a new gen'd docvalues file
+          fieldsConsumer.addBinaryField(fieldInfo, new Iterable<BytesRef>() {
+            final BinaryDocValues currentValues = reader.getBinaryDocValues(field);
+            final Bits docsWithField = reader.getDocsWithField(field);
+            final int maxDoc = reader.maxDoc();
+            final BinaryDocValuesFieldUpdates.Iterator updatesIter = dvFieldUpdates.iterator();
+            @Override
+            public Iterator<BytesRef> iterator() {
+              updatesIter.reset();
+              return new Iterator<BytesRef>() {
+
+                int curDoc = -1;
+                int updateDoc = updatesIter.nextDoc();
+                BytesRef scratch = new BytesRef();
+                
+                @Override
+                public boolean hasNext() {
+                  return curDoc < maxDoc - 1;
+                }
+
+                @Override
+                public BytesRef next() {
+                  if (++curDoc >= maxDoc) {
+                    throw new NoSuchElementException("no more documents to return values for");
+                  }
+                  if (curDoc == updateDoc) { // this document has an updated value
+                    BytesRef value = updatesIter.value(); // either null (unset value) or updated value
+                    updateDoc = updatesIter.nextDoc(); // prepare for next round
+                    return value;
+                  } else {
+                    // no update for this document
+                    assert curDoc < updateDoc;
+                    if (currentValues != null && docsWithField.get(curDoc)) {
+                      // only read the current value if the document had a value before
+                      currentValues.get(curDoc, scratch);
+                      return scratch;
+                    } else {
+                      return null;
+                    }
+                  }
+                }
+
+                @Override
+                public void remove() {
+                  throw new UnsupportedOperationException("this iterator does not support removing elements");
+                }
+              };
+            }
+          });
+        }
+
+          codec.fieldInfosFormat().getFieldInfosWriter().write(trackingDir, info.info.name, segmentSuffix, fieldInfos, IOContext.DEFAULT);
+          fieldsConsumerSuccess = true;
+        } finally {
+          if (fieldsConsumerSuccess) {
+            fieldsConsumer.close();
+          } else {
+            IOUtils.closeWhileHandlingException(fieldsConsumer);
+          }
+        }
+      } finally {
+        if (reader != this.reader) {
+//          System.out.println("[" + Thread.currentThread().getName() + "] RLD.writeLiveDocs: closeReader " + reader);
+          reader.close();
+        }
+      }
+    
+      success = true;
+    } finally {
+      if (!success) {
+        // Advance only the nextWriteDocValuesGen so that a 2nd
+        // attempt to write will write to a new file
+        info.advanceNextWriteFieldInfosGen();
+        
+        // Delete any partially created file(s):
+        for (String fileName : trackingDir.getCreatedFiles()) {
+          try {
+            dir.deleteFile(fileName);
+          } catch (Throwable t) {
+            // Ignore so we throw only the first exc
+          }
+        }
+      }
+    }
+    
+    info.advanceFieldInfosGen();
+    // copy all the updates to mergingUpdates, so they can later be applied to the merged segment
+    if (isMerging) {
+      for (Entry<String,NumericDocValuesFieldUpdates> e : dvUpdates.numericDVUpdates.entrySet()) {
+        DocValuesFieldUpdates updates = mergingDVUpdates.get(e.getKey());
+        if (updates == null) {
+          mergingDVUpdates.put(e.getKey(), e.getValue());
+        } else {
+          updates.merge(e.getValue());
+        }
+      }
+      for (Entry<String,BinaryDocValuesFieldUpdates> e : dvUpdates.binaryDVUpdates.entrySet()) {
+        DocValuesFieldUpdates updates = mergingDVUpdates.get(e.getKey());
+        if (updates == null) {
+          mergingDVUpdates.put(e.getKey(), e.getValue());
+        } else {
+          updates.merge(e.getValue());
+        }
+      }
+    }
+    
+    // create a new map, keeping only the gens that are in use
+    Map<Long,Set<String>> genUpdatesFiles = info.getUpdatesFiles();
+    Map<Long,Set<String>> newGenUpdatesFiles = new HashMap<>();
+    final long fieldInfosGen = info.getFieldInfosGen();
+    for (FieldInfo fi : fieldInfos) {
+      long dvGen = fi.getDocValuesGen();
+      if (dvGen != -1 && !newGenUpdatesFiles.containsKey(dvGen)) {
+        if (dvGen == fieldInfosGen) {
+          newGenUpdatesFiles.put(fieldInfosGen, trackingDir.getCreatedFiles());
+        } else {
+          newGenUpdatesFiles.put(dvGen, genUpdatesFiles.get(dvGen));
+        }
+      }
+    }
+    
+    info.setGenUpdatesFiles(newGenUpdatesFiles);
+    
+    // wrote new files, should checkpoint()
+    writer.checkpoint();
+
+    // if there is a reader open, reopen it to reflect the updates
+    if (reader != null) {
+      SegmentReader newReader = new SegmentReader(info, reader, liveDocs, info.info.getDocCount() - info.getDelCount() - pendingDeleteCount);
+      boolean reopened = false;
+      try {
+        reader.decRef();
+        reader = newReader;
+        reopened = true;
+      } finally {
+        if (!reopened) {
+          newReader.decRef();
+        }
+      }
+    }
+  }
+

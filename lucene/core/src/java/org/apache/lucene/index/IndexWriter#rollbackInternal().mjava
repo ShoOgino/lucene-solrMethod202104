@@ -57,6 +57,15 @@
         deleter.refresh();
 
         lastCommitChangeCount = changeCount;
+        
+        processEvents(false, true);
+        deleter.refresh();
+        deleter.close();
+
+        IOUtils.close(writeLock);                     // release write lock
+        writeLock = null;
+        
+        assert docWriter.perThreadPool.numDeactivatedThreadStates() == docWriter.perThreadPool.getMaxThreadStates() : "" +  docWriter.perThreadPool.numDeactivatedThreadStates() + " " +  docWriter.perThreadPool.getMaxThreadStates();
       }
 
       success = true;
@@ -65,15 +74,28 @@
     } finally {
       synchronized(this) {
         if (!success) {
-          closing = false;
-          notifyAll();
-          if (infoStream.isEnabled("IW")) {
-            infoStream.message("IW", "hit exception during rollback");
+          // we tried to be nice about it: do the minimum
+          
+          // don't leak a segments_N file if there is a pending commit
+          if (pendingCommit != null) {
+            try {
+              pendingCommit.rollbackCommit(directory);
+              deleter.decRef(pendingCommit);
+            } catch (Throwable t) {}
           }
+          
+          // close all the closeables we can (but important is readerPool and writeLock to prevent leaks)
+          IOUtils.closeWhileHandlingException(mergePolicy, mergeScheduler, readerPool, deleter, writeLock);
+          writeLock = null;
+        }
+        closed = true;
+        closing = false;
+        try {
+          processEvents(false, true);
+        } finally {
+          notifyAll();
         }
       }
     }
-
-    closeInternal(false, false);
   }
 

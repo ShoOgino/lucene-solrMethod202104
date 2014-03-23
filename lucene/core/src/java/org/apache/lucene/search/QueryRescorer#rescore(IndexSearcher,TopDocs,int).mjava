@@ -1,41 +1,63 @@
   @Override
-  public TopDocs rescore(IndexSearcher searcher, TopDocs topDocs, int topN) throws IOException {
-    int[] docIDs = new int[topDocs.scoreDocs.length];
-    for(int i=0;i<docIDs.length;i++) {
-      docIDs[i] = topDocs.scoreDocs[i].doc;
-    }
+  public TopDocs rescore(IndexSearcher searcher, TopDocs firstPassTopDocs, int topN) throws IOException {
+    ScoreDoc[] hits = firstPassTopDocs.scoreDocs.clone();
+    Arrays.sort(hits,
+                new Comparator<ScoreDoc>() {
+                  @Override
+                  public int compare(ScoreDoc a, ScoreDoc b) {
+                    return a.doc - b.doc;
+                  }
+                });
 
-    TopDocs topDocs2 = searcher.search(query, new OnlyDocIDsFilter(docIDs), topDocs.scoreDocs.length);
+    List<AtomicReaderContext> leaves = searcher.getIndexReader().leaves();
 
-    // TODO: we could save small young GC cost here if we
-    // cloned the incoming ScoreDoc[], sorted that by doc,
-    // passed that to OnlyDocIDsFilter, sorted 2nd pass
-    // TopDocs by doc, did a merge sort to combine the
-    // scores, and finally re-sorted by the combined score,
-    // but that is sizable added code complexity for minor
-    // GC savings:
-    Map<Integer,Float> newScores = new HashMap<Integer,Float>();
-    for(ScoreDoc sd : topDocs2.scoreDocs) {
-      newScores.put(sd.doc, sd.score);
-    }
+    Weight weight = searcher.createNormalizedWeight(query);
 
-    ScoreDoc[] newHits = new ScoreDoc[topDocs.scoreDocs.length];
-    for(int i=0;i<topDocs.scoreDocs.length;i++) {
-      ScoreDoc sd = topDocs.scoreDocs[i];
-      Float newScore = newScores.get(sd.doc);
-      float combinedScore;
-      if (newScore == null) {
-        combinedScore = combine(sd.score, false, 0.0f);
-      } else {
-        combinedScore = combine(sd.score, true, newScore.floatValue());
+    // Now merge sort docIDs from hits, with reader's leaves:
+    int hitUpto = 0;
+    int readerUpto = -1;
+    int endDoc = 0;
+    int docBase = 0;
+    Scorer scorer = null;
+
+    while (hitUpto < hits.length) {
+      ScoreDoc hit = hits[hitUpto];
+      int docID = hit.doc;
+      AtomicReaderContext readerContext = null;
+      while (docID >= endDoc) {
+        readerUpto++;
+        readerContext = leaves.get(readerUpto);
+        endDoc = readerContext.docBase + readerContext.reader().maxDoc();
       }
-      newHits[i] = new ScoreDoc(sd.doc, combinedScore);
+
+      if (readerContext != null) {
+        // We advanced to another segment:
+        docBase = readerContext.docBase;
+        scorer = weight.scorer(readerContext, null);
+      }
+
+      int targetDoc = docID - docBase;
+      int actualDoc = scorer.docID();
+      if (actualDoc < targetDoc) {
+        actualDoc = scorer.advance(targetDoc);
+      }
+
+      if (actualDoc == targetDoc) {
+        // Query did match this doc:
+        hit.score = combine(hit.score, true, scorer.score());
+      } else {
+        // Query did not match this doc:
+        assert actualDoc > targetDoc;
+        hit.score = combine(hit.score, false, 0.0f);
+      }
+
+      hitUpto++;
     }
 
     // TODO: we should do a partial sort (of only topN)
     // instead, but typically the number of hits is
     // smallish:
-    Arrays.sort(newHits,
+    Arrays.sort(hits,
                 new Comparator<ScoreDoc>() {
                   @Override
                   public int compare(ScoreDoc a, ScoreDoc b) {
@@ -52,12 +74,12 @@
                   }
                 });
 
-    if (topN < newHits.length) {
+    if (topN < hits.length) {
       ScoreDoc[] subset = new ScoreDoc[topN];
-      System.arraycopy(newHits, 0, subset, 0, topN);
-      newHits = subset;
+      System.arraycopy(hits, 0, subset, 0, topN);
+      hits = subset;
     }
 
-    return new TopDocs(topDocs.totalHits, newHits, newHits[0].score);
+    return new TopDocs(firstPassTopDocs.totalHits, hits, hits[0].score);
   }
 

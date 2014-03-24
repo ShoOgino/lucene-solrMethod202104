@@ -82,8 +82,8 @@
         ZkNodeProps leaderprops = zkStateReader.getLeaderRetry(
             cloudDesc.getCollectionName(), cloudDesc.getShardId());
       
-        String leaderBaseUrl = leaderprops.getStr(ZkStateReader.BASE_URL_PROP);
-        String leaderCoreName = leaderprops.getStr(ZkStateReader.CORE_NAME_PROP);
+        final String leaderBaseUrl = leaderprops.getStr(ZkStateReader.BASE_URL_PROP);
+        final String leaderCoreName = leaderprops.getStr(ZkStateReader.CORE_NAME_PROP);
 
         String leaderUrl = ZkCoreNodeProps.getCoreUrl(leaderBaseUrl, leaderCoreName);
 
@@ -104,8 +104,25 @@
         zkController.publish(core.getCoreDescriptor(), ZkStateReader.RECOVERING);
         
         
-        Slice slice = zkStateReader.getClusterState().getSlice(cloudDesc.getCollectionName(), cloudDesc.getShardId());
+        final Slice slice = zkStateReader.getClusterState().getSlice(cloudDesc.getCollectionName(), cloudDesc.getShardId());
+
+        try {
+          prevSendPreRecoveryHttpUriRequest.abort();
+        } catch (NullPointerException e) {
+          // okay
+        }
+        
+        if (isClosed()) {
+          log.info("Recovery was cancelled");
+          break;
+        }
+
         sendPrepRecoveryCmd(leaderBaseUrl, leaderCoreName, slice);
+        
+        if (isClosed()) {
+          log.info("Recovery was cancelled");
+          break;
+        }
         
         // we wait a bit so that any updates on the leader
         // that started before they saw recovering state 
@@ -163,6 +180,11 @@
           log.info("PeerSync Recovery was not successful - trying replication. core=" + coreName);
         }
 
+        if (isClosed()) {
+          log.info("Recovery was cancelled");
+          break;
+        }
+        
         log.info("Starting Replication Recovery. core=" + coreName);
         
         log.info("Begin buffering updates. core=" + coreName);
@@ -173,8 +195,18 @@
 
           replicate(zkController.getNodeName(), core, leaderprops);
 
+          if (isClosed()) {
+            log.info("Recovery was cancelled");
+            break;
+          }
+          
           replay(core);
           replayed = true;
+          
+          if (isClosed()) {
+            log.info("Recovery was cancelled");
+            break;
+          }
 
           log.info("Replication Recovery was successful - registering as Active. core=" + coreName);
           // if there are pending recovery requests, don't advert as active

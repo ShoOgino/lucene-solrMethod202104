@@ -1,53 +1,54 @@
   /**
-   * Commits all changes to an index, waits for pending merges
-   * to complete, and closes all associated files.  
-   * <p>
-   * This is a "slow graceful shutdown" which may take a long time
-   * especially if a big merge is pending: If you only want to close
-   * resources use {@link #rollback()}. If you only want to commit
-   * pending changes and close resources see {@link #close(boolean)}.
-   * <p>
-   * Note that this may be a costly
-   * operation, so, try to re-use a single writer instead of
-   * closing and opening a new one.  See {@link #commit()} for
-   * caveats about write caching done by some IO devices.
+   * Closes all open resources and releases the write lock.
+   * If there are running merges or uncommitted
+   * changes:
+   * <ul>
+   *   <li> If config.matchVersion >= LUCENE_50 then the
+   *        changes are silently discarded.
+   *   <li> Otherwise, a RuntimeException is thrown to
+   *        indicate what was lost, but the IndexWriter is
+   *        still closed.
+   * </ul>
    *
-   * <p> If an Exception is hit during close, eg due to disk
-   * full or some other reason, then both the on-disk index
-   * and the internal state of the IndexWriter instance will
-   * be consistent.  However, the close will not be complete
-   * even though part of it (flushing buffered documents)
-   * may have succeeded, so the write lock will still be
-   * held.</p>
-   *
-   * <p> If you can correct the underlying cause (eg free up
-   * some disk space) then you can call close() again.
-   * Failing that, if you want to force the write lock to be
-   * released (dangerous, because you may then lose buffered
-   * docs in the IndexWriter instance) then you can do
-   * something like this:</p>
-   *
-   * <pre class="prettyprint">
-   * try {
-   *   writer.close();
-   * } finally {
-   *   if (IndexWriter.isLocked(directory)) {
-   *     IndexWriter.unlock(directory);
-   *   }
-   * }
-   * </pre>
-   *
-   * after which, you must be certain not to use the writer
-   * instance anymore.</p>
-   *
-   * <p><b>NOTE</b>: if this method hits an OutOfMemoryError
-   * you should immediately close the writer, again.  See <a
-   * href="#OOME">above</a> for details.</p>
-   *
+   * Use {@link #shutdown} if you want to flush, commit, and
+   * wait for merges, before closing.
+   * 
    * @throws IOException if there is a low-level IO error
+   *   (the IndexWriter will still be closed)
+   * @throws RuntimeException if config.matchVersion <
+   *   LUCENE_50 and there were pending changes that were
+   *   lost (the IndexWriter will still be closed)
    */
   @Override
   public void close() throws IOException {
-    close(true);
+
+    // If there are uncommitted changes, or still running
+    // merges, we will in fact close, but we'll throw an
+    // exception notifying the caller that they lost
+    // changes, if IWC.matchVersion is < 5.0:
+    boolean lostChanges = false;
+
+    // Only check for lost changes if the version earlier than 5.0:
+    if (config.getMatchVersion().onOrAfter(Version.LUCENE_50) == false) {
+      lostChanges = hasUncommittedChanges();
+      if (lostChanges == false) {
+        synchronized(this) {
+          if (pendingMerges.isEmpty() == false) {
+            lostChanges = true;
+          }
+          if (runningMerges.isEmpty() == false) {
+            lostChanges = true;
+          }
+        }
+      }
+    }
+
+    // As long as there are no pending changes and no
+    // running merges, we just rollback to close:
+    rollback();
+
+    if (lostChanges) {
+      throw new RuntimeException("this writer is closed, but some pending changes or running merges were discarded; use shutdown to save pending changes and finish merges before closing");
+    }
   }
 

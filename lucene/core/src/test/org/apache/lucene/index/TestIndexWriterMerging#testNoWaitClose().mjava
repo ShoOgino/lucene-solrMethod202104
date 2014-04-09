@@ -6,7 +6,7 @@
     }
 
     final Document doc = new Document();
-    FieldType customType = new FieldType(TextField.TYPE_STORED);
+    FieldType customType = new FieldType(TextField.TYPE_NOT_STORED);
     customType.setTokenized(false);
 
     Field idField = newField("id", "", customType);
@@ -44,12 +44,14 @@
           delID += 5;
         }
 
+        writer.commit();
+
         // Force a bunch of merge threads to kick off so we
         // stress out aborting them on close:
         ((LogMergePolicy) writer.getConfig().getMergePolicy()).setMergeFactor(2);
 
         final IndexWriter finalWriter = writer;
-        final ArrayList<Throwable> failure = new ArrayList<>();
+        final AtomicReference<Throwable> failure = new AtomicReference<>();
         Thread t1 = new Thread() {
             @Override
             public void run() {
@@ -66,7 +68,7 @@
                     break;
                   } catch (Throwable e) {
                     e.printStackTrace(System.out);
-                    failure.add(e);
+                    failure.set(e);
                     done = true;
                     break;
                   }
@@ -77,14 +79,14 @@
             }
           };
 
-        if (failure.size() > 0) {
-          throw failure.get(0);
-        }
-
         t1.start();
 
-        writer.shutdown(false);
+        writer.close();
         t1.join();
+
+        if (failure.get() != null) {
+          throw failure.get();
+        }
 
         // Make sure reader can read
         IndexReader reader = DirectoryReader.open(directory);

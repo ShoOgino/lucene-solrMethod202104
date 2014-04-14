@@ -15,16 +15,33 @@
    *        this means inner most suffix must also contain circumfix flag.
    * @return List of stems, or empty list if no stems are found
    */
-  private List<CharsRef> stem(char word[], int length, int previous, int prevFlag, int prefixFlag, int recursionDepth, boolean doPrefix, boolean doSuffix, boolean previousWasPrefix, boolean circumfix) {
+  private List<CharsRef> stem(char word[], int length, int previous, int prevFlag, int prefixFlag, int recursionDepth, boolean doPrefix, boolean doSuffix, boolean previousWasPrefix, boolean circumfix) throws IOException {
     
     // TODO: allow this stuff to be reused by tokenfilter
     List<CharsRef> stems = new ArrayList<>();
     
     if (doPrefix && dictionary.prefixes != null) {
-      for (int i = length - 1; i >= 0; i--) {
-        IntsRef prefixes = dictionary.lookupPrefix(word, 0, i);
-        if (prefixes == null) {
+      FST<IntsRef> fst = dictionary.prefixes;
+      Outputs<IntsRef> outputs = fst.outputs;
+      FST.BytesReader bytesReader = prefixReaders[recursionDepth];
+      FST.Arc<IntsRef> arc = prefixArcs[recursionDepth];
+      fst.getFirstArc(arc);
+      IntsRef NO_OUTPUT = outputs.getNoOutput();
+      IntsRef output = NO_OUTPUT;
+      for (int i = 0; i < length; i++) {
+        if (i > 0) {
+          int ch = word[i-1];
+          if (fst.findTargetArc(ch, arc, arc, bytesReader) == null) {
+            break;
+          } else if (arc.output != NO_OUTPUT) {
+            output = fst.outputs.add(output, arc.output);
+          }
+        }
+        IntsRef prefixes = null;
+        if (!arc.isFinal()) {
           continue;
+        } else {
+          prefixes = fst.outputs.add(output, arc.nextFinalOutput);
         }
         
         for (int j = 0; j < prefixes.length; j++) {
@@ -78,10 +95,27 @@
     } 
     
     if (doSuffix && dictionary.suffixes != null) {
-      for (int i = 0; i < length; i++) {
-        IntsRef suffixes = dictionary.lookupSuffix(word, i, length - i);
-        if (suffixes == null) {
+      FST<IntsRef> fst = dictionary.suffixes;
+      Outputs<IntsRef> outputs = fst.outputs;
+      FST.BytesReader bytesReader = suffixReaders[recursionDepth];
+      FST.Arc<IntsRef> arc = suffixArcs[recursionDepth];
+      fst.getFirstArc(arc);
+      IntsRef NO_OUTPUT = outputs.getNoOutput();
+      IntsRef output = NO_OUTPUT;
+      for (int i = length; i >= 0; i--) {
+        if (i < length) {
+          int ch = word[i];
+          if (fst.findTargetArc(ch, arc, arc, bytesReader) == null) {
+            break;
+          } else if (arc.output != NO_OUTPUT) {
+            output = fst.outputs.add(output, arc.output);
+          }
+        }
+        IntsRef suffixes = null;
+        if (!arc.isFinal()) {
           continue;
+        } else {
+          suffixes = fst.outputs.add(output, arc.nextFinalOutput);
         }
         
         for (int j = 0; j < suffixes.length; j++) {

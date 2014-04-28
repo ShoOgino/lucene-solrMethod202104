@@ -2,6 +2,7 @@
     name = new String(name);
     if (usually(random) || !type.indexed()) {
       // most of the time, don't modify the params
+      fieldNamesSeen.add(name);
       return new Field(name, value, type);
     }
 
@@ -14,19 +15,39 @@
       newType.setStored(true); // randomly store it
     }
 
-    if (!newType.storeTermVectors() && random.nextBoolean()) {
-      newType.setStoreTermVectors(true);
-      if (!newType.storeTermVectorOffsets()) {
-        newType.setStoreTermVectorOffsets(random.nextBoolean());
-      }
-      if (!newType.storeTermVectorPositions()) {
-        newType.setStoreTermVectorPositions(random.nextBoolean());
+    // Randomly turn on term vector options, but always do
+    // so consistently for the same field name:
+    if (!newType.storeTermVectors() && fieldNamesSeen.contains(name) == false && random.nextBoolean()) {
+      FieldType prev;
+      synchronized(fieldTermVectorOptions) {
+        prev = fieldTermVectorOptions.get(name);
+        if (prev == null) {
+          newType.setStoreTermVectors(true);
+          if (!newType.storeTermVectorPositions()) {
+            newType.setStoreTermVectorPositions(random.nextBoolean());
         
-        if (newType.storeTermVectorPositions() && !newType.storeTermVectorPayloads()) {
-          newType.setStoreTermVectorPayloads(random.nextBoolean());
+            if (newType.storeTermVectorPositions()) {
+              if (!newType.storeTermVectorPayloads()) {
+                newType.setStoreTermVectorPayloads(random.nextBoolean());
+              }
+              if (!newType.storeTermVectorOffsets()) {
+                newType.setStoreTermVectorOffsets(random.nextBoolean());
+              }
+            }
+          }
+          fieldTermVectorOptions.put(name, prev);
         }
       }
+
+      if (prev != null) {
+        newType.setStoreTermVectors(prev.storeTermVectors());
+        newType.setStoreTermVectorOffsets(prev.storeTermVectorOffsets());
+        newType.setStoreTermVectorPositions(prev.storeTermVectorPositions());
+        newType.setStoreTermVectorPayloads(prev.storeTermVectorPayloads());
+      }
+      System.out.println("  LTC: upgrade name=" + name + " type=" + newType);
     }
+    newType.freeze();
 
     // TODO: we need to do this, but smarter, ie, most of
     // the time we set the same value for a given field but

@@ -2,24 +2,27 @@
   public void finishStage(ResponseBuilder rb) {
     if (rb.isDebug() && rb.stage == ResponseBuilder.STAGE_GET_FIELDS) {
       NamedList<Object> info = rb.getDebugInfo();
-      NamedList explain = new SimpleOrderedMap();
+      NamedList<Object> explain = new SimpleOrderedMap<>();
 
       Map.Entry<String, Object>[]  arr =  new NamedList.NamedListEntry[rb.resultIds.size()];
+      // Will be set to true if there is at least one response with PURPOSE_GET_DEBUG
+      boolean hasGetDebugResponses = false;
 
       for (ShardRequest sreq : rb.finished) {
-        if ((sreq.purpose & ShardRequest.PURPOSE_GET_DEBUG) == 0) continue;
         for (ShardResponse srsp : sreq.responses) {
           NamedList sdebug = (NamedList)srsp.getSolrResponse().getResponse().get("debug");
-          info = (NamedList)merge(sdebug, info, excludeSet);
-
-          if (rb.isDebugResults()) {
-            NamedList sexplain = (NamedList)sdebug.get("explain");
-            for (int i = 0; i < sexplain.size(); i++) {
-              String id = sexplain.getName(i);
-              // TODO: lookup won't work for non-string ids... String vs Float
-              ShardDoc sdoc = rb.resultIds.get(id);
-              int idx = sdoc.positionInResponse;
-              arr[idx] = new NamedList.NamedListEntry<>(id, sexplain.getVal(i));
+          info = (NamedList)merge(sdebug, info, EXCLUDE_SET);
+          if ((sreq.purpose & ShardRequest.PURPOSE_GET_DEBUG) != 0) {
+            hasGetDebugResponses = true;
+            if (rb.isDebugResults()) {
+              NamedList sexplain = (NamedList)sdebug.get("explain");
+              for (int i = 0; i < sexplain.size(); i++) {
+                String id = sexplain.getName(i);
+                // TODO: lookup won't work for non-string ids... String vs Float
+                ShardDoc sdoc = rb.resultIds.get(id);
+                int idx = sdoc.positionInResponse;
+                arr[idx] = new NamedList.NamedListEntry<>(id, sexplain.getVal(i));
+              }
             }
           }
         }
@@ -29,9 +32,11 @@
         explain = SolrPluginUtils.removeNulls(new SimpleOrderedMap<>(arr));
       }
 
-      if (info == null) {
+      if (!hasGetDebugResponses) {
+        if (info == null) {
+          info = new SimpleOrderedMap<>();
+        }
         // No responses were received from shards. Show local query info.
-        info = new SimpleOrderedMap<>();
         SolrPluginUtils.doStandardQueryDebug(
                 rb.req, rb.getQueryString(),  rb.getQuery(), rb.isDebugQuery(), info);
         if (rb.isDebugQuery() && rb.getQparser() != null) {
@@ -48,7 +53,7 @@
       }
 
       rb.setDebugInfo(info);
-      rb.rsp.add("debug", rb.getDebugInfo() );      
+      rb.rsp.add("debug", rb.getDebugInfo() );
     }
     
   }

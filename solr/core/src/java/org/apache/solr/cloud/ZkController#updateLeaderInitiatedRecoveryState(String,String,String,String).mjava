@@ -1,0 +1,44 @@
+  private void updateLeaderInitiatedRecoveryState(String collection, String shardId, String coreName, String state) {
+    if (collection == null || shardId == null || coreName == null) {
+      log.warn("Cannot set leader-initiated recovery state znode to "+state+" using: collection="+collection+
+          "; shardId="+shardId+"; coreName="+coreName);
+      return; // if we don't have complete data about a core in cloud mode, do nothing
+    }
+
+    String znodePath = getLeaderInitiatedRecoveryZnodePath(collection, shardId, coreName);
+    
+    if (ZkStateReader.ACTIVE.equals(state)) {
+      // since we're marking it active, we don't need this znode anymore, so delete instead of update
+      try {
+        zkClient.delete(znodePath, -1, false);
+      } catch (Exception justLogIt) {
+        log.warn("Failed to delete znode "+znodePath+" due to: "+justLogIt);
+      }
+      return;
+    }
+    
+    byte[] znodeData = null;
+    try {
+      znodeData = state.getBytes("UTF-8");
+    } catch (UnsupportedEncodingException e) {
+      throw new Error("JVM Does not seem to support UTF-8", e);
+    }
+
+    boolean retryOnConnLoss = true; // be a little more robust when trying to write data
+    try {
+      if (zkClient.exists(znodePath, retryOnConnLoss)) {
+        zkClient.setData(znodePath, znodeData, retryOnConnLoss);
+      } else {
+        zkClient.makePath(znodePath, znodeData, retryOnConnLoss);
+      }
+      log.info("Wrote "+state+" to "+znodePath);
+    } catch (Exception exc) {
+      if (exc instanceof SolrException) {
+        throw (SolrException)exc;
+      } else {
+        throw new SolrException(ErrorCode.SERVER_ERROR, 
+            "Failed to update data to "+state+" for znode: "+znodePath, exc);        
+      }
+    }
+  }
+

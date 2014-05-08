@@ -32,46 +32,66 @@
     // legit
 
     for (final SolrCmdDistributor.Error error : errors) {
+      
       if (error.req.node instanceof RetryNode) {
         // we don't try to force a leader to recover
         // when we cannot forward to it
         continue;
       }
-      // TODO: we should force their state to recovering ??
-      // TODO: do retries??
-      // TODO: what if its is already recovering? Right now recoveries queue up -
-      // should they?
-      final String recoveryUrl = error.req.node.getBaseUrl();
+       
+      DistribPhase phase =
+          DistribPhase.parseParam(error.req.uReq.getParams().get(DISTRIB_UPDATE_PARAM));       
+      if (phase != DistribPhase.FROMLEADER)
+        continue; // don't have non-leaders try to recovery other nodes
       
-      Thread thread = new Thread() {
-        {
-          setDaemon(true);
+      final String replicaUrl = error.req.node.getUrl();      
+
+      int maxTries = 1;       
+      boolean sendRecoveryCommand = true;
+      String collection = null;
+      String shardId = null;
+      
+      if (error.req.node instanceof StdNode) {
+        StdNode stdNode = (StdNode)error.req.node;
+        collection = stdNode.getCollection();
+        shardId = stdNode.getShardId();
+        try {
+          // if false, then the node is probably not "live" anymore
+          sendRecoveryCommand = 
+              zkController.ensureReplicaInLeaderInitiatedRecovery(collection, 
+                                                                  shardId, 
+                                                                  replicaUrl, 
+                                                                  stdNode.getNodeProps(), 
+                                                                  false);
+          
+          // we want to try more than once, ~10 minutes
+          if (sendRecoveryCommand) {
+            maxTries = 120;
+          } // else the node is no longer "live" so no need to send any recovery command
+          
+        } catch (Exception e) {
+          log.error("Leader failed to set replica "+
+              error.req.node.getUrl()+" state to DOWN due to: "+e, e);
         }
-        @Override
-        public void run() {
-          log.info("try and ask " + recoveryUrl + " to recover");
-          HttpSolrServer server = new HttpSolrServer(recoveryUrl);
-          try {
-            server.setSoTimeout(60000);
-            server.setConnectionTimeout(15000);
+      } // else not a StdNode, recovery command still gets sent once
             
-            RequestRecovery recoverRequestCmd = new RequestRecovery();
-            recoverRequestCmd.setAction(CoreAdminAction.REQUESTRECOVERY);
-            recoverRequestCmd.setCoreName(error.req.node.getCoreName());
-            try {
-              server.request(recoverRequestCmd);
-            } catch (Throwable t) {
-              SolrException.log(log, recoveryUrl
-                  + ": Could not tell a replica to recover", t);
-            }
-          } finally {
-            server.shutdown();
-          }
-        }
-      };
-      ExecutorService executor = req.getCore().getCoreDescriptor().getCoreContainer().getUpdateShardHandler().getUpdateExecutor();
-      executor.execute(thread);
+      if (!sendRecoveryCommand)
+        continue; // the replica is already in recovery handling or is not live   
       
+      Throwable rootCause = SolrException.getRootCause(error.e);      
+      log.error("Setting up to try to start recovery on replica "+replicaUrl+" after: "+rootCause);
+      
+      // try to send the recovery command to the downed replica in a background thread
+      CoreContainer coreContainer = req.getCore().getCoreDescriptor().getCoreContainer();      
+      LeaderInitiatedRecoveryThread lirThread = 
+          new LeaderInitiatedRecoveryThread(zkController,
+                                            coreContainer,
+                                            collection,
+                                            shardId,
+                                            error.req.node.getNodeProps(),
+                                            maxTries);
+      ExecutorService executor = coreContainer.getUpdateShardHandler().getUpdateExecutor();
+      executor.execute(lirThread);      
     }
   }
 

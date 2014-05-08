@@ -1,4 +1,31 @@
-  // you cannot subclass this without being in o.a.l.index package anyway, so
-  // the class is already pkg-private... fix me: see LUCENE-4013
-  abstract ThreadState getAndLock(Thread requestingThread, DocumentsWriter documentsWriter);
+  /** This method is used by DocumentsWriter/FlushControl to obtain a ThreadState to do an indexing operation (add/updateDocument). */
+  ThreadState getAndLock(Thread requestingThread, DocumentsWriter documentsWriter) {
+    ThreadState threadState = null;
+    synchronized (this) {
+      while (true) {
+        if (freeCount > 0) {
+          // Important that we are LIFO here! This way if number of concurrent indexing threads was once high, but has now reduced, we only use a
+          // limited number of thread states:
+          threadState = freeList[freeCount-1];
+          freeCount--;
+          break;
+        } else if (numThreadStatesActive < threadStates.length) {
+          // ThreadState is already locked before return by this method:
+          return newThreadState();
+        } else {
+          // Wait until a thread state frees up:
+          try {
+            wait();
+          } catch (InterruptedException ie) {
+            throw new ThreadInterruptedException(ie);
+          }
+        }
+      }
+    }
+
+    // This could take time, e.g. if the threadState is [briefly] checked for flushing:
+    threadState.lock();
+
+    return threadState;
+  }
 

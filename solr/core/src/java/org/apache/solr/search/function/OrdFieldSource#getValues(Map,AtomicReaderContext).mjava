@@ -4,8 +4,21 @@
     final AtomicReader r;
     Object o = context.get("searcher");
     if (o instanceof SolrIndexSearcher) {
-      // reuse ordinalmap
-      r = ((SolrIndexSearcher)o).getAtomicReader();
+      SolrIndexSearcher is = (SolrIndexSearcher) o;
+      SchemaField sf = is.getSchema().getFieldOrNull(field);
+      if (sf != null && sf.hasDocValues() == false && sf.multiValued() == false && sf.getType().getNumericType() != null) {
+        // its a single-valued numeric field: we must currently create insanity :(
+        List<AtomicReaderContext> leaves = is.getIndexReader().leaves();
+        AtomicReader insaneLeaves[] = new AtomicReader[leaves.size()];
+        int upto = 0;
+        for (AtomicReaderContext raw : leaves) {
+          insaneLeaves[upto++] = Insanity.wrapInsanity(raw.reader(), field);
+        }
+        r = SlowCompositeReaderWrapper.wrap(new MultiReader(insaneLeaves));
+      } else {
+        // reuse ordinalmap
+        r = ((SolrIndexSearcher)o).getAtomicReader();
+      }
     } else {
       IndexReader topReader = ReaderUtil.getTopLevelContext(readerContext).reader();
       r = SlowCompositeReaderWrapper.wrap(topReader);

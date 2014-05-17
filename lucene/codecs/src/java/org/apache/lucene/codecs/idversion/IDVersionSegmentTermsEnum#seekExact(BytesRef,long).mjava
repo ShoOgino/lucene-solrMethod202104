@@ -22,6 +22,8 @@
     int targetUpto;
     Pair<BytesRef,Long> output;
 
+    long startFrameFP = currentFrame.fp;
+
     targetBeforeCurrentLength = currentFrame.ord;
 
     // nocommit we could stop earlier w/ the version check, every time we traverse an index arc we can check?
@@ -122,6 +124,9 @@
          }
         currentFrame = lastFrame;
         currentFrame.rewind();
+        // nocommit put this back to BT also?
+        term.length = targetUpto;
+        termExists = false;
       } else {
         // Target is exactly the same as current term
         assert term.length == target.length;
@@ -143,6 +148,7 @@
             }
             return false;
           }
+          System.out.println("  term version=" + ((IDVersionTermState) currentFrame.state).idVersion + " frame version=" + currentFrame.maxIDVersion + " frame ord=" + currentFrame.ord);
 
            if (DEBUG) {
              System.out.println("  target is same as current; return true");
@@ -181,10 +187,11 @@
       currentFrame = pushFrame(arc, VersionBlockTreeTermsWriter.FST_OUTPUTS.add(output, arc.nextFinalOutput), 0);
     }
 
-     if (DEBUG) {
-       System.out.println("  start index loop targetUpto=" + targetUpto + " output=" + output + " currentFrame.ord=" + currentFrame.ord + " targetBeforeCurrentLength=" + targetBeforeCurrentLength);
-     }
+    if (DEBUG) {
+      System.out.println("  start index loop targetUpto=" + targetUpto + " output=" + output + " currentFrame.ord=" + currentFrame.ord + " targetBeforeCurrentLength=" + targetBeforeCurrentLength);
+    }
 
+    // We are done sharing the common prefix with the incoming target and where we are currently seek'd; now continue walking the index:
     while (targetUpto < target.length) {
 
       final int targetLabel = target.bytes[target.offset + targetUpto] & 0xFF;
@@ -214,19 +221,36 @@
         }
         //System.out.println("  check maxVersion=" + currentFrame.maxIDVersion + " vs " + minIDVersion);
 
+        if (DEBUG) {
+          System.out.println("  frame.maxIDVersion=" + currentFrame.maxIDVersion +  " vs minIDVersion=" + minIDVersion);
+        }
+
         if (currentFrame.maxIDVersion < minIDVersion) {
           // The max version for all terms in this block is lower than the minVersion
-          //termExists = false;
-          //term.bytes[targetUpto] = (byte) targetLabel;
-          //term.length = 1+targetUpto;
+          if (currentFrame.fp != startFrameFP) {
+          //if (targetUpto+1 > term.length) {
+            termExists = false;
+            term.bytes[targetUpto] = (byte) targetLabel;
+            term.length = 1+targetUpto;
+            if (DEBUG) {
+              System.out.println("    reset current term");
+            }
+            validIndexPrefix = Math.min(validIndexPrefix, term.length);
+          }
+            //if (currentFrame.ord != startFrameOrd) {
+            //termExists = false;
+            //}
           if (DEBUG) {
-            System.out.println("    FAST version NOT_FOUND term=" + brToString(term) + " currentFrame.maxIDVersion=" + currentFrame.maxIDVersion + " validIndexPrefix=" + validIndexPrefix);
+            System.out.println("    FAST version NOT_FOUND term=" + brToString(term) + " targetUpto=" + targetUpto + " currentFrame.maxIDVersion=" + currentFrame.maxIDVersion + " validIndexPrefix=" + validIndexPrefix);
           }
           return false;
         }
 
         currentFrame.loadBlock();
 
+        if (DEBUG) {
+          System.out.println("    scan currentFrame ord=" + currentFrame.ord);
+        }
         final SeekStatus result = currentFrame.scanToTerm(target, true);            
         if (result == SeekStatus.FOUND) {
           currentFrame.decodeMetaData();
@@ -253,6 +277,7 @@
         // Follow this arc
         arc = nextArc;
         term.bytes[targetUpto] = (byte) targetLabel;
+        termExists = false;
         // Aggregate output as we go:
         assert arc.output != null;
         if (arc.output != VersionBlockTreeTermsWriter.NO_OUTPUT) {
@@ -260,7 +285,7 @@
         }
 
          if (DEBUG) {
-           System.out.println("    index: follow label=" + Integer.toHexString((target.bytes[target.offset + targetUpto]&0xff)) + " arc.output=" + arc.output + " arc.nfo=" + arc.nextFinalOutput);
+           System.out.println("    index: follow label=" + (char) ((target.bytes[target.offset + targetUpto]&0xff)) + " arc.output=" + arc.output + " arc.nfo=" + arc.nextFinalOutput);
          }
         targetUpto++;
 
@@ -287,8 +312,13 @@
       return false;
     }
 
+    if (DEBUG) {
+      System.out.println("  frame.maxIDVersion=" + currentFrame.maxIDVersion +  " vs minIDVersion=" + minIDVersion);
+    }
+
     if (currentFrame.maxIDVersion < minIDVersion) {
       // The max version for all terms in this block is lower than the minVersion
+      // nocommit need same logic here as above?
       termExists = false;
       term.length = targetUpto;
       return false;

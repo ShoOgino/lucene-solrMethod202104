@@ -1,90 +1,138 @@
   @Override
   public void run() {
-       log.info("Process current queue of collection creations");
-       LeaderStatus isLeader = amILeader();
-       while (isLeader == LeaderStatus.DONT_KNOW) {
-         log.debug("am_i_leader unclear {}", isLeader);
-         isLeader = amILeader();  // not a no, not a yes, try ask again
-       }
+    log.info("Process current queue of collection creations");
+    LeaderStatus isLeader = amILeader();
+    while (isLeader == LeaderStatus.DONT_KNOW) {
+      log.debug("am_i_leader unclear {}", isLeader);
+      isLeader = amILeader();  // not a no, not a yes, try ask again
+    }
+
+    String oldestItemInWorkQueue = null;
+    // hasLeftOverItems - used for avoiding re-execution of async tasks that were processed by a previous Overseer.
+    // This variable is set in case there's any task found on the workQueue when the OCP starts up and
+    // the id for the queue tail is used as a marker to check for the task in completed/failed map in zk.
+    // Beyond the marker, all tasks can safely be assumed to have never been executed.
+    boolean hasLeftOverItems = true;
+
+    try {
+      oldestItemInWorkQueue = workQueue.getTailId();
+    } catch (KeeperException e) {
+      // We don't need to handle this. This is just a fail-safe which comes in handy in skipping already processed
+      // async calls.
+      SolrException.log(log, "", e);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
+
+    if (oldestItemInWorkQueue == null)
+      hasLeftOverItems = false;
+    else
+      log.debug("Found already existing elements in the work-queue. Last element: {}", oldestItemInWorkQueue);
 
     try {
       prioritizeOverseerNodes();
     } catch (Exception e) {
       log.error("Unable to prioritize overseer ", e);
-
     }
-    while (!this.isClosed) {
-         try {
-           isLeader = amILeader();
-           if (LeaderStatus.NO == isLeader) {
-             break;
-           }
-           else if (LeaderStatus.YES != isLeader) {
-             log.debug("am_i_leader unclear {}", isLeader);                  
-             continue; // not a no, not a yes, try asking again
-           }
-           
-           QueueEvent head = workQueue.peek(true);
-           if(isClosed) break;
-           final ZkNodeProps message = ZkNodeProps.load(head.getBytes());
 
-           final String asyncId = (message.containsKey(ASYNC) && message.get(ASYNC) != null) ? (String) message.get(ASYNC) : null;
+    // TODO: Make maxThreads configurable.
 
-           try {
-             if(message.containsKey(ASYNC) && message.get(ASYNC) != null && !runningMap.contains(message.getStr(ASYNC)))
-              runningMap.put(asyncId, null);
-           } catch (KeeperException.NodeExistsException e) {
-             // Just catch and do nothing. The runningMap.contains(..) check ensures that this is the only
-             // entry point into the runningMap.
-             // NOTE: Make sure to handle it as soon as OCP gets distributed/multi-threaded.
-           }
+    this.tpe = new ThreadPoolExecutor(5, 100, 0L, TimeUnit.MILLISECONDS,
+        new SynchronousQueue<Runnable>(),
+        new DefaultSolrThreadFactory("OverseerThreadFactory"));
+    try {
+      while (!this.isClosed) {
+        try {
+          isLeader = amILeader();
+          if (LeaderStatus.NO == isLeader) {
+            break;
+          } else if (LeaderStatus.YES != isLeader) {
+            log.debug("am_i_leader unclear {}", isLeader);
+            continue; // not a no, not a yes, try asking again
+          }
 
-           log.info("Overseer Collection Processor: Get the message id:" + head.getId() + " message:" + message.toString());
-           final String operation = message.getStr(QUEUE_OPERATION);
-           final TimerContext timerContext = stats.time("collection_" + operation); // even if operation is async, it is sync!
-           SolrResponse response = null;
-           try  {
-             response = processMessage(message, operation);
-           } finally {
-             timerContext.stop();
-           }
+          log.debug("Cleaning up work-queue. #Running tasks: {}", runningTasks.size());
+          cleanUpWorkQueue();
 
-           head.setBytes(SolrResponse.serializable(response));
-           if (!operation.equals(REQUESTSTATUS) && asyncId != null) {
-             if(response.getResponse().get("failure") != null || response.getResponse().get("exception") != null) {
-               failureMap.put(asyncId, null);
-             } else {
-               completedMap.put(asyncId, null);
-             }
-           }
-           if(asyncId != null)
-            runningMap.remove(asyncId);
+          printTrackingMaps();
 
-           workQueue.remove(head);
+          boolean waited = false;
 
-           if (response.getResponse().get("failure") != null || response.getResponse().get("exception") != null)  {
-             stats.error("collection_" + operation);
-             stats.storeFailureDetails("collection_" + operation, message, response);
-           } else {
-             stats.success("collection_" + operation);
-           }
+          while (runningTasks.size() > maxParallelThreads) {
+            synchronized (waitLock) {
+              waitLock.wait(100);//wait for 100 ms or till a task is complete
+            }
+            waited = true;
+          }
 
-          log.info("Overseer Collection Processor: Message id:" + head.getId() + " complete, response:"+ response.getResponse().toString());
+          if (waited)
+            cleanUpWorkQueue();
+
+          List<QueueEvent> heads = workQueue.peekTopN(maxParallelThreads, runningZKTasks, 2000L);
+
+          if (heads == null)
+            continue;
+
+          log.debug("Got {} tasks from work-queue : [{}]", heads.size(), heads.toString());
+
+          if (isClosed) break;
+
+          for (QueueEvent head : heads) {
+            final ZkNodeProps message = ZkNodeProps.load(head.getBytes());
+            String collectionName = message.containsKey(COLLECTION_PROP) ?
+                message.getStr(COLLECTION_PROP) : message.getStr("name");
+            String asyncId = message.getStr(ASYNC);
+            if (hasLeftOverItems) {
+              if (head.getId().equals(oldestItemInWorkQueue))
+                hasLeftOverItems = false;
+              if (asyncId != null && (completedMap.contains(asyncId) || failureMap.contains(asyncId))) {
+                log.debug("Found already processed task in workQueue, cleaning up. AsyncId [{}]",asyncId );
+                workQueue.remove(head);
+                continue;
+              }
+            }
+
+            if (!checkExclusivity(message, head.getId())) {
+              log.debug("Exclusivity check failed for [{}]", message.toString());
+              continue;
+            }
+
+            try {
+              markTaskAsRunning(head, collectionName, asyncId);
+              log.debug("Marked task [{}] as running", head.getId());
+            } catch (KeeperException.NodeExistsException e) {
+              // This should never happen
+              log.error("Tried to pick up task [{}] when it was already running!", head.getId());
+            } catch (InterruptedException e) {
+              log.error("Thread interrupted while trying to pick task for execution.", head.getId());
+              Thread.currentThread().interrupt();
+            }
+
+            log.info("Overseer Collection Processor: Get the message id:" + head.getId() + " message:" + message.toString());
+            String operation = message.getStr(Overseer.QUEUE_OPERATION);
+            Runner runner = new Runner(message,
+                operation, head);
+            tpe.execute(runner);
+          }
+
         } catch (KeeperException e) {
           if (e.code() == KeeperException.Code.SESSIONEXPIRED
               || e.code() == KeeperException.Code.CONNECTIONLOSS) {
-             log.warn("Overseer cannot talk to ZK");
-             return;
-           }
-           SolrException.log(log, "", e);
-           throw new ZooKeeperException(
-               SolrException.ErrorCode.SERVER_ERROR, "", e);
-         } catch (InterruptedException e) {
-           Thread.currentThread().interrupt();
-           return;
-         } catch (Exception e) {
-           SolrException.log(log, "", e);
-         }
-       }
+            log.warn("Overseer cannot talk to ZK");
+            return;
+          }
+          SolrException.log(log, "", e);
+          throw new ZooKeeperException(
+              SolrException.ErrorCode.SERVER_ERROR, "", e);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          return;
+        } catch (Exception e) {
+          SolrException.log(log, "", e);
+        }
+      }
+    } finally {
+      this.close();
+    }
   }
 

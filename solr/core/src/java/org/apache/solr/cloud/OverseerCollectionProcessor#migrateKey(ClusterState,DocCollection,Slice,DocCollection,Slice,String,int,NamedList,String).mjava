@@ -6,7 +6,7 @@
     if (clusterState.hasCollection(tempSourceCollectionName)) {
       log.info("Deleting temporary collection: " + tempSourceCollectionName);
       Map<String, Object> props = ZkNodeProps.makeMap(
-          QUEUE_OPERATION, DELETECOLLECTION,
+          Overseer.QUEUE_OPERATION, DELETECOLLECTION,
           "name", tempSourceCollectionName);
 
       try {
@@ -18,6 +18,8 @@
 
     CompositeIdRouter sourceRouter = (CompositeIdRouter) sourceCollection.getRouter();
     DocRouter.Range keyHashRange = sourceRouter.keyHashRange(splitKey);
+
+    ShardHandler shardHandler = shardHandlerFactory.getShardHandler();
 
     log.info("Hash range for split.key: {} is: {}", splitKey, keyHashRange);
     // intersect source range, keyHashRange and target range
@@ -41,9 +43,10 @@
     String nodeName = targetLeader.getNodeName();
     setupAsyncRequest(asyncId, requestMap, params, nodeName);
 
-    sendShardRequest(targetLeader.getNodeName(), params);
+    sendShardRequest(targetLeader.getNodeName(), params, shardHandler);
 
-    collectShardResponses(results, true, "MIGRATE failed to request node to buffer updates");
+    collectShardResponses(results, true, "MIGRATE failed to request node to buffer updates",
+        shardHandler);
 
     completeAsyncRequest(asyncId, requestMap, results);
 
@@ -87,7 +90,7 @@
     // create a temporary collection with just one node on the shard leader
     String configName = zkStateReader.readConfigName(sourceCollection.getName());
     Map<String, Object> props = ZkNodeProps.makeMap(
-        QUEUE_OPERATION, CREATECOLLECTION,
+        Overseer.QUEUE_OPERATION, CREATECOLLECTION,
         "name", tempSourceCollectionName,
         REPLICATION_FACTOR, 1,
         NUM_SLICES, 1,
@@ -117,10 +120,11 @@
     cmd.setState(ZkStateReader.ACTIVE);
     cmd.setCheckLive(true);
     cmd.setOnlyIfLeader(true);
-    sendShardRequest(tempSourceLeader.getNodeName(), new ModifiableSolrParams(cmd.getParams()));
+    sendShardRequest(tempSourceLeader.getNodeName(), new ModifiableSolrParams(cmd.getParams()), shardHandler);
 
     collectShardResponses(results, true,
-        "MIGRATE failed to create temp collection leader or timed out waiting for it to come up");
+        "MIGRATE failed to create temp collection leader or timed out waiting for it to come up",
+        shardHandler);
 
     log.info("Asking source leader to split index");
     params = new ModifiableSolrParams();
@@ -134,8 +138,8 @@
 
     setupAsyncRequest(asyncId, requestMap, params, tempNodeName);
 
-    sendShardRequest(tempNodeName, params);
-    collectShardResponses(results, true, "MIGRATE failed to invoke SPLIT core admin command");
+    sendShardRequest(tempNodeName, params, shardHandler);
+    collectShardResponses(results, true, "MIGRATE failed to invoke SPLIT core admin command", shardHandler);
     completeAsyncRequest(asyncId, requestMap, results);
 
     log.info("Creating a replica of temporary collection: {} on the target leader node: {}",
@@ -148,9 +152,10 @@
     params.set(CoreAdminParams.SHARD, tempSourceSlice.getName());
 
     setupAsyncRequest(asyncId, requestMap, params, targetLeader.getNodeName());
-    sendShardRequest(targetLeader.getNodeName(), params);
+    sendShardRequest(targetLeader.getNodeName(), params, shardHandler);
     collectShardResponses(results, true,
-        "MIGRATE failed to create replica of temporary collection in target leader node.");
+        "MIGRATE failed to create replica of temporary collection in target leader node.",
+        shardHandler);
 
     completeAsyncRequest(asyncId, requestMap, results);
 
@@ -169,10 +174,11 @@
 
     setupAsyncRequest(asyncId, requestMap, params, tempSourceLeader.getNodeName());
 
-    sendShardRequest(tempSourceLeader.getNodeName(), params);
+    sendShardRequest(tempSourceLeader.getNodeName(), params, shardHandler);
 
     collectShardResponses(results, true,
-        "MIGRATE failed to create temp collection replica or timed out waiting for them to come up");
+        "MIGRATE failed to create temp collection replica or timed out waiting for them to come up",
+        shardHandler);
 
     completeAsyncRequest(asyncId, requestMap, results);
     log.info("Successfully created replica of temp source collection on target leader node");
@@ -185,9 +191,11 @@
 
     setupAsyncRequest(asyncId, requestMap, params, sourceLeader.getNodeName());
 
-    sendShardRequest(targetLeader.getNodeName(), params);
+    sendShardRequest(targetLeader.getNodeName(), params, shardHandler);
     collectShardResponses(results, true,
-        "MIGRATE failed to merge " + tempCollectionReplica2 + " to " + targetLeader.getStr("core") + " on node: " + targetLeader.getNodeName());
+        "MIGRATE failed to merge " + tempCollectionReplica2 +
+            " to " + targetLeader.getStr("core") + " on node: " + targetLeader.getNodeName(),
+        shardHandler);
 
     completeAsyncRequest(asyncId, requestMap, results);
 
@@ -197,16 +205,17 @@
     params.set(CoreAdminParams.NAME, targetLeader.getStr("core"));
     setupAsyncRequest(asyncId, requestMap, params, targetLeader.getNodeName());
 
-    sendShardRequest(targetLeader.getNodeName(), params);
+    sendShardRequest(targetLeader.getNodeName(), params, shardHandler);
     collectShardResponses(results, true,
-        "MIGRATE failed to request node to apply buffered updates");
+        "MIGRATE failed to request node to apply buffered updates",
+        shardHandler);
 
     completeAsyncRequest(asyncId, requestMap, results);
 
     try {
       log.info("Deleting temporary collection: " + tempSourceCollectionName);
       props = ZkNodeProps.makeMap(
-          QUEUE_OPERATION, DELETECOLLECTION,
+          Overseer.QUEUE_OPERATION, DELETECOLLECTION,
           "name", tempSourceCollectionName);
       deleteCollection(new ZkNodeProps(props), results);
     } catch (Exception e) {

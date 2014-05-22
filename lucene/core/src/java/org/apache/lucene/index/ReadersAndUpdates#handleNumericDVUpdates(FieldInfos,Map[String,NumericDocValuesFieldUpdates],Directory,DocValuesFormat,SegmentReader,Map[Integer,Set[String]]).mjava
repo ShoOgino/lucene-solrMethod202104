@@ -1,0 +1,73 @@
+  @SuppressWarnings("synthetic-access")
+  private void handleNumericDVUpdates(FieldInfos infos, Map<String,NumericDocValuesFieldUpdates> updates,
+      Directory dir, DocValuesFormat dvFormat, final SegmentReader reader, Map<Integer,Set<String>> fieldFiles) throws IOException {
+    for (Entry<String,NumericDocValuesFieldUpdates> e : updates.entrySet()) {
+      final String field = e.getKey();
+      final NumericDocValuesFieldUpdates fieldUpdates = e.getValue();
+
+      final long nextDocValuesGen = info.getNextDocValuesGen();
+      final String segmentSuffix = Long.toString(nextDocValuesGen, Character.MAX_RADIX);
+      final long estUpdatesSize = fieldUpdates.ramBytesPerDoc() * info.info.getDocCount();
+      final IOContext updatesContext = new IOContext(new FlushInfo(info.info.getDocCount(), estUpdatesSize));
+      final FieldInfo fieldInfo = infos.fieldInfo(field);
+      assert fieldInfo != null;
+      fieldInfo.setDocValuesGen(nextDocValuesGen);
+      final FieldInfos fieldInfos = new FieldInfos(new FieldInfo[] { fieldInfo });
+      // separately also track which files were created for this gen
+      final TrackingDirectoryWrapper trackingDir = new TrackingDirectoryWrapper(dir);
+      final SegmentWriteState state = new SegmentWriteState(null, trackingDir, info.info, fieldInfos, null, updatesContext, segmentSuffix);
+      try (final DocValuesConsumer fieldsConsumer = dvFormat.fieldsConsumer(state)) {
+        // write the numeric updates to a new gen'd docvalues file
+        fieldsConsumer.addNumericField(fieldInfo, new Iterable<Number>() {
+          final NumericDocValues currentValues = reader.getNumericDocValues(field);
+          final Bits docsWithField = reader.getDocsWithField(field);
+          final int maxDoc = reader.maxDoc();
+          final NumericDocValuesFieldUpdates.Iterator updatesIter = fieldUpdates.iterator();
+          @Override
+          public Iterator<Number> iterator() {
+            updatesIter.reset();
+            return new Iterator<Number>() {
+
+              int curDoc = -1;
+              int updateDoc = updatesIter.nextDoc();
+              
+              @Override
+              public boolean hasNext() {
+                return curDoc < maxDoc - 1;
+              }
+
+              @Override
+              public Number next() {
+                if (++curDoc >= maxDoc) {
+                  throw new NoSuchElementException("no more documents to return values for");
+                }
+                if (curDoc == updateDoc) { // this document has an updated value
+                  Long value = updatesIter.value(); // either null (unset value) or updated value
+                  updateDoc = updatesIter.nextDoc(); // prepare for next round
+                  return value;
+                } else {
+                  // no update for this document
+                  assert curDoc < updateDoc;
+                  if (currentValues != null && docsWithField.get(curDoc)) {
+                    // only read the current value if the document had a value before
+                    return currentValues.get(curDoc);
+                  } else {
+                    return null;
+                  }
+                }
+              }
+
+              @Override
+              public void remove() {
+                throw new UnsupportedOperationException("this iterator does not support removing elements");
+              }
+            };
+          }
+        });
+      }
+      info.advanceDocValuesGen();
+      assert !fieldFiles.containsKey(fieldInfo.number);
+      fieldFiles.put(fieldInfo.number, trackingDir.getCreatedFiles());
+    }
+  }
+

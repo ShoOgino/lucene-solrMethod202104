@@ -1,0 +1,137 @@
+    private TermsEnum getTermsEnum(final IndexInput input) throws IOException {
+      input.seek(bytes.offset);
+      
+      return new TermsEnum() {
+        private long currentOrd = -1;
+        // TODO: maxLength is negative when all terms are merged away...
+        private final BytesRef termBuffer = new BytesRef(bytes.maxLength < 0 ? 0 : bytes.maxLength);
+        private final BytesRef term = new BytesRef(); // TODO: paranoia?
+
+        @Override
+        public BytesRef next() throws IOException {
+          if (doNext() == null) {
+            return null;
+          } else {
+            setTerm();
+            return term;
+          }
+        }
+        
+        private BytesRef doNext() throws IOException {
+          if (++currentOrd >= numValues) {
+            return null;
+          } else {
+            int start = input.readVInt();
+            int suffix = input.readVInt();
+            input.readBytes(termBuffer.bytes, start, suffix);
+            termBuffer.length = start + suffix;
+            return termBuffer;
+          }
+        }
+
+        @Override
+        public SeekStatus seekCeil(BytesRef text) throws IOException {
+          // binary-search just the index values to find the block,
+          // then scan within the block
+          long low = 0;
+          long high = numIndexValues-1;
+
+          while (low <= high) {
+            long mid = (low + high) >>> 1;
+            doSeek(mid * interval);
+            int cmp = termBuffer.compareTo(text);
+
+            if (cmp < 0) {
+              low = mid + 1;
+            } else if (cmp > 0) {
+              high = mid - 1;
+            } else {
+              // we got lucky, found an indexed term
+              setTerm();
+              return SeekStatus.FOUND;
+            }
+          }
+          
+          if (numIndexValues == 0) {
+            return SeekStatus.END;
+          }
+          
+          // block before insertion point
+          long block = low-1;
+          doSeek(block < 0 ? -1 : block * interval);
+          
+          while (doNext() != null) {
+            int cmp = termBuffer.compareTo(text);
+            if (cmp == 0) {
+              setTerm();
+              return SeekStatus.FOUND;
+            } else if (cmp > 0) {
+              setTerm();
+              return SeekStatus.NOT_FOUND;
+            }
+          }
+          
+          return SeekStatus.END;
+        }
+
+        @Override
+        public void seekExact(long ord) throws IOException {
+          doSeek(ord);
+          setTerm();
+        }
+        
+        private void doSeek(long ord) throws IOException {
+          long block = ord / interval;
+
+          if (ord >= currentOrd && block == currentOrd / interval) {
+            // seek within current block
+          } else {
+            // position before start of block
+            currentOrd = ord - ord % interval - 1;
+            input.seek(bytes.offset + addresses.get(block));
+          }
+          
+          while (currentOrd < ord) {
+            doNext();
+          }
+        }
+        
+        private void setTerm() {
+          // TODO: is there a cleaner way
+          term.bytes = new byte[termBuffer.length];
+          term.offset = 0;
+          term.copyBytes(termBuffer);
+        }
+
+        @Override
+        public BytesRef term() throws IOException {
+          return term;
+        }
+
+        @Override
+        public long ord() throws IOException {
+          return currentOrd;
+        }
+
+        @Override
+        public int docFreq() throws IOException {
+          throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public long totalTermFreq() throws IOException {
+          return -1;
+        }
+
+        @Override
+        public DocsEnum docs(Bits liveDocs, DocsEnum reuse, int flags) throws IOException {
+          throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public DocsAndPositionsEnum docsAndPositions(Bits liveDocs, DocsAndPositionsEnum reuse, int flags) throws IOException {
+          throw new UnsupportedOperationException();
+        }
+      };
+    }
+

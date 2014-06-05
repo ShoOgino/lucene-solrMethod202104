@@ -4,28 +4,18 @@
       return new TermsEnum() {
         private long currentOrd = -1;
         // TODO: maxLength is negative when all terms are merged away...
-        private final BytesRef termBuffer = new BytesRef(bytes.maxLength < 0 ? 0 : bytes.maxLength);
-        private final BytesRef term = new BytesRef(); // TODO: paranoia?
+        private final BytesRef term = new BytesRef(bytes.maxLength < 0 ? 0 : bytes.maxLength);
 
         @Override
         public BytesRef next() throws IOException {
-          if (doNext() == null) {
-            return null;
-          } else {
-            setTerm();
-            return term;
-          }
-        }
-        
-        private BytesRef doNext() throws IOException {
           if (++currentOrd >= numValues) {
             return null;
           } else {
             int start = input.readVInt();
             int suffix = input.readVInt();
-            input.readBytes(termBuffer.bytes, start, suffix);
-            termBuffer.length = start + suffix;
-            return termBuffer;
+            input.readBytes(term.bytes, start, suffix);
+            term.length = start + suffix;
+            return term;
           }
         }
 
@@ -38,8 +28,8 @@
 
           while (low <= high) {
             long mid = (low + high) >>> 1;
-            doSeek(mid * interval);
-            int cmp = termBuffer.compareTo(text);
+            seekExact(mid * interval);
+            int cmp = term.compareTo(text);
 
             if (cmp < 0) {
               low = mid + 1;
@@ -47,7 +37,6 @@
               high = mid - 1;
             } else {
               // we got lucky, found an indexed term
-              setTerm();
               return SeekStatus.FOUND;
             }
           }
@@ -58,15 +47,13 @@
           
           // block before insertion point
           long block = low-1;
-          doSeek(block < 0 ? -1 : block * interval);
+          seekExact(block < 0 ? -1 : block * interval);
           
-          while (doNext() != null) {
-            int cmp = termBuffer.compareTo(text);
+          while (next() != null) {
+            int cmp = term.compareTo(text);
             if (cmp == 0) {
-              setTerm();
               return SeekStatus.FOUND;
             } else if (cmp > 0) {
-              setTerm();
               return SeekStatus.NOT_FOUND;
             }
           }
@@ -76,11 +63,6 @@
 
         @Override
         public void seekExact(long ord) throws IOException {
-          doSeek(ord);
-          setTerm();
-        }
-        
-        private void doSeek(long ord) throws IOException {
           long block = ord / interval;
 
           if (ord >= currentOrd && block == currentOrd / interval) {
@@ -92,15 +74,8 @@
           }
           
           while (currentOrd < ord) {
-            doNext();
+            next();
           }
-        }
-        
-        private void setTerm() {
-          // TODO: is there a cleaner way
-          term.bytes = new byte[termBuffer.length];
-          term.offset = 0;
-          term.copyBytes(termBuffer);
         }
 
         @Override

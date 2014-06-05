@@ -1,10 +1,42 @@
   @Override
-  public synchronized BinaryDocValues getBinary(FieldInfo field) throws IOException {
-    BinaryDocValues instance = binaryInstances.get(field.number);
-    if (instance == null) {
-      instance = loadBinary(field);
-      binaryInstances.put(field.number, instance);
+  public BinaryDocValues getBinary(FieldInfo field) throws IOException {
+    BinaryEntry entry = binaries.get(field.number);
+
+    BytesAndAddresses instance;
+    synchronized (this) {
+      instance = pagedBytesInstances.get(field.number);
+      if (instance == null) {
+        instance = loadBinary(field);
+        pagedBytesInstances.put(field.number, instance);
+      }
     }
-    return instance;
+    final PagedBytes.Reader bytesReader = instance.reader;
+    final MonotonicBlockPackedReader addresses = instance.addresses;
+
+    if (addresses == null) {
+      assert entry.minLength == entry.maxLength;
+      final int fixedLength = entry.minLength;
+      return new BinaryDocValues() {
+        final BytesRef term = new BytesRef();
+
+        @Override
+        public BytesRef get(int docID) {
+          bytesReader.fillSlice(term, fixedLength * (long)docID, fixedLength);
+          return term;
+        }
+      };
+    } else {
+      return new BinaryDocValues() {
+        final BytesRef term = new BytesRef();
+
+        @Override
+        public BytesRef get(int docID) {
+          long startAddress = docID == 0 ? 0 : addresses.get(docID-1);
+          long endAddress = addresses.get(docID);
+          bytesReader.fillSlice(term, startAddress, (int) (endAddress - startAddress));
+          return term;
+        }
+      };
+    }
   }
 

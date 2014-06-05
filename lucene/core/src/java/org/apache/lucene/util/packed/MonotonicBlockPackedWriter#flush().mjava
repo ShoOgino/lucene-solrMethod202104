@@ -1,22 +1,29 @@
   protected void flush() throws IOException {
     assert off > 0;
 
-    // TODO: perform a true linear regression?
-    final long min = values[0];
-    final float avg = off == 1 ? 0f : (float) (values[off - 1] - min) / (off - 1);
-
-    long maxZigZagDelta = 0;
-    for (int i = 0; i < off; ++i) {
-      values[i] = zigZagEncode(values[i] - min - (long) (avg * i));
-      maxZigZagDelta = Math.max(maxZigZagDelta, values[i]);
+    final float avg = off == 1 ? 0f : (float) (values[off - 1] - values[0]) / (off - 1);
+    long min = values[0];
+    // adjust min so that all deltas will be positive
+    for (int i = 1; i < off; ++i) {
+      final long actual = values[i];
+      final long expected = expected(min, avg, i);
+      if (expected > actual) {
+        min -= (expected - actual);
+      }
     }
 
-    out.writeVLong(min);
+    long maxDelta = 0;
+    for (int i = 0; i < off; ++i) {
+      values[i] = values[i] - expected(min, avg, i);
+      maxDelta = Math.max(maxDelta, values[i]);
+    }
+
+    out.writeVLong(zigZagEncode(min));
     out.writeInt(Float.floatToIntBits(avg));
-    if (maxZigZagDelta == 0) {
+    if (maxDelta == 0) {
       out.writeVInt(0);
     } else {
-      final int bitsRequired = PackedInts.bitsRequired(maxZigZagDelta);
+      final int bitsRequired = PackedInts.bitsRequired(maxDelta);
       out.writeVInt(bitsRequired);
       writeValues(bitsRequired);
     }

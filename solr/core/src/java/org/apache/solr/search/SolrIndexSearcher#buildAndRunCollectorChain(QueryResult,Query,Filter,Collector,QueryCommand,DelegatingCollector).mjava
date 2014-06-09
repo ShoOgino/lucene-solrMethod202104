@@ -1,0 +1,36 @@
+  /**
+   * Builds the neccessary collector chain (via delegate wrapping) and executes the query 
+   * against it.  This method takes into consideration both the explicitly provided collector 
+   * and postFilter as well as any needed collector wrappers for dealing with options 
+   * specified in the QueryCOmmand.
+   */
+  private void buildAndRunCollectorChain(QueryResult qr, Query query, Filter luceneFilter,
+      Collector collector, QueryCommand cmd, DelegatingCollector postFilter) throws IOException {
+    
+    final boolean terminateEarly = (cmd.getFlags() & TERMINATE_EARLY) == TERMINATE_EARLY;
+    if (terminateEarly) {
+      collector = new EarlyTerminatingCollector(collector, cmd.len);
+    }
+
+    final long timeAllowed = cmd.getTimeAllowed();
+    if( timeAllowed > 0 ) {
+      collector = new TimeLimitingCollector(collector, TimeLimitingCollector.getGlobalCounter(), timeAllowed);
+    }
+    
+    if (postFilter != null) {
+      postFilter.setLastDelegate(collector);
+      collector = postFilter;
+    }
+    
+    try {
+      super.search(query, luceneFilter, collector);
+      if(collector instanceof DelegatingCollector) {
+        ((DelegatingCollector)collector).finish();
+      }
+    }
+    catch( TimeLimitingCollector.TimeExceededException x ) {
+      log.warn( "Query: " + query + "; " + x.getMessage() );
+      qr.setPartialResults(true);
+    }        
+  }
+

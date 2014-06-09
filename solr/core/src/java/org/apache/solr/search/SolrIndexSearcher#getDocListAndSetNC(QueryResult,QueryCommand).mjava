@@ -13,7 +13,6 @@
     DocSet set;
 
     boolean needScores = (cmd.getFlags() & GET_SCORES) != 0;
-    boolean terminateEarly = (cmd.getFlags() & TERMINATE_EARLY) == TERMINATE_EARLY;
     int maxDoc = maxDoc();
     int smallSetSize = maxDoc>>6;
 
@@ -21,7 +20,6 @@
     final Filter luceneFilter = pf.filter;
 
     Query query = QueryUtils.makeQueryable(cmd.getQuery());
-    final long timeAllowed = cmd.getTimeAllowed();
 
     // handle zero case...
     if (lastDocRequested<=0) {
@@ -56,27 +54,8 @@
         
         collector = MultiCollector.wrap(setCollector, topScoreCollector);
        }
-       if (terminateEarly) {
-         collector = new EarlyTerminatingCollector(collector, cmd.len);
-       }
-       if( timeAllowed > 0 ) {
-         collector = new TimeLimitingCollector(collector, TimeLimitingCollector.getGlobalCounter(), timeAllowed);
-       }
-      if (pf.postFilter != null) {
-        pf.postFilter.setLastDelegate(collector);
-        collector = pf.postFilter;
-      }
-
-       try {
-         super.search(query, luceneFilter, collector);
-         if(collector instanceof DelegatingCollector) {
-           ((DelegatingCollector)collector).finish();
-         }
-       }
-       catch( TimeLimitingCollector.TimeExceededException x ) {
-         log.warn( "Query: " + query + "; " + x.getMessage() );
-         qr.setPartialResults(true);
-       }
+       
+       buildAndRunCollectorChain(qr, query, luceneFilter, collector, cmd, pf.postFilter);
 
       set = setCollector.getDocSet();
 
@@ -92,26 +71,8 @@
       final TopDocsCollector topCollector = buildTopDocsCollector(len, cmd);
       DocSetCollector setCollector = new DocSetCollector(maxDoc>>6, maxDoc);
       Collector collector = MultiCollector.wrap(topCollector, setCollector);
-      if (terminateEarly) {
-        collector = new EarlyTerminatingCollector(collector, cmd.len);
-      }
-      if( timeAllowed > 0 ) {
-        collector = new TimeLimitingCollector(collector, TimeLimitingCollector.getGlobalCounter(), timeAllowed );
-      }
-      if (pf.postFilter != null) {
-        pf.postFilter.setLastDelegate(collector);
-        collector = pf.postFilter;
-      }
-      try {
-        super.search(query, luceneFilter, collector);
-        if(collector instanceof DelegatingCollector) {
-          ((DelegatingCollector)collector).finish();
-        }
-      }
-      catch( TimeLimitingCollector.TimeExceededException x ) {
-        log.warn( "Query: " + query + "; " + x.getMessage() );
-        qr.setPartialResults(true);
-      }
+
+      buildAndRunCollectorChain(qr, query, luceneFilter, collector, cmd, pf.postFilter);
 
       set = setCollector.getDocSet();      
 

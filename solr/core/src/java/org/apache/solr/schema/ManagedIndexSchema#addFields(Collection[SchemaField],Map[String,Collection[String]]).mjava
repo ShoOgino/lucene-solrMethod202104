@@ -6,45 +6,44 @@
       if (copyFieldNames == null){
         copyFieldNames = Collections.emptyMap();
       }
-      while ( ! success) { // optimistic concurrency
-        // even though fields is volatile, we need to synchronize to avoid two addFields
-        // happening concurrently (and ending up missing one of them)
-        synchronized (getSchemaUpdateLock()) {
-          newSchema = shallowCopy(true);
+      // even though fields is volatile, we need to synchronize to avoid two addFields
+      // happening concurrently (and ending up missing one of them)
+      synchronized (getSchemaUpdateLock()) {
+        newSchema = shallowCopy(true);
 
-          for (SchemaField newField : newFields) {
-            if (null != newSchema.getFieldOrNull(newField.getName())) {
-              String msg = "Field '" + newField.getName() + "' already exists.";
-              throw new FieldExistsException(ErrorCode.BAD_REQUEST, msg);
-            }
-            newSchema.fields.put(newField.getName(), newField);
+        for (SchemaField newField : newFields) {
+          if (null != newSchema.getFieldOrNull(newField.getName())) {
+            String msg = "Field '" + newField.getName() + "' already exists.";
+            throw new FieldExistsException(ErrorCode.BAD_REQUEST, msg);
+          }
+          newSchema.fields.put(newField.getName(), newField);
 
-            if (null != newField.getDefaultValue()) {
-              log.debug(newField.getName() + " contains default value: " + newField.getDefaultValue());
-              newSchema.fieldsWithDefaultValue.add(newField);
-            }
-            if (newField.isRequired()) {
-              log.debug("{} is required in this schema", newField.getName());
-              newSchema.requiredFields.add(newField);
-            }
-            Collection<String> copyFields = copyFieldNames.get(newField.getName());
-            if (copyFields != null) {
-              for (String copyField : copyFields) {
-                newSchema.registerCopyField(newField.getName(), copyField);
-              }
-            }
+          if (null != newField.getDefaultValue()) {
+            log.debug(newField.getName() + " contains default value: " + newField.getDefaultValue());
+            newSchema.fieldsWithDefaultValue.add(newField);
           }
-          // Run the callbacks on SchemaAware now that everything else is done
-          for (SchemaAware aware : newSchema.schemaAware) {
-            aware.inform(newSchema);
+          if (newField.isRequired()) {
+            log.debug("{} is required in this schema", newField.getName());
+            newSchema.requiredFields.add(newField);
           }
-          newSchema.refreshAnalyzers();
-          success = newSchema.persistManagedSchema(false); // don't just create - update it if it already exists
-          if (success) {
-            log.debug("Added field(s): {}", newFields);
+          Collection<String> copyFields = copyFieldNames.get(newField.getName());
+          if (copyFields != null) {
+            for (String copyField : copyFields) {
+              newSchema.registerCopyField(newField.getName(), copyField);
+            }
           }
         }
-        // release the lock between tries to allow the schema reader to update the schema & schemaZkVersion
+        // Run the callbacks on SchemaAware now that everything else is done
+        for (SchemaAware aware : newSchema.schemaAware) {
+          aware.inform(newSchema);
+        }
+        newSchema.refreshAnalyzers();
+        success = newSchema.persistManagedSchema(false); // don't just create - update it if it already exists
+        if (success) {
+          log.debug("Added field(s): {}", newFields);
+        } else {
+          log.error("Failed to add field(s): {}", newFields);
+        }
       }
     } else {
       String msg = "This ManagedIndexSchema is not mutable.";

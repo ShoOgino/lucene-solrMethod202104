@@ -2,21 +2,23 @@
    * Enumerates all minimal prefix paths in the automaton that also intersect the FST,
    * accumulating the FST end node and output for each path.
    */
-  public static <T> List<Path<T>> intersectPrefixPaths(Automaton a, FST<T> fst)
+  public static <T> List<Path<T>> intersectPrefixPaths(LightAutomaton a, FST<T> fst)
       throws IOException {
-    assert a.isDeterministic();
+    assert BasicOperations.isDeterministic(a);
     final List<Path<T>> queue = new ArrayList<>();
     final List<Path<T>> endNodes = new ArrayList<>();
-    queue.add(new Path<>(a.getInitialState(), fst
+    queue.add(new Path<>(0, fst
         .getFirstArc(new FST.Arc<T>()), fst.outputs.getNoOutput(),
         new IntsRef()));
     
     final FST.Arc<T> scratchArc = new FST.Arc<>();
     final FST.BytesReader fstReader = fst.getBytesReader();
-    
+
+    LightAutomaton.Transition t = new LightAutomaton.Transition();
+
     while (queue.size() != 0) {
       final Path<T> path = queue.remove(queue.size() - 1);
-      if (path.state.isAccept()) {
+      if (a.isAccept(path.state)) {
         endNodes.add(path);
         // we can stop here if we accept this path,
         // we accept all further paths too
@@ -24,18 +26,20 @@
       }
       
       IntsRef currentInput = path.input;
-      for (Transition t : path.state.getTransitions()) {
-        final int min = t.getMin();
-        final int max = t.getMax();
+      int count = a.initTransition(path.state, t);
+      for (int i=0;i<count;i++) {
+        a.getNextTransition(t);
+        final int min = t.min;
+        final int max = t.max;
         if (min == max) {
-          final FST.Arc<T> nextArc = fst.findTargetArc(t.getMin(),
+          final FST.Arc<T> nextArc = fst.findTargetArc(t.min,
               path.fstNode, scratchArc, fstReader);
           if (nextArc != null) {
             final IntsRef newInput = new IntsRef(currentInput.length + 1);
             newInput.copyInts(currentInput);
-            newInput.ints[currentInput.length] = t.getMin();
+            newInput.ints[currentInput.length] = t.min;
             newInput.length = currentInput.length + 1;
-            queue.add(new Path<>(t.getDest(), new FST.Arc<T>()
+            queue.add(new Path<>(t.dest, new FST.Arc<T>()
                 .copyFrom(nextArc), fst.outputs
                 .add(path.output, nextArc.output), newInput));
           }
@@ -57,7 +61,7 @@
             newInput.copyInts(currentInput);
             newInput.ints[currentInput.length] = nextArc.label;
             newInput.length = currentInput.length + 1;
-            queue.add(new Path<>(t.getDest(), new FST.Arc<T>()
+            queue.add(new Path<>(t.dest, new FST.Arc<T>()
                 .copyFrom(nextArc), fst.outputs
                 .add(path.output, nextArc.output), newInput));
             final int label = nextArc.label; // used in assert

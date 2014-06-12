@@ -4,72 +4,21 @@
     meta.writeByte(Lucene49DocValuesFormat.SORTED_SET);
 
     if (isSingleValued(docToOrdCount)) {
-      meta.writeVInt(SORTED_SET_SINGLE_VALUED_SORTED);
+      meta.writeVInt(SORTED_SINGLE_VALUED);
       // The field is single-valued, we can encode it as SORTED
-      addSortedField(field, values, new Iterable<Number>() {
+      addSortedField(field, values, singletonView(docToOrdCount, ords, -1L));
+    } else {
+      meta.writeVInt(SORTED_WITH_ADDRESSES);
 
-        @Override
-        public Iterator<Number> iterator() {
-          final Iterator<Number> docToOrdCountIt = docToOrdCount.iterator();
-          final Iterator<Number> ordsIt = ords.iterator();
-          return new Iterator<Number>() {
+      // write the ord -> byte[] as a binary field
+      addTermsDict(field, values);
 
-            @Override
-            public boolean hasNext() {
-              assert ordsIt.hasNext() ? docToOrdCountIt.hasNext() : true;
-              return docToOrdCountIt.hasNext();
-            }
+      // write the stream of ords as a numeric field
+      // NOTE: we could return an iterator that delta-encodes these within a doc
+      addNumericField(field, ords, false);
 
-            @Override
-            public Number next() {
-              final Number ordCount = docToOrdCountIt.next();
-              if (ordCount.longValue() == 0) {
-                return MISSING_ORD;
-              } else {
-                assert ordCount.longValue() == 1;
-                return ordsIt.next();
-              }
-            }
-
-            @Override
-            public void remove() {
-              throw new UnsupportedOperationException();
-            }
-
-          };
-        }
-
-      });
-      return;
+      // write the doc -> ord count as a absolute index to the stream
+      addAddresses(field, docToOrdCount);
     }
-
-    meta.writeVInt(SORTED_SET_WITH_ADDRESSES);
-
-    // write the ord -> byte[] as a binary field
-    addTermsDict(field, values);
-
-    // write the stream of ords as a numeric field
-    // NOTE: we could return an iterator that delta-encodes these within a doc
-    addNumericField(field, ords, false);
-
-    // write the doc -> ord count as a absolute index to the stream
-    meta.writeVInt(field.number);
-    meta.writeByte(Lucene49DocValuesFormat.NUMERIC);
-    meta.writeVInt(MONOTONIC_COMPRESSED);
-    meta.writeLong(-1L);
-    meta.writeLong(data.getFilePointer());
-    meta.writeVLong(maxDoc);
-    meta.writeVInt(PackedInts.VERSION_CURRENT);
-    meta.writeVInt(BLOCK_SIZE);
-
-    final MonotonicBlockPackedWriter writer = new MonotonicBlockPackedWriter(data, BLOCK_SIZE);
-    long addr = 0;
-    writer.add(addr);
-    for (Number v : docToOrdCount) {
-      addr += v.longValue();
-      writer.add(addr);
-    }
-    writer.finish();
-    meta.writeLong(data.getFilePointer());
   }
 

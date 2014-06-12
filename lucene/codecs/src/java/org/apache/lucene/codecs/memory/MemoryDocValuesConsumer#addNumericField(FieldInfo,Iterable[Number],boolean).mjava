@@ -9,10 +9,11 @@
     boolean missing = false;
     // TODO: more efficient?
     HashSet<Long> uniqueValues = null;
+    long count = 0;
+
     if (optimizeStorage) {
       uniqueValues = new HashSet<>();
 
-      long count = 0;
       long currentBlockMin = Long.MAX_VALUE;
       long currentBlockMax = Long.MIN_VALUE;
       for (Number nv : values) {
@@ -59,12 +60,12 @@
           currentBlockMin = Long.MAX_VALUE;
         }
       }
-      assert count == maxDoc;
     } else {
       for (Number nv : values) {
         long v = nv.longValue();
         maxValue = Math.max(v, maxValue);
         minValue = Math.min(v, minValue);
+        count++;
       }
     }
     
@@ -82,14 +83,14 @@
     final FormatAndBits deltaBPV = PackedInts.fastestFormatAndBits(maxDoc, deltaRequired, acceptableOverheadRatio);
         
     final FormatAndBits tableBPV;
-    if (uniqueValues != null) {
+    if (count < Integer.MAX_VALUE && uniqueValues != null) {
       tableBPV = PackedInts.fastestFormatAndBits(maxDoc, PackedInts.bitsRequired(uniqueValues.size()-1), acceptableOverheadRatio);
     } else {
       tableBPV = null;
     }
     
     final FormatAndBits gcdBPV;
-    if (gcd != 0 && gcd != 1) {
+    if (count < Integer.MAX_VALUE && gcd != 0 && gcd != 1) {
       final long gcdDelta = (maxValue - minValue) / gcd;
       final int gcdRequired = gcdDelta < 0 ? 64 : PackedInts.bitsRequired(gcdDelta);
       gcdBPV = PackedInts.fastestFormatAndBits(maxDoc, gcdRequired, acceptableOverheadRatio);
@@ -106,6 +107,10 @@
       if (numBlocks >= 4 && (avgBPV+avgBPV*acceptableOverheadRatio) < deltaBPV.bitsPerValue) {
         doBlock = true;
       }
+    }
+    // blockpackedreader allows us to read in huge streams of ints
+    if (count >= Integer.MAX_VALUE) {
+      doBlock = true;
     }
     
     if (tableBPV != null && (tableBPV.bitsPerValue+tableBPV.bitsPerValue*acceptableOverheadRatio) < deltaBPV.bitsPerValue) {
@@ -124,10 +129,11 @@
       }
       
       meta.writeVInt(PackedInts.VERSION_CURRENT);
+      meta.writeLong(count);
       data.writeVInt(tableBPV.format.getId());
       data.writeVInt(tableBPV.bitsPerValue);
       
-      final PackedInts.Writer writer = PackedInts.getWriterNoHeader(data, tableBPV.format, maxDoc, tableBPV.bitsPerValue, PackedInts.DEFAULT_BUFFER_SIZE);
+      final PackedInts.Writer writer = PackedInts.getWriterNoHeader(data, tableBPV.format, (int)count, tableBPV.bitsPerValue, PackedInts.DEFAULT_BUFFER_SIZE);
       for(Number nv : values) {
         writer.add(encode.get(nv == null ? 0 : nv.longValue()));
       }
@@ -135,12 +141,13 @@
     } else if (gcdBPV != null && (gcdBPV.bitsPerValue+gcdBPV.bitsPerValue*acceptableOverheadRatio) < deltaBPV.bitsPerValue) {
       meta.writeByte(GCD_COMPRESSED);
       meta.writeVInt(PackedInts.VERSION_CURRENT);
+      meta.writeLong(count);
       data.writeLong(minValue);
       data.writeLong(gcd);
       data.writeVInt(gcdBPV.format.getId());
       data.writeVInt(gcdBPV.bitsPerValue);
 
-      final PackedInts.Writer writer = PackedInts.getWriterNoHeader(data, gcdBPV.format, maxDoc, gcdBPV.bitsPerValue, PackedInts.DEFAULT_BUFFER_SIZE);
+      final PackedInts.Writer writer = PackedInts.getWriterNoHeader(data, gcdBPV.format, (int)count, gcdBPV.bitsPerValue, PackedInts.DEFAULT_BUFFER_SIZE);
       for (Number nv : values) {
         long value = nv == null ? 0 : nv.longValue();
         writer.add((value - minValue) / gcd);
@@ -149,6 +156,7 @@
     } else if (doBlock) {
       meta.writeByte(BLOCK_COMPRESSED); // block delta-compressed
       meta.writeVInt(PackedInts.VERSION_CURRENT);
+      meta.writeLong(count);
       data.writeVInt(BLOCK_SIZE);
       final BlockPackedWriter writer = new BlockPackedWriter(data, BLOCK_SIZE);
       for (Number nv : values) {
@@ -158,12 +166,13 @@
     } else {
       meta.writeByte(DELTA_COMPRESSED); // delta-compressed
       meta.writeVInt(PackedInts.VERSION_CURRENT);
+      meta.writeLong(count);
       final long minDelta = deltaBPV.bitsPerValue == 64 ? 0 : minValue;
       data.writeLong(minDelta);
       data.writeVInt(deltaBPV.format.getId());
       data.writeVInt(deltaBPV.bitsPerValue);
 
-      final PackedInts.Writer writer = PackedInts.getWriterNoHeader(data, deltaBPV.format, maxDoc, deltaBPV.bitsPerValue, PackedInts.DEFAULT_BUFFER_SIZE);
+      final PackedInts.Writer writer = PackedInts.getWriterNoHeader(data, deltaBPV.format, (int)count, deltaBPV.bitsPerValue, PackedInts.DEFAULT_BUFFER_SIZE);
       for (Number nv : values) {
         long v = nv == null ? 0 : nv.longValue();
         writer.add(v - minDelta);

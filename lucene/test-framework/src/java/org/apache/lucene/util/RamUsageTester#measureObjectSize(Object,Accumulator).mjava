@@ -4,7 +4,7 @@
    * or complex graphs (a max. recursion depth on my machine was ~5000 objects linked in a chain
    * so not too much).
    */
-  private static long measureObjectSize(Object root, Filter filter) {
+  private static long measureObjectSize(Object root, Accumulator accumulator) {
     // Objects seen so far.
     final IdentityHashSet<Object> seen = new IdentityHashSet<>();
     // Class cache with reference Field and precalculated shallow size. 
@@ -29,25 +29,28 @@
          * Consider an array, possibly of primitive types. Push any of its references to
          * the processing stack and accumulate this array's shallow size. 
          */
-        long size = RamUsageEstimator.NUM_BYTES_ARRAY_HEADER;
+        final long shallowSize = RamUsageEstimator.shallowSizeOf(ob);
         final int len = Array.getLength(ob);
-        if (len > 0) {
-          Class<?> componentClazz = obClazz.getComponentType();
-          if (componentClazz.isPrimitive()) {
-            size += (long) len * RamUsageEstimator.shallowSizeOfInstance(componentClazz);
-          } else {
-            size += (long) RamUsageEstimator.NUM_BYTES_OBJECT_REF * len;
+        final List<Object> values;
+        Class<?> componentClazz = obClazz.getComponentType();
+        if (componentClazz.isPrimitive()) {
+          values = Collections.emptyList();
+        } else {
+          values = new AbstractList<Object>() {
 
-            // Push refs for traversal later.
-            for (int i = len; --i >= 0 ;) {
-              final Object o = Array.get(ob, i);
-              if (o != null && !seen.contains(o) && filter.accept(o)) {
-                stack.add(o);
+            @Override
+            public Object get(int index) {
+              return Array.get(ob, index);
+            }
+
+            @Override
+            public int size() {
+              return len;
               }
-            }            
+              
+            };         
           }
-        }
-        totalSize += RamUsageEstimator.alignObjectSize(size);
+        totalSize += accumulator.accumulateArray(ob, shallowSize, values, stack);
       } else {
         /*
          * Consider an object. Push any references it has to the processing stack
@@ -59,17 +62,12 @@
             classCache.put(obClazz, cachedInfo = createCacheEntry(obClazz));
           }
 
+          Map<Field, Object> fieldValues = new HashMap<>();
           for (Field f : cachedInfo.referenceFields) {
-            if (filter.accept(f)) {
-              // Fast path to eliminate redundancies.
-              final Object o = f.get(ob);
-              if (o != null && !seen.contains(o) && filter.accept(o)) {
-                stack.add(o);
-              }
-            }
+            fieldValues.put(f, f.get(ob));
           }
 
-          totalSize += cachedInfo.alignedShallowInstanceSize;
+          totalSize += accumulator.accumulateObject(ob, cachedInfo.alignedShallowInstanceSize, fieldValues, stack);
         } catch (IllegalAccessException e) {
           // this should never happen as we enabled setAccessible().
           throw new RuntimeException("Reflective field access failed?", e);

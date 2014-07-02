@@ -7,8 +7,11 @@
     // one-pass algorithm if only id and score fields are requested, but not if fl=score since that's the same as fl=*,score
     ReturnFields fields = rb.rsp.getReturnFields();
 
-    if(fields != null && fields.wantsField(keyFieldName)
-        && fields.getRequestedFieldNames() != null && Arrays.asList(keyFieldName, "score").containsAll(fields.getRequestedFieldNames())) {
+    // distrib.singlePass=true forces a one-pass query regardless of requested fields
+    boolean distribSinglePass = rb.req.getParams().getBool(ShardParams.DISTRIB_SINGLE_PASS, false);
+
+    if(distribSinglePass || (fields != null && fields.wantsField(keyFieldName)
+        && fields.getRequestedFieldNames() != null && Arrays.asList(keyFieldName, "score").containsAll(fields.getRequestedFieldNames()))) {
       sreq.purpose |= ShardRequest.PURPOSE_GET_FIELDS;
       rb.onePassDistributedQuery = true;
     }
@@ -38,14 +41,38 @@
       sreq.params.set(CommonParams.ROWS, rb.getSortSpec().getOffset() + rb.getSortSpec().getCount());
     }
 
-    // in this first phase, request only the unique key field
-    // and any fields needed for merging.
     sreq.params.set(ResponseBuilder.FIELD_SORT_VALUES,"true");
 
-    if ( (rb.getFieldFlags() & SolrIndexSearcher.GET_SCORES)!=0 || rb.getSortSpec().includesScore()) {
-      sreq.params.set(CommonParams.FL, keyFieldName + ",score");
+    boolean shardQueryIncludeScore = (rb.getFieldFlags() & SolrIndexSearcher.GET_SCORES) != 0 || rb.getSortSpec().includesScore();
+    if (distribSinglePass) {
+      String fl = rb.req.getParams().get(CommonParams.FL);
+      if (fl == null) {
+        if (fields.getRequestedFieldNames() == null && fields.wantsAllFields()) {
+          fl = "*";
+        } else  {
+          fl = "";
+          for (String s : fields.getRequestedFieldNames()) {
+            fl += s + ",";
+          }
+        }
+      }
+      if (!fields.wantsField(keyFieldName))  {
+        // the user has not requested the unique key but
+        // we still need to add it otherwise mergeIds can't work
+        if (fl.endsWith(",")) {
+          fl += keyFieldName;
+        } else  {
+          fl += "," + keyFieldName;
+        }
+      }
+      sreq.params.set(CommonParams.FL, updateFl(fl, shardQueryIncludeScore));
     } else {
-      sreq.params.set(CommonParams.FL, keyFieldName);
+      // in this first phase, request only the unique key field and any fields needed for merging.
+      if (shardQueryIncludeScore) {
+        sreq.params.set(CommonParams.FL, keyFieldName + ",score");
+      } else {
+        sreq.params.set(CommonParams.FL, keyFieldName);
+      }
     }
 
     rb.addRequest(this, sreq);

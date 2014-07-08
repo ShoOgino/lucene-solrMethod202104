@@ -1,0 +1,110 @@
+  @Override
+  protected double score(Rectangle target, Explanation exp) {
+    // calculate "height": the intersection height between two boxes.
+    double top = Math.min(queryExtent.getMaxY(), target.getMaxY());
+    double bottom = Math.max(queryExtent.getMinY(), target.getMinY());
+    double height = top - bottom;
+    if (height < 0)
+      return 0;//no intersection
+
+    // calculate "width": the intersection width between two boxes.
+    double width = 0;
+    {
+      Rectangle a = queryExtent;
+      Rectangle b = target;
+      if (a.getCrossesDateLine() == b.getCrossesDateLine()) {
+        //both either cross or don't
+        double left = Math.max(a.getMinX(), b.getMinX());
+        double right = Math.min(a.getMaxX(), b.getMaxX());
+        if (!a.getCrossesDateLine()) {//both don't
+          if (left <= right) {
+            width = right - left;
+          } else if (isGeo && (Math.abs(a.getMinX()) == 180 || Math.abs(a.getMaxX()) == 180)
+              && (Math.abs(b.getMinX()) == 180 || Math.abs(b.getMaxX()) == 180)) {
+            width = 0;//both adjacent to dateline
+          } else {
+            return 0;//no intersection
+          }
+        } else {//both cross
+          width = right - left + 360;
+        }
+      } else {
+        if (!a.getCrossesDateLine()) {//then flip
+          a = target;
+          b = queryExtent;
+        }
+        //a crosses, b doesn't
+        double qryWestLeft = Math.max(a.getMinX(), b.getMinX());
+        double qryWestRight = b.getMaxX();
+        if (qryWestLeft < qryWestRight)
+          width += qryWestRight - qryWestLeft;
+
+        double qryEastLeft = b.getMinX();
+        double qryEastRight = Math.min(a.getMaxX(), b.getMaxX());
+        if (qryEastLeft < qryEastRight)
+          width += qryEastRight - qryEastLeft;
+
+        if (qryWestLeft > qryWestRight && qryEastLeft > qryEastRight)
+          return 0;//no intersection
+      }
+    }
+
+    // calculate queryRatio and targetRatio
+    double intersectionArea = calcArea(width, height);
+    double queryRatio;
+    if (queryArea > 0) {
+      queryRatio = intersectionArea / queryArea;
+    } else if (queryExtent.getHeight() > 0) {//vert line
+      queryRatio = height / queryExtent.getHeight();
+    } else if (queryExtent.getWidth() > 0) {//horiz line
+      queryRatio = width / queryExtent.getWidth();
+    } else {
+      queryRatio = queryExtent.relate(target).intersects() ? 1 : 0;//could be optimized
+    }
+
+    double targetArea = calcArea(target.getWidth(), target.getHeight());
+    assert targetArea >= 0;
+    double targetRatio;
+    if (targetArea > 0) {
+      targetRatio = intersectionArea / targetArea;
+    } else if (target.getHeight() > 0) {//vert line
+      targetRatio = height / target.getHeight();
+    } else if (target.getWidth() > 0) {//horiz line
+      targetRatio = width / target.getWidth();
+    } else {
+      targetRatio = target.relate(queryExtent).intersects() ? 1 : 0;//could be optimized
+    }
+    assert queryRatio >= 0 && queryRatio <= 1 : queryRatio;
+    assert targetRatio >= 0 && targetRatio <= 1 : targetRatio;
+
+    // combine ratios into a score
+
+    double queryFactor = queryRatio * queryTargetProportion;
+    double targetFactor = targetRatio * (1.0 - queryTargetProportion);
+    double score = queryFactor + targetFactor;
+
+    if (exp!=null) {
+      exp.setValue((float)score);
+      exp.setDescription(this.getClass().getSimpleName()+": queryFactor + targetFactor");
+
+      Explanation e;//tmp
+
+      String minSideDesc = minSideLength > 0.0 ? " (minSide="+minSideLength+")" : "";
+
+      exp.addDetail( e = new Explanation((float)intersectionArea, "IntersectionArea" + minSideDesc));
+      e.addDetail(new Explanation((float)width,  "width"));
+      e.addDetail(new Explanation((float)height, "height"));
+      e.addDetail(new Explanation((float)queryTargetProportion, "queryTargetProportion"));
+
+      exp.addDetail( e = new Explanation((float)queryFactor, "queryFactor"));
+      e.addDetail(new Explanation((float)queryRatio, "ratio"));
+      e.addDetail(new Explanation((float)queryArea,  "area of " + queryExtent + minSideDesc));
+
+      exp.addDetail( e = new Explanation((float)targetFactor, "targetFactor"));
+      e.addDetail(new Explanation((float)targetRatio, "ratio"));
+      e.addDetail(new Explanation((float)targetArea,  "area of " + target + minSideDesc));
+    }
+
+    return score;
+  }
+

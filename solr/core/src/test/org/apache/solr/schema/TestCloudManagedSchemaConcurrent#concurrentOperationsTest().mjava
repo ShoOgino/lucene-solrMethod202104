@@ -1,0 +1,93 @@
+  private void concurrentOperationsTest() throws Exception {
+    
+    // First, add a bunch of fields via PUT and POST, as well as copyFields,
+    // but do it fast enough and verify shards' schemas after all of them are added
+    int numFields = 100;
+    int numAddFieldPuts = 0;
+    int numAddFieldPosts = 0;
+    List<CopyFieldInfo> copyFields = new ArrayList<>();
+    
+    final String putFieldName = "newfieldPut";
+    final String postFieldName = "newfieldPost";
+
+    for (int i = 0; i <= numFields ; ++i) {
+      RestTestHarness publisher = restTestHarnesses.get(r.nextInt(restTestHarnesses.size()));
+
+      int type = random().nextInt(3);
+      if (type == 0) { // send an add field via PUT
+        addFieldPut(publisher, putFieldName + numAddFieldPuts++);
+      }
+      else if (type == 1) { // send an add field via POST
+        addFieldPost(publisher, postFieldName + numAddFieldPosts++);
+      }
+      else if (type == 2) { // send a copy field
+        String sourceField = null;
+        String destField = null;
+
+        int sourceType = random().nextInt(3);
+        if (sourceType == 0) {  // existing
+          sourceField = "name";
+        } else if (sourceType == 1) { // newly created
+          sourceField = "copySource" + i;
+          addFieldPut(publisher, sourceField);
+        } else { // dynamic
+          sourceField = "*_dynamicSource" + i + "_t";
+          // * only supported if both src and dst use it
+          destField = "*_dynamicDest" + i + "_t";
+        }
+        
+        if (destField == null) {
+          int destType = random().nextInt(2);
+          if (destType == 0) {  // existing
+            destField = "title";
+          } else { // newly created
+            destField = "copyDest" + i;
+            addFieldPut(publisher, destField);
+          }
+        }
+        copyField(publisher, sourceField, destField);
+        copyFields.add(new CopyFieldInfo(sourceField, destField));
+      }
+    }
+
+    String[] expectedAddFields = getExpectedFieldResponses(numAddFieldPuts, putFieldName,
+                                                           numAddFieldPosts, postFieldName);
+    String[] expectedCopyFields = getExpectedCopyFieldResponses(copyFields);
+
+    boolean success = false;
+    long maxTimeoutMillis = 100000;
+    long startTime = System.nanoTime();
+    String request = null;
+    String response = null;
+    String result = null;
+
+    while ( ! success 
+           && TimeUnit.MILLISECONDS.convert(System.nanoTime() - startTime, TimeUnit.NANOSECONDS) < maxTimeoutMillis) {
+      Thread.sleep(100);
+
+      for (RestTestHarness client : restTestHarnesses) {
+        // verify addFieldPuts and addFieldPosts
+        request = "/schema/fields?wt=xml";
+        response = client.query(request);
+        result = BaseTestHarness.validateXPath(response, expectedAddFields);
+        if (result != null) {
+          break;
+        }
+
+        // verify copyFields
+        request = "/schema/copyfields?wt=xml";
+        response = client.query(request);
+        result = BaseTestHarness.validateXPath(response, expectedCopyFields);
+        if (result != null) {
+          break;
+        }
+      }
+      success = (result == null);
+    }
+    if ( ! success) {
+      String msg = "QUERY FAILED: xpath=" + result + "  request=" + request + "  response=" + response;
+      log.error(msg);
+      fail(msg);
+    }
+  }
+

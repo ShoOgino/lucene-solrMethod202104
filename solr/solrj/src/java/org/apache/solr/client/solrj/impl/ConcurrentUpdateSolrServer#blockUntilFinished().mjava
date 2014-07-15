@@ -1,27 +1,27 @@
   public synchronized void blockUntilFinished() {
     lock = new CountDownLatch(1);
     try {
-      // Wait until no runners are running
-      for (;;) {
-        Runner runner;
-        synchronized (runners) {
-          runner = runners.peek();
-        }
-
-        if ((runner == null && queue.isEmpty()) || scheduler.isTerminated())
-          break;
-        
-        if (runner != null) {
-          runner.runnerLock.lock();
-          runner.runnerLock.unlock();
-        } else if (!queue.isEmpty()) {
-          // failsafe - should not be necessary, but a good
-          // precaution to ensure blockUntilFinished guarantees
-          // all updates are emptied from the queue regardless of
-          // any bugs around starting or retaining runners
-          Runner r = new Runner();
-          runners.add(r);
-          scheduler.execute(r);
+      synchronized (runners) {
+        while (!runners.isEmpty()) {
+          try {
+            runners.wait();
+          } catch (InterruptedException e) {
+            Thread.interrupted();
+          }
+          
+          if (scheduler.isTerminated())
+            break;
+                      
+          // if we reach here, then we probably got the notifyAll, but need to check if
+          // the queue is empty before really considering this is finished (SOLR-4260)
+          int queueSize = queue.size();
+          if (queueSize > 0) {
+            log.warn("No more runners, but queue still has "+
+              queueSize+" adding more runners to process remaining requests on queue");
+            Runner r = new Runner();
+            runners.add(r);
+            scheduler.execute(r);
+          }
         }
       }
     } finally {

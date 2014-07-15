@@ -1,0 +1,66 @@
+  @Test
+  public void testConcurrentUpdate() throws Exception {
+    TestServlet.clear();
+    
+    String serverUrl = jetty.getBaseUrl().toString() + "/cuss/foo";
+        
+    int cussThreadCount = 2;
+    int cussQueueSize = 100;
+    
+    // for tracking callbacks from CUSS
+    final AtomicInteger successCounter = new AtomicInteger(0);
+    final AtomicInteger errorCounter = new AtomicInteger(0);    
+    final StringBuilder errors = new StringBuilder();     
+    
+    @SuppressWarnings("serial")
+    ConcurrentUpdateSolrServer cuss = new ConcurrentUpdateSolrServer(serverUrl, cussQueueSize, cussThreadCount) {
+      @Override
+      public void handleError(Throwable ex) {
+        errorCounter.incrementAndGet();
+        errors.append(" "+ex);
+      }
+      @Override
+      public void onSuccess(HttpResponse resp) {
+        successCounter.incrementAndGet();
+      }
+    };
+    
+    cuss.setParser(new BinaryResponseParser());
+    cuss.setRequestWriter(new BinaryRequestWriter());
+    cuss.setPollQueueTime(0);
+    
+    // ensure it doesn't block where there's nothing to do yet
+    cuss.blockUntilFinished();
+    
+    int poolSize = 5;
+    ExecutorService threadPool = Executors.newFixedThreadPool(poolSize);
+
+    int numDocs = 100;
+    int numRunnables = 5;
+    for (int r=0; r < numRunnables; r++)
+      threadPool.execute(new SendDocsRunnable(String.valueOf(r), numDocs, cuss));
+    
+    // ensure all docs are sent
+    threadPool.awaitTermination(5, TimeUnit.SECONDS);
+    threadPool.shutdown();
+    
+    // wait until all requests are processed by CUSS 
+    cuss.blockUntilFinished();
+    cuss.shutdownNow();    
+    
+    assertEquals("post", TestServlet.lastMethod);
+        
+    // expect all requests to be successful
+    int expectedSuccesses = TestServlet.numReqsRcvd.get();
+    assertTrue(expectedSuccesses > 0); // at least one request must have been sent
+    
+    assertTrue("Expected no errors but got "+errorCounter.get()+
+        ", due to: "+errors.toString(), errorCounter.get() == 0);
+    assertTrue("Expected "+expectedSuccesses+" successes, but got "+successCounter.get(), 
+        successCounter.get() == expectedSuccesses);
+    
+    int expectedDocs = numDocs * numRunnables;
+    assertTrue("Expected CUSS to send "+expectedDocs+" but got "+TestServlet.numDocsRcvd.get(), 
+        TestServlet.numDocsRcvd.get() == expectedDocs);
+  }
+

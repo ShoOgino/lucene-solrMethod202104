@@ -1,0 +1,58 @@
+  /**
+   * Unload a core from this container, optionally removing the core's data and configuration
+   *
+   * @param name the name of the core to unload
+   * @param deleteIndexDir if true, delete the core's index on close
+   * @param deleteDataDir if true, delete the core's data directory on close
+   * @param deleteInstanceDir if true, delete the core's instance directory on close
+   */
+  public void unload(String name, boolean deleteIndexDir, boolean deleteDataDir, boolean deleteInstanceDir) {
+
+    name = checkDefault(name);
+
+    // check for core-init errors first
+    CoreLoadFailure loadFailure = coreInitFailures.remove(name);
+    if (loadFailure != null) {
+      // getting the index directory requires opening a DirectoryFactory with a SolrConfig, etc,
+      // which we may not be able to do because of the init error.  So we just go with what we
+      // can glean from the CoreDescriptor - datadir and instancedir
+      SolrCore.deleteUnloadedCore(loadFailure.cd, deleteDataDir, deleteInstanceDir);
+      return;
+    }
+
+    CoreDescriptor cd = solrCores.getCoreDescriptor(name);
+    if (cd == null)
+      throw new SolrException(ErrorCode.BAD_REQUEST, "Cannot unload non-existent core [" + name + "]");
+
+    boolean close = solrCores.isLoadedNotPendingClose(name);
+    SolrCore core = solrCores.remove(name);
+    coresLocator.delete(this, cd);
+
+    if (core == null) {
+      // transient core
+      SolrCore.deleteUnloadedCore(cd, deleteDataDir, deleteInstanceDir);
+      return;
+    }
+
+    if (zkSys.getZkController() != null) {
+      // cancel recovery in cloud mode
+      core.getSolrCoreState().cancelRecovery();
+    }
+
+    core.unloadOnClose(deleteIndexDir, deleteDataDir, deleteInstanceDir);
+    if (close)
+      core.close();
+
+    if (zkSys.getZkController() != null) {
+      try {
+        zkSys.getZkController().unregister(name, cd);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new SolrException(ErrorCode.SERVER_ERROR, "Interrupted while unregistering core [" + name + "] from cloud state");
+      } catch (KeeperException e) {
+        throw new SolrException(ErrorCode.SERVER_ERROR, "Error unregistering core [" + name + "] from cloud state", e);
+      }
+    }
+
+  }
+

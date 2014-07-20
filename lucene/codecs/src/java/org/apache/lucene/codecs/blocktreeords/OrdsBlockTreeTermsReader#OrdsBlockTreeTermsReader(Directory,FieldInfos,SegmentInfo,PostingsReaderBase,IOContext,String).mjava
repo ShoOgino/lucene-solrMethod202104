@@ -1,0 +1,94 @@
+  /** Sole constructor. */
+  public OrdsBlockTreeTermsReader(Directory dir, FieldInfos fieldInfos, SegmentInfo info,
+                                  PostingsReaderBase postingsReader, IOContext ioContext,
+                                  String segmentSuffix)
+    throws IOException {
+    
+    this.postingsReader = postingsReader;
+
+    this.segment = info.name;
+    in = dir.openInput(IndexFileNames.segmentFileName(segment, segmentSuffix, OrdsBlockTreeTermsWriter.TERMS_EXTENSION),
+                       ioContext);
+
+    boolean success = false;
+    IndexInput indexIn = null;
+
+    try {
+      version = CodecUtil.checkHeader(in,
+                                      OrdsBlockTreeTermsWriter.TERMS_CODEC_NAME,
+                                      OrdsBlockTreeTermsWriter.VERSION_START,
+                                      OrdsBlockTreeTermsWriter.VERSION_CURRENT);
+      indexIn = dir.openInput(IndexFileNames.segmentFileName(segment, segmentSuffix, OrdsBlockTreeTermsWriter.TERMS_INDEX_EXTENSION),
+                              ioContext);
+      int indexVersion = CodecUtil.checkHeader(indexIn,
+                                               OrdsBlockTreeTermsWriter.TERMS_INDEX_CODEC_NAME,
+                                               OrdsBlockTreeTermsWriter.VERSION_START,
+                                               OrdsBlockTreeTermsWriter.VERSION_CURRENT);
+      if (indexVersion != version) {
+        throw new CorruptIndexException("mixmatched version files: " + in + "=" + version + "," + indexIn + "=" + indexVersion);
+      }
+      
+      // verify
+      CodecUtil.checksumEntireFile(indexIn);
+
+      // Have PostingsReader init itself
+      postingsReader.init(in);
+
+      // Read per-field details
+      seekDir(in, dirOffset);
+      seekDir(indexIn, indexDirOffset);
+
+      final int numFields = in.readVInt();
+      if (numFields < 0) {
+        throw new CorruptIndexException("invalid numFields: " + numFields + " (resource=" + in + ")");
+      }
+
+      for(int i=0;i<numFields;i++) {
+        final int field = in.readVInt();
+        final long numTerms = in.readVLong();
+        assert numTerms >= 0;
+        // System.out.println("read field=" + field + " numTerms=" + numTerms + " i=" + i);
+        final int numBytes = in.readVInt();
+        final BytesRef code = new BytesRef(new byte[numBytes]);
+        in.readBytes(code.bytes, 0, numBytes);
+        code.length = numBytes;
+        final Output rootCode = OrdsBlockTreeTermsWriter.FST_OUTPUTS.newOutput(code, 0, numTerms);
+        final FieldInfo fieldInfo = fieldInfos.fieldInfo(field);
+        assert fieldInfo != null: "field=" + field;
+        assert numTerms <= Integer.MAX_VALUE;
+        final long sumTotalTermFreq = fieldInfo.getIndexOptions() == IndexOptions.DOCS_ONLY ? -1 : in.readVLong();
+        final long sumDocFreq = in.readVLong();
+        final int docCount = in.readVInt();
+        final int longsSize = in.readVInt();
+        // System.out.println("  longsSize=" + longsSize);
+
+        BytesRef minTerm = readBytesRef(in);
+        BytesRef maxTerm = readBytesRef(in);
+        if (docCount < 0 || docCount > info.getDocCount()) { // #docs with field must be <= #docs
+          throw new CorruptIndexException("invalid docCount: " + docCount + " maxDoc: " + info.getDocCount() + " (resource=" + in + ")");
+        }
+        if (sumDocFreq < docCount) {  // #postings must be >= #docs with field
+          throw new CorruptIndexException("invalid sumDocFreq: " + sumDocFreq + " docCount: " + docCount + " (resource=" + in + ")");
+        }
+        if (sumTotalTermFreq != -1 && sumTotalTermFreq < sumDocFreq) { // #positions must be >= #postings
+          throw new CorruptIndexException("invalid sumTotalTermFreq: " + sumTotalTermFreq + " sumDocFreq: " + sumDocFreq + " (resource=" + in + ")");
+        }
+        final long indexStartFP = indexIn.readVLong();
+        OrdsFieldReader previous = fields.put(fieldInfo.name,       
+                                              new OrdsFieldReader(this, fieldInfo, numTerms, rootCode, sumTotalTermFreq, sumDocFreq, docCount,
+                                                                  indexStartFP, longsSize, indexIn, minTerm, maxTerm));
+        if (previous != null) {
+          throw new CorruptIndexException("duplicate field: " + fieldInfo.name + " (resource=" + in + ")");
+        }
+      }
+      indexIn.close();
+
+      success = true;
+    } finally {
+      if (!success) {
+        // this.close() will close in:
+        IOUtils.closeWhileHandlingException(indexIn, this);
+      }
+    }
+  }
+

@@ -1,0 +1,63 @@
+  private void getCountNumeric() throws IOException {
+    final FieldType ft = schemaField.getType();
+    final String fieldName = schemaField.getName();
+    final NumericType numericType = ft.getNumericType();
+    if (numericType == null) {
+      throw new IllegalStateException();
+    }
+    final List<AtomicReaderContext> leaves = searcher.getIndexReader().leaves();
+
+    final Iterator<AtomicReaderContext> ctxIt = leaves.iterator();
+    AtomicReaderContext ctx = null;
+    NumericDocValues longs = null;
+    Bits docsWithField = null;
+    for (DocIterator docsIt = docs.iterator(); docsIt.hasNext(); ) {
+      final int doc = docsIt.nextDoc();
+      if (ctx == null || doc >= ctx.docBase + ctx.reader().maxDoc()) {
+        do {
+          ctx = ctxIt.next();
+        } while (ctx == null || doc >= ctx.docBase + ctx.reader().maxDoc());
+        assert doc >= ctx.docBase;
+        switch (numericType) {
+          case LONG:
+            longs = DocValues.getNumeric(ctx.reader(), fieldName);
+            break;
+          case INT:
+            longs = DocValues.getNumeric(ctx.reader(), fieldName);
+            break;
+          case FLOAT:
+            final NumericDocValues floats = DocValues.getNumeric(ctx.reader(), fieldName);
+            // TODO: this bit flipping should probably be moved to tie-break in the PQ comparator
+            longs = new NumericDocValues() {
+              @Override
+              public long get(int docID) {
+                long bits = floats.get(docID);
+                if (bits < 0) bits ^= 0x7fffffffffffffffL;
+                return bits;
+              }
+            };
+            break;
+          case DOUBLE:
+            final NumericDocValues doubles = DocValues.getNumeric(ctx.reader(), fieldName);
+            // TODO: this bit flipping should probably be moved to tie-break in the PQ comparator
+            longs = new NumericDocValues() {
+              @Override
+              public long get(int docID) {
+                long bits = doubles.get(docID);
+                if (bits < 0) bits ^= 0x7fffffffffffffffL;
+                return bits;
+              }
+            };
+            break;
+          default:
+            throw new AssertionError();
+        }
+        docsWithField = DocValues.getDocsWithField(ctx.reader(), schemaField.getName());
+      }
+      long v = longs.get(doc - ctx.docBase);
+      if (v != 0 || docsWithField.get(doc - ctx.docBase)) {
+        accumIntervalWithValue(v);
+      }
+    }
+  }
+

@@ -1,19 +1,20 @@
-    public void compileIndex(List<PendingBlock> floorBlocks, RAMOutputStream scratchBytes) throws IOException {
+    public void compileIndex(List<PendingBlock> blocks, RAMOutputStream scratchBytes, IntsRef scratchIntsRef) throws IOException {
 
-      assert (isFloor && floorBlocks != null && floorBlocks.size() != 0) || (!isFloor && floorBlocks == null): "isFloor=" + isFloor + " floorBlocks=" + floorBlocks;
+      assert (isFloor && blocks.size() > 1) || (isFloor == false && blocks.size() == 1): "isFloor=" + isFloor + " blocks=" + blocks;
+      assert this == blocks.get(0);
 
       assert scratchBytes.getFilePointer() == 0;
 
       // TODO: try writing the leading vLong in MSB order
       // (opposite of what Lucene does today), for better
       // outputs sharing in the FST
-      //System.out.println("\ncompileIndex isFloor=" + isFloor  + " numTerms=" + totalTermCount);
       long lastSumTotalTermCount = 0;
       long sumTotalTermCount = totalTermCount;
       scratchBytes.writeVLong(encodeOutput(fp, hasTerms, isFloor));
       if (isFloor) {
-        scratchBytes.writeVInt(floorBlocks.size());
-        for (PendingBlock sub : floorBlocks) {
+        scratchBytes.writeVInt(blocks.size()-1);
+        for (int i=1;i<blocks.size();i++) {
+          PendingBlock sub = blocks.get(i);
           assert sub.floorLeadByte != -1;
           //if (DEBUG) {
           //  System.out.println("    write floorLeadByte=" + Integer.toHexString(sub.floorLeadByte&0xff));
@@ -30,7 +31,7 @@
 
       final Builder<Output> indexBuilder = new Builder<>(FST.INPUT_TYPE.BYTE1,
                                                          0, 0, true, false, Integer.MAX_VALUE,
-                                                         FST_OUTPUTS, null, false,
+                                                         FST_OUTPUTS, false,
                                                          PackedInts.COMPACT, true, 15);
       //if (DEBUG) {
       //  System.out.println("  compile index for prefix=" + prefix);
@@ -47,31 +48,22 @@
 
       // Copy over index for all sub-blocks
 
-      if (subIndices != null) {
-        for(SubIndex subIndex : subIndices) {
-          //System.out.println("  append subIndex: termOrdStart=" + subIndex.termOrdStart);
-          append(indexBuilder, subIndex.index, subIndex.termOrdStart);
-        }
-      }
-
-      if (floorBlocks != null) {
-        long termOrdOffset = totalTermCount;
-        for (PendingBlock sub : floorBlocks) {
-          if (sub.subIndices != null) {
-            for(SubIndex subIndex : sub.subIndices) {
-              append(indexBuilder, subIndex.index, termOrdOffset + subIndex.termOrdStart);
-            }
+      long termOrdOffset = 0;
+      for(PendingBlock block : blocks) {
+        if (block.subIndices != null) {
+          for(SubIndex subIndex : block.subIndices) {
+            append(indexBuilder, subIndex.index, termOrdOffset + subIndex.termOrdStart, scratchIntsRef);
           }
-          sub.subIndices = null;
-          termOrdOffset += sub.totalTermCount;
+          block.subIndices = null;
         }
-        totFloorTermCount = termOrdOffset;
-      } else {
-        totFloorTermCount = sumTotalTermCount;
+        termOrdOffset += block.totalTermCount;
       }
+      totFloorTermCount = termOrdOffset;
+
+      assert sumTotalTermCount == totFloorTermCount;
 
       index = indexBuilder.finish();
-      subIndices = null;
+      assert subIndices == null;
 
       /*
       Writer w = new OutputStreamWriter(new FileOutputStream("out.dot"));

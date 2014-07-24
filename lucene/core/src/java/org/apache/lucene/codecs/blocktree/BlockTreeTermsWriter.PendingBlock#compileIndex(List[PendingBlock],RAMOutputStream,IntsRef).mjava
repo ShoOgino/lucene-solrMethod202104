@@ -1,6 +1,7 @@
-    public void compileIndex(List<PendingBlock> floorBlocks, RAMOutputStream scratchBytes) throws IOException {
+    public void compileIndex(List<PendingBlock> blocks, RAMOutputStream scratchBytes, IntsRef scratchIntsRef) throws IOException {
 
-      assert (isFloor && floorBlocks != null && floorBlocks.size() != 0) || (!isFloor && floorBlocks == null): "isFloor=" + isFloor + " floorBlocks=" + floorBlocks;
+      assert (isFloor && blocks.size() > 1) || (isFloor == false && blocks.size() == 1): "isFloor=" + isFloor + " blocks=" + blocks;
+      assert this == blocks.get(0);
 
       assert scratchBytes.getFilePointer() == 0;
 
@@ -9,8 +10,9 @@
       // outputs sharing in the FST
       scratchBytes.writeVLong(encodeOutput(fp, hasTerms, isFloor));
       if (isFloor) {
-        scratchBytes.writeVInt(floorBlocks.size());
-        for (PendingBlock sub : floorBlocks) {
+        scratchBytes.writeVInt(blocks.size()-1);
+        for (int i=1;i<blocks.size();i++) {
+          PendingBlock sub = blocks.get(i);
           assert sub.floorLeadByte != -1;
           //if (DEBUG) {
           //  System.out.println("    write floorLeadByte=" + Integer.toHexString(sub.floorLeadByte&0xff));
@@ -23,9 +25,9 @@
 
       final ByteSequenceOutputs outputs = ByteSequenceOutputs.getSingleton();
       final Builder<BytesRef> indexBuilder = new Builder<>(FST.INPUT_TYPE.BYTE1,
-                                                                   0, 0, true, false, Integer.MAX_VALUE,
-                                                                   outputs, null, false,
-                                                                   PackedInts.COMPACT, true, 15);
+                                                           0, 0, true, false, Integer.MAX_VALUE,
+                                                           outputs, false,
+                                                           PackedInts.COMPACT, true, 15);
       //if (DEBUG) {
       //  System.out.println("  compile index for prefix=" + prefix);
       //}
@@ -37,26 +39,18 @@
       scratchBytes.reset();
 
       // Copy over index for all sub-blocks
-
-      if (subIndices != null) {
-        for(FST<BytesRef> subIndex : subIndices) {
-          append(indexBuilder, subIndex);
-        }
-      }
-
-      if (floorBlocks != null) {
-        for (PendingBlock sub : floorBlocks) {
-          if (sub.subIndices != null) {
-            for(FST<BytesRef> subIndex : sub.subIndices) {
-              append(indexBuilder, subIndex);
-            }
+      for(PendingBlock block : blocks) {
+        if (block.subIndices != null) {
+          for(FST<BytesRef> subIndex : block.subIndices) {
+            append(indexBuilder, subIndex, scratchIntsRef);
           }
-          sub.subIndices = null;
+          block.subIndices = null;
         }
       }
 
       index = indexBuilder.finish();
-      subIndices = null;
+
+      assert subIndices == null;
 
       /*
       Writer w = new OutputStreamWriter(new FileOutputStream("out.dot"));

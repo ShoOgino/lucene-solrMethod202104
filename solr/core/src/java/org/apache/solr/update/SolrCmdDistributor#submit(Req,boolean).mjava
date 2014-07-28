@@ -1,7 +1,6 @@
-  private void submit(Req req) {
+  private void submit(final Req req, boolean isCommit) {
     if (req.synchronous) {
-      servers.blockUntilFinished();
-      doRetriesIfNeeded();
+      blockAndDoRetries();
       
       HttpSolrServer server = new HttpSolrServer(req.node.getUrl(),
           servers.getHttpClient());
@@ -15,24 +14,28 @@
       
       return;
     }
+    
     if (log.isDebugEnabled()) {
       log.debug("sending update to "
           + req.node.getUrl() + " retry:"
           + req.retries + " " + req.cmdString + " params:" + req.uReq.getParams());
     }
     
-    try {
-      SolrServer solrServer = servers.getSolrServer(req);
-      solrServer.request(req.uReq);
-    } catch (Exception e) {
-      SolrException.log(log, e);
-      Error error = new Error();
-      error.e = e;
-      error.req = req;
-      if (e instanceof SolrException) {
-        error.statusCode = ((SolrException) e).code();
-      }
-      errors.add(error);
+    if (isCommit) {
+      // a commit using ConncurrentUpdateSolrServer is not async,
+      // so we make it async to prevent commits from happening
+      // serially across multiple nodes
+      pending.add(completionService.submit(new Callable<Object>() {
+        
+        @Override
+        public Object call() throws Exception {
+          doRequest(req);
+          return null;
+        }
+
+      }));
+    } else {
+      doRequest(req);
     }
   }
 

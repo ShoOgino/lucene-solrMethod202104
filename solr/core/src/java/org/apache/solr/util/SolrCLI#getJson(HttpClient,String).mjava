@@ -1,0 +1,101 @@
+  /**
+   * Utility function for sending HTTP GET request to Solr and then doing some
+   * validation of the response.
+   */
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  public static Map<String,Object> getJson(HttpClient httpClient, String getUrl) throws Exception {
+    Map<String,Object> json = null;
+
+    // ensure we're requesting JSON back from Solr
+    URL url = new URL(getUrl);
+    String queryString = url.getQuery();
+    if (queryString != null) {
+      if (queryString.indexOf("wt=json") == -1) {
+        getUrl += "&wt=json";
+      }
+    } else {
+      getUrl += "?wt=json";      
+    }
+       
+    // Prepare a request object
+    HttpGet httpget = new HttpGet(getUrl);
+    
+    // Execute the request
+    HttpResponse response = httpClient.execute(httpget);
+    
+    // Get hold of the response entity
+    HttpEntity entity = response.getEntity();
+    if (response.getStatusLine().getStatusCode() != 200) {
+      StringBuilder body = new StringBuilder();
+      if (entity != null) {
+        InputStream instream = entity.getContent();
+        String line;
+        try {
+          BufferedReader reader = 
+              new BufferedReader(new InputStreamReader(instream, "UTF-8"));
+          while ((line = reader.readLine()) != null) {
+            body.append(line);
+          }
+        } catch (Exception ignore) {
+          // squelch it - just trying to compose an error message here
+        } finally {
+          instream.close();
+        }
+      }
+      throw new Exception("GET request [" + getUrl + "] failed due to: "
+          + response.getStatusLine() + ": " + body);
+    }
+    
+    // If the response does not enclose an entity, there is no need
+    // to worry about connection release
+    if (entity != null) {
+      InputStreamReader isr = null;
+      try {
+        isr = new InputStreamReader(entity.getContent(), "UTF-8");
+        Object resp = 
+            ObjectBuilder.getVal(new JSONParser(isr));
+        if (resp != null && resp instanceof Map) {
+          json = (Map<String,Object>)resp;
+        } else {
+          throw new SolrServerException("Expected JSON object in response from "+
+              getUrl+" but received "+ resp);
+        }
+      } catch (RuntimeException ex) {
+        // In case of an unexpected exception you may want to abort
+        // the HTTP request in order to shut down the underlying
+        // connection and release it back to the connection manager.
+        httpget.abort();
+        throw ex;
+      } finally {
+        // Closing the input stream will trigger connection release
+        isr.close();
+      }
+    }
+    
+    // lastly check the response JSON from Solr to see if it is an error
+    int statusCode = -1;
+    Map responseHeader = (Map)json.get("responseHeader");
+    if (responseHeader != null) {
+      Long status = (Long)responseHeader.get("status");
+      if (status != null)
+        statusCode = status.intValue();
+    }
+    
+    if (statusCode == -1)
+      throw new SolrServerException("Unable to determine outcome of GET request to: "+
+        getUrl+"! Response: "+json);
+    
+    if (statusCode != 0) {      
+      String errMsg = null;
+      Map error = (Map) json.get("error");
+      if (error != null) {
+        errMsg = (String)error.get("msg");
+      }
+      
+      if (errMsg == null) errMsg = String.valueOf(json);
+      throw new SolrServerException("Request to "+getUrl+" failed due to: "+errMsg);
+    }
+
+    return json;
+  }  
+

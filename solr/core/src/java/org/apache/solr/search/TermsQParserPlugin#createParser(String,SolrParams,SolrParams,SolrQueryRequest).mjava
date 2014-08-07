@@ -1,0 +1,39 @@
+  @Override
+  public QParser createParser(String qstr, SolrParams localParams, SolrParams params, SolrQueryRequest req) {
+    return new QParser(qstr, localParams, params, req) {
+      @Override
+      public Query parse() throws SyntaxError {
+        String fname = localParams.get(QueryParsing.F);
+        FieldType ft = req.getSchema().getFieldTypeNoEx(fname);
+        String separator = localParams.get(SEPARATOR, " ");
+        String qstr = localParams.get(QueryParsing.V);//never null
+        Method method = Method.valueOf(localParams.get(METHOD, Method.termsFilter.name()));
+        //TODO pick the default method based on various heuristics from benchmarks
+
+        //if space then split on all whitespace & trim, otherwise strictly interpret
+        final boolean sepIsSpace = separator.equals(" ");
+        if (sepIsSpace)
+          qstr = qstr.trim();
+        if (qstr.length() == 0)
+          return new BooleanQuery();//Matches nothing.
+        final String[] splitVals = sepIsSpace ? qstr.split("\\s+") : qstr.split(Pattern.quote(separator), -1);
+        assert splitVals.length > 0;
+
+        BytesRef[] bytesRefs = new BytesRef[splitVals.length];
+        for (int i = 0; i < splitVals.length; i++) {
+          String stringVal = splitVals[i];
+          //logic same as TermQParserPlugin
+          BytesRef term = new BytesRef();
+          if (ft != null) {
+            ft.readableToIndexed(stringVal, term);
+          } else {
+            term.copyChars(stringVal);
+          }
+          bytesRefs[i] = term;
+        }
+
+        return new SolrConstantScoreQuery(method.makeFilter(fname, bytesRefs));
+      }
+    };
+  }
+

@@ -1,0 +1,59 @@
+  /**
+   * Recursive function to compute all the pivot counts for the values under teh specified field
+   */
+  protected List<NamedList<Object>> doPivots(NamedList<Integer> superFacets,
+      String field, String subField, Deque<String> fnames,Deque<String> vnames,DocSet docs) throws IOException {
+
+    SolrIndexSearcher searcher = rb.req.getSearcher();
+    // TODO: optimize to avoid converting to an external string and then having to convert back to internal below
+    SchemaField sfield = searcher.getSchema().getField(field);
+    FieldType ftype = sfield.getType();
+
+    String nextField = fnames.poll();
+
+    // re-useable BytesRefBuilder for conversion of term values to Objects
+    BytesRefBuilder termval = new BytesRefBuilder(); 
+
+    List<NamedList<Object>> values = new ArrayList<>( superFacets.size() );
+    for (Map.Entry<String, Integer> kv : superFacets) {
+      // Only sub-facet if parent facet has positive count - still may not be any values for the sub-field though
+      if (kv.getValue() >= getMinCountForField(field)) {  
+        final String fieldValue = kv.getKey();
+
+        SimpleOrderedMap<Object> pivot = new SimpleOrderedMap<>();
+        pivot.add( "field", field );
+        if (null == fieldValue) {
+          pivot.add( "value", null );
+        } else {
+          ftype.readableToIndexed(fieldValue, termval);
+          pivot.add( "value", ftype.toObject(sfield, termval.get()) );
+        }
+        pivot.add( "count", kv.getValue() );
+
+        DocSet subset = getSubset(docs, sfield, fieldValue);
+        
+        if( subField != null )  {
+          NamedList<Integer> facetCounts;
+          if(!vnames.isEmpty()){
+            String val = vnames.pop();
+            facetCounts = new NamedList<Integer>();
+            facetCounts.add(val, getSubsetSize(subset,
+                                               searcher.getSchema().getField(subField),
+                                               val));
+          } else {
+            facetCounts = this.getTermCountsForPivots(subField, subset);
+          }
+
+          if (facetCounts.size() >= 1) {
+            pivot.add( "pivot", doPivots( facetCounts, subField, nextField, fnames, vnames, subset) );
+          }
+        }
+        values.add( pivot );
+      }
+
+    }
+    // put the field back on the list
+    fnames.push( nextField );
+    return values;
+  }
+

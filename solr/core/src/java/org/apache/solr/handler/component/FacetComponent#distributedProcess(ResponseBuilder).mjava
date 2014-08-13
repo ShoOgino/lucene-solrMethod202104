@@ -3,102 +3,121 @@
     if (!rb.doFacets) {
       return ResponseBuilder.STAGE_DONE;
     }
-
+    
     if (rb.stage == ResponseBuilder.STAGE_GET_FIELDS) {
-      // overlap facet refinement requests (those shards that we need a count for
-      // particular facet values from), where possible, with
+      // overlap facet refinement requests (those shards that we need a count
+      // for particular facet values from), where possible, with
       // the requests to get fields (because we know that is the
       // only other required phase).
       // We do this in distributedProcess so we can look at all of the
       // requests in the outgoing queue at once.
-
-
-
-      for (int shardNum=0; shardNum<rb.shards.length; shardNum++) {
-        List<String> refinements = null;
-
+      
+      for (int shardNum = 0; shardNum < rb.shards.length; shardNum++) {
+        List<String> distribFieldFacetRefinements = null;
+        
         for (DistribFieldFacet dff : rb._facetInfo.facets.values()) {
           if (!dff.needRefinements) continue;
           List<String> refList = dff._toRefine[shardNum];
-          if (refList == null || refList.size()==0) continue;
-
-          String key = dff.getKey();  // reuse the same key that was used for the main facet
+          if (refList == null || refList.size() == 0) continue;
+          
+          String key = dff.getKey(); // reuse the same key that was used for the
+                                     // main facet
           String termsKey = key + "__terms";
           String termsVal = StrUtils.join(refList, ',');
-
+          
           String facetCommand;
           // add terms into the original facet.field command
           // do it via parameter reference to avoid another layer of encoding.
-
+          
           String termsKeyEncoded = QueryParsing.encodeLocalParamVal(termsKey);
           if (dff.localParams != null) {
-            facetCommand = commandPrefix+termsKeyEncoded + " " + dff.facetStr.substring(2);
+            facetCommand = commandPrefix + termsKeyEncoded + " "
+                + dff.facetStr.substring(2);
           } else {
-            facetCommand = commandPrefix+termsKeyEncoded+'}'+dff.field;
+            facetCommand = commandPrefix + termsKeyEncoded + '}' + dff.field;
           }
-
-          if (refinements == null) {
-            refinements = new ArrayList<>();
+          
+          if (distribFieldFacetRefinements == null) {
+            distribFieldFacetRefinements = new ArrayList<>();
           }
-
-          refinements.add(facetCommand);
-          refinements.add(termsKey);
-          refinements.add(termsVal);
+          
+          distribFieldFacetRefinements.add(facetCommand);
+          distribFieldFacetRefinements.add(termsKey);
+          distribFieldFacetRefinements.add(termsVal);
         }
+        
+        boolean pivotFacetRefinementRequestsExistForShard = 
+          doAnyPivotFacetRefinementRequestsExistForShard(rb._facetInfo, shardNum);
 
-        if (refinements == null) continue;
-
-
+        if (distribFieldFacetRefinements == null
+            && !pivotFacetRefinementRequestsExistForShard) {
+          // nothing to refine, short circut out
+          continue;
+        }
+        
         String shard = rb.shards[shardNum];
-        ShardRequest refine = null;
+        ShardRequest shardsRefineRequest = null;
         boolean newRequest = false;
-
+        
         // try to find a request that is already going out to that shard.
-        // If nshards becomes to great, we way want to move to hashing for better
-        // scalability.
+        // If nshards becomes to great, we way want to move to hashing for
+        // better scalability.
         for (ShardRequest sreq : rb.outgoing) {
-          if ((sreq.purpose & ShardRequest.PURPOSE_GET_FIELDS)!=0
-                  && sreq.shards != null
-                  && sreq.shards.length==1
-                  && sreq.shards[0].equals(shard))
-          {
-            refine = sreq;
+          if ((sreq.purpose & ShardRequest.PURPOSE_GET_FIELDS) != 0
+              && sreq.shards != null 
+              && sreq.shards.length == 1
+              && sreq.shards[0].equals(shard)) {
+            shardsRefineRequest = sreq;
             break;
           }
         }
-
-        if (refine == null) {
-          // we didn't find any other suitable requests going out to that shard, so
-          // create one ourselves.
+        
+        if (shardsRefineRequest == null) {
+          // we didn't find any other suitable requests going out to that shard,
+          // so create one ourselves.
           newRequest = true;
-          refine = new ShardRequest();
-          refine.shards = new String[]{rb.shards[shardNum]};
-          refine.params = new ModifiableSolrParams(rb.req.getParams());
+          shardsRefineRequest = new ShardRequest();
+          shardsRefineRequest.shards = new String[] { rb.shards[shardNum] };
+          shardsRefineRequest.params = new ModifiableSolrParams(rb.req.getParams());
           // don't request any documents
-          refine.params.remove(CommonParams.START);
-          refine.params.set(CommonParams.ROWS,"0");
+          shardsRefineRequest.params.remove(CommonParams.START);
+          shardsRefineRequest.params.set(CommonParams.ROWS, "0");
         }
-
-        refine.purpose |= ShardRequest.PURPOSE_REFINE_FACETS;
-        refine.params.set(FacetParams.FACET, "true");
-        refine.params.remove(FacetParams.FACET_FIELD);
-        refine.params.remove(FacetParams.FACET_QUERY);
-
-        for (int i=0; i<refinements.size();) {
-          String facetCommand=refinements.get(i++);
-          String termsKey=refinements.get(i++);
-          String termsVal=refinements.get(i++);
-
-          refine.params.add(FacetParams.FACET_FIELD, facetCommand);
-          refine.params.set(termsKey, termsVal);
+        
+        // FieldFacetAdditions
+        if (distribFieldFacetRefinements != null) {
+          shardsRefineRequest.purpose |= ShardRequest.PURPOSE_REFINE_FACETS;
+          shardsRefineRequest.params.set(FacetParams.FACET, "true");
+          shardsRefineRequest.params.remove(FacetParams.FACET_FIELD);
+          shardsRefineRequest.params.remove(FacetParams.FACET_QUERY);
+          
+          for (int i = 0; i < distribFieldFacetRefinements.size();) {
+            String facetCommand = distribFieldFacetRefinements.get(i++);
+            String termsKey = distribFieldFacetRefinements.get(i++);
+            String termsVal = distribFieldFacetRefinements.get(i++);
+            
+            shardsRefineRequest.params.add(FacetParams.FACET_FIELD,
+                facetCommand);
+            shardsRefineRequest.params.set(termsKey, termsVal);
+          }
         }
-
+        
         if (newRequest) {
-          rb.addRequest(this, refine);
+          rb.addRequest(this, shardsRefineRequest);
+        }
+        
+        // PivotFacetAdditions
+        if (pivotFacetRefinementRequestsExistForShard) {
+          if (newRequest) {
+            shardsRefineRequest.params.remove(FacetParams.FACET_PIVOT);
+            shardsRefineRequest.params.remove(FacetParams.FACET_PIVOT_MINCOUNT);
+          }
+          
+          enqueuePivotFacetShardRequests(null, rb, shardNum);
         }
       }
     }
-
+    
     return ResponseBuilder.STAGE_DONE;
   }
 

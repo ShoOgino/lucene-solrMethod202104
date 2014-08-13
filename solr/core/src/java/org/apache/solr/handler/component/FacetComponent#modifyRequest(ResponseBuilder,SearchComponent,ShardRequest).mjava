@@ -1,66 +1,23 @@
-  @Override
-  public void modifyRequest(ResponseBuilder rb, SearchComponent who, ShardRequest sreq) {
+  public void modifyRequest(ResponseBuilder rb, SearchComponent who,ShardRequest sreq) {
+
     if (!rb.doFacets) return;
-
+    
     if ((sreq.purpose & ShardRequest.PURPOSE_GET_TOP_IDS) != 0) {
-        sreq.purpose |= ShardRequest.PURPOSE_GET_FACETS;
-
-        FacetInfo fi = rb._facetInfo;
-        if (fi == null) {
-          rb._facetInfo = fi = new FacetInfo();
-          fi.parse(rb.req.getParams(), rb);
-          // should already be true...
-          // sreq.params.set(FacetParams.FACET, "true");
-        }
-
-        sreq.params.remove(FacetParams.FACET_MINCOUNT);
-        sreq.params.remove(FacetParams.FACET_OFFSET);
-        sreq.params.remove(FacetParams.FACET_LIMIT);
-
-        for (DistribFieldFacet dff : fi.facets.values()) {
-          String paramStart = "f." + dff.field + '.';
-          sreq.params.remove(paramStart + FacetParams.FACET_MINCOUNT);
-          sreq.params.remove(paramStart + FacetParams.FACET_OFFSET);
-
-          dff.initialLimit = dff.limit <= 0 ? dff.limit : dff.offset + dff.limit;
-
-          if (dff.sort.equals(FacetParams.FACET_SORT_COUNT)) {
-            if (dff.limit > 0) {
-              // set the initial limit higher to increase accuracy
-              dff.initialLimit = (int)(dff.initialLimit * 1.5) + 10;
-              dff.initialMincount = 0;      // TODO: we could change this to 1, but would then need more refinement for small facet result sets?
-            } else {
-              // if limit==-1, then no need to artificially lower mincount to 0 if it's 1
-              dff.initialMincount = Math.min(dff.minCount, 1);
-            }
-          } else {
-            // we're sorting by index order.
-            // if minCount==0, we should always be able to get accurate results w/o over-requesting or refining
-            // if minCount==1, we should be able to get accurate results w/o over-requesting, but we'll need to refine
-            // if minCount==n (>1), we can set the initialMincount to minCount/nShards, rounded up.
-            // For example, we know that if minCount=10 and we have 3 shards, then at least one shard must have a count of 4 for the term
-            // For the minCount>1 case, we can generate too short of a list (miss terms at the end of the list) unless limit==-1
-            // For example: each shard could produce a list of top 10, but some of those could fail to make it into the combined list (i.e.
-            //   we needed to go beyond the top 10 to generate the top 10 combined).  Overrequesting can help a little here, but not as
-            //   much as when sorting by count.
-            if (dff.minCount <= 1) {
-              dff.initialMincount = dff.minCount;
-            } else {
-              dff.initialMincount = (int)Math.ceil((double)dff.minCount / rb.slices.length);
-              // dff.initialMincount = 1;
-            }
-          }
-
-          if (dff.initialMincount != 0) {
-            sreq.params.set(paramStart + FacetParams.FACET_MINCOUNT, dff.initialMincount);
-          }
-
-          // Currently this is for testing only and allows overriding of the
-          // facet.limit set to the shards
-          dff.initialLimit = rb.req.getParams().getInt("facet.shard.limit", dff.initialLimit);
-
-          sreq.params.set(paramStart + FacetParams.FACET_LIMIT,  dff.initialLimit);
+      sreq.purpose |= ShardRequest.PURPOSE_GET_FACETS;
+      
+      FacetInfo fi = rb._facetInfo;
+      if (fi == null) {
+        rb._facetInfo = fi = new FacetInfo();
+        fi.parse(rb.req.getParams(), rb);
       }
+      
+      modifyRequestForFieldFacets(rb, sreq, fi);
+      
+      modifyRequestForPivotFacets(rb, sreq, fi.pivotFacets);
+      
+      sreq.params.remove(FacetParams.FACET_MINCOUNT);
+      sreq.params.remove(FacetParams.FACET_OFFSET);
+      
     } else {
       // turn off faceting on other requests
       sreq.params.set(FacetParams.FACET, "false");

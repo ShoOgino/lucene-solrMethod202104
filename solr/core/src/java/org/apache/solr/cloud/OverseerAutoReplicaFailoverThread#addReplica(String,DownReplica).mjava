@@ -1,0 +1,41 @@
+  private boolean addReplica(final String collection, DownReplica badReplica) {
+    // first find best home - first strategy, sort by number of cores
+    // hosted where maxCoresPerNode is not violated
+    final String createUrl = getBestCreateUrl(zkStateReader, badReplica);
+    if (createUrl == null) {
+      log.warn("Could not find a node to create new replica on.");
+      return false;
+    }
+    
+    // NOTE: we send the absolute path, which will slightly change
+    // behavior of these cores as they won't respond to changes
+    // in the solr.hdfs.home sys prop as they would have.
+    final String dataDir = badReplica.replica.getStr("dataDir");
+    final String ulogDir = badReplica.replica.getStr("ulogDir");
+    final String coreNodeName = badReplica.replica.getName();
+    if (dataDir != null) {
+      // need an async request - full shard goes down leader election
+      final String coreName = badReplica.replica.getStr(ZkStateReader.CORE_NAME_PROP);
+      log.debug("submit call to {}", createUrl);
+      updateExecutor.submit(new Callable<Boolean>() {
+        
+        @Override
+        public Boolean call() {
+          return createSolrCore(collection, createUrl, dataDir, ulogDir, coreNodeName, coreName);
+        }
+      });
+      
+      // wait to see state for core we just created
+      boolean success = ClusterStateUtil.waitToSeeLive(zkStateReader, collection, coreNodeName, createUrl, 30);
+      if (!success) {
+        log.error("Creating new replica appears to have failed, timed out waiting to see created SolrCore register in the clusterstate.");
+        return false;
+      }
+      return true;
+    }
+    
+    log.warn("Could not find dataDir or ulogDir in cluster state.");
+    
+    return false;
+  }
+

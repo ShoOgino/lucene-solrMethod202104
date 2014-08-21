@@ -1,0 +1,92 @@
+  @Override
+  public void addNormsField(FieldInfo field, Iterable<Number> values) throws IOException {
+    meta.writeVInt(field.number);
+    long minValue = Long.MAX_VALUE;
+    long maxValue = Long.MIN_VALUE;
+    // TODO: more efficient?
+    NormMap uniqueValues = new NormMap();
+    
+    long count = 0;
+    for (Number nv : values) {
+      if (nv == null) {
+        throw new IllegalStateException("illegal norms data for field " + field.name + ", got null for value: " + count);
+      }
+      final long v = nv.longValue();
+      
+      minValue = Math.min(minValue, v);
+      maxValue = Math.max(maxValue, v);
+      
+      if (uniqueValues != null) {
+        if (uniqueValues.add(v)) {
+          if (uniqueValues.size > 256) {
+            uniqueValues = null;
+          }
+        }
+      }
+      ++count;
+    }
+    
+    if (count != maxDoc) {
+      throw new IllegalStateException("illegal norms data for field " + field.name + ", expected " + maxDoc + " values, got " + count);
+    }
+    
+    if (uniqueValues != null && uniqueValues.size == 1) {
+      // 0 bpv
+      meta.writeByte(CONST_COMPRESSED);
+      meta.writeLong(minValue);
+    } else if (uniqueValues != null) {
+      // small number of unique values: this is the typical case:
+      // we only use bpv=1,2,4,8     
+      PackedInts.Format format = PackedInts.Format.PACKED_SINGLE_BLOCK;
+      int bitsPerValue = PackedInts.bitsRequired(uniqueValues.size-1);
+      if (bitsPerValue == 3) {
+        bitsPerValue = 4;
+      } else if (bitsPerValue > 4) {
+        bitsPerValue = 8;
+      }
+      
+      if (bitsPerValue == 8 && minValue >= Byte.MIN_VALUE && maxValue <= Byte.MAX_VALUE) {
+        meta.writeByte(UNCOMPRESSED); // uncompressed byte[]
+        meta.writeLong(data.getFilePointer());
+        for (Number nv : values) {
+          data.writeByte(nv == null ? 0 : (byte) nv.longValue());
+        }
+      } else {
+        meta.writeByte(TABLE_COMPRESSED); // table-compressed
+        meta.writeLong(data.getFilePointer());
+        data.writeVInt(PackedInts.VERSION_CURRENT);
+        
+        long[] decode = uniqueValues.getDecodeTable();
+        // upgrade to power of two sized array
+        int size = 1 << bitsPerValue;
+        data.writeVInt(size);
+        for (int i = 0; i < decode.length; i++) {
+          data.writeLong(decode[i]);
+        }
+        for (int i = decode.length; i < size; i++) {
+          data.writeLong(0);
+        }
+
+        data.writeVInt(format.getId());
+        data.writeVInt(bitsPerValue);
+
+        final PackedInts.Writer writer = PackedInts.getWriterNoHeader(data, format, maxDoc, bitsPerValue, PackedInts.DEFAULT_BUFFER_SIZE);
+        for(Number nv : values) {
+          writer.add(uniqueValues.getOrd(nv.longValue()));
+        }
+        writer.finish();
+      }
+    } else {
+      meta.writeByte(DELTA_COMPRESSED); // delta-compressed
+      meta.writeLong(data.getFilePointer());
+      data.writeVInt(PackedInts.VERSION_CURRENT);
+      data.writeVInt(BLOCK_SIZE);
+
+      final BlockPackedWriter writer = new BlockPackedWriter(data, BLOCK_SIZE);
+      for (Number nv : values) {
+        writer.add(nv.longValue());
+      }
+      writer.finish();
+    }
+  }
+

@@ -1,6 +1,12 @@
     public TopDocs topDocs(int start, int howMany) {
+
       try {
-        TopDocs mainDocs = mainCollector.topDocs(0, reRankDocs);
+
+        TopDocs mainDocs = mainCollector.topDocs(0,  Math.max(reRankDocs, length));
+
+        if(mainDocs.totalHits == 0 || mainDocs.scoreDocs.length == 0) {
+          return mainDocs;
+        }
 
         if(boostedPriority != null) {
           SolrRequestInfo info = SolrRequestInfo.getRequestInfo();
@@ -11,6 +17,12 @@
 
           IntIntOpenHashMap boostedDocs = QueryElevationComponent.getBoostDocs((SolrIndexSearcher)searcher, boostedPriority, requestContext);
 
+          ScoreDoc[] mainScoreDocs = mainDocs.scoreDocs;
+          ScoreDoc[] reRankScoreDocs = new ScoreDoc[Math.min(mainScoreDocs.length, reRankDocs)];
+          System.arraycopy(mainScoreDocs,0,reRankScoreDocs,0,reRankScoreDocs.length);
+
+          mainDocs.scoreDocs = reRankScoreDocs;
+
           TopDocs rescoredDocs = new QueryRescorer(reRankQuery) {
             @Override
             protected float combine(float firstPassScore, boolean secondPassMatches, float secondPassScore) {
@@ -20,20 +32,47 @@
               }
               return score;
             }
-          }.rescore(searcher, mainDocs, reRankDocs);
+          }.rescore(searcher, mainDocs, mainDocs.scoreDocs.length);
 
           Arrays.sort(rescoredDocs.scoreDocs, new BoostedComp(boostedDocs, mainDocs.scoreDocs, rescoredDocs.getMaxScore()));
 
-          if(howMany > rescoredDocs.scoreDocs.length) {
-            howMany = rescoredDocs.scoreDocs.length;
+          //Lower howMany if we've collected fewer documents.
+          howMany = Math.min(howMany, mainScoreDocs.length);
+
+          if(howMany == rescoredDocs.scoreDocs.length) {
+            return rescoredDocs; // Just return the rescoredDocs
+          } else if(howMany > rescoredDocs.scoreDocs.length) {
+            //We need to return more then we've reRanked, so create the combined page.
+            ScoreDoc[] scoreDocs = new ScoreDoc[howMany];
+            System.arraycopy(mainScoreDocs, 0, scoreDocs, 0, scoreDocs.length); //lay down the initial docs
+            System.arraycopy(rescoredDocs.scoreDocs, 0, scoreDocs, 0, rescoredDocs.scoreDocs.length);//overlay the re-ranked docs.
+            rescoredDocs.scoreDocs = scoreDocs;
+            return rescoredDocs;
+          } else {
+            //We've rescored more then we need to return.
+            ScoreDoc[] scoreDocs = new ScoreDoc[howMany];
+            System.arraycopy(rescoredDocs.scoreDocs, 0, scoreDocs, 0, howMany);
+            rescoredDocs.scoreDocs = scoreDocs;
+            return rescoredDocs;
           }
 
-          ScoreDoc[] scoreDocs = new ScoreDoc[howMany];
-          System.arraycopy(rescoredDocs.scoreDocs,0,scoreDocs,0,howMany);
-          rescoredDocs.scoreDocs = scoreDocs;
-          return rescoredDocs;
         } else {
-          return new QueryRescorer(reRankQuery) {
+
+          ScoreDoc[] mainScoreDocs   = mainDocs.scoreDocs;
+
+          /*
+          *  Create the array for the reRankScoreDocs.
+          */
+          ScoreDoc[] reRankScoreDocs = new ScoreDoc[Math.min(mainScoreDocs.length, reRankDocs)];
+
+          /*
+          *  Copy the initial results into the reRankScoreDocs array.
+          */
+          System.arraycopy(mainScoreDocs, 0, reRankScoreDocs, 0, reRankScoreDocs.length);
+
+          mainDocs.scoreDocs = reRankScoreDocs;
+
+          TopDocs rescoredDocs = new QueryRescorer(reRankQuery) {
             @Override
             protected float combine(float firstPassScore, boolean secondPassMatches, float secondPassScore) {
               float score = firstPassScore;
@@ -42,9 +81,31 @@
               }
               return score;
             }
-          }.rescore(searcher, mainDocs, howMany);
-        }
+          }.rescore(searcher, mainDocs, mainDocs.scoreDocs.length);
 
+          //Lower howMany to return if we've collected fewer documents.
+          howMany = Math.min(howMany, mainScoreDocs.length);
+
+          if(howMany == rescoredDocs.scoreDocs.length) {
+            return rescoredDocs; // Just return the rescoredDocs
+          } else if(howMany > rescoredDocs.scoreDocs.length) {
+
+            //We need to return more then we've reRanked, so create the combined page.
+            ScoreDoc[] scoreDocs = new ScoreDoc[howMany];
+            //lay down the initial docs
+            System.arraycopy(mainScoreDocs, 0, scoreDocs, 0, scoreDocs.length);
+            //overlay the rescoreds docs
+            System.arraycopy(rescoredDocs.scoreDocs, 0, scoreDocs, 0, rescoredDocs.scoreDocs.length);
+            rescoredDocs.scoreDocs = scoreDocs;
+            return rescoredDocs;
+          } else {
+            //We've rescored more then we need to return.
+            ScoreDoc[] scoreDocs = new ScoreDoc[howMany];
+            System.arraycopy(rescoredDocs.scoreDocs, 0, scoreDocs, 0, howMany);
+            rescoredDocs.scoreDocs = scoreDocs;
+            return rescoredDocs;
+          }
+        }
       } catch (Exception e) {
         throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e);
       }

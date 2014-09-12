@@ -1,0 +1,71 @@
+  private void addZkWatch(final String coll) throws KeeperException,
+      InterruptedException {
+    log.info("addZkWatch {}", coll);
+    final String fullpath = getCollectionPath(coll);
+    synchronized (getUpdateLock()) {
+      
+      cmdExecutor.ensureExists(fullpath, zkClient);
+      log.info("Updating collection state at {} from ZooKeeper... ", fullpath);
+      
+      Watcher watcher = new Watcher() {
+        
+        @Override
+        public void process(WatchedEvent event) {
+          // session events are not change events,
+          // and do not remove the watcher
+          if (EventType.None.equals(event.getType())) {
+            return;
+          }
+          log.info("A cluster state change: {}, has occurred - updating... ",
+              (event), ZkStateReader.this.clusterState == null ? 0
+                  : ZkStateReader.this.clusterState.getLiveNodes().size());
+          try {
+            
+            // delayed approach
+            // ZkStateReader.this.updateClusterState(false, false);
+            synchronized (ZkStateReader.this.getUpdateLock()) {
+              if (!watchedCollections.contains(coll)) {
+                log.info("Unwatched collection {}", coll);
+                return;
+              }
+              // remake watch
+              final Watcher thisWatch = this;
+              Stat stat = new Stat();
+              byte[] data = zkClient.getData(fullpath, thisWatch, stat, true);
+              
+              if (data == null || data.length == 0) {
+                log.warn("No value set for collection state : {}", coll);
+                return;
+                
+              }
+              ClusterState clusterState = ClusterState.load(stat.getVersion(),
+                  data, Collections.<String> emptySet(), fullpath);
+              // update volatile
+              
+              DocCollection newState = clusterState.getCollectionStates()
+                  .get(coll).get();
+              updateWatchedCollection(newState);
+              
+            }
+          } catch (KeeperException e) {
+            if (e.code() == KeeperException.Code.SESSIONEXPIRED
+                || e.code() == KeeperException.Code.CONNECTIONLOSS) {
+              log.warn("ZooKeeper watch triggered, but Solr cannot talk to ZK");
+              return;
+            }
+            log.error("Unwatched collection :" + coll, e);
+            throw new ZooKeeperException(ErrorCode.SERVER_ERROR, "", e);
+            
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.error("Unwatched collection :" + coll, e);
+            return;
+          }
+        }
+        
+      };
+      zkClient.exists(fullpath, watcher, true);
+    }
+    updateWatchedCollection(getCollectionLive(this, coll));
+  }
+

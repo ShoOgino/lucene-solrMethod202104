@@ -25,18 +25,9 @@
             synchronized (ZkStateReader.this.getUpdateLock()) {
               // remake watch
               final Watcher thisWatch = this;
-              Stat stat = new Stat();
-              byte[] data = zkClient.getData(CLUSTER_STATE, thisWatch, stat ,
-                  true);
               Set<String> ln = ZkStateReader.this.clusterState.getLiveNodes();
-              ClusterState clusterState = ClusterState.load(stat.getVersion(), data, ln);
               // update volatile
-              ZkStateReader.this.clusterState = clusterState;
-
-//              HashSet<String> all = new HashSet<>(colls);;
-//              all.addAll(clusterState.getAllInternalCollections());
-//              all.remove(null);
-
+              ZkStateReader.this.clusterState = constructState(ln, thisWatch);
             }
           } catch (KeeperException e) {
             if (e.code() == KeeperException.Code.SESSIONEXPIRED
@@ -105,8 +96,7 @@
     
       Set<String> liveNodeSet = new HashSet<>();
       liveNodeSet.addAll(liveNodes);
-      ClusterState clusterState = ClusterState.load(zkClient, liveNodeSet, ZkStateReader.this);
-      this.clusterState = clusterState;
+      this.clusterState = constructState(liveNodeSet, null);
 
       zkClient.exists(ALIASES,
           new Watcher() {
@@ -152,5 +142,11 @@
           }, true);
     }
     updateAliases();
+    //on reconnect of SolrZkClient re-add watchers for the watched external collections
+    synchronized (this) {
+      for (String watchedCollection : watchedCollections) {
+        addZkWatch(watchedCollection);
+      }
+    }
   }
 

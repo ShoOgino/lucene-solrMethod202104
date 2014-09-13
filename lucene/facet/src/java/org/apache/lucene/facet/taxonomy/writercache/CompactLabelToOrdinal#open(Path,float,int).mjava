@@ -1,0 +1,83 @@
+  /**
+   * Opens the file and reloads the CompactLabelToOrdinal. The file it expects
+   * is generated from the {@link #flush(Path)} command.
+   */
+  static CompactLabelToOrdinal open(Path file, float loadFactor,
+                                    int numHashArrays) throws IOException {
+    /**
+     * Part of the file is the labelRepository, which needs to be rehashed
+     * and label offsets re-added to the object. I am unsure as to why we
+     * can't just store these off in the file as well, but in keeping with
+     * the spirit of the original code, I did it this way. (ssuppe)
+     */
+    CompactLabelToOrdinal l2o = new CompactLabelToOrdinal();
+    l2o.loadFactor = loadFactor;
+    l2o.hashArrays = new HashArray[numHashArrays];
+
+    DataInputStream dis = null;
+    try {
+      dis = new DataInputStream(new BufferedInputStream(
+          Files.newInputStream(file)));
+
+      // TaxiReader needs to load the "counter" or occupancy (L2O) to know
+      // the next unique facet. we used to load the delimiter too, but
+      // never used it.
+      l2o.counter = dis.readInt();
+
+      l2o.capacity = determineCapacity((int) Math.pow(2,
+          l2o.hashArrays.length), l2o.counter);
+      l2o.init();
+
+      // now read the chars
+      l2o.labelRepository = CharBlockArray.open(dis);
+
+      l2o.collisionMap = new CollisionMap(l2o.labelRepository);
+
+      // Calculate hash on the fly based on how CategoryPath hashes
+      // itself. Maybe in the future we can call some static based methods
+      // in CategoryPath so that this doesn't break again? I don't like
+      // having code in two different places...
+      int cid = 0;
+      // Skip the initial offset, it's the CategoryPath(0,0), which isn't
+      // a hashed value.
+      int offset = 1;
+      int lastStartOffset = offset;
+      // This loop really relies on a well-formed input (assumes pretty blindly
+      // that array offsets will work).  Since the initial file is machine 
+      // generated, I think this should be OK.
+      while (offset < l2o.labelRepository.length()) {
+        // identical code to CategoryPath.hashFromSerialized. since we need to
+        // advance offset, we cannot call the method directly. perhaps if we
+        // could pass a mutable Integer or something...
+        int length = (short) l2o.labelRepository.charAt(offset++);
+        int hash = length;
+        if (length != 0) {
+          for (int i = 0; i < length; i++) {
+            int len = (short) l2o.labelRepository.charAt(offset++);
+            hash = hash * 31 + l2o.labelRepository.subSequence(offset, offset + len).hashCode();
+            offset += len;
+          }
+        }
+        // Now that we've hashed the components of the label, do the
+        // final part of the hash algorithm.
+        hash = hash ^ ((hash >>> 20) ^ (hash >>> 12));
+        hash = hash ^ (hash >>> 7) ^ (hash >>> 4);
+        // Add the label, and let's keep going
+        l2o.addLabelOffset(hash, cid, lastStartOffset);
+        cid++;
+        lastStartOffset = offset;
+      }
+
+    } catch (ClassNotFoundException cnfe) {
+      throw new IOException("Invalid file format. Cannot deserialize.");
+    } finally {
+      if (dis != null) {
+        dis.close();
+      }
+    }
+
+    l2o.threshold = (int) (l2o.loadFactor * l2o.capacity);
+    return l2o;
+
+  }
+

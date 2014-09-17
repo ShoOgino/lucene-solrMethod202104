@@ -1,24 +1,42 @@
   private synchronized final void finishCommit() throws IOException {
 
+    boolean success = false;
+    
     if (pendingCommit != null) {
       try {
         if (infoStream.isEnabled("IW")) {
           infoStream.message("IW", "commit: pendingCommit != null");
         }
         pendingCommit.finishCommit(directory);
-        if (infoStream.isEnabled("IW")) {
-          infoStream.message("IW", "commit: wrote segments file \"" + pendingCommit.getSegmentsFileName() + "\"");
+        success = true;
+        // we committed, if anything goes wrong after this: we are screwed
+        try {
+          if (infoStream.isEnabled("IW")) {
+            infoStream.message("IW", "commit: wrote segments file \"" + pendingCommit.getSegmentsFileName() + "\"");
+          }
+          segmentInfos.updateGeneration(pendingCommit);
+          lastCommitChangeCount = pendingCommitChangeCount;
+          rollbackSegments = pendingCommit.createBackupSegmentInfos();
+          // NOTE: don't use this.checkpoint() here, because
+          // we do not want to increment changeCount:
+          deleter.checkpoint(pendingCommit, true);
+        } catch (Throwable tragedy) {
+          tragicEvent(tragedy, "finishCommit");
         }
-        segmentInfos.updateGeneration(pendingCommit);
-        lastCommitChangeCount = pendingCommitChangeCount;
-        rollbackSegments = pendingCommit.createBackupSegmentInfos();
-        // NOTE: don't use this.checkpoint() here, because
-        // we do not want to increment changeCount:
-        deleter.checkpoint(pendingCommit, true);
       } finally {
         // Matches the incRef done in prepareCommit:
         try {
-          deleter.decRef(filesToCommit);
+          if (success == false || tragedy == null) {
+            try {
+              deleter.decRef(filesToCommit);
+            } catch (Throwable t) {
+              // if the commit succeeded, we are in screwed state
+              // otherwise, throw our original exception
+              if (success) {
+                tragicEvent(tragedy, "finishCommit");
+              }
+            } 
+          }
         } finally {
           filesToCommit = null;
           pendingCommit = null;

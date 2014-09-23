@@ -1,0 +1,77 @@
+  @Override
+  public FunctionValues getValues(Map context, LeafReaderContext readerContext) throws IOException {
+    final NumericDocValues arr = DocValues.getNumeric(readerContext.reader(), field);
+    final Bits valid = DocValues.getDocsWithField(readerContext.reader(), field);
+
+    return new IntDocValues(this) {
+      final MutableValueInt val = new MutableValueInt();
+
+      @Override
+      public int intVal(int doc) {
+        return (int) arr.get(doc);
+      }
+
+      @Override
+      public String strVal(int doc) {
+        Integer intValue = intVal(doc);
+        return intValueToStringValue(intValue);
+      }
+
+      @Override
+      public boolean exists(int doc) {
+        return valid.get(doc);
+      }
+
+      @Override
+      public ValueSourceScorer getRangeScorer(IndexReader reader, String lowerVal, String upperVal, boolean includeLower, boolean includeUpper) {
+        Integer lower = stringValueToIntValue(lowerVal);
+        Integer upper = stringValueToIntValue(upperVal);
+
+        // instead of using separate comparison functions, adjust the endpoints.
+
+        if (lower == null) {
+          lower = Integer.MIN_VALUE;
+        } else {
+          if (!includeLower && lower < Integer.MAX_VALUE) lower++;
+        }
+
+        if (upper == null) {
+          upper = Integer.MAX_VALUE;
+        } else {
+          if (!includeUpper && upper > Integer.MIN_VALUE) upper--;
+        }
+
+        final int ll = lower;
+        final int uu = upper;
+
+        return new ValueSourceScorer(reader, this) {
+          @Override
+          public boolean matchesValue(int doc) {
+            int val = intVal(doc);
+            // only check for deleted if it's the default value
+            // if (val==0 && reader.isDeleted(doc)) return false;
+            return val >= ll && val <= uu;
+          }
+        };
+      }
+
+      @Override
+      public ValueFiller getValueFiller() {
+        return new ValueFiller() {
+          private final MutableValueInt mval = new MutableValueInt();
+
+          @Override
+          public MutableValue getValue() {
+            return mval;
+          }
+
+          @Override
+          public void fillValue(int doc) {
+            mval.value = intVal(doc);
+            mval.exists = valid.get(doc);
+          }
+        };
+      }
+    };
+  }
+

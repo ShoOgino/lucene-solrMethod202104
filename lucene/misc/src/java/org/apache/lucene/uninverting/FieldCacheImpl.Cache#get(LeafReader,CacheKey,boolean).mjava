@@ -1,0 +1,45 @@
+    public Object get(LeafReader reader, CacheKey key, boolean setDocsWithField) throws IOException {
+      Map<CacheKey,Accountable> innerCache;
+      Accountable value;
+      final Object readerKey = reader.getCoreCacheKey();
+      synchronized (readerCache) {
+        innerCache = readerCache.get(readerKey);
+        if (innerCache == null) {
+          // First time this reader is using FieldCache
+          innerCache = new HashMap<>();
+          readerCache.put(readerKey, innerCache);
+          wrapper.initReader(reader);
+          value = null;
+        } else {
+          value = innerCache.get(key);
+        }
+        if (value == null) {
+          value = new CreationPlaceholder();
+          innerCache.put(key, value);
+        }
+      }
+      if (value instanceof CreationPlaceholder) {
+        synchronized (value) {
+          CreationPlaceholder progress = (CreationPlaceholder) value;
+          if (progress.value == null) {
+            progress.value = createValue(reader, key, setDocsWithField);
+            synchronized (readerCache) {
+              innerCache.put(key, progress.value);
+            }
+
+            // Only check if key.custom (the parser) is
+            // non-null; else, we check twice for a single
+            // call to FieldCache.getXXX
+            if (key.custom != null && wrapper != null) {
+              final PrintStream infoStream = wrapper.getInfoStream();
+              if (infoStream != null) {
+                printNewInsanity(infoStream, progress.value);
+              }
+            }
+          }
+          return progress.value;
+        }
+      }
+      return value;
+    }
+

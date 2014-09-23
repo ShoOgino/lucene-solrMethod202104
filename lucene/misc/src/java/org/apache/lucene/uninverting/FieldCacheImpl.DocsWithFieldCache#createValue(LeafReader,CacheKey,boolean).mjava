@@ -1,0 +1,51 @@
+    @Override
+    protected BitsEntry createValue(LeafReader reader, CacheKey key, boolean setDocsWithField /* ignored */)
+    throws IOException {
+      final String field = key.field;
+      final int maxDoc = reader.maxDoc();
+
+      // Visit all docs that have terms for this field
+      FixedBitSet res = null;
+      Terms terms = reader.terms(field);
+      if (terms != null) {
+        final int termsDocCount = terms.getDocCount();
+        assert termsDocCount <= maxDoc;
+        if (termsDocCount == maxDoc) {
+          // Fast case: all docs have this field:
+          return new BitsEntry(new Bits.MatchAllBits(maxDoc));
+        }
+        final TermsEnum termsEnum = terms.iterator(null);
+        DocsEnum docs = null;
+        while(true) {
+          final BytesRef term = termsEnum.next();
+          if (term == null) {
+            break;
+          }
+          if (res == null) {
+            // lazy init
+            res = new FixedBitSet(maxDoc);
+          }
+
+          docs = termsEnum.docs(null, docs, DocsEnum.FLAG_NONE);
+          // TODO: use bulk API
+          while (true) {
+            final int docID = docs.nextDoc();
+            if (docID == DocIdSetIterator.NO_MORE_DOCS) {
+              break;
+            }
+            res.set(docID);
+          }
+        }
+      }
+      if (res == null) {
+        return new BitsEntry(new Bits.MatchNoBits(maxDoc));
+      }
+      final int numSet = res.cardinality();
+      if (numSet >= maxDoc) {
+        // The cardinality of the BitSet is maxDoc if all documents have a value.
+        assert numSet == maxDoc;
+        return new BitsEntry(new Bits.MatchAllBits(maxDoc));
+      }
+      return new BitsEntry(res);
+    }
+

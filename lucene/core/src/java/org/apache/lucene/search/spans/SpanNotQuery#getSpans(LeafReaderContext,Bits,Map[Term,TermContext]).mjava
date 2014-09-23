@@ -1,0 +1,97 @@
+  @Override
+  public Spans getSpans(final LeafReaderContext context, final Bits acceptDocs, final Map<Term,TermContext> termContexts) throws IOException {
+    return new Spans() {
+        private Spans includeSpans = include.getSpans(context, acceptDocs, termContexts);
+        private boolean moreInclude = true;
+
+        private Spans excludeSpans = exclude.getSpans(context, acceptDocs, termContexts);
+        private boolean moreExclude = excludeSpans.next();
+
+        @Override
+        public boolean next() throws IOException {
+          if (moreInclude)                        // move to next include
+            moreInclude = includeSpans.next();
+
+          while (moreInclude && moreExclude) {
+
+            if (includeSpans.doc() > excludeSpans.doc()) // skip exclude
+              moreExclude = excludeSpans.skipTo(includeSpans.doc());
+
+            while (moreExclude                    // while exclude is before
+                   && includeSpans.doc() == excludeSpans.doc()
+                   && excludeSpans.end() <= includeSpans.start() - pre) {
+              moreExclude = excludeSpans.next();  // increment exclude
+            }
+
+            if (!moreExclude                      // if no intersection
+                || includeSpans.doc() != excludeSpans.doc()
+                || includeSpans.end()+post <= excludeSpans.start())
+              break;                              // we found a match
+
+            moreInclude = includeSpans.next();    // intersected: keep scanning
+          }
+          return moreInclude;
+        }
+
+        @Override
+        public boolean skipTo(int target) throws IOException {
+          if (moreInclude)                        // skip include
+            moreInclude = includeSpans.skipTo(target);
+
+          if (!moreInclude)
+            return false;
+
+          if (moreExclude                         // skip exclude
+              && includeSpans.doc() > excludeSpans.doc())
+            moreExclude = excludeSpans.skipTo(includeSpans.doc());
+
+          while (moreExclude                      // while exclude is before
+                 && includeSpans.doc() == excludeSpans.doc()
+                 && excludeSpans.end() <= includeSpans.start()-pre) {
+            moreExclude = excludeSpans.next();    // increment exclude
+          }
+
+          if (!moreExclude                      // if no intersection
+                || includeSpans.doc() != excludeSpans.doc()
+                || includeSpans.end()+post <= excludeSpans.start())
+            return true;                          // we found a match
+
+          return next();                          // scan to next match
+        }
+
+        @Override
+        public int doc() { return includeSpans.doc(); }
+        @Override
+        public int start() { return includeSpans.start(); }
+        @Override
+        public int end() { return includeSpans.end(); }
+
+      // TODO: Remove warning after API has been finalized
+      @Override
+      public Collection<byte[]> getPayload() throws IOException {
+        ArrayList<byte[]> result = null;
+        if (includeSpans.isPayloadAvailable()) {
+          result = new ArrayList<>(includeSpans.getPayload());
+        }
+        return result;
+      }
+
+      // TODO: Remove warning after API has been finalized
+      @Override
+      public boolean isPayloadAvailable() throws IOException {
+        return includeSpans.isPayloadAvailable();
+      }
+
+      @Override
+      public long cost() {
+        return includeSpans.cost();
+      }
+
+      @Override
+      public String toString() {
+          return "spans(" + SpanNotQuery.this.toString() + ")";
+        }
+
+      };
+  }
+

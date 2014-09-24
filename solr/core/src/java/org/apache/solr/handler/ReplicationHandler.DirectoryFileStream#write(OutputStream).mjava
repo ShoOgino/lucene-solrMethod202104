@@ -1,32 +1,10 @@
     public void write(OutputStream out) throws IOException {
-      String fileName = params.get(FILE);
-      String cfileName = params.get(CONF_FILE_SHORT);
-      String sOffset = params.get(OFFSET);
-      String sLen = params.get(LEN);
-      String compress = params.get(COMPRESSION);
-      String sChecksum = params.get(CHECKSUM);
-      String sGen = params.get(GENERATION);
-      if (sGen != null) indexGen = Long.parseLong(sGen);
-      if (Boolean.parseBoolean(compress)) {
-        fos = new FastOutputStream(new DeflaterOutputStream(out));
-      } else {
-        fos = new FastOutputStream(out);
-      }
+      createOutputStream(out);
 
-      int packetsWritten = 0;
       IndexInput in = null;
       try {
-        long offset = -1;
-        int len = -1;
-        // check if checksum is requested
-        boolean useChecksum = Boolean.parseBoolean(sChecksum);
-        if (sOffset != null) offset = Long.parseLong(sOffset);
-        if (sLen != null) len = Integer.parseInt(sLen);
-        if (fileName == null && cfileName == null) {
-          // no filename do nothing
-          writeNothing();
-        }
-        
+        initWrite();
+
         RefCounted<SolrIndexSearcher> sref = core.getSearcher();
         Directory dir;
         try {
@@ -38,17 +16,15 @@
         in = dir.openInput(fileName, IOContext.READONCE);
         // if offset is mentioned move the pointer to that point
         if (offset != -1) in.seek(offset);
-        byte[] buf = new byte[(len == -1 || len > PACKET_SZ) ? PACKET_SZ : len];
-        Checksum checksum = null;
-        if (useChecksum) checksum = new Adler32();
         
         long filelen = dir.fileLength(fileName);
+        long maxBytesBeforePause = 0;
+
         while (true) {
           offset = offset == -1 ? 0 : offset;
           int read = (int) Math.min(buf.length, filelen - offset);
           in.readBytes(buf, 0, read);
-          
-          fos.writeInt((int) read);
+          fos.writeInt(read);
           if (useChecksum) {
             checksum.reset();
             checksum.update(buf, 0, read);
@@ -56,13 +32,15 @@
           }
           fos.write(buf, 0, read);
           fos.flush();
-          if (indexGen != null && (packetsWritten % 5 == 0)) {
-            // after every 5 packets reserve the commitpoint for some time
-            delPolicy.setReserveDuration(indexGen, reserveCommitDuration);
+
+          //Pause if necessary
+          maxBytesBeforePause += read;
+          if (maxBytesBeforePause >= rateLimiter.getMinPauseCheckBytes()) {
+            rateLimiter.pause(maxBytesBeforePause);
+            maxBytesBeforePause = 0;
           }
-          packetsWritten++;
           if (read != buf.length) {
-            writeNothing();
+            writeNothingAndFlush();
             fos.close();
             break;
           }
@@ -75,6 +53,7 @@
         if (in != null) {
           in.close();
         }
+        releaseCommitPointAndExtendReserve();
       }
     }
 

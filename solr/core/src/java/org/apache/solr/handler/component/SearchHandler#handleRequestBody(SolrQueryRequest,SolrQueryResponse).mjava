@@ -43,30 +43,42 @@
     if (!rb.isDistrib) {
       // a normal non-distributed request
 
-      // The semantics of debugging vs not debugging are different enough that
-      // it makes sense to have two control loops
-      if(!rb.isDebug()) {
-        // Process
-        for( SearchComponent c : components ) {
-          c.process(rb);
-        }
+      long timeAllowed = req.getParams().getLong(CommonParams.TIME_ALLOWED, -1L);
+      if (timeAllowed > 0L) {
+        SolrQueryTimeoutImpl.set(timeAllowed);
       }
-      else {
-        // Process
-        RTimer subt = timer.sub( "process" );
-        for( SearchComponent c : components ) {
-          rb.setTimer( subt.sub( c.getName() ) );
-          c.process(rb);
-          rb.getTimer().stop();
+      try {
+        // The semantics of debugging vs not debugging are different enough that
+        // it makes sense to have two control loops
+        if(!rb.isDebug()) {
+          // Process
+          for( SearchComponent c : components ) {
+            c.process(rb);
+          }
         }
-        subt.stop();
-        timer.stop();
+        else {
+          // Process
+          RTimer subt = timer.sub( "process" );
+          for( SearchComponent c : components ) {
+            rb.setTimer( subt.sub( c.getName() ) );
+            c.process(rb);
+            rb.getTimer().stop();
+          }
+          subt.stop();
+          timer.stop();
 
-        // add the timing info
-        if (rb.isDebugTimings()) {
-          rb.addDebugInfo("timing", timer.asNamedList() );
+          // add the timing info
+          if (rb.isDebugTimings()) {
+            rb.addDebugInfo("timing", timer.asNamedList() );
+          }
         }
-      }      
+      } catch (ExitableDirectoryReader.ExitingReaderException ex) {
+        log.warn( "Query: " + req.getParamString() + "; " + ex.getMessage());
+        throw new SolrException(ErrorCode.BAD_REQUEST,
+            "Request took too long during query expansion. Terminating request.");
+      } finally {
+        SolrQueryTimeoutImpl.reset();
+      }
     } else {
       // a distributed request
 

@@ -1,0 +1,44 @@
+  /** Sole constructor. */
+  public Lucene41StoredFieldsWriter(Directory directory, SegmentInfo si, String segmentSuffix, IOContext context,
+      String formatName, CompressionMode compressionMode, int chunkSize) throws IOException {
+    assert directory != null;
+    this.directory = directory;
+    this.segment = si.name;
+    this.segmentSuffix = segmentSuffix;
+    this.compressor = compressionMode.newCompressor();
+    this.chunkSize = chunkSize;
+    this.docBase = 0;
+    this.bufferedDocs = new GrowableByteArrayDataOutput(chunkSize);
+    this.numStoredFields = new int[16];
+    this.endOffsets = new int[16];
+    this.numBufferedDocs = 0;
+
+    boolean success = false;
+    IndexOutput indexStream = directory.createOutput(IndexFileNames.segmentFileName(segment, segmentSuffix, FIELDS_INDEX_EXTENSION), 
+                                                                     context);
+    try {
+      fieldsStream = directory.createOutput(IndexFileNames.segmentFileName(segment, segmentSuffix, FIELDS_EXTENSION),
+                                                    context);
+
+      final String codecNameIdx = formatName + CODEC_SFX_IDX;
+      final String codecNameDat = formatName + CODEC_SFX_DAT;
+      CodecUtil.writeHeader(indexStream, codecNameIdx, VERSION_CURRENT);
+      CodecUtil.writeHeader(fieldsStream, codecNameDat, VERSION_CURRENT);
+      assert CodecUtil.headerLength(codecNameDat) == fieldsStream.getFilePointer();
+      assert CodecUtil.headerLength(codecNameIdx) == indexStream.getFilePointer();
+
+      indexWriter = new Lucene41StoredFieldsIndexWriter(indexStream);
+      indexStream = null;
+
+      fieldsStream.writeVInt(chunkSize);
+      fieldsStream.writeVInt(PackedInts.VERSION_CURRENT);
+
+      success = true;
+    } finally {
+      if (!success) {
+        IOUtils.closeWhileHandlingException(indexStream);
+        abort();
+      }
+    }
+  }
+

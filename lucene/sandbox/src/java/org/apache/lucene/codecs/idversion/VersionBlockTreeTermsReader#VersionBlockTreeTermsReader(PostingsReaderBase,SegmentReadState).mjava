@@ -1,25 +1,33 @@
   /** Sole constructor. */
-  public VersionBlockTreeTermsReader(Directory dir, FieldInfos fieldInfos, SegmentInfo info,
-                                     PostingsReaderBase postingsReader, IOContext ioContext,
-                                     String segmentSuffix)
-    throws IOException {
+  public VersionBlockTreeTermsReader(PostingsReaderBase postingsReader, SegmentReadState state) throws IOException {
     
     this.postingsReader = postingsReader;
 
-    this.segment = info.name;
-    in = dir.openInput(IndexFileNames.segmentFileName(segment, segmentSuffix, VersionBlockTreeTermsWriter.TERMS_EXTENSION),
-                       ioContext);
+    String termsFile = IndexFileNames.segmentFileName(state.segmentInfo.name, 
+                                                      state.segmentSuffix, 
+                                                      VersionBlockTreeTermsWriter.TERMS_EXTENSION);
+    in = state.directory.openInput(termsFile, state.context);
 
     boolean success = false;
     IndexInput indexIn = null;
 
     try {
-      version = readHeader(in);
-      indexIn = dir.openInput(IndexFileNames.segmentFileName(segment, segmentSuffix, VersionBlockTreeTermsWriter.TERMS_INDEX_EXTENSION),
-                                ioContext);
-      int indexVersion = readIndexHeader(indexIn);
-      if (indexVersion != version) {
-        throw new CorruptIndexException("mixmatched version files: " + in + "=" + version + "," + indexIn + "=" + indexVersion, indexIn);
+      int termsVersion = CodecUtil.checkSegmentHeader(in, VersionBlockTreeTermsWriter.TERMS_CODEC_NAME,
+                                                          VersionBlockTreeTermsWriter.VERSION_START,
+                                                          VersionBlockTreeTermsWriter.VERSION_CURRENT,
+                                                          state.segmentInfo.getId(), state.segmentSuffix);
+      
+      String indexFile = IndexFileNames.segmentFileName(state.segmentInfo.name, 
+                                                        state.segmentSuffix, 
+                                                        VersionBlockTreeTermsWriter.TERMS_INDEX_EXTENSION);
+      indexIn = state.directory.openInput(indexFile, state.context);
+      int indexVersion = CodecUtil.checkSegmentHeader(indexIn, VersionBlockTreeTermsWriter.TERMS_INDEX_CODEC_NAME,
+                                                               VersionBlockTreeTermsWriter.VERSION_START,
+                                                               VersionBlockTreeTermsWriter.VERSION_CURRENT,
+                                                               state.segmentInfo.getId(), state.segmentSuffix);
+      
+      if (indexVersion != termsVersion) {
+        throw new CorruptIndexException("mixmatched version files: " + in + "=" + termsVersion + "," + indexIn + "=" + indexVersion, indexIn);
       }
       
       // verify
@@ -35,8 +43,8 @@
       CodecUtil.retrieveChecksum(in);
 
       // Read per-field details
-      seekDir(in, dirOffset);
-      seekDir(indexIn, indexDirOffset);
+      seekDir(in);
+      seekDir(indexIn);
 
       final int numFields = in.readVInt();
       if (numFields < 0) {
@@ -53,7 +61,7 @@
         code.length = numBytes;
         final long version = in.readVLong();
         final Pair<BytesRef,Long> rootCode = VersionBlockTreeTermsWriter.FST_OUTPUTS.newPair(code, version);
-        final FieldInfo fieldInfo = fieldInfos.fieldInfo(field);
+        final FieldInfo fieldInfo = state.fieldInfos.fieldInfo(field);
         assert fieldInfo != null: "field=" + field;
         final long sumTotalTermFreq = numTerms;
         final long sumDocFreq = numTerms;
@@ -63,8 +71,8 @@
 
         BytesRef minTerm = readBytesRef(in);
         BytesRef maxTerm = readBytesRef(in);
-        if (docCount < 0 || docCount > info.getDocCount()) { // #docs with field must be <= #docs
-          throw new CorruptIndexException("invalid docCount: " + docCount + " maxDoc: " + info.getDocCount(), in);
+        if (docCount < 0 || docCount > state.segmentInfo.getDocCount()) { // #docs with field must be <= #docs
+          throw new CorruptIndexException("invalid docCount: " + docCount + " maxDoc: " + state.segmentInfo.getDocCount(), in);
         }
         if (sumDocFreq < docCount) {  // #postings must be >= #docs with field
           throw new CorruptIndexException("invalid sumDocFreq: " + sumDocFreq + " docCount: " + docCount, in);

@@ -1,0 +1,61 @@
+  private void verifyWaitForSchemaUpdateToPropagate() throws Exception {
+    String testCollectionName = "collection1";
+
+    ClusterState clusterState = cloudClient.getZkStateReader().getClusterState();
+    Replica shard1Leader = clusterState.getLeader(testCollectionName, "shard1");
+    final String coreUrl = (new ZkCoreNodeProps(shard1Leader)).getCoreUrl();
+    assertNotNull(coreUrl);
+
+    RestTestHarness harness = new RestTestHarness(new RESTfulServerProvider() {
+      public String getBaseURL() {
+        return coreUrl.endsWith("/") ? coreUrl.substring(0, coreUrl.length()-1) : coreUrl;
+      }
+    });
+
+    addFieldTypePut(harness, "fooInt", 15);
+
+    // go into ZK to get the version of the managed schema after the update
+    SolrZkClient zkClient = cloudClient.getZkStateReader().getZkClient();
+    Stat stat = new Stat();
+    String znodePath = "/configs/conf1/managed-schema";
+    byte[] managedSchemaBytes = zkClient.getData(znodePath, null, stat, false);
+    int schemaZkVersion = stat.getVersion();
+
+    // now loop over all replicas and verify each has the same schema version
+    Replica randomReplicaNotLeader = null;
+    for (Slice slice : clusterState.getActiveSlices(testCollectionName)) {
+      for (Replica replica : slice.getReplicas()) {
+        validateZkVersion(replica, schemaZkVersion, 0, false);
+
+        // save a random replica to test zk watcher behavior
+        if (randomReplicaNotLeader == null && !replica.getName().equals(shard1Leader.getName()))
+          randomReplicaNotLeader = replica;
+      }
+    }
+    assertNotNull(randomReplicaNotLeader);
+
+    // now update the data and then verify the znode watcher fires correctly
+    // before an after a zk session expiration (see SOLR-6249)
+    zkClient.setData(znodePath, managedSchemaBytes, schemaZkVersion, false);
+    stat = new Stat();
+    managedSchemaBytes = zkClient.getData(znodePath, null, stat, false);
+    int updatedSchemaZkVersion = stat.getVersion();
+    assertTrue(updatedSchemaZkVersion > schemaZkVersion);
+    validateZkVersion(randomReplicaNotLeader, updatedSchemaZkVersion, 2, true);
+
+    // ok - looks like the watcher fired correctly on the replica
+    // now, expire that replica's zk session and then verify the watcher fires again (after reconnect)
+    JettySolrRunner randomReplicaJetty =
+        getJettyOnPort(getReplicaPort(randomReplicaNotLeader));
+    assertNotNull(randomReplicaJetty);
+    chaosMonkey.expireSession(randomReplicaJetty);
+
+    // update the data again to cause watchers to fire
+    zkClient.setData(znodePath, managedSchemaBytes, updatedSchemaZkVersion, false);
+    stat = new Stat();
+    managedSchemaBytes = zkClient.getData(znodePath, null, stat, false);
+    updatedSchemaZkVersion = stat.getVersion();
+    // give up to 10 secs for the replica to recover after zk session loss and see the update
+    validateZkVersion(randomReplicaNotLeader, updatedSchemaZkVersion, 10, true);
+  }
+

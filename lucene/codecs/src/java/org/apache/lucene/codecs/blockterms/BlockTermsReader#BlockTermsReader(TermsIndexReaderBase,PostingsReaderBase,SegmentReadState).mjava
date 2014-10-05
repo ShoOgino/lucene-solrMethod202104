@@ -1,0 +1,64 @@
+  public BlockTermsReader(TermsIndexReaderBase indexReader, PostingsReaderBase postingsReader, SegmentReadState state) throws IOException {
+    
+    this.postingsReader = postingsReader;
+    
+    String filename = IndexFileNames.segmentFileName(state.segmentInfo.name, state.segmentSuffix, BlockTermsWriter.TERMS_EXTENSION);
+    in = state.directory.openInput(filename, state.context);
+
+    boolean success = false;
+    try {
+      CodecUtil.checkSegmentHeader(in, BlockTermsWriter.CODEC_NAME, 
+                                       BlockTermsWriter.VERSION_START,
+                                       BlockTermsWriter.VERSION_CURRENT,
+                                       state.segmentInfo.getId(), state.segmentSuffix);
+
+      // Have PostingsReader init itself
+      postingsReader.init(in);
+      
+      // NOTE: data file is too costly to verify checksum against all the bytes on open,
+      // but for now we at least verify proper structure of the checksum footer: which looks
+      // for FOOTER_MAGIC + algorithmID. This is cheap and can detect some forms of corruption
+      // such as file truncation.
+      CodecUtil.retrieveChecksum(in);
+
+      // Read per-field details
+      seekDir(in);
+
+      final int numFields = in.readVInt();
+      if (numFields < 0) {
+        throw new CorruptIndexException("invalid number of fields: " + numFields, in);
+      }
+      for(int i=0;i<numFields;i++) {
+        final int field = in.readVInt();
+        final long numTerms = in.readVLong();
+        assert numTerms >= 0;
+        final long termsStartPointer = in.readVLong();
+        final FieldInfo fieldInfo = state.fieldInfos.fieldInfo(field);
+        final long sumTotalTermFreq = fieldInfo.getIndexOptions() == IndexOptions.DOCS_ONLY ? -1 : in.readVLong();
+        final long sumDocFreq = in.readVLong();
+        final int docCount = in.readVInt();
+        final int longsSize = in.readVInt();
+        if (docCount < 0 || docCount > state.segmentInfo.getDocCount()) { // #docs with field must be <= #docs
+          throw new CorruptIndexException("invalid docCount: " + docCount + " maxDoc: " + state.segmentInfo.getDocCount(), in);
+        }
+        if (sumDocFreq < docCount) {  // #postings must be >= #docs with field
+          throw new CorruptIndexException("invalid sumDocFreq: " + sumDocFreq + " docCount: " + docCount, in);
+        }
+        if (sumTotalTermFreq != -1 && sumTotalTermFreq < sumDocFreq) { // #positions must be >= #postings
+          throw new CorruptIndexException("invalid sumTotalTermFreq: " + sumTotalTermFreq + " sumDocFreq: " + sumDocFreq, in);
+        }
+        FieldReader previous = fields.put(fieldInfo.name, new FieldReader(fieldInfo, numTerms, termsStartPointer, sumTotalTermFreq, sumDocFreq, docCount, longsSize));
+        if (previous != null) {
+          throw new CorruptIndexException("duplicate fields: " + fieldInfo.name, in);
+        }
+      }
+      success = true;
+    } finally {
+      if (!success) {
+        in.close();
+      }
+    }
+
+    this.indexReader = indexReader;
+  }
+

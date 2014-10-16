@@ -1,6 +1,44 @@
   public void testQuery() throws Exception {
-    assertHits(new FunctionQuery(new QueryValueSource(
-        new FunctionQuery(new ConstValueSource(2f)), 0f)),
-        new float[] { 2f, 2f });
+    Similarity saved = searcher.getSimilarity();
+
+    try {
+      searcher.setSimilarity(new DefaultSimilarity());
+      
+      ValueSource vs = new QueryValueSource(new TermQuery(new Term("string","bar")), 42F);
+      assertHits(new FunctionQuery(vs), new float[] { 42F, 1F });
+
+      // valuesource should exist only for things matching the term query
+      // sanity check via quick & dirty wrapper arround tf
+      ValueSource expected = new MultiFloatFunction(new ValueSource[] {
+          new TFValueSource("bogus", "bogus", "string", new BytesRef("bar"))}) {
+
+        @Override
+        protected String name() { return "tf_based_exists"; }
+
+        @Override
+        protected float func(int doc, FunctionValues[] valsArr) {
+          return valsArr[0].floatVal(doc);
+        }
+        @Override
+        protected boolean exists(int doc, FunctionValues[] valsArr) {
+          // if tf > 0, then it should exist
+          return 0 < func(doc, valsArr);
+        }
+      };
+
+      assertExists(expected, vs);
+
+
+      // Query matches all docs, func exists for all docs
+      vs = new QueryValueSource(new TermQuery(new Term("text","test")), 0F);
+      assertAllExist(vs);
+
+      // Query matches no docs, func exists for no docs
+      vs = new QueryValueSource(new TermQuery(new Term("bogus","does not exist")), 0F);
+      assertNoneExist(vs);
+
+    } finally {
+      searcher.setSimilarity(saved);
+    }
   }
 

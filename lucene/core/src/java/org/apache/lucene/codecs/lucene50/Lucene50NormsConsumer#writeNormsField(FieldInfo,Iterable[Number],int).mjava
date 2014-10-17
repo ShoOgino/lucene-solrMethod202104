@@ -1,0 +1,54 @@
+  private void writeNormsField(FieldInfo field, Iterable<Number> values, int level) throws IOException {
+    assert level <= 1; // we only "recurse" once in the indirect case
+    meta.writeVInt(field.number);
+    long minValue = Long.MAX_VALUE;
+    long maxValue = Long.MIN_VALUE;
+    // TODO: more efficient?
+    NormMap uniqueValues = new NormMap();
+    
+    int count = 0;
+    
+    for (Number nv : values) {
+      if (nv == null) {
+        throw new IllegalStateException("illegal norms data for field " + field.name + ", got null for value: " + count);
+      }
+      final long v = nv.longValue();
+      
+      minValue = Math.min(minValue, v);
+      maxValue = Math.max(maxValue, v);
+      
+      if (uniqueValues != null) {
+        if (uniqueValues.add(v)) {
+          if (uniqueValues.size > 256) {
+            uniqueValues = null;
+          }
+        }
+      }
+      count++;
+    }
+    if (uniqueValues != null && uniqueValues.size == 1) {
+      // 0 bpv
+      addConstant(minValue);
+    } else if (level == 0 && count > 256 && uniqueValues != null && uniqueValues.maxFreq() > count * INDIRECT_THRESHOLD) {
+      long commonValue = uniqueValues.getDecodeTable()[uniqueValues.maxOrd()];
+      if (commonValue == 0) {
+        // if the common value is missing, don't waste RAM on a bitset, since we won't be searching those docs
+        addIndirect(field, values, count, uniqueValues);
+      } else {
+        // otherwise, write a sparse bitset, where 1 indicates 'uncommon value'.
+        addPatched(field, values, count, uniqueValues);
+      }
+    } else if (uniqueValues != null) {
+      // small number of unique values: this is the typical case:
+      FormatAndBits compression = fastestFormatAndBits(uniqueValues.size-1);
+      
+      if (compression.bitsPerValue == 8 && minValue >= Byte.MIN_VALUE && maxValue <= Byte.MAX_VALUE) {
+        addUncompressed(values, count);
+      } else {
+        addTableCompressed(values, compression, count, uniqueValues);
+      }
+    } else {
+      addDeltaCompressed(values, count);
+    }
+  }
+

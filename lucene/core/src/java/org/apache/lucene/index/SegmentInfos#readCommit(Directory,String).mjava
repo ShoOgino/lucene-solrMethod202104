@@ -7,18 +7,10 @@
    * @throws CorruptIndexException if the index is corrupt
    * @throws IOException if there is a low-level IO error
    */
-  public final void read(Directory directory, String segmentFileName) throws IOException {
-    boolean success = false;
+  public static final SegmentInfos readCommit(Directory directory, String segmentFileName) throws IOException {
 
-    // Clear any previous segments:
-    this.clear();
-
-    generation = generationFromSegmentsFileName(segmentFileName);
-
-    lastGeneration = generation;
-
-    ChecksumIndexInput input = directory.openChecksumInput(segmentFileName, IOContext.READ);
-    try {
+    long generation = generationFromSegmentsFileName(segmentFileName);
+    try (ChecksumIndexInput input = directory.openChecksumInput(segmentFileName, IOContext.READ)) {
       // NOTE: as long as we want to throw indexformattooold (vs corruptindexexception), we need
       // to read the magic ourselves.
       int magic = input.readInt();
@@ -27,17 +19,42 @@
       }
       // 4.0+
       int format = CodecUtil.checkHeaderNoMagic(input, "segments", VERSION_40, VERSION_50);
-      version = input.readLong();
-      counter = input.readInt();
+      // 5.0+
+      byte id[] = null;
+      if (format >= VERSION_50) {
+        id = new byte[StringHelper.ID_LENGTH];
+        input.readBytes(id, 0, id.length);
+        CodecUtil.checkIndexHeaderSuffix(input, Long.toString(generation, Character.MAX_RADIX));
+      }
+      
+      SegmentInfos infos = new SegmentInfos();
+      infos.id = id;
+      infos.generation = generation;
+      infos.lastGeneration = generation;
+      infos.version = input.readLong();
+      infos.counter = input.readInt();
       int numSegments = input.readInt();
       if (numSegments < 0) {
         throw new CorruptIndexException("invalid segment count: " + numSegments, input);
       }
       for (int seg = 0; seg < numSegments; seg++) {
         String segName = input.readString();
+        final byte segmentID[];
+        if (format >= VERSION_50) {
+          byte hasID = input.readByte();
+          if (hasID == 1) {
+            segmentID = new byte[StringHelper.ID_LENGTH];
+            input.readBytes(segmentID, 0, segmentID.length);
+          } else if (hasID == 0) {
+            segmentID = null; // 4.x segment, doesn't have an ID
+          } else {
+            throw new CorruptIndexException("invalid hasID byte, got: " + hasID, input);
+          }
+        } else {
+          segmentID = null;
+        }
         Codec codec = Codec.forName(input.readString());
-        //System.out.println("SIS.read seg=" + seg + " codec=" + codec);
-        SegmentInfo info = codec.segmentInfoFormat().read(directory, segName, IOContext.READ);
+        SegmentInfo info = codec.segmentInfoFormat().read(directory, segName, segmentID, IOContext.READ);
         info.setCodec(codec);
         long delGen = input.readLong();
         int delCount = input.readInt();
@@ -88,13 +105,9 @@
             siPerCommit.setDocValuesUpdatesFiles(dvUpdateFiles);
           }
         }
-        add(siPerCommit);
+        infos.add(siPerCommit);
       }
-      userData = input.readStringStringMap();
-      if (format >= VERSION_50) {
-        id = new byte[StringHelper.ID_LENGTH];
-        input.readBytes(id, 0, id.length);
-      }
+      infos.userData = input.readStringStringMap();
 
       if (format >= VERSION_48) {
         CodecUtil.checkFooter(input);
@@ -108,16 +121,7 @@
         CodecUtil.checkEOF(input);
       }
 
-      success = true;
-    } finally {
-      if (!success) {
-        // Clear any segment infos we had loaded so we
-        // have a clean slate on retry:
-        this.clear();
-        IOUtils.closeWhileHandlingException(input);
-      } else {
-        input.close();
-      }
+      return infos;
     }
   }
 

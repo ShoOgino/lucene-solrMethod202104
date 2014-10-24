@@ -1,0 +1,127 @@
+  /**
+   * Read a particular segmentFileName.  Note that this may
+   * throw an IOException if a commit is in process.
+   *
+   * @param directory -- directory containing the segments file
+   * @param segmentFileName -- segment file to load
+   * @throws CorruptIndexException if the index is corrupt
+   * @throws IOException if there is a low-level IO error
+   */
+  public static final SegmentInfos readCommit(Directory directory, String segmentFileName) throws IOException {
+
+    long generation = generationFromSegmentsFileName(segmentFileName);
+    try (ChecksumIndexInput input = directory.openChecksumInput(segmentFileName, IOContext.READ)) {
+      // NOTE: as long as we want to throw indexformattooold (vs corruptindexexception), we need
+      // to read the magic ourselves.
+      int magic = input.readInt();
+      if (magic != CodecUtil.CODEC_MAGIC) {
+        throw new IndexFormatTooOldException(input, magic, CodecUtil.CODEC_MAGIC, CodecUtil.CODEC_MAGIC);
+      }
+      // 4.0+
+      int format = CodecUtil.checkHeaderNoMagic(input, "segments", VERSION_40, VERSION_50);
+      // 5.0+
+      byte id[] = null;
+      if (format >= VERSION_50) {
+        id = new byte[StringHelper.ID_LENGTH];
+        input.readBytes(id, 0, id.length);
+        CodecUtil.checkIndexHeaderSuffix(input, Long.toString(generation, Character.MAX_RADIX));
+      }
+      
+      SegmentInfos infos = new SegmentInfos();
+      infos.id = id;
+      infos.generation = generation;
+      infos.lastGeneration = generation;
+      infos.version = input.readLong();
+      infos.counter = input.readInt();
+      int numSegments = input.readInt();
+      if (numSegments < 0) {
+        throw new CorruptIndexException("invalid segment count: " + numSegments, input);
+      }
+      for (int seg = 0; seg < numSegments; seg++) {
+        String segName = input.readString();
+        final byte segmentID[];
+        if (format >= VERSION_50) {
+          byte hasID = input.readByte();
+          if (hasID == 1) {
+            segmentID = new byte[StringHelper.ID_LENGTH];
+            input.readBytes(segmentID, 0, segmentID.length);
+          } else if (hasID == 0) {
+            segmentID = null; // 4.x segment, doesn't have an ID
+          } else {
+            throw new CorruptIndexException("invalid hasID byte, got: " + hasID, input);
+          }
+        } else {
+          segmentID = null;
+        }
+        Codec codec = Codec.forName(input.readString());
+        SegmentInfo info = codec.segmentInfoFormat().read(directory, segName, segmentID, IOContext.READ);
+        info.setCodec(codec);
+        long delGen = input.readLong();
+        int delCount = input.readInt();
+        if (delCount < 0 || delCount > info.getDocCount()) {
+          throw new CorruptIndexException("invalid deletion count: " + delCount + " vs docCount=" + info.getDocCount(), input);
+        }
+        long fieldInfosGen = -1;
+        if (format >= VERSION_46) {
+          fieldInfosGen = input.readLong();
+        }
+        long dvGen = -1;
+        if (format >= VERSION_49) {
+          dvGen = input.readLong();
+        } else {
+          dvGen = fieldInfosGen;
+        }
+        SegmentCommitInfo siPerCommit = new SegmentCommitInfo(info, delCount, delGen, fieldInfosGen, dvGen);
+        if (format >= VERSION_46) {
+          if (format < VERSION_49) {
+            // Recorded per-generation files, which were buggy (see
+            // LUCENE-5636). We need to read and keep them so we continue to
+            // reference those files. Unfortunately it means that the files will
+            // be referenced even if the fields are updated again, until the
+            // segment is merged.
+            final int numGensUpdatesFiles = input.readInt();
+            final Map<Long,Set<String>> genUpdatesFiles;
+            if (numGensUpdatesFiles == 0) {
+              genUpdatesFiles = Collections.emptyMap();
+            } else {
+              genUpdatesFiles = new HashMap<>(numGensUpdatesFiles);
+              for (int i = 0; i < numGensUpdatesFiles; i++) {
+                genUpdatesFiles.put(input.readLong(), input.readStringSet());
+              }
+            }
+            siPerCommit.setGenUpdatesFiles(genUpdatesFiles);
+          } else {
+            siPerCommit.setFieldInfosFiles(input.readStringSet());
+            final Map<Integer,Set<String>> dvUpdateFiles;
+            final int numDVFields = input.readInt();
+            if (numDVFields == 0) {
+              dvUpdateFiles = Collections.emptyMap();
+            } else {
+              dvUpdateFiles = new HashMap<>(numDVFields);
+              for (int i = 0; i < numDVFields; i++) {
+                dvUpdateFiles.put(input.readInt(), input.readStringSet());
+              }
+            }
+            siPerCommit.setDocValuesUpdatesFiles(dvUpdateFiles);
+          }
+        }
+        infos.add(siPerCommit);
+      }
+      infos.userData = input.readStringStringMap();
+
+      if (format >= VERSION_48) {
+        CodecUtil.checkFooter(input);
+      } else {
+        final long checksumNow = input.getChecksum();
+        final long checksumThen = input.readLong();
+        if (checksumNow != checksumThen) {
+          throw new CorruptIndexException("checksum failed (hardware problem?) : expected=" + Long.toHexString(checksumThen) +  
+                                          " actual=" + Long.toHexString(checksumNow), input);
+        }
+        CodecUtil.checkEOF(input);
+      }
+
+      return infos;
+    }
+  }
+

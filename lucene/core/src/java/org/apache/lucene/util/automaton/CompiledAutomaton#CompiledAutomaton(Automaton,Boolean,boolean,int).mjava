@@ -1,0 +1,100 @@
+  /** Create this.  If finite is null, we use {@link Operations#isFinite}
+   *  to determine whether it is finite.  If simplify is true, we run
+   *  possibly expensive operations to determine if the automaton is one
+   *  the cases in {@link CompiledAutomaton.AUTOMATON_TYPE}. If simplify
+   *  requires determinizing the autaomaton then only maxDeterminizedStates
+   *  will be created.  Any more than that will cause a
+   *  TooComplexToDeterminizeException.
+   */
+  public CompiledAutomaton(Automaton automaton, Boolean finite, boolean simplify,
+      int maxDeterminizedStates) {
+    if (automaton.getNumStates() == 0) {
+      automaton = new Automaton();
+      automaton.createState();
+    }
+
+    if (simplify) {
+
+      // Test whether the automaton is a "simple" form and
+      // if so, don't create a runAutomaton.  Note that on a
+      // large automaton these tests could be costly:
+
+      if (Operations.isEmpty(automaton)) {
+        // matches nothing
+        type = AUTOMATON_TYPE.NONE;
+        term = null;
+        commonSuffixRef = null;
+        runAutomaton = null;
+        this.automaton = null;
+        this.finite = null;
+        return;
+      // NOTE: only approximate, because automaton may not be minimal:
+      } else if (Operations.isTotal(automaton)) {
+        // matches all possible strings
+        type = AUTOMATON_TYPE.ALL;
+        term = null;
+        commonSuffixRef = null;
+        runAutomaton = null;
+        this.automaton = null;
+        this.finite = null;
+        return;
+      } else {
+
+        automaton = Operations.determinize(automaton, maxDeterminizedStates);
+
+        final String commonPrefix = Operations.getCommonPrefix(automaton);
+        final String singleton;
+
+        if (commonPrefix.length() > 0 && Operations.sameLanguage(automaton, Automata.makeString(commonPrefix))) {
+          singleton = commonPrefix;
+        } else {
+          singleton = null;
+        }
+
+        if (singleton != null) {
+          // matches a fixed string
+          type = AUTOMATON_TYPE.SINGLE;
+          term = new BytesRef(singleton);
+          commonSuffixRef = null;
+          runAutomaton = null;
+          this.automaton = null;
+          this.finite = null;
+          return;
+        } else if (commonPrefix.length() > 0) {
+          Automaton other = Operations.concatenate(Automata.makeString(commonPrefix), Automata.makeAnyString());
+          other = Operations.determinize(other, maxDeterminizedStates);
+          assert Operations.hasDeadStates(other) == false;
+          if (Operations.sameLanguage(automaton, other)) {
+            // matches a constant prefix
+            type = AUTOMATON_TYPE.PREFIX;
+            term = new BytesRef(commonPrefix);
+            commonSuffixRef = null;
+            runAutomaton = null;
+            this.automaton = null;
+            this.finite = null;
+            return;
+          }
+        }
+      }
+    }
+
+    type = AUTOMATON_TYPE.NORMAL;
+    term = null;
+
+    if (finite == null) {
+      this.finite = Operations.isFinite(automaton);
+    } else {
+      this.finite = finite;
+    }
+
+    Automaton utf8 = new UTF32ToUTF8().convert(automaton);
+    if (this.finite) {
+      commonSuffixRef = null;
+    } else {
+      commonSuffixRef = Operations.getCommonSuffixBytesRef(utf8, maxDeterminizedStates);
+    }
+    runAutomaton = new ByteRunAutomaton(utf8, true, maxDeterminizedStates);
+
+    this.automaton = runAutomaton.automaton;
+  }
+

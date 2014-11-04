@@ -8,9 +8,15 @@
     if (!rb.doFacets || pivots == null) 
       return null;
     
+    // rb._statsInfo may be null if stats=false, ie: refine requests
+    // if that's the case, but we need to refine w/stats, then we'll lazy init our 
+    // own instance of StatsInfo
+    StatsInfo statsInfo = rb._statsInfo; 
+
     SimpleOrderedMap<List<NamedList<Object>>> pivotResponse = new SimpleOrderedMap<>();
     for (String pivotList : pivots) {
       try {
+        // NOTE: this sets localParams (SimpleFacets is stateful)
         this.parseParams(FacetParams.FACET_PIVOT, pivotList);
       } catch (SyntaxError e) {
         throw new SolrException(ErrorCode.BAD_REQUEST, e);
@@ -29,15 +35,37 @@
         }
       } 
 
-      //REFINEMENT
-      String fieldValueKey = localParams == null ? null : localParams.get(PivotFacet.REFINE_PARAM);
-      if(fieldValueKey != null ){
-        String[] refinementValuesByField = params.getParams(PivotFacet.REFINE_PARAM+fieldValueKey);
+      // start by assuing no local params...
+
+      String refineKey = null; // no local => no refinement
+      List<StatsField> statsFields = Collections.emptyList(); // no local => no stats
+      
+      if (null != localParams) {
+        // we might be refining..
+        refineKey = localParams.get(PivotFacet.REFINE_PARAM);
+        
+        String statsLocalParam = localParams.get(StatsParams.STATS);
+        if (null != refineKey
+            && null != statsLocalParam
+            && null == statsInfo) {
+          // we are refining and need to compute stats, 
+          // but stats component hasn't inited StatsInfo (because we
+          // don't need/want top level stats when refining) so we lazy init
+          // our own copy of StatsInfo
+          statsInfo = new StatsInfo(rb);
+        }
+        statsFields = getTaggedStatsFields(statsInfo, statsLocalParam);
+      }
+
+      if (null != refineKey) {
+        String[] refinementValuesByField 
+          = params.getParams(PivotFacet.REFINE_PARAM + refineKey);
+
         for(String refinements : refinementValuesByField){
-          pivotResponse.addAll(processSingle(pivotFields, refinements));
+          pivotResponse.addAll(processSingle(pivotFields, refinements, statsFields));
         }
       } else{
-        pivotResponse.addAll(processSingle(pivotFields, null));
+        pivotResponse.addAll(processSingle(pivotFields, null, statsFields));
       }
     }
     return pivotResponse;

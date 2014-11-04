@@ -2,7 +2,12 @@
    * Recursive function to compute all the pivot counts for the values under teh specified field
    */
   protected List<NamedList<Object>> doPivots(NamedList<Integer> superFacets,
-      String field, String subField, Deque<String> fnames,Deque<String> vnames,DocSet docs) throws IOException {
+                                             String field, String subField, 
+                                             Deque<String> fnames, Deque<String> vnames, 
+                                             DocSet docs, List<StatsField> statsFields) 
+    throws IOException {
+
+    boolean isShard = rb.req.getParams().getBool(ShardParams.IS_SHARD, false);
 
     SolrIndexSearcher searcher = rb.req.getSearcher();
     // TODO: optimize to avoid converting to an external string and then having to convert back to internal below
@@ -19,6 +24,7 @@
       // Only sub-facet if parent facet has positive count - still may not be any values for the sub-field though
       if (kv.getValue() >= getMinCountForField(field)) {  
         final String fieldValue = kv.getKey();
+        final int pivotCount = kv.getValue();
 
         SimpleOrderedMap<Object> pivot = new SimpleOrderedMap<>();
         pivot.add( "field", field );
@@ -28,7 +34,7 @@
           ftype.readableToIndexed(fieldValue, termval);
           pivot.add( "value", ftype.toObject(sfield, termval.get()) );
         }
-        pivot.add( "count", kv.getValue() );
+        pivot.add( "count", pivotCount );
 
         DocSet subset = getSubset(docs, sfield, fieldValue);
         
@@ -45,8 +51,16 @@
           }
 
           if (facetCounts.size() >= 1) {
-            pivot.add( "pivot", doPivots( facetCounts, subField, nextField, fnames, vnames, subset) );
+            pivot.add( "pivot", doPivots( facetCounts, subField, nextField, fnames, vnames, subset, statsFields ) );
           }
+        }
+        if ((isShard || 0 < pivotCount) && ! statsFields.isEmpty()) {
+          Map<String, StatsValues> stv = new LinkedHashMap<>();
+          for (StatsField statsField : statsFields) {
+            stv.put(statsField.getOutputKey(), statsField.computeLocalStatsValues(subset));
+          }
+          // for pivots, we *always* include requested stats - even if 'empty'
+          pivot.add("stats", StatsComponent.convertToResponse(true, stv));
         }
         values.add( pivot );
       }

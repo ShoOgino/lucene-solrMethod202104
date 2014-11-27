@@ -1,4 +1,5 @@
   // Stress test reopen during addIndexes
+  @Nightly
   public void testDuringAddIndexes() throws Exception {
     Directory dir1 = getAssertNoDeletesDirectory(newDirectory());
     final IndexWriter writer = new IndexWriter(
@@ -18,19 +19,20 @@
 
     DirectoryReader r = writer.getReader();
 
-    final float SECONDS = 0.5f;
-
-    final long endTime = (long) (System.currentTimeMillis() + 1000.*SECONDS);
+    final int numIterations = 10;
     final List<Throwable> excs = Collections.synchronizedList(new ArrayList<Throwable>());
 
     // Only one thread can addIndexes at a time, because
     // IndexWriter acquires a write lock in each directory:
     final Thread[] threads = new Thread[1];
+    final AtomicBoolean threadDone = new AtomicBoolean(false);
     for(int i=0;i<threads.length;i++) {
       threads[i] = new Thread() {
           @Override
           public void run() {
+            int count = 0;
             do {
+              count++;
               try {
                 writer.addIndexes(dirs);
                 writer.maybeMerge();
@@ -38,7 +40,8 @@
                 excs.add(t);
                 throw new RuntimeException(t);
               }
-            } while(System.currentTimeMillis() < endTime);
+            } while(count < numIterations);
+            threadDone.set(true);
           }
         };
       threads[i].setDaemon(true);
@@ -46,17 +49,17 @@
     }
 
     int lastCount = 0;
-    while(System.currentTimeMillis() < endTime) {
+    while(threadDone.get() == false) {
       DirectoryReader r2 = DirectoryReader.openIfChanged(r);
       if (r2 != null) {
         r.close();
         r = r2;
+        Query q = new TermQuery(new Term("indexname", "test"));
+        IndexSearcher searcher = newSearcher(r);
+        final int count = searcher.search(q, 10).totalHits;
+        assertTrue(count >= lastCount);
+        lastCount = count;
       }
-      Query q = new TermQuery(new Term("indexname", "test"));
-      IndexSearcher searcher = newSearcher(r);
-      final int count = searcher.search(q, 10).totalHits;
-      assertTrue(count >= lastCount);
-      lastCount = count;
     }
 
     for(int i=0;i<threads.length;i++) {

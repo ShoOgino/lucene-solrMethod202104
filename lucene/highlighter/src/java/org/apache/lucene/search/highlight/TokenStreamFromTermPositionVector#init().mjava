@@ -1,0 +1,112 @@
+  //We initialize in reset() because we can see which attributes the consumer wants, particularly payloads
+  private void init() throws IOException {
+    if (vector.hasOffsets()) {
+      offsetAttribute = addAttribute(OffsetAttribute.class);
+    }
+    if (vector.hasPayloads() && hasAttribute(PayloadAttribute.class)) {
+      payloadAttribute = getAttribute(PayloadAttribute.class);
+    }
+
+    // Step 1: iterate termsEnum and create a token, placing into an array of tokens by position
+
+    TokenLL[] positionedTokens = initTokensArray();
+
+    int lastPosition = -1;
+
+    final TermsEnum termsEnum = vector.iterator(null);
+    BytesRef termBytesRef;
+    DocsAndPositionsEnum dpEnum = null;
+    //int sumFreq = 0;
+    while ((termBytesRef = termsEnum.next()) != null) {
+      //Grab the term (in same way as BytesRef.utf8ToString() but we don't want a String obj)
+      // note: if term vectors supported seek by ord then we might just keep an int and seek by ord on-demand
+      final char[] termChars = new char[termBytesRef.length];
+      final int termCharsLen = UnicodeUtil.UTF8toUTF16(termBytesRef, termChars);
+
+      dpEnum = termsEnum.docsAndPositions(null, dpEnum);
+      assert dpEnum != null; // presumably checked by TokenSources.hasPositions earlier
+      dpEnum.nextDoc();
+      final int freq = dpEnum.freq();
+      //sumFreq += freq;
+      for (int j = 0; j < freq; j++) {
+        int pos = dpEnum.nextPosition();
+        TokenLL token = new TokenLL();
+        token.termChars = termChars;
+        token.termCharsLen = termCharsLen;
+        if (offsetAttribute != null) {
+          token.startOffset = dpEnum.startOffset();
+          token.endOffset = dpEnum.endOffset();
+          if (pos == -1) {
+            pos = token.startOffset >> 3;//divide by 8
+          }
+        }
+
+        if (payloadAttribute != null) {
+          // Must make a deep copy of the returned payload,
+          // since D&PEnum API is allowed to re-use on every
+          // call:
+          final BytesRef payload = dpEnum.getPayload();
+          if (payload != null) {
+            token.payload = BytesRef.deepCopyOf(payload);//TODO share a ByteBlockPool & re-use BytesRef
+          }
+        }
+
+        //Add token to an array indexed by position
+        if (positionedTokens.length <= pos) {
+          //grow, but not 2x since we think our original length estimate is close
+          TokenLL[] newPositionedTokens = new TokenLL[(int)((pos + 1) * 1.5f)];
+          System.arraycopy(positionedTokens, 0, newPositionedTokens, 0, lastPosition + 1);
+          positionedTokens = newPositionedTokens;
+        }
+        positionedTokens[pos] = token.insertIntoSortedLinkedList(positionedTokens[pos]);
+
+        lastPosition = Math.max(lastPosition, pos);
+      }
+    }
+
+//    System.out.println(String.format(
+//        "SumFreq: %5d Size: %4d SumFreq/size: %3.3f MaxPos: %4d MaxPos/SumFreq: %3.3f WastePct: %3.3f",
+//        sumFreq, vector.size(), (sumFreq / (float)vector.size()), lastPosition, ((float)lastPosition)/sumFreq,
+//        (originalPositionEstimate/(lastPosition + 1.0f))));
+
+    // Step 2:  Link all Tokens into a linked-list and set position increments as we go
+
+    int prevTokenPos = -1;
+    TokenLL prevToken = null;
+    for (int pos = 0; pos <= lastPosition; pos++) {
+      TokenLL token = positionedTokens[pos];
+      if (token == null) {
+        continue;
+      }
+      //link
+      if (prevToken != null) {
+        assert prevToken.next == null;
+        prevToken.next = token; //concatenate linked-list
+      } else {
+        assert firstToken == null;
+        firstToken = token;
+      }
+      //set increments
+      if (vector.hasPositions()) {
+        token.positionIncrement = pos - prevTokenPos;
+        while (token.next != null) {
+          token = token.next;
+          token.positionIncrement = 0;
+        }
+      } else {
+        token.positionIncrement = 1;
+        while (token.next != null) {
+          prevToken = token;
+          token = token.next;
+          if (prevToken.startOffset == token.startOffset) {
+            token.positionIncrement = 0;
+          } else {
+            token.positionIncrement = 1;
+          }
+        }
+      }
+      prevTokenPos = pos;
+      prevToken = token;
+    }
+  }
+

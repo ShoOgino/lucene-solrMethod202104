@@ -1,0 +1,64 @@
+  public ClusterState writePendingUpdates() throws KeeperException, InterruptedException {
+    if (!hasPendingUpdates()) throw new IllegalStateException("No queued updates to execute");
+    TimerContext timerContext = stats.time("update_state");
+    boolean success = false;
+    try {
+      if (!updates.isEmpty()) {
+        for (Map.Entry<String, DocCollection> entry : updates.entrySet()) {
+          String name = entry.getKey();
+          String path = ZkStateReader.getCollectionPath(name);
+          DocCollection c = entry.getValue();
+
+          if (c == null) {
+            // let's clean up the collections path for this collection
+            reader.getZkClient().clean("/collections/" + name);
+          } else if (c.getStateFormat() > 1) {
+            byte[] data = ZkStateReader.toJSON(new ClusterState(-1, Collections.<String>emptySet(), singletonMap(c.getName(), c)));
+            if (reader.getZkClient().exists(path, true)) {
+              assert c.getZNodeVersion() >= 0;
+              log.info("going to update_collection {}", path);
+              Stat stat = reader.getZkClient().setData(path, data, c.getZNodeVersion(), true);
+              DocCollection newCollection = new DocCollection(name, c.getSlicesMap(), c.getProperties(), c.getRouter(), stat.getVersion(), path);
+              clusterState = clusterState.copyWith(singletonMap(name, newCollection));
+            } else {
+              log.info("going to create_collection {}", path);
+              reader.getZkClient().create(path, data, CreateMode.PERSISTENT, true);
+              DocCollection newCollection = new DocCollection(name, c.getSlicesMap(), c.getProperties(), c.getRouter(), 0, path);
+              clusterState = clusterState.copyWith(singletonMap(name, newCollection));
+              isClusterStateModified = true;
+            }
+          } else if (c.getStateFormat() == 1) {
+            isClusterStateModified = true;
+          }
+        }
+
+        updates.clear();
+      }
+
+      if (isClusterStateModified) {
+        assert clusterState.getZkClusterStateVersion() >= 0;
+        lastUpdatedTime = System.nanoTime();
+        byte[] data = ZkStateReader.toJSON(clusterState);
+        Stat stat = reader.getZkClient().setData(ZkStateReader.CLUSTER_STATE, data, clusterState.getZkClusterStateVersion(), true);
+        Set<String> collectionNames = clusterState.getCollections();
+        Map<String, DocCollection> collectionStates = new HashMap<>(collectionNames.size());
+        for (String c : collectionNames) {
+          collectionStates.put(c, clusterState.getCollection(c));
+        }
+        // use the reader's live nodes because our cluster state's live nodes may be stale
+        clusterState = new ClusterState(stat.getVersion(), reader.getClusterState().getLiveNodes(), collectionStates);
+        isClusterStateModified = false;
+      }
+      success = true;
+    } finally {
+      timerContext.stop();
+      if (success) {
+        stats.success("update_state");
+      } else {
+        stats.error("update_state");
+      }
+    }
+
+    return clusterState;
+  }
+

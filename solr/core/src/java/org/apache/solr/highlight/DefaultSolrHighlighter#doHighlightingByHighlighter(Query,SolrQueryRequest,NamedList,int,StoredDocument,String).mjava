@@ -1,3 +1,4 @@
+  @SuppressWarnings("unchecked")
   private void doHighlightingByHighlighter( Query query, SolrQueryRequest req, NamedList docSummaries,
       int docId, StoredDocument doc, String fieldName ) throws IOException {
     final SolrIndexSearcher searcher = req.getSearcher();
@@ -7,10 +8,7 @@
     // so we disable them until fixed (see LUCENE-3080)!
     // BEGIN: Hack
     final SchemaField schemaField = schema.getFieldOrNull(fieldName);
-    if (schemaField != null && (
-      (schemaField.getType() instanceof org.apache.solr.schema.TrieField) ||
-      (schemaField.getType() instanceof org.apache.solr.schema.TrieDateField)
-    )) return;
+    if (schemaField != null && schemaField.getType() instanceof org.apache.solr.schema.TrieField) return;
     // END: Hack
     
     SolrParams params = req.getParams();
@@ -19,19 +17,18 @@
     boolean preserveMulti = params.getFieldBool(fieldName, HighlightParams.PRESERVE_MULTI, false);
 
     List<StorableField> allFields = doc.getFields();
-    if (allFields != null && allFields.size() == 0) return; // No explicit contract that getFields returns != null,
+    if (allFields == null || allFields.isEmpty()) return; // No explicit contract that getFields returns != null,
                                                             // although currently it can't.
 
-    TokenStream tstream = null;
     int numFragments = getMaxSnippets(fieldName, params);
     boolean mergeContiguousFragments = isMergeContiguousFragments(fieldName, params);
 
     String[] summaries = null;
     List<TextFragment> frags = new ArrayList<>();
 
-    TermOffsetsTokenStream tots = null; // to be non-null iff we're using TermOffsets optimization
+    TermOffsetsTokenStream tots = null; // to be non-null iff we're using TermOffsets optimization (multi-valued)
     TokenStream tvStream = TokenSources.getTokenStreamWithOffsets(searcher.getIndexReader(), docId, fieldName);
-    if (tvStream != null) {
+    if (tvStream != null && schemaField.multiValued() && isActuallyMultiValued(allFields, fieldName)) {
       tots = new TermOffsetsTokenStream(tvStream);
     }
     int mvToExamine = Integer.parseInt(req.getParams().get(HighlightParams.MAX_MULTIVALUED_TO_EXAMINE,
@@ -46,10 +43,13 @@
 
       --mvToExamine;
       String thisText = thisField.stringValue();
-      if( tots != null ) {
-        // if we're using TermOffsets optimization, then get the next
+      TokenStream tstream;
+      if (tots != null) {
+        // if we're using TermOffsets optimization (multi-valued field with term vectors), then get the next
         // field value's TokenStream (i.e. get field j's TokenStream) from tots:
-        tstream = tots.getMultiValuedTokenStream( thisText.length() );
+        tstream = tots.getMultiValuedTokenStream(thisText.length());
+      } else if (tvStream != null) {
+        tstream = tvStream; // single-valued with term vectors
       } else {
         // fall back to analyzer
         tstream = createAnalyzerTStream(schema, fieldName, thisText);
@@ -61,17 +61,30 @@
       
       Highlighter highlighter;
       if (Boolean.valueOf(req.getParams().get(HighlightParams.USE_PHRASE_HIGHLIGHTER, "true"))) {
-        if (maxCharsToAnalyze < 0) {
-          tstream = new CachingTokenFilter(tstream);
+        // We're going to call getPhraseHighlighter and it might consume the tokenStream. If it does, the tokenStream
+        // needs to implement reset() efficiently.
+
+        //If the tokenStream is right from the term vectors, then CachingTokenFilter is unnecessary.
+        //  It should be okay if OffsetLimit won't get applied in this case.
+        final TokenStream tempTokenStream;
+        if (tstream != tvStream) {
+          if (maxCharsToAnalyze < 0) {
+            tempTokenStream = new CachingTokenFilter(tstream);
+          } else {
+            tempTokenStream = new CachingTokenFilter(new OffsetLimitTokenFilter(tstream, maxCharsToAnalyze));
+          }
         } else {
-          tstream = new CachingTokenFilter(new OffsetLimitTokenFilter(tstream, maxCharsToAnalyze));
+          tempTokenStream = tstream;
         }
-        
+
         // get highlighter
-        highlighter = getPhraseHighlighter(query, fieldName, req, (CachingTokenFilter) tstream);
+        highlighter = getPhraseHighlighter(query, fieldName, req, tempTokenStream);
          
-        // after highlighter initialization, reset tstream since construction of highlighter already used it
-        tstream.reset();
+        // if the CachingTokenFilter was consumed then use it going forward.
+        if (tempTokenStream instanceof CachingTokenFilter && ((CachingTokenFilter)tempTokenStream).isCached()) {
+          tstream = tempTokenStream;
+        }
+        //tstream.reset(); not needed; getBestTextFragments will reset it.
       }
       else {
         // use "the old way"
@@ -86,15 +99,15 @@
 
       try {
         TextFragment[] bestTextFragments = highlighter.getBestTextFragments(tstream, thisText, mergeContiguousFragments, numFragments);
-        for (int k = 0; k < bestTextFragments.length; k++) {
+        for (TextFragment bestTextFragment : bestTextFragments) {
           if (preserveMulti) {
-            if (bestTextFragments[k] != null) {
-              frags.add(bestTextFragments[k]);
+            if (bestTextFragment != null) {
+              frags.add(bestTextFragment);
               --mvToMatch;
             }
           } else {
-            if ((bestTextFragments[k] != null) && (bestTextFragments[k].getScore() > 0)) {
-              frags.add(bestTextFragments[k]);
+            if ((bestTextFragment != null) && (bestTextFragment.getScore() > 0)) {
+              frags.add(bestTextFragment);
               --mvToMatch;
             }
           }
@@ -102,19 +115,20 @@
       } catch (InvalidTokenOffsetsException e) {
         throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, e);
       }
-    }
-    // sort such that the fragments with the highest score come first
-     if(!preserveMulti){
-        Collections.sort(frags, new Comparator<TextFragment>() {
-                @Override
-                public int compare(TextFragment arg0, TextFragment arg1) {
-                 return Math.round(arg1.getScore() - arg0.getScore());
-        }
-        });
-     }
+    }//end field value loop
 
-     // convert fragments back into text
-     // TODO: we can include score and position information in output as snippet attributes
+    // sort such that the fragments with the highest score come first
+    if (!preserveMulti) {
+      Collections.sort(frags, new Comparator<TextFragment>() {
+        @Override
+        public int compare(TextFragment arg0, TextFragment arg1) {
+          return Math.round(arg1.getScore() - arg0.getScore());
+        }
+      });
+    }
+
+    // convert fragments back into text
+    // TODO: we can include score and position information in output as snippet attributes
     if (frags.size() > 0) {
       ArrayList<String> fragTexts = new ArrayList<>();
       for (TextFragment fragment: frags) {

@@ -29,35 +29,18 @@
                 }
                 else if (LeaderStatus.YES == isLeader) {
                   final ZkNodeProps message = ZkNodeProps.load(head);
-                  final String operation = message.getStr(QUEUE_OPERATION);
-                  final TimerContext timerContext = stats.time(operation);
-                  try {
-                    ZkWriteCommand zkWriteCommand = processMessage(clusterState, message, operation, workQueue.getStats().getQueueLength());
-                    clusterState = zkStateWriter.enqueueUpdate(clusterState, zkWriteCommand);
-                    stats.success(operation);
-                  } catch (Exception e) {
-                    // generally there is nothing we can do - in most cases, we have
-                    // an issue that will fail again on retry or we cannot communicate with     a
-                    // ZooKeeper in which case another Overseer should take over
-                    // TODO: if ordering for the message is not important, we could
-                    // track retries and put it back on the end of the queue
-                    log.error("Overseer could not process the current clusterstate state update message, skipping the message.", e);
-                    stats.error(operation);
-                  } finally {
-                    timerContext.stop();
-                  }
-                  if (zkStateWriter.hasPendingUpdates())  {
-                    clusterState = zkStateWriter.writePendingUpdates();
-                  }
+                  log.info("processMessage: queueSize: {}, message = {}", workQueue.getStats().getQueueLength(), message);
+                  clusterState = processQueueItem(message, clusterState, zkStateWriter);
                   workQueue.poll(); // poll-ing removes the element we got by peek-ing
                 }
                 else {
                   log.info("am_i_leader unclear {}", isLeader);                  
                   // re-peek below in case our 'head' value is out-of-date by now
                 }
-                
                 head = workQueue.peek();
               }
+              // force flush at the end of the loop
+              clusterState = zkStateWriter.writePendingUpdates();
             }
           } catch (KeeperException e) {
             if (e.code() == KeeperException.Code.SESSIONEXPIRED) {
@@ -77,8 +60,6 @@
       }
       
       log.info("Starting to work on the main queue");
-      int lastStateFormat = -1; // sentinel
-      String lastCollectionName = null;
       try {
         ZkStateWriter zkStateWriter = new ZkStateWriter(reader, stats);
         ClusterState clusterState = null;
@@ -120,90 +101,37 @@
                 // the state queue, items would have been left in the
                 // work queue so let's process those first
                 byte[] data = workQueue.peek();
+                boolean hadWorkItems = data != null;
                 while (data != null)  {
                   final ZkNodeProps message = ZkNodeProps.load(data);
-                  final String operation = message.getStr(QUEUE_OPERATION);
-                  final TimerContext timerContext = stats.time(operation);
-                  try {
-                    ZkWriteCommand zkWriteCommand = processMessage(clusterState, message, operation, workQueue.getStats().getQueueLength());
-                    clusterState = zkStateWriter.enqueueUpdate(clusterState, zkWriteCommand);
-                    stats.success(operation);
-                  } catch (Exception e) {
-                    // generally there is nothing we can do - in most cases, we have
-                    // an issue that will fail again on retry or we cannot communicate with     a
-                    // ZooKeeper in which case another Overseer should take over
-                    // TODO: if ordering for the message is not important, we could
-                    // track retries and put it back on the end of the queue
-                    log.error("Overseer could not process the current clusterstate state update message, skipping the message.", e);
-                    stats.error(operation);
-                  } finally {
-                    timerContext.stop();
-                  }
-                  if (zkStateWriter.hasPendingUpdates())  {
-                    clusterState = zkStateWriter.writePendingUpdates();
-                  }
+                  log.info("processMessage: queueSize: {}, message = {}", workQueue.getStats().getQueueLength(), message);
+                  clusterState = processQueueItem(message, clusterState, zkStateWriter);
                   workQueue.poll(); // poll-ing removes the element we got by peek-ing
                   data = workQueue.peek();
+                }
+                // force flush at the end of the loop
+                if (hadWorkItems) {
+                  clusterState = zkStateWriter.writePendingUpdates();
                 }
               }
 
               while (head != null) {
                 final ZkNodeProps message = ZkNodeProps.load(head.getBytes());
-                final String operation = message.getStr(QUEUE_OPERATION);
-
-                // we batch updates for the main cluster state together (stateFormat=1)
-                // but if we encounter a message for a collection with a stateFormat different than the last
-                // then we stop batching at that point
-                String collection = message.getStr(ZkStateReader.COLLECTION_PROP);
-                if (collection == null) collection = message.getStr("name");
-                if (collection != null) {
-                  DocCollection docCollection = clusterState.getCollectionOrNull(collection);
-                  if (lastStateFormat != -1 && docCollection != null && docCollection.getStateFormat() != lastStateFormat)  {
-                    lastStateFormat = docCollection.getStateFormat();
-                    // we don't want to mix batching of different state formats together because that makes
-                    // it harder to guarantee atomicity of ZK writes
-                    break;
-                  }
-                  if (docCollection != null)  {
-                    lastStateFormat = docCollection.getStateFormat();
-                  }
-                }
-
-                final TimerContext timerContext = stats.time(operation);
-                try {
-                  ZkWriteCommand zkWriteCommand = processMessage(clusterState, message, operation, stateUpdateQueue.getStats().getQueueLength());
-                  clusterState = zkStateWriter.enqueueUpdate(clusterState, zkWriteCommand);
-                  stats.success(operation);
-                } catch (Exception e) {
-                  // generally there is nothing we can do - in most cases, we have
-                  // an issue that will fail again on retry or we cannot communicate with
-                  // ZooKeeper in which case another Overseer should take over
-                  // TODO: if ordering for the message is not important, we could
-                  // track retries and put it back on the end of the queue
-                  log.error("Overseer could not process the current clusterstate state update message, skipping the message.", e);
-                  stats.error(operation);
-                } finally {
-                  timerContext.stop();
-                }
+                log.info("processMessage: queueSize: {}, message = {} current state version: {}", stateUpdateQueue.getStats().getQueueLength(), message, clusterState.getZkClusterStateVersion());
+                clusterState = processQueueItem(message, clusterState, zkStateWriter);
                 workQueue.offer(head.getBytes());
 
                 stateUpdateQueue.poll();
 
-                if (isClosed || System.nanoTime() - lastUpdatedTime > TimeUnit.NANOSECONDS.convert(STATE_UPDATE_DELAY, TimeUnit.MILLISECONDS)) break;
-                if (!updateNodes.isEmpty() && !collection.equals(lastCollectionName)) {
-                  lastCollectionName = collection;
-                  break;
-                }
-                lastCollectionName = collection;
+                if (isClosed) break;
                 // if an event comes in the next 100ms batch it together
                 head = stateUpdateQueue.peek(100);
               }
-              if (zkStateWriter.hasPendingUpdates())  {
-                clusterState = zkStateWriter.writePendingUpdates();
-                lastUpdatedTime = zkStateWriter.getLastUpdatedTime();
-              }
+              // we should force write all pending updates because the next iteration might sleep until there
+              // are more items in the main queue
+              clusterState = zkStateWriter.writePendingUpdates();
               // clean work queue
-              while (workQueue.poll() != null) ;
+              while (workQueue.poll() != null);
 
             } catch (KeeperException e) {
               if (e.code() == KeeperException.Code.SESSIONEXPIRED) {

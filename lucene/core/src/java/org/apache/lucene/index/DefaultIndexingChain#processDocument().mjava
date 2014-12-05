@@ -1,5 +1,5 @@
   @Override
-  public void processDocument() throws IOException {
+  public void processDocument() throws IOException, AbortingException {
 
     // How many indexed field names we've seen (collapses
     // multiple field instances by the same name):
@@ -42,16 +42,12 @@
       }
     }
 
-    boolean success = false;
     try {
       termsHash.finishDocument();
-      success = true;
-    } finally {
-      if (success == false) {
-        // Must abort, on the possibility that on-disk term
-        // vectors are now corrupt:
-        docWriter.setAborting();
-      }
+    } catch (Throwable th) {
+      // Must abort, on the possibility that on-disk term
+      // vectors are now corrupt:
+      throw new AbortingException(th);
     }
 
     // Add stored fields:
@@ -69,9 +65,12 @@
         
         PerField fp = getOrAddField(fieldName, fieldType, false);
         if (fieldType.stored()) {
-          abort = true;
-          storedFieldsWriter.writeField(fp.fieldInfo, field);
-          abort = false;
+          try {
+            storedFieldsWriter.writeField(fp.fieldInfo, field);
+          } catch (Throwable th) {
+            abort = true;
+            throw new AbortingException(th);
+          }
         }
 
         DocValuesType dvType = fieldType.docValuesType();
@@ -83,9 +82,7 @@
         }
       }
     } finally {
-      if (abort) {
-        docWriter.setAborting();
-      } else {
+      if (abort == false) {
         finishStoredFields();
       }
     }

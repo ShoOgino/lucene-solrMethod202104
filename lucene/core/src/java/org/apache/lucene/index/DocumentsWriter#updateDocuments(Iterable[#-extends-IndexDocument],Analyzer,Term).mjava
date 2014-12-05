@@ -1,5 +1,5 @@
   boolean updateDocuments(final Iterable<? extends IndexDocument> docs, final Analyzer analyzer,
-                          final Term delTerm) throws IOException {
+                          final Term delTerm) throws IOException, AbortingException {
     boolean hasEvents = preUpdate();
 
     final ThreadState perThread = flushControl.obtainAndLock();
@@ -16,18 +16,15 @@
       final int dwptNumDocs = dwpt.getNumDocsInRAM();
       try {
         dwpt.updateDocuments(docs, analyzer, delTerm);
+      } catch (AbortingException ae) {
+        flushControl.doOnAbort(perThread);
+        dwpt.abort();
+        throw ae;
       } finally {
         // We don't know how many documents were actually
         // counted as indexed, so we must subtract here to
         // accumulate our separate counter:
         numDocsInRAM.addAndGet(dwpt.getNumDocsInRAM() - dwptNumDocs);
-        if (dwpt.checkAndResetHasAborted()) {
-          if (!dwpt.pendingFilesToDelete().isEmpty()) {
-            putEvent(new DeleteNewFilesEvent(dwpt.pendingFilesToDelete()));
-          }
-          subtractFlushedNumDocs(dwptNumDocs);
-          flushControl.doOnAbort(perThread);
-        }
       }
       final boolean isUpdate = delTerm != null;
       flushingDWPT = flushControl.doAfterDocument(perThread, isUpdate);

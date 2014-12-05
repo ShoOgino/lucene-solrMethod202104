@@ -1,17 +1,38 @@
   protected LeafReaderContext getLeafContext() throws IOException {
     if (internalReader == null) {
-      if(wrapToCaching && !(tokenStream instanceof CachingTokenFilter)) {
-        assert !cachedTokenStream;
-        tokenStream = new CachingTokenFilter(new OffsetLimitTokenFilter(tokenStream, maxDocCharsToAnalyze));
-        cachedTokenStream = true;
+      boolean cacheIt = wrapToCaching && !(tokenStream instanceof CachingTokenFilter);
+
+      // If it's from term vectors, simply wrap the underlying Terms in a reader
+      if (tokenStream instanceof TokenStreamFromTermVector) {
+        cacheIt = false;
+        Terms termVectorTerms = ((TokenStreamFromTermVector) tokenStream).getTermVectorTerms();
+        if (termVectorTerms.hasPositions() && termVectorTerms.hasOffsets()) {
+          internalReader = new TermVectorLeafReader(DelegatingLeafReader.FIELD_NAME, termVectorTerms);
+        }
       }
-      final MemoryIndex indexer = new MemoryIndex(true);
-      indexer.addField(DelegatingLeafReader.FIELD_NAME, tokenStream);
-      tokenStream.reset();
-      final IndexSearcher searcher = indexer.createSearcher();
-      // MEM index has only atomic ctx
-      internalReader = new DelegatingLeafReader(((LeafReaderContext)searcher.getTopReaderContext()).reader());
+
+      // Use MemoryIndex (index/invert this tokenStream now)
+      if (internalReader == null) {
+        final MemoryIndex indexer = new MemoryIndex(true);
+        if (cacheIt) {
+          assert !cachedTokenStream;
+          tokenStream = new CachingTokenFilter(new OffsetLimitTokenFilter(tokenStream, maxDocCharsToAnalyze));
+          cachedTokenStream = true;
+          indexer.addField(DelegatingLeafReader.FIELD_NAME, tokenStream);
+        } else {
+          indexer.addField(DelegatingLeafReader.FIELD_NAME,
+              new OffsetLimitTokenFilter(tokenStream, maxDocCharsToAnalyze));
+        }
+        tokenStream.reset();//reset to beginning when we return
+        final IndexSearcher searcher = indexer.createSearcher();
+        // MEM index has only atomic ctx
+        internalReader = ((LeafReaderContext) searcher.getTopReaderContext()).reader();
+      }
+
+      //Now wrap it so we always use a common field.
+      this.internalReader = new DelegatingLeafReader(internalReader);
     }
+
     return internalReader.getContext();
   }
 

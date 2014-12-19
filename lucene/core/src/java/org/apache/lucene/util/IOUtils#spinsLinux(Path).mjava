@@ -1,0 +1,43 @@
+  // note: requires a real or fake linux filesystem!
+  static boolean spinsLinux(Path path) throws IOException {
+    FileStore store = getFileStore(path);
+    
+    // if fs type is tmpfs, it doesn't spin.
+    // this won't have a corresponding block device
+    if ("tmpfs".equals(store.type())) {
+      return false;
+    }
+    
+    // get block device name
+    String devName = getBlockDevice(store);
+    // not a device (e.g. NFS server)
+    if (!devName.startsWith("/")) {
+      return true;
+    }
+    
+    // resolve any symlinks to real block device (e.g. LVM)
+    // /dev/sda0 -> sda0
+    // /devices/XXX -> sda0
+    devName = path.getRoot().resolve(devName).toRealPath().getFileName().toString();
+  
+    // now read:
+    Path sysinfo = path.getRoot().resolve("sys/block");
+    Path devinfo = sysinfo.resolve(devName);
+    
+    // tear away partition numbers until we find it.
+    while (!Files.exists(devinfo)) {
+      if (!devName.isEmpty() && Character.isDigit(devName.charAt(devName.length()-1))) {
+        devName = devName.substring(0, devName.length()-1);
+      } else {
+        break; // give up
+      }
+      devinfo = sysinfo.resolve(devName);
+    }
+    
+    // read first byte from rotational, its a 1 if it spins.
+    Path info = devinfo.resolve("queue/rotational");
+    try (InputStream stream = Files.newInputStream(info)) {
+      return stream.read() == '1'; 
+    }
+  }
+

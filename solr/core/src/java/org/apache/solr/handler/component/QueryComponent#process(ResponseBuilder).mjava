@@ -4,6 +4,8 @@
   @Override
   public void process(ResponseBuilder rb) throws IOException
   {
+    LOG.debug("process: {}", rb.req.getParams());
+  
     SolrQueryRequest req = rb.req;
     SolrQueryResponse rsp = rb.rsp;
     SolrParams params = req.getParams();
@@ -11,6 +13,19 @@
       return;
     }
     SolrIndexSearcher searcher = req.getSearcher();
+
+    StatsCache statsCache = req.getCore().getStatsCache();
+    
+    int purpose = params.getInt(ShardParams.SHARDS_PURPOSE, ShardRequest.PURPOSE_GET_TOP_IDS);
+    if ((purpose & ShardRequest.PURPOSE_GET_TERM_STATS) != 0) {
+      statsCache.returnLocalStats(rb, searcher);
+      return;
+    }
+    // check if we need to update the local copy of global dfs
+    if ((purpose & ShardRequest.PURPOSE_SET_TERM_STATS) != 0) {
+      // retrieve from request and update local cache
+      statsCache.receiveGlobalStats(req);
+    }
 
     if (rb.getQueryCommand().getOffset() < 0) {
       throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "'start' parameter cannot be negative");
@@ -62,6 +77,9 @@
 
     SolrIndexSearcher.QueryCommand cmd = rb.getQueryCommand();
     cmd.setTimeAllowed(timeAllowed);
+
+    req.getContext().put(SolrIndexSearcher.STATS_SOURCE, statsCache.get(req));
+    
     SolrIndexSearcher.QueryResult result = new SolrIndexSearcher.QueryResult();
 
     //
@@ -212,8 +230,8 @@
     }
 
     // normal search result
-    searcher.search(result,cmd);
-    rb.setResult( result );
+    searcher.search(result, cmd);
+    rb.setResult(result);
 
     ResultContext ctx = new ResultContext();
     ctx.docs = rb.getResults().docList;

@@ -1,0 +1,42 @@
+  @Override
+  public void returnLocalStats(ResponseBuilder rb, SolrIndexSearcher searcher) {
+    Query q = rb.getQuery();
+    try {
+      q = q.rewrite(searcher.getIndexReader());
+      HashSet<Term> terms = new HashSet<Term>();
+      q.extractTerms(terms);
+      IndexReaderContext context = searcher.getTopReaderContext();
+      HashMap<String,TermStats> statsMap = new HashMap<String,TermStats>();
+      HashMap<String,CollectionStats> colMap = new HashMap<String,CollectionStats>();
+      for (Term t : terms) {
+        TermContext termContext = TermContext.build(context, t);
+        
+        TermStatistics tst = searcher.localTermStatistics(t, termContext);
+        if (tst.docFreq() == 0) { // skip terms that are not present here
+          continue;
+        }
+        
+        statsMap.put(t.toString(), new TermStats(t.field(), tst));
+        rb.rsp.add(TERMS_KEY, t.toString());
+        if (!colMap.containsKey(t.field())) { // collection stats for this field
+          colMap.put(
+              t.field(),
+              new CollectionStats(searcher.localCollectionStatistics(t.field())));
+        }
+      }
+      
+      String termStatsString = StatsUtil.termStatsMapToString(statsMap);
+      rb.rsp.add(TERM_STATS_KEY, termStatsString);
+      String colStatsString = StatsUtil.colStatsMapToString(colMap);
+      rb.rsp.add(COL_STATS_KEY, colStatsString);
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("termStats=" + termStatsString + ", collectionStats="
+            + colStatsString + ", terms=" + terms + ", numDocs="
+            + searcher.maxDoc());
+      }
+    } catch (IOException e) {
+      LOG.error("Error collecting local stats, query='" + q.toString() + "'", e);
+      throw new SolrException(ErrorCode.SERVER_ERROR, "Error collecting local stats.", e);
+    }
+  }
+

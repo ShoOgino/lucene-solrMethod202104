@@ -1,0 +1,125 @@
+  public static Facets compute(final NumberRangePrefixTreeStrategy strategy,
+                               LeafReaderContext context, Bits acceptDocs, Shape queryShape, final Facets facets)
+      throws IOException {
+    final NumberRangePrefixTree tree = strategy.getGrid();
+    final int scanLevel = tree.getMaxLevels();
+
+    //TODO extract AbstractVisitingPrefixTreeFilter / VisitorTemplate to be generic, not necessarily a Filter/DocIdSet.
+    new AbstractVisitingPrefixTreeFilter(queryShape, strategy.getFieldName(), tree, facets.detailLevel, scanLevel) {
+
+      @Override
+      public DocIdSet getDocIdSet(LeafReaderContext context, Bits acceptDocs) throws IOException {
+        return new VisitorTemplate(context, acceptDocs, !strategy.pointsOnly) {
+
+          Facets.FacetParentVal parentFacet;
+
+          @Override
+          protected void start() throws IOException {
+          }
+
+          @Override
+          protected DocIdSet finish() throws IOException {
+            return null;//unused
+          }
+
+          @Override
+          protected boolean visit(Cell cell) throws IOException {
+            // At facetLevel...
+            if (cell.getLevel() == facets.detailLevel) {
+              //note: parentFacet shouldn't be null if we get here
+
+              // Count docs
+              int count = countDocsAtThisTermInSet(acceptDocs);
+              if (count > 0) {
+                //lazy init childCounts
+                if (parentFacet.childCounts == null) {
+                  parentFacet.childCounts = new int[parentFacet.childCountsLen];
+                }
+                UnitNRShape unitShape = (UnitNRShape) cell.getShape();
+                parentFacet.childCounts[unitShape.getValAtLevel(cell.getLevel())] += count;
+              }
+              return false;//don't descend further; this is enough detail
+            }
+
+            parentFacet = null;//reset
+
+            // At parent
+            if (cell.getLevel() == facets.detailLevel - 1) {
+              if (!hasDocsAtThisTermInSet(acceptDocs)) {
+                return false;
+              }
+              //Look for existing parentFacet (from previous segment)
+              UnitNRShape unitShape = (UnitNRShape) cell.getShape();
+              UnitNRShape key = unitShape.clone();
+              parentFacet = facets.parents.get(key);
+              if (parentFacet == null) {//didn't find one; make a new one
+                parentFacet = new Facets.FacetParentVal();
+                parentFacet.childCountsLen = tree.getNumSubCells(unitShape);
+                facets.parents.put(key, parentFacet);
+              }
+            }
+            return true;
+          }
+
+          @Override
+          protected void visitLeaf(Cell cell) throws IOException {
+            final int levelsToGo = facets.detailLevel - cell.getLevel();
+            if (levelsToGo <= 0) {
+              return;//do nothing; we already collected in visit()
+              //note: once we index ranges without direct prefix's of leaves,
+              //  we'll need to collect here at levelsToGo==0 too.
+            }
+            int count = countDocsAtThisTermInSet(acceptDocs);
+            if (count == 0) {
+              return;
+            }
+            if (levelsToGo == 1) {
+              // Because all leaves also have an indexed non-leaf, we can be sure we have parentCell set via visit().
+              parentFacet.parentLeaves += count;
+            } else {
+              facets.topLeaves += count;
+            }
+
+          }
+
+          @Override
+          protected void visitScanned(Cell cell) throws IOException {
+            //TODO does this belong in superclass?  It ignores boolean result from visit(), but that's ok.
+            if (queryShape.relate(cell.getShape()).intersects()) {
+              if (cell.isLeaf()) {
+                visitLeaf(cell);
+              } else {
+                visit(cell);
+              }
+            }
+          }
+
+          //TODO These utility methods could move to superclass
+
+          private int countDocsAtThisTermInSet(Bits actualBaseDocs) throws IOException {
+            if (actualBaseDocs == null) {
+              return termsEnum.docFreq();
+            }
+            int count = 0;
+            docsEnum = termsEnum.docs(actualBaseDocs, docsEnum, DocsEnum.FLAG_NONE);
+            while (docsEnum.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
+              count++;
+            }
+            return count;
+          }
+
+          private boolean hasDocsAtThisTermInSet(Bits actualBaseDocs) throws IOException {
+            if (actualBaseDocs == null) {
+              return true;
+            }
+            docsEnum = termsEnum.docs(actualBaseDocs, docsEnum, DocsEnum.FLAG_NONE);
+            return (docsEnum.nextDoc() != DocIdSetIterator.NO_MORE_DOCS);
+          }
+
+        }.getDocIdSet();
+      }
+    }.getDocIdSet(context, acceptDocs);
+
+    return facets;
+  }
+

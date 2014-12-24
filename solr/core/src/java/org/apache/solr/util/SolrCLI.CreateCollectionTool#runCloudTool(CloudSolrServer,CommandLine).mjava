@@ -1,4 +1,4 @@
-    protected void runCloudTool(CloudSolrServer cloudSolrServer, CommandLine cli) throws Exception {
+    protected int runCloudTool(CloudSolrServer cloudSolrServer, CommandLine cli) throws Exception {
       Set<String> liveNodes = cloudSolrServer.getZkStateReader().getClusterState().getLiveNodes();
       if (liveNodes.isEmpty())
         throw new IllegalStateException("No live nodes found! Cannot create a collection until " +
@@ -19,26 +19,58 @@
       }
 
       String configSet = cli.getOptionValue("config", DEFAULT_CONFIG_SET);
-      // first, test to see if that config exists in ZK
-      if (!cloudSolrServer.getZkStateReader().getZkClient().exists("/configs/"+configSet, true)) {
+      String configSetNameInZk = configSet;
+      File configSetDir = null;
+      // we try to be flexible and allow the user to specify a configuration directory instead of a configset name
+      File possibleConfigDir = new File(configSet);
+      if (possibleConfigDir.isDirectory()) {
+        configSetDir = possibleConfigDir;
+        configSetNameInZk = possibleConfigDir.getName();
+      } else {
         File configsetsDir = new File(cli.getOptionValue("configsetsDir"));
         if (!configsetsDir.isDirectory())
           throw new FileNotFoundException(configsetsDir.getAbsolutePath()+" not found!");
 
         // upload the configset if it exists
-        File configSetDir = new File(configsetsDir, configSet);
-        if (!configSetDir.isDirectory())
-          throw new FileNotFoundException("Specified config "+configSet+
-              " not found in "+configsetsDir.getAbsolutePath());
+        configSetDir = new File(configsetsDir, configSet);
+        if (!configSetDir.isDirectory()) {
+          throw new FileNotFoundException("Specified config " + configSet +
+              " not found in " + configsetsDir.getAbsolutePath());
+        }
+      }
 
-        File confDir = new File(configSetDir,"conf");
+      File confDir = new File(configSetDir, "conf");
+      if (!confDir.isDirectory()) {
+        // config dir should contain a conf sub-directory but if not and there's a solrconfig.xml, then use it
+        if ((new File(configSetDir, "solrconfig.xml")).isFile()) {
+          confDir = configSetDir;
+        } else {
+          System.err.println("Specified configuration directory "+configSetDir.getAbsolutePath()+
+              " is invalid;\nit should contain either conf sub-directory or solrconfig.xml");
+          return 1;
+        }
+      }
+
+      // test to see if that config exists in ZK
+      if (!cloudSolrServer.getZkStateReader().getZkClient().exists("/configs/"+configSetNameInZk, true)) {
         System.out.println("Uploading "+confDir.getAbsolutePath()+
-            " for config "+configSet+" to ZooKeeper at "+cloudSolrServer.getZkHost());
-        ZkController.uploadConfigDir(cloudSolrServer.getZkStateReader().getZkClient(), confDir, configSet);
+            " for config "+configSetNameInZk+" to ZooKeeper at "+cloudSolrServer.getZkHost());
+        ZkController.uploadConfigDir(cloudSolrServer.getZkStateReader().getZkClient(), confDir, configSetNameInZk);
       }
 
       String baseUrl = cloudSolrServer.getZkStateReader().getBaseUrlForNodeName(firstLiveNode);
       String collectionName = cli.getOptionValue("name");
+
+      // since creating a collection is a heavy-weight operation, check for existence first
+      String collectionListUrl = baseUrl+"/admin/collections?action=list";
+      if (safeCheckCollectionExists(collectionListUrl, collectionName)) {
+        System.err.println("\nCollection '"+collectionName+"' already exists!");
+        System.err.println("\nChecked collection existence using Collections API command:\n"+collectionListUrl);
+        System.err.println();
+        return 1;
+      }
+
+      // doesn't seem to exist ... try to create
       String createCollectionUrl =
           String.format(Locale.ROOT,
               "%s/admin/collections?action=CREATE&name=%s&numShards=%d&replicationFactor=%d&maxShardsPerNode=%d&collection.configName=%s",
@@ -47,14 +79,30 @@
               numShards,
               replicationFactor,
               maxShardsPerNode,
-              configSet);
+              configSetNameInZk);
 
-      System.out.println("Creating new collection '"+collectionName+"' using command:\n\n"+createCollectionUrl+"\n");
+      System.out.println("\nCreating new collection '"+collectionName+"' using command:\n"+createCollectionUrl+"\n");
 
-      Map<String,Object> json = getJson(createCollectionUrl);
+      Map<String,Object> json = null;
+      try {
+        json = getJson(createCollectionUrl);
+      } catch (SolrServerException sse) {
+        // check if already exists
+        if (safeCheckCollectionExists(collectionListUrl, collectionName)) {
+          System.err.println("Collection '"+collectionName+"' already exists!");
+          System.err.println("\nChecked collection existence using Collections API command:\n"+collectionListUrl);
+        } else {
+          System.err.println("Failed to create collection '"+collectionName+"' due to: "+sse.getMessage());
+        }
+        System.err.println();
+        return 1;
+      }
+
       CharArr arr = new CharArr();
       new JSONWriter(arr, 2).write(json);
       System.out.println(arr.toString());
       System.out.println();
+
+      return 0;
     }
 

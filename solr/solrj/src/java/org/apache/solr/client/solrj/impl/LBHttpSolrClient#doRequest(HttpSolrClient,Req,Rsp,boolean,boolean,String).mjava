@@ -1,0 +1,48 @@
+  protected Exception doRequest(HttpSolrClient client, Req req, Rsp rsp, boolean isUpdate,
+      boolean isZombie, String zombieKey) throws SolrServerException, IOException {
+    Exception ex = null;
+    try {
+      rsp.rsp = client.request(req.getRequest());
+      if (isZombie) {
+        zombieServers.remove(zombieKey);
+      }
+    } catch (SolrException e) {
+      // we retry on 404 or 403 or 503 or 500
+      // unless it's an update - then we only retry on connect exception
+      if (!isUpdate && RETRY_CODES.contains(e.code())) {
+        ex = (!isZombie) ? addZombie(client, e) : e;
+      } else {
+        // Server is alive but the request was likely malformed or invalid
+        if (isZombie) {
+          zombieServers.remove(zombieKey);
+        }
+        throw e;
+      }
+    } catch (SocketException e) {
+      if (!isUpdate || e instanceof ConnectException) {
+        ex = (!isZombie) ? addZombie(client, e) : e;
+      } else {
+        throw e;
+      }
+    } catch (SocketTimeoutException e) {
+      if (!isUpdate) {
+        ex = (!isZombie) ? addZombie(client, e) : e;
+      } else {
+        throw e;
+      }
+    } catch (SolrServerException e) {
+      Throwable rootCause = e.getRootCause();
+      if (!isUpdate && rootCause instanceof IOException) {
+        ex = (!isZombie) ? addZombie(client, e) : e;
+      } else if (isUpdate && rootCause instanceof ConnectException) {
+        ex = (!isZombie) ? addZombie(client, e) : e;
+      } else {
+        throw e;
+      }
+    } catch (Exception e) {
+      throw new SolrServerException(e);
+    }
+
+    return ex;
+  }
+

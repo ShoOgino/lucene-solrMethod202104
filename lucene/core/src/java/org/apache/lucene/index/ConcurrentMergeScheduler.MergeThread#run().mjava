@@ -1,61 +1,45 @@
     @Override
     public void run() {
-      
-      // First time through the while loop we do the merge
-      // that we were started with:
-      MergePolicy.OneMerge merge = this.startMerge;
-      
+
       try {
 
         if (verbose()) {
           message("  merge thread: start");
         }
 
-        while(true) {
-          setRunningMerge(merge);
-          doMerge(merge);
-
-          // Subsequent times through the loop we do any new
-          // merge that writer says is necessary:
-          merge = tWriter.getNextMerge();
-
-          // Notify here in case any threads were stalled;
-          // they will notice that the pending merge has
-          // been pulled and possibly resume:
-          synchronized(ConcurrentMergeScheduler.this) {
-            ConcurrentMergeScheduler.this.notifyAll();
-          }
-
-          if (merge != null) {
-            updateMergeThreads();
-            if (verbose()) {
-              message("  merge thread: do another merge " + tWriter.segString(merge.segments));
-            }
-          } else {
-            break;
-          }
-        }
+        doMerge(writer, merge);
 
         if (verbose()) {
           message("  merge thread: done");
         }
 
+        removeMergeThread(this);
+
+        // Let CMS run new merges if necessary:
+        try {
+          merge(writer, MergeTrigger.MERGE_FINISHED, true);
+        } catch (AlreadyClosedException ace) {
+          // OK
+        } catch (IOException ioe) {
+          throw new RuntimeException(ioe);
+        }
+
       } catch (Throwable exc) {
 
-        // Ignore the exception if it was due to abort:
-        if (!(exc instanceof MergePolicy.MergeAbortedException)) {
-          //System.out.println(Thread.currentThread().getName() + ": CMS: exc");
-          //exc.printStackTrace(System.out);
-          if (!suppressExceptions) {
-            // suppressExceptions is normally only set during
-            // testing.
-            handleMergeException(exc);
-          }
+        if (exc instanceof MergePolicy.MergeAbortedException) {
+          // OK to ignore
+        } else if (suppressExceptions == false) {
+          // suppressExceptions is normally only set during
+          // testing.
+          handleMergeException(writer.getDirectory(), exc);
         }
+
       } finally {
-        done = true;
         synchronized(ConcurrentMergeScheduler.this) {
           updateMergeThreads();
+
+          // In case we had stalled indexing, we can now wake up
+          // and possibly unstall:
           ConcurrentMergeScheduler.this.notifyAll();
         }
       }

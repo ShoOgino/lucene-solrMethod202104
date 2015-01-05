@@ -3,12 +3,7 @@
 
     assert !Thread.holdsLock(writer);
 
-    this.writer = writer;
-
-    initMergeThreadPriority();
-    initMaxMergesAndThreads();
-
-    dir = writer.getDirectory();
+    initDynamicDefaults(writer);
 
     // First, quickly run through the newly proposed merges
     // and add any orthogonal merges (ie a merge not
@@ -26,15 +21,17 @@
     // pending merges, until it's empty:
     while (true) {
 
-      maybeStall();
+      maybeStall(writer);
 
-      MergePolicy.OneMerge merge = writer.getNextMerge();
+      OneMerge merge = writer.getNextMerge();
       if (merge == null) {
         if (verbose()) {
           message("  no more merges pending; now return");
         }
         return;
       }
+
+      updateIOThrottle(merge);
 
       boolean success = false;
       try {
@@ -46,16 +43,12 @@
         // merge:
         final MergeThread merger = getMergeThread(writer, merge);
         mergeThreads.add(merger);
+
         if (verbose()) {
           message("    launch new thread [" + merger.getName() + "]");
         }
 
         merger.start();
-
-        // Must call this after starting the thread else
-        // the new thread is removed from mergeThreads
-        // (since it's not alive yet):
-        updateMergeThreads();
 
         success = true;
       } finally {

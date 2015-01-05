@@ -1,0 +1,37 @@
+  @Override
+  public long pause(long bytes) throws MergePolicy.MergeAbortedException {
+
+    totalBytesWritten += bytes;
+
+    long startNS = System.nanoTime();
+    long curNS = startNS;
+
+    // While loop because 1) Thread.wait doesn't always sleep long
+    // enough, and 2) we wake up and check again when our rate limit
+    // is changed while we were pausing:
+    long pausedNS = 0;
+    while (true) {
+      PauseResult result = maybePause(bytes, curNS);
+      if (result == PauseResult.NO) {
+        // Set to curNS, not targetNS, to enforce the instant rate, not
+        // the "averaaged over all history" rate:
+        lastNS = curNS;
+        break;
+      }
+      curNS = System.nanoTime();
+      long ns = curNS - startNS;
+      startNS = curNS;
+
+      // Separately track when merge was stopped vs rate limited:
+      if (result == PauseResult.STOPPED) {
+        totalStoppedNS += ns;
+      } else {
+        assert result == PauseResult.PAUSED;
+        totalPausedNS += ns;
+      }
+      pausedNS += ns;
+    }
+
+    return pausedNS;
+  }
+

@@ -3,14 +3,13 @@
    *  instance */
   private int mergeMiddle(MergePolicy.OneMerge merge, MergePolicy mergePolicy) throws IOException {
 
-    merge.checkAborted(directory);
+    merge.rateLimiter.checkAbort();
 
     List<SegmentCommitInfo> sourceSegments = merge.segments;
     
     IOContext context = new IOContext(merge.getMergeInfo());
 
-    final MergeState.CheckAbort checkAbort = new MergeState.CheckAbort(merge, directory);
-    final TrackingDirectoryWrapper dirWrapper = new TrackingDirectoryWrapper(directory);
+    final TrackingDirectoryWrapper dirWrapper = new TrackingDirectoryWrapper(mergeDirectory);
 
     if (infoStream.isEnabled("IW")) {
       infoStream.message("IW", "merging " + segString(merge.segments));
@@ -90,15 +89,12 @@
       // OneMerge to return a view over the actual segments to merge
       final SegmentMerger merger = new SegmentMerger(merge.getMergeReaders(),
                                                      merge.info.info, infoStream, dirWrapper,
-                                                     checkAbort, globalFieldNumberMap, 
+                                                     globalFieldNumberMap, 
                                                      context);
 
-      merge.checkAborted(directory);
+      merge.rateLimiter.checkAbort();
 
-      long mergeStartTime = 0;
-      if (infoStream.isEnabled("IW")) {
-        mergeStartTime = System.nanoTime();
-      }
+      merge.mergeStartNS = System.nanoTime();
 
       // This is where all the work happens:
       boolean success3 = false;
@@ -118,13 +114,13 @@
       assert mergeState.segmentInfo == merge.info.info;
       merge.info.info.setFiles(new HashSet<>(dirWrapper.getCreatedFiles()));
 
-      // Record which codec was used to write the segment
-
       if (infoStream.isEnabled("IW")) {
         if (merger.shouldMerge()) {
           long t1 = System.nanoTime();
-          double sec = (t1-mergeStartTime)/1000000000.;
+          double sec = (t1-merge.mergeStartNS)/1000000000.;
           double segmentMB = (merge.info.sizeInBytes()/1024./1024.);
+          double stoppedSec = merge.rateLimiter.getTotalStoppedNS()/1000000000.;
+          double throttleSec = merge.rateLimiter.getTotalPausedNS()/1000000000.;
           infoStream.message("IW", "merge codec=" + codec + " docCount=" + merge.info.info.getDocCount() + "; merged segment has " +
                              (mergeState.mergeFieldInfos.hasVectors() ? "vectors" : "no vectors") + "; " +
                              (mergeState.mergeFieldInfos.hasNorms() ? "norms" : "no norms") + "; " + 
@@ -132,8 +128,10 @@
                              (mergeState.mergeFieldInfos.hasProx() ? "prox" : "no prox") + "; " + 
                              (mergeState.mergeFieldInfos.hasProx() ? "freqs" : "no freqs") + "; " +
                              String.format(Locale.ROOT,
-                                           "%d msec to merge segment [%.2f MB, %.2f MB/sec]",
-                                           ((t1-mergeStartTime)/1000000),
+                                           "%.1f sec (%.1f sec stopped, %.1f sec paused) to merge segment [%.2f MB, %.2f MB/sec]",
+                                           sec,
+                                           stoppedSec,
+                                           throttleSec,
                                            segmentMB,
                                            segmentMB / sec));
         } else {
@@ -166,11 +164,11 @@
         Collection<String> filesToRemove = merge.info.files();
 
         try {
-          filesToRemove = createCompoundFile(infoStream, directory, checkAbort, merge.info.info, context);
+          filesToRemove = createCompoundFile(infoStream, mergeDirectory, merge.info.info, context);
           success = true;
         } catch (IOException ioe) {
           synchronized(this) {
-            if (merge.isAborted()) {
+            if (merge.rateLimiter.getAbort()) {
               // This can happen if rollback or close(false)
               // is called -- fall through to logic below to
               // remove the partially created CFS:
@@ -206,7 +204,7 @@
           // registered with IFD
           deleter.deleteNewFiles(filesToRemove);
 
-          if (merge.isAborted()) {
+          if (merge.rateLimiter.getAbort()) {
             if (infoStream.isEnabled("IW")) {
               infoStream.message("IW", "abort merge after building CFS");
             }

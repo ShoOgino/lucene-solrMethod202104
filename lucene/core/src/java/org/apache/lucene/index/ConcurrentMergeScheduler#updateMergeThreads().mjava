@@ -1,9 +1,10 @@
   /**
-   * Called whenever the running merges have changed, to pause and unpause
-   * threads. This method sorts the merge threads by their merge size in
+   * Called whenever the running merges have changed, to set merge IO limits.
+   * This method sorts the merge threads by their merge size in
    * descending order and then pauses/unpauses threads from first to last --
    * that way, smaller merges are guaranteed to run before larger ones.
    */
+
   protected synchronized void updateMergeThreads() {
 
     // Only look at threads that are alive & not in the
@@ -18,47 +19,98 @@
         mergeThreads.remove(threadIdx);
         continue;
       }
-      if (mergeThread.getCurrentMerge() != null) {
-        activeMerges.add(mergeThread);
-      }
+      activeMerges.add(mergeThread);
       threadIdx++;
     }
 
-    // Sort the merge threads in descending order.
-    CollectionUtil.timSort(activeMerges, compareByMergeDocCount);
-    
-    int pri = mergeThreadPriority;
+    // Sort the merge threads, largest first:
+    CollectionUtil.timSort(activeMerges);
+
     final int activeMergeCount = activeMerges.size();
-    for (threadIdx=0;threadIdx<activeMergeCount;threadIdx++) {
-      final MergeThread mergeThread = activeMerges.get(threadIdx);
-      final MergePolicy.OneMerge merge = mergeThread.getCurrentMerge();
-      if (merge == null) { 
-        continue;
+
+    int bigMergeCount = 0;
+
+    for (threadIdx=activeMergeCount-1;threadIdx>=0;threadIdx--) {
+      MergeThread mergeThread = activeMerges.get(threadIdx);
+      if (mergeThread.merge.estimatedMergeBytes > MIN_BIG_MERGE_MB*1024*1024) {
+        bigMergeCount = 1+threadIdx;
+        break;
       }
+    }
+
+    long now = System.nanoTime();
+
+    StringBuilder message;
+    if (verbose()) {
+      message = new StringBuilder();
+      message.append(String.format(Locale.ROOT, "updateMergeThreads ioThrottle=%s targetMBPerSec=%.1f MB/sec", doAutoIOThrottle, targetMBPerSec));
+    } else {
+      message = null;
+    }
+
+    for (threadIdx=0;threadIdx<activeMergeCount;threadIdx++) {
+      MergeThread mergeThread = activeMerges.get(threadIdx);
+
+      OneMerge merge = mergeThread.merge;
 
       // pause the thread if maxThreadCount is smaller than the number of merge threads.
-      final boolean doPause = threadIdx < activeMergeCount - maxThreadCount;
+      final boolean doPause = threadIdx < bigMergeCount - maxThreadCount;
 
+      double newMBPerSec;
+      if (doPause) {
+        newMBPerSec = 0.0;
+      } else if (merge.maxNumSegments != -1) {
+        newMBPerSec = forceMergeMBPerSec;
+      } else if (doAutoIOThrottle == false) {
+        newMBPerSec = Double.POSITIVE_INFINITY;
+      } else if (merge.estimatedMergeBytes < MIN_BIG_MERGE_MB*1024*1024) {
+        // Don't rate limit small merges:
+        newMBPerSec = Double.POSITIVE_INFINITY;
+      } else {
+        newMBPerSec = targetMBPerSec;
+      }
+
+      double curMBPerSec = merge.rateLimiter.getMBPerSec();
+      
       if (verbose()) {
-        if (doPause != merge.getPause()) {
-          if (doPause) {
-            message("pause thread " + mergeThread.getName());
-          } else {
-            message("unpause thread " + mergeThread.getName());
-          }
+        long mergeStartNS = merge.mergeStartNS;
+        if (mergeStartNS == -1) {
+          // IndexWriter didn't start the merge yet:
+          mergeStartNS = now;
         }
-      }
-      if (doPause != merge.getPause()) {
-        merge.setPause(doPause);
+        message.append('\n');
+        message.append(String.format(Locale.ROOT, "merge thread %s estSize=%.1f MB (written=%.1f MB) runTime=%.1fs (stopped=%.1fs, paused=%.1fs) rate=%s\n",
+                                     mergeThread.getName(),
+                                     bytesToMB(merge.estimatedMergeBytes),
+                                     bytesToMB(merge.rateLimiter.totalBytesWritten),
+                                     nsToSec(now - mergeStartNS),
+                                     nsToSec(merge.rateLimiter.getTotalStoppedNS()),
+                                     nsToSec(merge.rateLimiter.getTotalPausedNS()),
+                                     rateToString(merge.rateLimiter.getMBPerSec())));
+
+        if (newMBPerSec != curMBPerSec) {
+          if (newMBPerSec == 0.0) {
+            message.append("  now stop");
+          } else if (curMBPerSec == 0.0) {
+            if (newMBPerSec == Double.POSITIVE_INFINITY) {
+              message.append("  now resume");
+            } else {
+              message.append(String.format(Locale.ROOT, "  now resume to %.1f MB/sec", newMBPerSec));
+            }
+          } else {
+            message.append(String.format(Locale.ROOT, "  now change from %.1f MB/sec to %.1f MB/sec", curMBPerSec, newMBPerSec));
+          }
+        } else if (curMBPerSec == 0.0) {
+          message.append("  leave stopped");
+        } else {
+          message.append(String.format(Locale.ROOT, "  leave running at %.1f MB/sec", curMBPerSec));
+        }
       }
 
-      if (!doPause) {
-        if (verbose()) {
-          message("set priority of merge thread " + mergeThread.getName() + " to " + pri);
-        }
-        mergeThread.setThreadPriority(pri);
-        pri = Math.min(Thread.MAX_PRIORITY, 1+pri);
-      }
+      merge.rateLimiter.setMBPerSec(newMBPerSec);
+    }
+    if (verbose()) {
+      message(message.toString());
     }
   }
 

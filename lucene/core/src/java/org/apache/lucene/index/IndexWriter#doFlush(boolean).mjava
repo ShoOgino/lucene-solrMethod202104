@@ -1,3 +1,4 @@
+  /** Returns true a segment was flushed or deletes were applied. */
   private boolean doFlush(boolean applyAllDeletes) throws IOException {
     if (tragedy != null) {
       throw new IllegalStateException("this writer hit an unrecoverable error; cannot flush", tragedy);
@@ -12,12 +13,16 @@
         infoStream.message("IW", "  start flush: applyAllDeletes=" + applyAllDeletes);
         infoStream.message("IW", "  index before flush " + segString());
       }
-      final boolean anySegmentFlushed;
+      boolean anyChanges = false;
       
       synchronized (fullFlushLock) {
       boolean flushSuccess = false;
         try {
-          anySegmentFlushed = docWriter.flushAllThreads();
+          anyChanges = docWriter.flushAllThreads();
+          if (!anyChanges) {
+            // flushCount is incremented in flushAllThreads
+            flushCount.incrementAndGet();
+        }
           flushSuccess = true;
         } finally {
           docWriter.finishFullFlush(flushSuccess);
@@ -25,14 +30,10 @@
         }
       }
       synchronized(this) {
-        maybeApplyDeletes(applyAllDeletes);
+        anyChanges |= maybeApplyDeletes(applyAllDeletes);
         doAfterFlush();
-        if (!anySegmentFlushed) {
-          // flushCount is incremented in flushAllThreads
-          flushCount.incrementAndGet();
-        }
         success = true;
-        return anySegmentFlushed;
+        return anyChanges;
       }
     } catch (AbortingException | OutOfMemoryError tragedy) {
       tragicEvent(tragedy, "doFlush");

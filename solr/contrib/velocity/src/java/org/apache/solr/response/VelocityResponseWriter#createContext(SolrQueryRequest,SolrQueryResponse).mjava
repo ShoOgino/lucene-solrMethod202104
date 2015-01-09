@@ -1,0 +1,45 @@
+  private VelocityContext createContext(SolrQueryRequest request, SolrQueryResponse response) {
+    VelocityContext context = new VelocityContext();
+
+    context.put("request", request);
+
+    // Register useful Velocity "tools"
+    context.put("esc", new EscapeTool());
+    context.put("date", new ComparisonDateTool());
+    context.put("list", new ListTool());
+    context.put("math", new MathTool());
+    context.put("number", new NumberTool());
+    context.put("sort", new SortTool());
+    context.put("display", new DisplayTool());
+    context.put("resource", new SolrVelocityResourceTool(
+        request.getCore().getSolrConfig().getResourceLoader().getClassLoader(),
+        request.getParams().get(LOCALE)));
+
+    // Turn the SolrQueryResponse into a SolrResponse.
+    // QueryResponse has lots of conveniences suitable for a view
+    // Problem is, which SolrResponse class to use?
+    // One patch to SOLR-620 solved this by passing in a class name as
+    // as a parameter and using reflection and Solr's class loader to
+    // create a new instance.  But for now the implementation simply
+    // uses QueryResponse, and if it chokes in a known way, fall back
+    // to bare bones SolrResponseBase.
+    // Can this writer know what the handler class is?  With echoHandler=true it can get its string name at least
+    SolrResponse rsp = new QueryResponse();
+    NamedList<Object> parsedResponse = BinaryResponseWriter.getParsedResponse(request, response);
+    try {
+      rsp.setResponse(parsedResponse);
+
+      // page only injected if QueryResponse works
+      context.put("page", new PageTool(request, response));  // page tool only makes sense for a SearchHandler request
+      context.put("debug",((QueryResponse)rsp).getDebugMap());
+    } catch (ClassCastException e) {
+      // known edge case where QueryResponse's extraction assumes "response" is a SolrDocumentList
+      // (AnalysisRequestHandler emits a "response")
+      rsp = new SolrResponseBase();
+      rsp.setResponse(parsedResponse);
+    }
+    context.put("response", rsp);
+
+    return context;
+  }
+

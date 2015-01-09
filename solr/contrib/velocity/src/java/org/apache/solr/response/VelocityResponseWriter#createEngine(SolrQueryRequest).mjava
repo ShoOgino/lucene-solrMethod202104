@@ -1,0 +1,64 @@
+  private VelocityEngine createEngine(SolrQueryRequest request) {
+    VelocityEngine engine = new VelocityEngine();
+
+    // route all Velocity logging through Solr's logging facility
+    engine.setProperty(RuntimeConstants.RUNTIME_LOG_LOGSYSTEM, velocityLogger);
+
+    // Set some engine properties that improve the experience
+    //   - these could be considered in the future for parameterization, but can also be overridden by using
+    //     the init.properties.file setting.  (TODO: add a test for this)
+
+    // load the built-in _macros.vm first, then load VM_global_library.vm for legacy (pre-5.0) support,
+    // and finally allow macros.vm to have the final say and override anything defined in the preceding files.
+    engine.setProperty(RuntimeConstants.VM_LIBRARY, "_macros.vm,VM_global_library.vm,macros.vm");
+
+    // Standard templates autoload, but not the macro one(s), by default, so let's just make life
+    // easier, and consistent, for macro development too.
+    engine.setProperty(RuntimeConstants.VM_LIBRARY_AUTORELOAD, "true");
+
+    /*
+      Set up Velocity resource loader(s)
+       terminology note: "resource loader" is overloaded here, there is Solr's resource loader facility for plugins,
+       and there are Velocity template resource loaders.  It's confusing, they overlap: there is a Velocity resource
+       loader that loads templates from Solr's resource loader (SolrVelocityResourceLoader).
+
+      The Velocity resource loader order is [params,][file,][solr], intentionally ordered in this manner, and each
+      one optional and individually enable-able.  By default, only "solr" (resource loader) is used, parsing templates
+      from a velocity/ sub-tree in either the classpath or under conf/.
+
+      A common usage would be to enable the file template loader, keeping the solr loader enabled; the Velocity resource
+      loader path would then be "file,solr" (params is disabled by default).  The basic browse templates are built into
+      this plugin, but can be individually overridden by placing a same-named template in the template.base.dir specified
+      directory.
+     */
+    ArrayList<String> loaders = new ArrayList<String>();
+    if (paramsResourceLoaderEnabled) {
+      loaders.add("params");
+      engine.setProperty("params.resource.loader.instance", new SolrParamResourceLoader(request));
+    }
+    if (fileResourceLoaderBaseDir != null) {
+      loaders.add("file");
+      engine.setProperty(RuntimeConstants.FILE_RESOURCE_LOADER_PATH, fileResourceLoaderBaseDir.getAbsolutePath());
+    }
+    if (solrResourceLoaderEnabled) {
+      // The solr resource loader serves templates under a velocity/ subtree from <lib>, conf/,
+      // or SolrCloud's configuration tree.  Or rather the other way around, other resource loaders are rooted
+      // from the top, whereas this is velocity/ sub-tree rooted.
+      loaders.add("solr");
+      engine.setProperty("solr.resource.loader.instance", new SolrVelocityResourceLoader(request.getCore().getSolrConfig().getResourceLoader()));
+    }
+
+    // Always have the built-in classpath loader.  This is needed when using VM_LIBRARY macros, as they are required
+    // to be present if specified, and we want to have a nice macros facility built-in for users to use easily, and to
+    // extend in custom ways.
+    loaders.add("builtin");
+    engine.setProperty("builtin.resource.loader.instance", new ClasspathResourceLoader());
+
+    engine.setProperty(RuntimeConstants.RESOURCE_LOADER, StringUtils.join(",", loaders));
+
+    // bring in any custom properties too
+    engine.init(velocityInitProps);
+
+    return engine;
+  }
+

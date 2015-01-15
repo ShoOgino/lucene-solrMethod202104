@@ -19,8 +19,8 @@
       final int maxDoc = mergeState.maxDocs[readerIndex];
       final Bits liveDocs = mergeState.liveDocs[readerIndex];
 
-      // if its some other format, or an older version of this format:
-      if (matchingFieldsReader == null || matchingFieldsReader.getVersion() != VERSION_CURRENT) {
+      // if its some other format, or an older version of this format, or safety switch:
+      if (matchingFieldsReader == null || matchingFieldsReader.getVersion() != VERSION_CURRENT || BULK_MERGE_ENABLED == false) {
         // naive merge...
         StoredFieldsReader storedFieldsReader = mergeState.storedFieldsReaders[readerIndex];
         if (storedFieldsReader != null) {
@@ -35,10 +35,78 @@
           finishDocument();
           ++docCount;
         }
+      } else if (matchingFieldsReader.getCompressionMode() == compressionMode && 
+                 matchingFieldsReader.getChunkSize() == chunkSize && 
+                 liveDocs == null &&
+                 !tooDirty(matchingFieldsReader)) { 
+        // optimized merge, raw byte copy
+        // its not worth fine-graining this if there are deletions.
+        
+        // if the format is older, its always handled by the naive merge case above
+        assert matchingFieldsReader.getVersion() == VERSION_CURRENT;        
+        matchingFieldsReader.checkIntegrity();
+        
+        // flush any pending chunks
+        if (numBufferedDocs > 0) {
+          flush();
+          numDirtyChunks++; // incomplete: we had to force this flush
+        }
+        
+        // iterate over each chunk. we use the stored fields index to find chunk boundaries,
+        // read the docstart + doccount from the chunk header (we write a new header, since doc numbers will change),
+        // and just copy the bytes directly.
+        IndexInput rawDocs = matchingFieldsReader.getFieldsStream();
+        CompressingStoredFieldsIndexReader index = matchingFieldsReader.getIndexReader();
+        rawDocs.seek(index.getStartPointer(0));
+        int docID = 0;
+        while (docID < maxDoc) {
+          // read header
+          int base = rawDocs.readVInt();
+          if (base != docID) {
+            throw new CorruptIndexException("invalid state: base=" + base + ", docID=" + docID, rawDocs);
+          }
+          int code = rawDocs.readVInt();
+          
+          // write a new index entry and new header for this chunk.
+          int bufferedDocs = code >>> 1;
+          indexWriter.writeIndex(bufferedDocs, fieldsStream.getFilePointer());
+          fieldsStream.writeVInt(docBase); // rebase
+          fieldsStream.writeVInt(code);
+          docID += bufferedDocs;
+          docBase += bufferedDocs;
+          docCount += bufferedDocs;
+          
+          if (docID > maxDoc) {
+            throw new CorruptIndexException("invalid state: base=" + base + ", count=" + bufferedDocs + ", maxDoc=" + maxDoc, rawDocs);
+          }
+          
+          // copy bytes until the next chunk boundary (or end of chunk data).
+          // using the stored fields index for this isn't the most efficient, but fast enough
+          // and is a source of redundancy for detecting bad things.
+          final long end;
+          if (docID == maxDoc) {
+            end = matchingFieldsReader.getMaxPointer();
+          } else {
+            end = index.getStartPointer(docID);
+          }
+          fieldsStream.copyBytes(rawDocs, end - rawDocs.getFilePointer());
+        }
+               
+        if (rawDocs.getFilePointer() != matchingFieldsReader.getMaxPointer()) {
+          throw new CorruptIndexException("invalid state: pos=" + rawDocs.getFilePointer() + ", max=" + matchingFieldsReader.getMaxPointer(), rawDocs);
+        }
+        
+        // since we bulk merged all chunks, we inherit any dirty ones from this segment.
+        numChunks += matchingFieldsReader.getNumChunks();
+        numDirtyChunks += matchingFieldsReader.getNumDirtyChunks();
       } else {
         // optimized merge, we copy serialized (but decompressed) bytes directly
         // even on simple docs (1 stored field), it seems to help by about 20%
+        
+        // if the format is older, its always handled by the naive merge case above
+        assert matchingFieldsReader.getVersion() == VERSION_CURRENT;
         matchingFieldsReader.checkIntegrity();
+
         for (int docID = 0; docID < maxDoc; docID++) {
           if (liveDocs != null && liveDocs.get(docID) == false) {
             continue;

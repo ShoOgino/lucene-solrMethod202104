@@ -1,0 +1,44 @@
+  /**
+   * Computes facets using a callback/visitor style design, allowing flexibility for the caller to determine what to do
+   * with each underlying count.
+   *
+   * @param strategy the prefix tree strategy (contains the field reference, grid, max levels)
+   * @param context the IndexReader's context
+   * @param filter a Filter to limit counted docs. For optimal performance, it's
+   *               {@link org.apache.lucene.search.DocIdSet#bits()} should be non-null. If no filter is provided, live
+   *               docs are counted.
+   * @param queryShape the shape to limit the range of facet counts to
+   * @param facetLevel the maximum depth (detail) of faceted cells
+   * @param facetVisitor the visitor/callback to receive the counts
+   */
+  public static void compute(PrefixTreeStrategy strategy, IndexReaderContext context, Filter filter,
+                             Shape queryShape, int facetLevel, FacetVisitor facetVisitor)
+      throws IOException {
+    //We collect per-leaf
+    for (final LeafReaderContext leafCtx : context.leaves()) {
+      //determine leaf acceptDocs Bits
+      Bits leafAcceptDocs;
+      if (filter == null) {
+        leafAcceptDocs = leafCtx.reader().getLiveDocs();//filter deleted
+      } else {
+        final DocIdSet docIdSet = filter.getDocIdSet(leafCtx, leafCtx.reader().getLiveDocs());
+        if (docIdSet == null) {
+          continue;//no docs in filter
+        }
+        leafAcceptDocs = docIdSet.bits();
+        if (leafAcceptDocs == null) {
+          final DocIdSetIterator iterator = docIdSet.iterator();
+          if (iterator == null) {
+            continue;//no docs in filter
+          }
+          //build bits from iterator (abnormal, hopefully, not expecting many docs)
+          SparseFixedBitSet bitSet = new SparseFixedBitSet(leafCtx.reader().maxDoc());
+          bitSet.or(iterator);
+          leafAcceptDocs = bitSet;
+        }
+      }
+
+      compute(strategy, leafCtx, leafAcceptDocs, queryShape, facetLevel, facetVisitor);
+    }
+  }
+

@@ -1,68 +1,14 @@
   @Override
   public boolean score(LeafCollector collector, int max) throws IOException {
+    fakeScorer.doc = -1;
+    collector.setScorer(fakeScorer);
 
-    boolean more;
-    Bucket tmp;
-    FakeScorer fs = new FakeScorer();
-
-    // The internal loop will set the score and doc before calling collect.
-    collector.setScorer(fs);
-    do {
-      bucketTable.first = null;
-      
-      while (current != null) {         // more queued 
-
-        // check prohibited & required
-        if ((current.bits & PROHIBITED_MASK) == 0) {
-
-          // TODO: re-enable this if BQ ever sends us required
-          // clauses
-          //&& (current.bits & requiredMask) == requiredMask) {
-          
-          // NOTE: Lucene always passes max =
-          // Integer.MAX_VALUE today, because we never embed
-          // a BooleanScorer inside another (even though
-          // that should work)... but in theory an outside
-          // app could pass a different max so we must check
-          // it:
-          if (current.doc >= max) {
-            tmp = current;
-            current = current.next;
-            tmp.next = bucketTable.first;
-            bucketTable.first = tmp;
-            continue;
-          }
-          
-          if (current.coord >= minNrShouldMatch) {
-            fs.score = (float) (current.score * coordFactors[current.coord]);
-            fs.doc = current.doc;
-            fs.freq = current.coord;
-            collector.collect(current.doc);
-          }
-        }
-        
-        current = current.next;         // pop the queue
+    for (int docBase = this.max & ~MASK; docBase < max; docBase += SIZE) {
+      if (scoreWindow(collector, docBase, max) == false) {
+        return false;
       }
-      
-      if (bucketTable.first != null){
-        current = bucketTable.first;
-        bucketTable.first = current.next;
-        return true;
-      }
+    }
 
-      // refill the queue
-      more = false;
-      end += BucketTable.SIZE;
-      for (SubScorer sub = scorers; sub != null; sub = sub.next) {
-        if (sub.more) {
-          sub.more = sub.scorer.score(sub.collector, end);
-          more |= sub.more;
-        }
-      }
-      current = bucketTable.first;
-      
-    } while (current != null || more);
-
-    return false;
+    return true;
   }
 

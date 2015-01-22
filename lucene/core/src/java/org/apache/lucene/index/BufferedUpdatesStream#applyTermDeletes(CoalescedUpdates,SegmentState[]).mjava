@@ -1,0 +1,132 @@
+  /** Merge sorts the deleted terms and all segments to resolve terms to docIDs for deletion. */
+  private synchronized long applyTermDeletes(CoalescedUpdates updates, SegmentState[] segStates) throws IOException {
+
+    long startNS = System.nanoTime();
+
+    int numReaders = segStates.length;
+
+    long delTermVisitedCount = 0;
+    long segTermVisitedCount = 0;
+
+    FieldTermIterator iter = updates.termIterator();
+
+    String field = null;
+    SegmentQueue queue = null;
+
+    while (true) {
+
+      boolean newField;
+
+      newField = iter.next();
+
+      if (newField) {
+        field = iter.field();
+        if (field == null) {
+          // No more terms:
+          break;
+        }
+
+        queue = new SegmentQueue(numReaders);
+
+        long segTermCount = 0;
+        for(int i=0;i<numReaders;i++) {
+          SegmentState state = segStates[i];
+          Terms terms = state.reader.fields().terms(field);
+          if (terms != null) {
+            segTermCount += terms.size();
+            state.termsEnum = terms.iterator(state.termsEnum);
+            state.term = state.termsEnum.next();
+            if (state.term != null) {
+              queue.add(state);
+            }
+          }
+        }
+
+        assert checkDeleteTerm(null);
+      }
+
+      // Get next term to delete
+      BytesRef term = iter.term();
+      assert checkDeleteTerm(term);
+      delTermVisitedCount++;
+
+      long delGen = iter.delGen();
+
+      while (queue.size() != 0) {
+
+        // Get next term merged across all segments
+        SegmentState state = queue.top();
+        segTermVisitedCount++;
+
+        int cmp = term.compareTo(state.term);
+
+        if (cmp < 0) {
+          break;
+        } else if (cmp == 0) {
+          // fall through
+        } else {
+          TermsEnum.SeekStatus status = state.termsEnum.seekCeil(term);
+          if (status == TermsEnum.SeekStatus.FOUND) {
+            // fallthrough
+          } else {
+            if (status == TermsEnum.SeekStatus.NOT_FOUND) {
+              state.term = state.termsEnum.term();
+              queue.updateTop();
+            } else {
+              // No more terms in this segment
+              queue.pop();
+            }
+
+            continue;
+          }
+        }
+
+        assert state.delGen != delGen;
+
+        if (state.delGen < delGen) {
+
+          // we don't need term frequencies for this
+          state.docsEnum = state.termsEnum.docs(state.rld.getLiveDocs(), state.docsEnum, DocsEnum.FLAG_NONE);
+
+          assert state.docsEnum != null;
+
+          while (true) {
+            final int docID = state.docsEnum.nextDoc();
+            if (docID == DocIdSetIterator.NO_MORE_DOCS) {
+              break;
+            }
+            if (!state.any) {
+              state.rld.initWritableLiveDocs();
+              state.any = true;
+            }
+
+            // NOTE: there is no limit check on the docID
+            // when deleting by Term (unlike by Query)
+            // because on flush we apply all Term deletes to
+            // each segment.  So all Term deleting here is
+            // against prior segments:
+            state.rld.delete(docID);
+          }
+        }
+
+        state.term = state.termsEnum.next();
+        if (state.term == null) {
+          queue.pop();
+        } else {
+          queue.updateTop();
+        }
+      }
+    }
+
+    if (infoStream.isEnabled("BD")) {
+      infoStream.message("BD",
+                         String.format(Locale.ROOT, "applyTermDeletes took %.1f msec for %d segments and %d packets; %d del terms visited; %d seg terms visited",
+                                       (System.nanoTime()-startNS)/1000000.,
+                                       numReaders,
+                                       updates.terms.size(),
+                                       delTermVisitedCount, segTermVisitedCount));
+    }
+
+    return delTermVisitedCount;
+  }
+

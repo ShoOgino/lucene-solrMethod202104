@@ -1,0 +1,41 @@
+  /** Close segment states previously opened with openSegmentStates. */
+  private ApplyDeletesResult closeSegmentStates(IndexWriter.ReaderPool pool, SegmentState[] segStates, boolean success, long gen) throws IOException {
+    int numReaders = segStates.length;
+    Throwable firstExc = null;
+    List<SegmentCommitInfo> allDeleted = null;
+    long totDelCount = 0;
+    for (int j=0;j<numReaders;j++) {
+      SegmentState segState = segStates[j];
+      if (success) {
+        totDelCount += segState.rld.getPendingDeleteCount() - segState.startDelCount;
+        segState.reader.getSegmentInfo().setBufferedDeletesGen(gen);
+        int fullDelCount = segState.rld.info.getDelCount() + segState.rld.getPendingDeleteCount();
+        assert fullDelCount <= segState.rld.info.info.getDocCount();
+        if (fullDelCount == segState.rld.info.info.getDocCount()) {
+          if (allDeleted == null) {
+            allDeleted = new ArrayList<>();
+          }
+          allDeleted.add(segState.reader.getSegmentInfo());
+        }
+      }
+      try {
+        segStates[j].finish(pool);
+      } catch (Throwable th) {
+        if (firstExc != null) {
+          firstExc = th;
+        }
+      }
+    }
+
+    if (success) {
+      // Does nothing if firstExc is null:
+      IOUtils.reThrow(firstExc);
+    }
+
+    if (infoStream.isEnabled("BD")) {
+      infoStream.message("BD", "applyDeletes: " + totDelCount + " new deleted documents");
+    }
+
+    return new ApplyDeletesResult(totDelCount > 0, gen, allDeleted);      
+  }
+

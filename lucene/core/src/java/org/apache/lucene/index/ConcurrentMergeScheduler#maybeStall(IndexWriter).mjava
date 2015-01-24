@@ -4,11 +4,16 @@
    *  many segments for merging to keep up, to wait until merges catch
    *  up. Applications that can take other less drastic measures, such
    *  as limiting how many threads are allowed to index, can do nothing
-   *  here and throttle elsewhere. */
+   *  here and throttle elsewhere.
+   *
+   *  If this method wants to stall but the calling thread is a merge
+   *  thread, it should return false to tell caller not to kick off
+   *  any new merges. */
 
-  protected synchronized void maybeStall(IndexWriter writer) {
+  protected synchronized boolean maybeStall(IndexWriter writer) {
     long startStallTime = 0;
     while (writer.hasPendingMerges() && mergeThreadCount() >= maxMergeCount) {
+
       // This means merging has fallen too far behind: we
       // have already created maxMergeCount threads, and
       // now there's at least one more merge pending.
@@ -18,22 +23,25 @@
       // updateMergeThreads).  We stall this producer
       // thread to prevent creation of new segments,
       // until merging has caught up:
+
+      if (mergeThreads.contains(Thread.currentThread())) {
+        // Never stall a merge thread since this blocks the thread from
+        // finishing and calling updateMergeThreads, and blocking it
+        // accomplishes nothing anyway (it's not really a segment producer):
+        return false;
+      }
+
       if (verbose() && startStallTime == 0) {
         message("    too many merges; stalling...");
       }
       startStallTime = System.currentTimeMillis();
-      try {
-        // Only wait 0.25 seconds, so if all merges are aborted (by IW.rollback) we notice:
-        wait(250);
-      } catch (InterruptedException ie) {
-        throw new ThreadInterruptedException(ie);
-      }
+      doStall();
     }
 
-    if (verbose()) {
-      if (startStallTime != 0) {
-        message("  stalled for " + (System.currentTimeMillis()-startStallTime) + " msec");
-      }
+    if (verbose() && startStallTime != 0) {
+      message("  stalled for " + (System.currentTimeMillis()-startStallTime) + " msec");
     }
+
+    return true;
   }
 

@@ -1,36 +1,27 @@
-  /**
-   * Advances to the first match beyond the current whose document number is
-   * greater than or equal to a given target. <br>
-   * The implementation uses the advance() method on the subscorers.
-   * 
-   * @param target the target document number.
-   * @return the document whose number is greater than or equal to the given
-   *         target, or -1 if none exist.
-   */
   @Override
   public int advance(int target) throws IOException {
-    if (numScorers < mm)
-      return doc = NO_MORE_DOCS;
-    // advance all Scorers in heap at smaller docs to at least target
-    while (subScorers[0].docID() < target) {
-      if (subScorers[0].advance(target) != NO_MORE_DOCS) {
-        minheapSiftDown(0);
-      } else {
-        minheapRemoveRoot();
-        numScorers--;
-        if (numScorers < mm) {
-          return doc = NO_MORE_DOCS;
-        }
+    // Same logic as in nextDoc
+    for (ScorerWrapper s = lead; s != null; s = s.next) {
+      final ScorerWrapper evicted = insertTailWithOverFlow(s);
+      if (evicted != null) {
+        evicted.doc = evicted.scorer.advance(target);
+        head.add(evicted);
       }
-      //assert minheapCheck();
     }
 
-    evaluateSmallestDocInHeap();
-
-    if (nrMatchers >= mm) {
-      return doc;
-    } else {
-      return nextDoc();
+    // But this time there might also be scorers in 'head' behind the desired
+    // target so we need to do the same thing that we did on 'lead' on 'head'
+    ScorerWrapper headTop = head.top();
+    while (headTop.doc < target) {
+      final ScorerWrapper evicted = insertTailWithOverFlow(headTop);
+      // We know that the tail is full since it contains at most
+      // minShouldMatch - 1 entries and we just moved at least minShouldMatch
+      // entries to it, so evicted is not null
+      evicted.doc = evicted.scorer.advance(target);
+      headTop = head.updateTop(evicted);
     }
+
+    setDocAndFreq();
+    return doNext();
   }
 

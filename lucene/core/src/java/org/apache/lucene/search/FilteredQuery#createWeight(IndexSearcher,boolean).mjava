@@ -1,0 +1,69 @@
+  /**
+   * Returns a Weight that applies the filter to the enclosed query's Weight.
+   * This is accomplished by overriding the Scorer returned by the Weight.
+   */
+  @Override
+  public Weight createWeight(final IndexSearcher searcher, boolean needsScores) throws IOException {
+    final Weight weight = query.createWeight (searcher, needsScores);
+    return new Weight(FilteredQuery.this) {
+
+      @Override
+      public float getValueForNormalization() throws IOException { 
+        return weight.getValueForNormalization() * getBoost() * getBoost(); // boost sub-weight
+      }
+
+      @Override
+      public void normalize(float norm, float topLevelBoost) { 
+        weight.normalize(norm, topLevelBoost * getBoost()); // incorporate boost
+      }
+
+      @Override
+      public Explanation explain(LeafReaderContext ir, int i) throws IOException {
+        Explanation inner = weight.explain (ir, i);
+        Filter f = FilteredQuery.this.filter;
+        DocIdSet docIdSet = f.getDocIdSet(ir, ir.reader().getLiveDocs());
+        DocIdSetIterator docIdSetIterator = docIdSet == null ? DocIdSetIterator.empty() : docIdSet.iterator();
+        if (docIdSetIterator == null) {
+          docIdSetIterator = DocIdSetIterator.empty();
+        }
+        if (docIdSetIterator.advance(i) == i) {
+          return inner;
+        } else {
+          Explanation result = new Explanation
+            (0.0f, "failure to match filter: " + f.toString());
+          result.addDetail(inner);
+          return result;
+        }
+      }
+
+      // return a filtering scorer
+      @Override
+      public Scorer scorer(LeafReaderContext context, Bits acceptDocs) throws IOException {
+        assert filter != null;
+
+        DocIdSet filterDocIdSet = filter.getDocIdSet(context, acceptDocs);
+        if (filterDocIdSet == null) {
+          // this means the filter does not accept any documents.
+          return null;
+        }
+
+        return strategy.filteredScorer(context, weight, filterDocIdSet);
+      }
+
+      // return a filtering top scorer
+      @Override
+      public BulkScorer bulkScorer(LeafReaderContext context, Bits acceptDocs) throws IOException {
+        assert filter != null;
+
+        DocIdSet filterDocIdSet = filter.getDocIdSet(context, acceptDocs);
+        if (filterDocIdSet == null) {
+          // this means the filter does not accept any documents.
+          return null;
+        }
+
+        return strategy.filteredBulkScorer(context, weight, filterDocIdSet);
+
+      }
+    };
+  }
+

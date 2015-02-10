@@ -4,6 +4,12 @@
    */
   private static Status.TermIndexStatus checkFields(Fields fields, Bits liveDocs, int maxDoc, FieldInfos fieldInfos, boolean doPrint, boolean isVectors, PrintStream infoStream, boolean verbose) throws IOException {
     // TODO: we should probably return our own stats thing...?!
+    long startNS;
+    if (doPrint) {
+      startNS = System.nanoTime();
+    } else {
+      startNS = 0;
+    }
     
     final Status.TermIndexStatus status = new Status.TermIndexStatus();
     int computedFieldCount = 0;
@@ -46,27 +52,33 @@
       final boolean hasPayloads = terms.hasPayloads();
       final boolean hasOffsets = terms.hasOffsets();
       
-      BytesRef bb = terms.getMin();
-      BytesRef minTerm;
-      if (bb != null) {
-        assert bb.isValid();
-        minTerm = BytesRef.deepCopyOf(bb);
-      } else {
-        minTerm = null;
-      }
-
       BytesRef maxTerm;
-      bb = terms.getMax();
-      if (bb != null) {
-        assert bb.isValid();
-        maxTerm = BytesRef.deepCopyOf(bb);
-        if (minTerm == null) {
-          throw new RuntimeException("field \"" + field + "\" has null minTerm but non-null maxTerm");
-        }
-      } else {
+      BytesRef minTerm;
+      if (isVectors) {
+        // Term vectors impls can be very slow for getMax
         maxTerm = null;
-        if (minTerm != null) {
-          throw new RuntimeException("field \"" + field + "\" has non-null minTerm but null maxTerm");
+        minTerm = null;
+      } else {
+        BytesRef bb = terms.getMin();
+        if (bb != null) {
+          assert bb.isValid();
+          minTerm = BytesRef.deepCopyOf(bb);
+        } else {
+          minTerm = null;
+        }
+
+        bb = terms.getMax();
+        if (bb != null) {
+          assert bb.isValid();
+          maxTerm = BytesRef.deepCopyOf(bb);
+          if (minTerm == null) {
+            throw new RuntimeException("field \"" + field + "\" has null minTerm but non-null maxTerm");
+          }
+        } else {
+          maxTerm = null;
+          if (minTerm != null) {
+            throw new RuntimeException("field \"" + field + "\" has non-null minTerm but null maxTerm");
+          }
         }
       }
 
@@ -101,7 +113,7 @@
       }
 
       final TermsEnum termsEnum = terms.iterator(null);
-      
+
       boolean hasOrd = true;
       final long termCountStart = status.delTermCount + status.termCount;
       
@@ -131,19 +143,21 @@
           }
           lastTerm.copyBytes(term);
         }
+
+        if (isVectors == false) {
+          if (minTerm == null) {
+            // We checked this above:
+            assert maxTerm == null;
+            throw new RuntimeException("field=\"" + field + "\": invalid term: term=" + term + ", minTerm=" + minTerm);
+          }
         
-        if (minTerm == null) {
-          // We checked this above:
-          assert maxTerm == null;
-          throw new RuntimeException("field=\"" + field + "\": invalid term: term=" + term + ", minTerm=" + minTerm);
-        }
+          if (term.compareTo(minTerm) < 0) {
+            throw new RuntimeException("field=\"" + field + "\": invalid term: term=" + term + ", minTerm=" + minTerm);
+          }
         
-        if (term.compareTo(minTerm) < 0) {
-          throw new RuntimeException("field=\"" + field + "\": invalid term: term=" + term + ", minTerm=" + minTerm);
-        }
-        
-        if (term.compareTo(maxTerm) > 0) {
-          throw new RuntimeException("field=\"" + field + "\": invalid term: term=" + term + ", maxTerm=" + maxTerm);
+          if (term.compareTo(maxTerm) > 0) {
+            throw new RuntimeException("field=\"" + field + "\": invalid term: term=" + term + ", maxTerm=" + maxTerm);
+          }
         }
         
         final int docFreq = termsEnum.docFreq();
@@ -369,6 +383,11 @@
                 throw new RuntimeException("term " + term + ": advance(docID=" + skipDocID + "), then .next() returned docID=" + nextDocID + " vs prev docID=" + docID);
               }
             }
+
+            if (isVectors) {
+              // Only 1 doc in the postings for term vectors, so we only test 1 advance:
+              break;
+            }
           }
         } else {
           for(int idx=0;idx<7;idx++) {
@@ -388,6 +407,10 @@
               if (nextDocID <= docID) {
                 throw new RuntimeException("term " + term + ": advance(docID=" + skipDocID + "), then .next() returned docID=" + nextDocID + " vs prev docID=" + docID);
               }
+            }
+            if (isVectors) {
+              // Only 1 doc in the postings for term vectors, so we only test 1 advance:
+              break;
             }
           }
         }
@@ -534,7 +557,8 @@
     }
 
     if (doPrint) {
-      msg(infoStream, "OK [" + status.termCount + " terms; " + status.totFreq + " terms/docs pairs; " + status.totPos + " tokens]");
+      msg(infoStream, String.format(Locale.ROOT, "OK [%d terms; %d terms/docs pairs; %d tokens] [took %.3f sec]",
+                                    status.termCount, status.totFreq, status.totPos, nsToSec(System.nanoTime()-startNS)));
     }
     
     if (verbose && status.blockTreeStats != null && infoStream != null && status.termCount > 0) {

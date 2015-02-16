@@ -1,0 +1,60 @@
+  @Override
+  public TwoPhaseDocIdSetIterator asTwoPhaseIterator() {
+    boolean hasApproximation = false;
+    for (ScorerWrapper w : subScorers) {
+      if (w.twoPhaseView != null) {
+        hasApproximation = true;
+        break;
+      }
+    }
+
+    if (hasApproximation == false) {
+      // none of the sub scorers supports approximations
+      return null;
+    }
+
+    return new TwoPhaseDocIdSetIterator() {
+
+      @Override
+      public DocIdSetIterator approximation() {
+        // note it is important to share the same pq as this scorer so that
+        // rebalancing the pq through the approximation will also rebalance
+        // the pq in this scorer.
+        return new DisjunctionDISIApproximation(subScorers);
+      }
+
+      @Override
+      public boolean matches() throws IOException {
+        ScorerWrapper topScorers = subScorers.topList();
+        // remove the head of the list as long as it does not match
+        while (topScorers.twoPhaseView != null && topScorers.twoPhaseView.matches() == false) {
+          topScorers = topScorers.next;
+          if (topScorers == null) {
+            return false;
+          }
+        }
+        // now we know we have at least one match since the first element of 'matchList' matches
+        if (needsScores) {
+          // if scores or freqs are needed, we also need to remove scorers
+          // from the top list that do not actually match
+          ScorerWrapper previous = topScorers;
+          for (ScorerWrapper w = topScorers.next; w != null; w = w.next) {
+            if (w.twoPhaseView != null && w.twoPhaseView.matches() == false) {
+              // w does not match, remove it
+              previous.next = w.next;
+            } else {
+              previous = w;
+            }
+          }
+
+          // We need to explicitely set the list of top scorers to avoid the
+          // laziness of DisjunctionScorer.score() that would take all scorers
+          // positioned on the same doc as the top of the pq, including
+          // non-matching scorers
+          DisjunctionScorer.this.topScorers = topScorers;
+        }
+        return true;
+      }
+    };
+  }
+

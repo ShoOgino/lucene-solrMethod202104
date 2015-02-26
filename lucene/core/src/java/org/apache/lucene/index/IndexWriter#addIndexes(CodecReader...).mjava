@@ -24,10 +24,14 @@
    *           if the index is corrupt
    * @throws IOException
    *           if there is a low-level IO error
+   * @throws IllegalArgumentException
+   *           if addIndexes would cause the index to exceed {@link #MAX_DOCS}
    */
   public void addIndexes(CodecReader... readers) throws IOException {
     ensureOpen();
-    int numDocs = 0;
+
+    // long so we can detect int overflow:
+    long numDocs = 0;
 
     try {
       if (infoStream.isEnabled("IW")) {
@@ -39,12 +43,11 @@
       for (CodecReader leaf : readers) {
         numDocs += leaf.numDocs();
       }
-
-      // Make sure adding the new documents to this index won't
-      // exceed the limit:
-      reserveDocs(numDocs);
       
-      final IOContext context = new IOContext(new MergeInfo(numDocs, -1, false, -1));
+      // Best-effort up front check:
+      testReserveDocs(numDocs);
+
+      final IOContext context = new IOContext(new MergeInfo(Math.toIntExact(numDocs), -1, false, -1));
 
       // TODO: somehow we should fix this merge so it's
       // abortable so that IW.close(false) is able to stop it
@@ -136,11 +139,15 @@
           return;
         }
         ensureOpen();
+
+        // Now reserve the docs, just before we update SIS:
+        reserveDocs(numDocs);
+      
         segmentInfos.add(infoPerCommit);
         checkpoint();
       }
     } catch (OutOfMemoryError oom) {
-      tragicEvent(oom, "addIndexes(IndexReader...)");
+      tragicEvent(oom, "addIndexes(CodecReader...)");
     }
     maybeMerge();
   }

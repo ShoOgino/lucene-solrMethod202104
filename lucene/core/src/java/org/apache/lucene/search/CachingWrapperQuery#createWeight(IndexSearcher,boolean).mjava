@@ -1,0 +1,102 @@
+  @Override
+  public Weight createWeight(IndexSearcher searcher, boolean needsScores) throws IOException {
+    final Weight weight = query.createWeight(searcher, needsScores);
+    if (needsScores) {
+      // our cache is not sufficient, we need scores too
+      return weight;
+    }
+    policy.onUse(weight.getQuery());
+    return new ConstantScoreWeight(weight.getQuery()) {
+      @Override
+      Scorer scorer(LeafReaderContext context, Bits acceptDocs, float score) throws IOException {
+        final LeafReader reader = context.reader();
+        final Object key = reader.getCoreCacheKey();
+
+        DocIdSet docIdSet = cache.get(key);
+        if (docIdSet != null) {
+          hitCount++;
+        } else if (policy.shouldCache(query, context)) {
+          missCount++;
+          final Scorer scorer = weight.scorer(context, null);
+          if (scorer == null) {
+            docIdSet = DocIdSet.EMPTY;
+          } else {
+            docIdSet = cacheImpl(scorer, context.reader());
+          }
+          cache.put(key, docIdSet);
+        } else {
+          return weight.scorer(context, acceptDocs);
+        }
+
+        assert docIdSet != null;
+        if (docIdSet == DocIdSet.EMPTY) {
+          return null;
+        }
+        final DocIdSetIterator approximation = docIdSet.iterator();
+        if (approximation == null) {
+          return null;
+        }
+
+        final DocIdSetIterator disi;
+        final TwoPhaseIterator twoPhaseView;
+        if (acceptDocs == null) {
+          twoPhaseView = null;
+          disi = approximation;
+        } else {
+          twoPhaseView = new TwoPhaseIterator() {
+            
+            @Override
+            public boolean matches() throws IOException {
+              final int doc = approximation.docID();
+              return acceptDocs.get(doc);
+            }
+            
+            @Override
+            public DocIdSetIterator approximation() {
+              return approximation;
+            }
+          };
+          disi = TwoPhaseIterator.asDocIdSetIterator(twoPhaseView);
+        }
+        return new Scorer(weight) {
+
+          @Override
+          public TwoPhaseIterator asTwoPhaseIterator() {
+            return twoPhaseView;
+          }
+
+          @Override
+          public float score() throws IOException {
+            return 0f;
+          }
+
+          @Override
+          public int freq() throws IOException {
+            return 1;
+          }
+
+          @Override
+          public int docID() {
+            return disi.docID();
+          }
+
+          @Override
+          public int nextDoc() throws IOException {
+            return disi.nextDoc();
+          }
+
+          @Override
+          public int advance(int target) throws IOException {
+            return disi.advance(target);
+          }
+
+          @Override
+          public long cost() {
+            return disi.cost();
+          }
+          
+        };
+      }
+    };
+  }
+

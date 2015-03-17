@@ -2,26 +2,26 @@
   public void handleRequestBody(final SolrQueryRequest req, SolrQueryResponse rsp) throws Exception {
     String httpMethod = (String) req.getContext().get("httpMethod");
     String path = (String) req.getContext().get("path");
-    SolrConfigHandler.setWt(req,"json");
+    SolrConfigHandler.setWt(req, "json");
 
     List<String> pieces = StrUtils.splitSmart(path, '/');
     String blobName = null;
-    if(pieces.size()>=3) blobName = pieces.get(2);
+    if (pieces.size() >= 3) blobName = pieces.get(2);
 
-    if("POST".equals(httpMethod)) {
+    if ("POST".equals(httpMethod)) {
       if (blobName == null || blobName.isEmpty()) {
-        rsp.add("error","Name not found");
+        rsp.add("error", "Name not found");
         return;
       }
       String err = SolrConfigHandler.validateName(blobName);
-      if(err!=null){
+      if (err != null) {
         log.warn("no blob name");
         rsp.add("error", err);
         return;
       }
-      if(req.getContentStreams() == null )  {
+      if (req.getContentStreams() == null) {
         log.warn("no content stream");
-        rsp.add("error","No stream");
+        rsp.add("error", "No stream");
         return;
       }
 
@@ -29,18 +29,18 @@
       for (ContentStream stream : req.getContentStreams()) {
         ByteBuffer payload = SimplePostTool.inputStreamToByteArray(stream.getStream(), maxSize);
         MessageDigest m = MessageDigest.getInstance("MD5");
-        m.update(payload.array(),payload.position(),payload.limit());
-        String md5 = new BigInteger(1,m.digest()).toString(16);
+        m.update(payload.array(), payload.position(), payload.limit());
+        String md5 = new BigInteger(1, m.digest()).toString(16);
 
         TopDocs duplicate = req.getSearcher().search(new TermQuery(new Term("md5", md5)), 1);
-        if(duplicate.totalHits >0){
+        if (duplicate.totalHits > 0) {
           rsp.add("error", "duplicate entry");
           req.forward(null,
               new MapSolrParams((Map) makeMap(
-              "q", "md5:" + md5,
-              "fl", "id,size,version,timestamp,blobName")),
+                  "q", "md5:" + md5,
+                  "fl", "id,size,version,timestamp,blobName")),
               rsp);
-          log.warn("duplicate entry for blob :"+blobName);
+          log.warn("duplicate entry for blob :" + blobName);
           return;
         }
 
@@ -48,13 +48,13 @@
             1, new Sort(new SortField("version", SortField.Type.LONG, true)));
 
         long version = 0;
-        if(docs.totalHits >0){
+        if (docs.totalHits > 0) {
           StoredDocument doc = req.getSearcher().doc(docs.scoreDocs[0].doc);
           Number n = doc.getField("version").numericValue();
           version = n.longValue();
         }
         version++;
-        String id = blobName+"/"+version;
+        String id = blobName + "/" + version;
         Map<String, Object> doc = makeMap(
             "id", id,
             "md5", md5,
@@ -64,16 +64,16 @@
             "size", payload.limit(),
             "blob", payload);
         verifyWithRealtimeGet(blobName, version, req, doc);
-        log.info(MessageFormat.format("inserting new blob {0} ,size {1}, md5 {2}",doc.get("id"), String.valueOf(payload.limit()),md5));
+        log.info(MessageFormat.format("inserting new blob {0} ,size {1}, md5 {2}", doc.get("id"), String.valueOf(payload.limit()), md5));
         indexMap(req, rsp, doc);
-        log.info(" Successfully Added and committed a blob with id {} and size {} ",id, payload.limit());
+        log.info(" Successfully Added and committed a blob with id {} and size {} ", id, payload.limit());
 
         break;
       }
 
     } else {
-      int version =-1;
-      if(pieces.size()>3){
+      int version = -1;
+      if (pieces.size() > 3) {
         try {
           version = Integer.parseInt(pieces.get(3));
         } catch (NumberFormatException e) {
@@ -82,16 +82,16 @@
         }
 
       }
-      if(ReplicationHandler.FILE_STREAM.equals(req.getParams().get(CommonParams.WT))){
-        if(blobName == null ){
+      if (ReplicationHandler.FILE_STREAM.equals(req.getParams().get(CommonParams.WT))) {
+        if (blobName == null) {
           throw new SolrException(SolrException.ErrorCode.NOT_FOUND, "Please send the request in the format /blob/<blobName>/<version>");
         } else {
           String q = "blobName:{0}";
-          if(version != -1) q = "id:{0}/{1}";
-          QParser qparser =  QParser.getParser(MessageFormat.format(q,blobName,version) , "lucene", req);
-          final TopDocs docs = req.getSearcher().search(qparser.parse(), 1, new Sort( new SortField("version", SortField.Type.LONG, true)));
-          if(docs.totalHits>0){
-            rsp.add(ReplicationHandler.FILE_STREAM, new SolrCore.RawWriter(){
+          if (version != -1) q = "id:{0}/{1}";
+          QParser qparser = QParser.getParser(MessageFormat.format(q, blobName, version), "lucene", req);
+          final TopDocs docs = req.getSearcher().search(qparser.parse(), 1, new Sort(new SortField("version", SortField.Type.LONG, true)));
+          if (docs.totalHits > 0) {
+            rsp.add(ReplicationHandler.FILE_STREAM, new SolrCore.RawWriter() {
 
               @Override
               public void write(OutputStream os) throws IOException {
@@ -99,26 +99,26 @@
                 StorableField sf = doc.getField("blob");
                 FieldType fieldType = req.getSchema().getField("blob").getType();
                 ByteBuffer buf = (ByteBuffer) fieldType.toObject(sf);
-                if(buf == null){
+                if (buf == null) {
                   //should never happen unless a user wrote this document directly
                   throw new SolrException(SolrException.ErrorCode.NOT_FOUND, "Invalid document . No field called blob");
                 } else {
-                  os.write(buf.array(),0,buf.limit());
+                  os.write(buf.array(), 0, buf.limit());
                 }
               }
             });
 
           } else {
             throw new SolrException(SolrException.ErrorCode.NOT_FOUND,
-                MessageFormat.format("Invalid combination of blobName {0} and version {1}", blobName,String.valueOf(version)));
+                MessageFormat.format("Invalid combination of blobName {0} and version {1}", blobName, String.valueOf(version)));
           }
 
         }
       } else {
         String q = "*:*";
-        if(blobName != null){
+        if (blobName != null) {
           q = "blobName:{0}";
-          if(version != -1){
+          if (version != -1) {
             q = "id:{0}/{1}";
           }
         }

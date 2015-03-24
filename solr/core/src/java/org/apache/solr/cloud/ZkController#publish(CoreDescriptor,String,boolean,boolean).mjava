@@ -10,73 +10,84 @@
       }
     }
     String collection = cd.getCloudDescriptor().getCollectionName();
-    log.info("publishing core={} state={} collection={}", cd.getName(), state, collection);
-    //System.out.println(Thread.currentThread().getStackTrace()[3]);
-    Integer numShards = cd.getCloudDescriptor().getNumShards();
-    if (numShards == null) { //XXX sys prop hack
-      log.info("numShards not found on descriptor - reading it from system property");
-      numShards = Integer.getInteger(ZkStateReader.NUM_SHARDS_PROP);
-    }
-    
-    assert collection != null && collection.length() > 0;
-    
-    String shardId = cd.getCloudDescriptor().getShardId();
-    String coreNodeName = cd.getCloudDescriptor().getCoreNodeName();    
-    // If the leader initiated recovery, then verify that this replica has performed
-    // recovery as requested before becoming active; don't even look at lirState if going down
-    if (!ZkStateReader.DOWN.equals(state)) {
-      String lirState = getLeaderInitiatedRecoveryState(collection, shardId, coreNodeName);
-      if (lirState != null) {
-        if (ZkStateReader.ACTIVE.equals(state)) {
-          // trying to become active, so leader-initiated state must be recovering
-          if (ZkStateReader.RECOVERING.equals(lirState)) {
-            updateLeaderInitiatedRecoveryState(collection, shardId, coreNodeName, ZkStateReader.ACTIVE, null, true);
-          } else if (ZkStateReader.DOWN.equals(lirState)) {
-            throw new SolrException(ErrorCode.INVALID_STATE, 
-                "Cannot publish state of core '"+cd.getName()+"' as active without recovering first!");
-          }
-        } else if (ZkStateReader.RECOVERING.equals(state)) {
-          // if it is currently DOWN, then trying to enter into recovering state is good
-          if (ZkStateReader.DOWN.equals(lirState)) {
-            updateLeaderInitiatedRecoveryState(collection, shardId, coreNodeName, ZkStateReader.RECOVERING, null, true);
+
+    Map previousMDCContext = MDC.getCopyOfContextMap();
+    MDCUtils.setCollection(collection);
+
+    try {
+      if (cd != null && cd.getName() != null)
+        MDCUtils.setCore(cd.getName());
+      log.info("publishing core={} state={} collection={}", cd.getName(), state, collection);
+      //System.out.println(Thread.currentThread().getStackTrace()[3]);
+      Integer numShards = cd.getCloudDescriptor().getNumShards();
+      if (numShards == null) { //XXX sys prop hack
+        log.info("numShards not found on descriptor - reading it from system property");
+        numShards = Integer.getInteger(ZkStateReader.NUM_SHARDS_PROP);
+      }
+
+      assert collection != null && collection.length() > 0;
+
+      String shardId = cd.getCloudDescriptor().getShardId();
+      MDCUtils.setShard(shardId);
+      String coreNodeName = cd.getCloudDescriptor().getCoreNodeName();
+      // If the leader initiated recovery, then verify that this replica has performed
+      // recovery as requested before becoming active; don't even look at lirState if going down
+      if (!ZkStateReader.DOWN.equals(state)) {
+        String lirState = getLeaderInitiatedRecoveryState(collection, shardId, coreNodeName);
+        if (lirState != null) {
+          if (ZkStateReader.ACTIVE.equals(state)) {
+            // trying to become active, so leader-initiated state must be recovering
+            if (ZkStateReader.RECOVERING.equals(lirState)) {
+              updateLeaderInitiatedRecoveryState(collection, shardId, coreNodeName, ZkStateReader.ACTIVE, null, true);
+            } else if (ZkStateReader.DOWN.equals(lirState)) {
+              throw new SolrException(ErrorCode.INVALID_STATE,
+                  "Cannot publish state of core '" + cd.getName() + "' as active without recovering first!");
+            }
+          } else if (ZkStateReader.RECOVERING.equals(state)) {
+            // if it is currently DOWN, then trying to enter into recovering state is good
+            if (ZkStateReader.DOWN.equals(lirState)) {
+              updateLeaderInitiatedRecoveryState(collection, shardId, coreNodeName, ZkStateReader.RECOVERING, null, true);
+            }
           }
         }
       }
-    }
-    
-    Map<String, Object> props = new HashMap<>();
-    props.put(Overseer.QUEUE_OPERATION, "state");
-    props.put(ZkStateReader.STATE_PROP, state);
-    props.put(ZkStateReader.BASE_URL_PROP, getBaseUrl());
-    props.put(ZkStateReader.CORE_NAME_PROP, cd.getName());
-    props.put(ZkStateReader.ROLES_PROP, cd.getCloudDescriptor().getRoles());
-    props.put(ZkStateReader.NODE_NAME_PROP, getNodeName());
-    props.put(ZkStateReader.SHARD_ID_PROP, cd.getCloudDescriptor().getShardId());
-    props.put(ZkStateReader.COLLECTION_PROP, collection);
-    if (numShards != null) {
-      props.put(ZkStateReader.NUM_SHARDS_PROP, numShards.toString());
-    }
-    if (coreNodeName != null) {
-      props.put(ZkStateReader.CORE_NODE_NAME_PROP, coreNodeName);
-    }
-    
-    if (ClusterStateUtil.isAutoAddReplicas(getZkStateReader(), collection)) { 
-      try (SolrCore core = cc.getCore(cd.getName())) {
-        if (core != null && core.getDirectoryFactory().isSharedStorage()) {
-          props.put("dataDir", core.getDataDir());
-          UpdateLog ulog = core.getUpdateHandler().getUpdateLog();
-          if (ulog != null) {
-            props.put("ulogDir", ulog.getLogDir());
+
+      Map<String, Object> props = new HashMap<>();
+      props.put(Overseer.QUEUE_OPERATION, "state");
+      props.put(ZkStateReader.STATE_PROP, state);
+      props.put(ZkStateReader.BASE_URL_PROP, getBaseUrl());
+      props.put(ZkStateReader.CORE_NAME_PROP, cd.getName());
+      props.put(ZkStateReader.ROLES_PROP, cd.getCloudDescriptor().getRoles());
+      props.put(ZkStateReader.NODE_NAME_PROP, getNodeName());
+      props.put(ZkStateReader.SHARD_ID_PROP, cd.getCloudDescriptor().getShardId());
+      props.put(ZkStateReader.COLLECTION_PROP, collection);
+      if (numShards != null) {
+        props.put(ZkStateReader.NUM_SHARDS_PROP, numShards.toString());
+      }
+      if (coreNodeName != null) {
+        props.put(ZkStateReader.CORE_NODE_NAME_PROP, coreNodeName);
+      }
+
+      if (ClusterStateUtil.isAutoAddReplicas(getZkStateReader(), collection)) {
+        try (SolrCore core = cc.getCore(cd.getName())) {
+          if (core != null && core.getDirectoryFactory().isSharedStorage()) {
+            props.put("dataDir", core.getDataDir());
+            UpdateLog ulog = core.getUpdateHandler().getUpdateLog();
+            if (ulog != null) {
+              props.put("ulogDir", ulog.getLogDir());
+            }
           }
         }
       }
+
+      ZkNodeProps m = new ZkNodeProps(props);
+
+      if (updateLastState) {
+        cd.getCloudDescriptor().lastPublished = state;
+      }
+      overseerJobQueue.offer(ZkStateReader.toJSON(m));
+    } finally {
+      MDCUtils.cleanupMDC(previousMDCContext);
     }
-    
-    ZkNodeProps m = new ZkNodeProps(props);
-    
-    if (updateLastState) {
-      cd.getCloudDescriptor().lastPublished = state;
-    }
-    overseerJobQueue.offer(ZkStateReader.toJSON(m));
   }
 

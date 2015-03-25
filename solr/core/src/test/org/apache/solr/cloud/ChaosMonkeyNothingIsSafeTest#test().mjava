@@ -1,6 +1,6 @@
   @Test
   public void test() throws Exception {
-    boolean testsSuccesful = false;
+    boolean testSuccessful = false;
     try {
       handle.clear();
       handle.put("timestamp", SKIPVAL);
@@ -14,14 +14,14 @@
       
       // we cannot do delete by query
       // as it's not supported for recovery
-       del("*:*");
+      del("*:*");
       
-      List<StopableThread> threads = new ArrayList<>();
-      List<StopableIndexingThread> indexTreads = new ArrayList<>();
+      List<StoppableThread> threads = new ArrayList<>();
+      List<StoppableIndexingThread> indexTreads = new ArrayList<>();
       int threadCount = TEST_NIGHTLY ? 3 : 1;
       int i = 0;
       for (i = 0; i < threadCount; i++) {
-        StopableIndexingThread indexThread = new StopableIndexingThread(controlClient, cloudClient, Integer.toString(i), true);
+        StoppableIndexingThread indexThread = new StoppableIndexingThread(controlClient, cloudClient, Integer.toString(i), true);
         threads.add(indexThread);
         indexTreads.add(indexThread);
         indexThread.start();
@@ -30,7 +30,7 @@
       threadCount = 1;
       i = 0;
       for (i = 0; i < threadCount; i++) {
-        StopableSearchThread searchThread = new StopableSearchThread();
+        StoppableSearchThread searchThread = new StoppableSearchThread(cloudClient);
         threads.add(searchThread);
         searchThread.start();
       }
@@ -39,7 +39,7 @@
       // it's currently hard to know what requests failed when using ConcurrentSolrUpdateServer
       boolean runFullThrottle = random().nextBoolean();
       if (runFullThrottle) {
-        FullThrottleStopableIndexingThread ftIndexThread = new FullThrottleStopableIndexingThread(
+        FullThrottleStoppableIndexingThread ftIndexThread = new FullThrottleStoppableIndexingThread(
             clients, "ft1", true);
         threads.add(ftIndexThread);
         ftIndexThread.start();
@@ -65,15 +65,18 @@
       } finally {
         chaosMonkey.stopTheMonkey();
       }
-      
-      for (StopableThread indexThread : threads) {
+
+      // ideally this should go into chaosMonkey
+      restartZk(1000 * (5 + random().nextInt(4)));
+
+      for (StoppableThread indexThread : threads) {
         indexThread.safeStop();
       }
       
       // start any downed jetties to be sure we still will end up with a leader per shard...
       
       // wait for stop...
-      for (StopableThread indexThread : threads) {
+      for (StoppableThread indexThread : threads) {
         indexThread.join();
       }
       
@@ -98,9 +101,11 @@
       
       
       // we expect full throttle fails, but cloud client should not easily fail
-      for (StopableThread indexThread : threads) {
-        if (indexThread instanceof StopableIndexingThread && !(indexThread instanceof FullThrottleStopableIndexingThread)) {
-          assertFalse("There were too many update fails - we expect it can happen, but shouldn't easily", ((StopableIndexingThread) indexThread).getFailCount() > FAIL_TOLERANCE);
+      for (StoppableThread indexThread : threads) {
+        if (indexThread instanceof StoppableIndexingThread && !(indexThread instanceof FullThrottleStoppableIndexingThread)) {
+          int failCount = ((StoppableIndexingThread) indexThread).getFailCount();
+          assertFalse("There were too many update fails (" + failCount + " > " + FAIL_TOLERANCE
+              + ") - we expect it can happen, but shouldn't easily", failCount > FAIL_TOLERANCE);
         }
       }
       
@@ -128,11 +133,8 @@
 
       // sometimes we restart zookeeper as well
       if (random().nextBoolean()) {
-        zkServer.shutdown();
-        zkServer = new ZkTestServer(zkServer.getZkDir(), zkServer.getPort());
-        zkServer.run();
+        restartZk(1000 * (5 + random().nextInt(4)));
       }
-      
 
       try (CloudSolrClient client = createCloudClient("collection1")) {
           createCollection(null, "testcollection",
@@ -144,9 +146,9 @@
       numShardsNumReplicas.add(1);
       checkForCollection("testcollection", numShardsNumReplicas, null);
       
-      testsSuccesful = true;
+      testSuccessful = true;
     } finally {
-      if (!testsSuccesful) {
+      if (!testSuccessful) {
         printLayout();
       }
     }

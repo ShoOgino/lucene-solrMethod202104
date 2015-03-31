@@ -1,0 +1,83 @@
+  /** The subSpans are ordered in the same doc, so there is a possible match.
+   * Compute the slop while making the match as short as possible by using nextStartPosition
+   * on all subSpans, except the last one, in reverse order.
+   * Also collect the payloads.
+   */
+  protected boolean shrinkToAfterShortestMatch() throws IOException {
+    Spans lastSubSpans = subSpans.get(subSpans.size() - 1);
+    matchStart = lastSubSpans.startPosition();
+    matchEnd = lastSubSpans.endPosition();
+
+    matchPayload.clear();
+    possibleMatchPayloads.clear();
+
+    if (lastSubSpans.isPayloadAvailable()) {
+      possibleMatchPayloads.addAll(lastSubSpans.getPayload());
+    }
+
+    Collection<byte[]> possiblePayload = null;
+
+    int matchSlop = 0;
+    int lastStart = matchStart;
+    int lastEnd = matchEnd;
+    for (int i = subSpans.size() - 2; i >= 0; i--) {
+      Spans prevSpans = subSpans.get(i);
+
+      if (prevSpans.isPayloadAvailable()) {
+        Collection<byte[]> payload = prevSpans.getPayload();
+        possiblePayload = new ArrayList<>(payload.size());
+        possiblePayload.addAll(payload);
+      }
+
+      int prevStart = prevSpans.startPosition();
+      int prevEnd = prevSpans.endPosition();
+      while (true) { // prevSpans nextStartPosition until after (lastStart, lastEnd)
+        if (prevSpans.nextStartPosition() == NO_MORE_POSITIONS) {
+          oneExhaustedInCurrentDoc = true;
+          break; // Check remaining subSpans for match.
+        }
+        int ppStart = prevSpans.startPosition();
+        int ppEnd = prevSpans.endPosition();
+        if (ppEnd > lastStart) { // if overlapping spans
+          break; // Check remaining subSpans.
+        }
+        // prevSpans still before (lastStart, lastEnd)
+        prevStart = ppStart;
+        prevEnd = ppEnd;
+        if (prevSpans.isPayloadAvailable()) {
+          Collection<byte[]> payload = prevSpans.getPayload();
+          if (possiblePayload == null) {
+            possiblePayload = new ArrayList<>(payload.size());
+          } else {
+            possiblePayload.clear();
+          }
+          possiblePayload.addAll(payload);
+        }
+      }
+
+      if (possiblePayload != null) {
+        possibleMatchPayloads.addAll(possiblePayload);
+      }
+
+      assert prevStart <= matchStart;
+      if (matchStart > prevEnd) { // Only non overlapping spans add to slop.
+        matchSlop += (matchStart - prevEnd);
+      }
+
+      /* Do not break on (matchSlop > allowedSlop) here to make sure
+       * that on return the first subSpans has nextStartPosition called.
+       */
+      matchStart = prevStart;
+      lastStart = prevStart;
+      lastEnd = prevEnd;
+    }
+
+    boolean match = matchSlop <= allowedSlop;
+
+    if (match && possibleMatchPayloads.size() > 0) {
+      matchPayload.addAll(possibleMatchPayloads);
+    }
+
+    return match; // ordered and allowed slop
+  }
+

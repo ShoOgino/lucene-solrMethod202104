@@ -1,0 +1,141 @@
+  public void testEnforceDeletions() throws Exception {
+    Directory dir = newDirectory();
+    RandomIndexWriter writer = new RandomIndexWriter(
+        random(),
+        dir,
+        newIndexWriterConfig(new MockAnalyzer(random())).
+            setMergeScheduler(new SerialMergeScheduler()).
+            // asserts below requires no unexpected merges:
+            setMergePolicy(newLogMergePolicy(10))
+    );
+
+    // NOTE: cannot use writer.getReader because RIW (on
+    // flipping a coin) may give us a newly opened reader,
+    // but we use .reopen on this reader below and expect to
+    // (must) get an NRT reader:
+    DirectoryReader reader = DirectoryReader.open(writer.w, true);
+    // same reason we don't wrap?
+    IndexSearcher searcher = newSearcher(reader, false);
+
+    // add a doc, refresh the reader, and check that it's there
+    Document doc = new Document();
+    doc.add(newStringField("id", "1", Field.Store.YES));
+    writer.addDocument(doc);
+
+    reader = refreshReader(reader);
+    searcher = newSearcher(reader, false);
+
+    TopDocs docs = searcher.search(new MatchAllDocsQuery(), 1);
+    assertEquals("Should find a hit...", 1, docs.totalHits);
+
+    final Query startQuery = new TermQuery(new Term("id", "1"));
+
+    CachingWrapperQuery query = new CachingWrapperQuery(startQuery, QueryCachingPolicy.ALWAYS_CACHE);
+
+    docs = searcher.search(new ConstantScoreQuery(query), 1);
+    assertTrue(query.ramBytesUsed() > 0);
+
+    assertEquals("[query + filter] Should find a hit...", 1, docs.totalHits);
+
+    Query constantScore = new ConstantScoreQuery(query);
+    docs = searcher.search(constantScore, 1);
+    assertEquals("[just filter] Should find a hit...", 1, docs.totalHits);
+
+    // make sure we get a cache hit when we reopen reader
+    // that had no change to deletions
+
+    // fake delete (deletes nothing):
+    writer.deleteDocuments(new Term("foo", "bar"));
+
+    IndexReader oldReader = reader;
+    reader = refreshReader(reader);
+    assertTrue(reader == oldReader);
+    int missCount = query.missCount;
+    docs = searcher.search(constantScore, 1);
+    assertEquals("[just filter] Should find a hit...", 1, docs.totalHits);
+
+    // cache hit:
+    assertEquals(missCount, query.missCount);
+
+    // now delete the doc, refresh the reader, and see that it's not there
+    writer.deleteDocuments(new Term("id", "1"));
+
+    // NOTE: important to hold ref here so GC doesn't clear
+    // the cache entry!  Else the assert below may sometimes
+    // fail:
+    oldReader = reader;
+    reader = refreshReader(reader);
+
+    searcher = newSearcher(reader, false);
+
+    missCount = query.missCount;
+    docs = searcher.search(new ConstantScoreQuery(query), 1);
+    assertEquals("[query + filter] Should *not* find a hit...", 0, docs.totalHits);
+
+    // cache hit
+    assertEquals(missCount, query.missCount);
+    docs = searcher.search(constantScore, 1);
+    assertEquals("[just filter] Should *not* find a hit...", 0, docs.totalHits);
+
+    // apply deletes dynamically:
+    query = new CachingWrapperQuery(startQuery, QueryCachingPolicy.ALWAYS_CACHE);
+    writer.addDocument(doc);
+    reader = refreshReader(reader);
+    searcher = newSearcher(reader, false);
+
+    docs = searcher.search(new ConstantScoreQuery(query), 1);
+    assertEquals("[query + filter] Should find a hit...", 1, docs.totalHits);
+    missCount = query.missCount;
+    assertTrue(missCount > 0);
+    constantScore = new ConstantScoreQuery(query);
+    docs = searcher.search(constantScore, 1);
+    assertEquals("[just filter] Should find a hit...", 1, docs.totalHits);
+    assertEquals(missCount, query.missCount);
+
+    writer.addDocument(doc);
+
+    // NOTE: important to hold ref here so GC doesn't clear
+    // the cache entry!  Else the assert below may sometimes
+    // fail:
+    oldReader = reader;
+
+    reader = refreshReader(reader);
+    searcher = newSearcher(reader, false);
+        
+    docs = searcher.search(new ConstantScoreQuery(query), 1);
+    assertEquals("[query + filter] Should find 2 hits...", 2, docs.totalHits);
+    assertTrue(query.missCount > missCount);
+    missCount = query.missCount;
+
+    constantScore = new ConstantScoreQuery(query);
+    docs = searcher.search(constantScore, 1);
+    assertEquals("[just filter] Should find a hit...", 2, docs.totalHits);
+    assertEquals(missCount, query.missCount);
+
+    // now delete the doc, refresh the reader, and see that it's not there
+    writer.deleteDocuments(new Term("id", "1"));
+
+    reader = refreshReader(reader);
+    searcher = newSearcher(reader, false);
+
+    docs = searcher.search(new ConstantScoreQuery(query), 1);
+    assertEquals("[query + filter] Should *not* find a hit...", 0, docs.totalHits);
+    // CWF reused the same entry (it dynamically applied the deletes):
+    assertEquals(missCount, query.missCount);
+
+    docs = searcher.search(constantScore, 1);
+    assertEquals("[just filter] Should *not* find a hit...", 0, docs.totalHits);
+    // CWF reused the same entry (it dynamically applied the deletes):
+    assertEquals(missCount, query.missCount);
+
+    // NOTE: silliness to make sure JRE does not eliminate
+    // our holding onto oldReader to prevent
+    // CachingWrapperFilter's WeakHashMap from dropping the
+    // entry:
+    assertTrue(oldReader != null);
+
+    reader.close();
+    writer.close();
+    dir.close();
+  }
+

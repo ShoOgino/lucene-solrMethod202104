@@ -1,0 +1,35 @@
+  @Override
+  public void close() throws IOException {
+    if (closed) {
+      return;
+    }
+    closed = true;
+    String indexFile = IndexFileNames.segmentFileName(state.segmentInfo.name, state.segmentSuffix, INDEX_EXTENSION);
+    boolean success = false;
+    try (IndexOutput indexOut = state.directory.createOutput(indexFile, state.context)) {
+      delegateFieldsConsumer.close();
+      CodecUtil.writeIndexHeader(indexOut, CODEC_NAME, COMPLETION_VERSION_CURRENT, state.segmentInfo.getId(), state.segmentSuffix);
+      /*
+       * we write the delegate postings format name so we can load it
+       * without getting an instance in the ctor
+       */
+      indexOut.writeString(delegatePostingsFormatName);
+      // write # of seen fields
+      indexOut.writeVInt(seenFields.size());
+      // write field numbers and dictOut offsets
+      for (Map.Entry<String, Long> seenField : seenFields.entrySet()) {
+        FieldInfo fieldInfo = state.fieldInfos.fieldInfo(seenField.getKey());
+        indexOut.writeVInt(fieldInfo.number);
+        indexOut.writeVLong(seenField.getValue());
+      }
+      CodecUtil.writeFooter(indexOut);
+      CodecUtil.writeFooter(dictOut);
+      IOUtils.close(dictOut);
+      success = true;
+    } finally {
+      if (success == false) {
+        IOUtils.closeWhileHandlingException(dictOut, delegateFieldsConsumer);
+      }
+    }
+  }
+

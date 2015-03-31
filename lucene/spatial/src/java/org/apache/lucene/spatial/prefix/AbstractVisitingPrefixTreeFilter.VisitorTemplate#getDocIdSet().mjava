@@ -2,9 +2,9 @@
       assert curVNode == null : "Called more than once?";
       if (termsEnum == null)
         return null;
-      //advance
-      if ((thisTerm = termsEnum.next()) == null)
-        return null; // all done
+      if (!nextTerm()) {//advances
+        return null;
+      }
 
       curVNode = new VNode(null);
       curVNode.reset(grid.getWorldCell());
@@ -41,30 +41,46 @@
         }
 
         //Seek to curVNode's cell (or skip if termsEnum has moved beyond)
-        curVNode.cell.getTokenBytesNoLeaf(curVNodeTerm);
-        int compare = thisTerm.compareTo(curVNodeTerm);
+        final int compare = indexedCell.compareToNoLeaf(curVNode.cell);
         if (compare > 0) {
-          // leap frog (termsEnum is beyond where we would otherwise seek)
-          assert ! context.reader().terms(fieldName).iterator(null).seekExact(curVNodeTerm) : "should be absent";
-        } else {
-          if (compare < 0) {
-            // Seek !
-            TermsEnum.SeekStatus seekStatus = termsEnum.seekCeil(curVNodeTerm);
-            if (seekStatus == TermsEnum.SeekStatus.END)
-              break; // all done
-            thisTerm = termsEnum.term();
-            if (seekStatus == TermsEnum.SeekStatus.NOT_FOUND) {
-              continue; // leap frog
-            }
-          }
-          // Visit!
-          boolean descend = visit(curVNode.cell);
-          //advance
-          if ((thisTerm = termsEnum.next()) == null)
+          // The indexed cell is after; continue loop to next query cell
+          continue;
+        }
+        if (compare < 0) {
+          // The indexed cell is before; seek ahead to query cell:
+          //      Seek !
+          curVNode.cell.getTokenBytesNoLeaf(curVNodeTerm);
+          TermsEnum.SeekStatus seekStatus = termsEnum.seekCeil(curVNodeTerm);
+          if (seekStatus == TermsEnum.SeekStatus.END)
             break; // all done
-          if (descend)
-            addIntersectingChildren();
+          thisTerm = termsEnum.term();
+          indexedCell = grid.readCell(thisTerm, indexedCell);
+          if (seekStatus == TermsEnum.SeekStatus.NOT_FOUND) {
+            // Did we find a leaf of the cell we were looking for or something after?
+            if (!indexedCell.isLeaf() || indexedCell.compareToNoLeaf(curVNode.cell) != 0)
+              continue; // The indexed cell is after; continue loop to next query cell
+          }
+        }
+        // indexedCell == queryCell (disregarding leaf).
 
+        // If indexedCell is a leaf then there's no prefix (prefix sorts before) -- just visit and continue
+        if (indexedCell.isLeaf()) {
+          visitLeaf(indexedCell);//TODO or query cell? Though shouldn't matter.
+          if (!nextTerm()) break;
+          continue;
+        }
+        // If a prefix (non-leaf) then visit; see if we descend.
+        final boolean descend = visitPrefix(curVNode.cell);//need to use curVNode.cell not indexedCell
+        if (!nextTerm()) break;
+        // Check for adjacent leaf with the same prefix
+        if (indexedCell.isLeaf() && indexedCell.getLevel() == curVNode.cell.getLevel()) {
+          visitLeaf(indexedCell);//TODO or query cell? Though shouldn't matter.
+          if (!nextTerm()) break;
+        }
+
+
+        if (descend) {
+          addIntersectingChildren();
         }
 
       }//main loop

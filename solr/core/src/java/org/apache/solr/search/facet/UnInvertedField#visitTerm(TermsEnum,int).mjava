@@ -1,0 +1,36 @@
+  @Override
+  protected void visitTerm(TermsEnum te, int termNum) throws IOException {
+
+    if (termNum >= maxTermCounts.length) {
+      // resize by doubling - for very large number of unique terms, expanding
+      // by 4K and resultant GC will dominate uninvert times.  Resize at end if material
+      int[] newMaxTermCounts = new int[ Math.min(Integer.MAX_VALUE-16, maxTermCounts.length*2) ];
+      System.arraycopy(maxTermCounts, 0, newMaxTermCounts, 0, termNum);
+      maxTermCounts = newMaxTermCounts;
+    }
+
+    final BytesRef term = te.term();
+
+    if (te.docFreq() > maxTermDocFreq) {
+      TopTerm topTerm = new TopTerm();
+      topTerm.term = BytesRef.deepCopyOf(term);
+      topTerm.termNum = termNum;
+      topTerm.termQuery = new TermQuery(new Term(field, topTerm.term));
+
+      bigTerms.put(topTerm.termNum, topTerm);
+
+      if (deState == null) {
+        deState = new SolrIndexSearcher.DocsEnumState();
+        deState.fieldName = field;
+        deState.liveDocs = searcher.getLeafReader().getLiveDocs();
+        deState.termsEnum = te;  // TODO: check for MultiTermsEnum in SolrIndexSearcher could now fail?
+        deState.postingsEnum = postingsEnum;
+        deState.minSetSizeCached = maxTermDocFreq;
+      }
+
+      postingsEnum = deState.postingsEnum;
+      DocSet set = searcher.getDocSet(deState);
+      maxTermCounts[termNum] = set.size();
+    }
+  }
+

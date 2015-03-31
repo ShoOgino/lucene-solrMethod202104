@@ -1,4 +1,5 @@
   public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain, boolean retry) throws IOException, ServletException {
+    MDCUtils.clearMDC();
 
     if (abortErrorMessage != null) {
       sendError((HttpServletResponse) response, 500, abortErrorMessage);
@@ -14,6 +15,8 @@
     SolrCore core = null;
     SolrQueryRequest solrReq = null;
     Aliases aliases = null;
+    //The states of client that is invalid in this request
+    Map<String, Integer> invalidStates = null;
     
     if( request instanceof HttpServletRequest) {
       HttpServletRequest req = (HttpServletRequest)request;
@@ -22,6 +25,8 @@
       String corename = "";
       String origCorename = null;
       try {
+        // set a request timer which can be reused by requests if needed
+        req.setAttribute(SolrRequestParsers.REQUEST_TIMER_SERVLET_ATTRIBUTE, new RTimer());
         // put the core container in request attribute
         req.setAttribute("org.apache.solr.CoreContainer", cores);
         String path = req.getServletPath();
@@ -81,11 +86,15 @@
 
             if (core != null) {
               path = path.substring( idx );
+              addMDCValues(cores, core);
             }
           }
           if (core == null) {
             if (!cores.isZooKeeperAware() ) {
               core = cores.getCore("");
+              if (core != null) {
+                addMDCValues(cores, core);
+              }
             }
           }
         }
@@ -97,6 +106,7 @@
           if (core != null) {
             // we found a core, update the path
             path = path.substring( idx );
+            addMDCValues(cores, core);
           }
           
           // if we couldn't find it locally, look on other nodes
@@ -104,11 +114,15 @@
             String coreUrl = getRemotCoreUrl(cores, corename, origCorename);
             // don't proxy for internal update requests
             SolrParams queryParams = SolrRequestParsers.parseQueryString(req.getQueryString());
-            checkStateIsValid(cores, queryParams.get(CloudSolrClient.STATE_VERSION));
+            invalidStates = checkStateIsValid(cores, queryParams.get(CloudSolrClient.STATE_VERSION));
             if (coreUrl != null
                 && queryParams
                     .get(DistributingUpdateProcessorFactory.DISTRIB_UPDATE_PARAM) == null) {
               path = path.substring(idx);
+              if (invalidStates != null) {
+                //it does not make sense to send the request to a remote node
+                throw new SolrException(ErrorCode.INVALID_STATE, new String(ZkStateReader.toJSON(invalidStates), org.apache.lucene.util.IOUtils.UTF_8));
+              }
               remoteQuery(coreUrl + path, req, solrReq, resp);
               return;
             } else {
@@ -127,6 +141,9 @@
           // try the default core
           if (core == null) {
             core = cores.getCore("");
+            if (core != null) {
+              addMDCValues(cores, core);
+            }
           }
         }
 
@@ -165,7 +182,7 @@
               if( "/select".equals( path ) || "/select/".equals( path ) ) {
                 solrReq = parser.parse( core, path, req );
 
-                checkStateIsValid(cores,solrReq.getParams().get(CloudSolrClient.STATE_VERSION));
+                invalidStates = checkStateIsValid(cores,solrReq.getParams().get(CloudSolrClient.STATE_VERSION));
                 String qt = solrReq.getParams().get( CommonParams.QT );
                 handler = core.getRequestHandler( qt );
                 if( handler == null ) {
@@ -212,7 +229,8 @@
                   resp.addHeader(entry.getKey(), entry.getValue());
                 }
                QueryResponseWriter responseWriter = core.getQueryResponseWriter(solrReq);
-               writeResponse(solrRsp, response, responseWriter, solrReq, reqMethod);
+              if(invalidStates != null) solrReq.getContext().put(CloudSolrClient.STATE_VERSION, invalidStates);
+              writeResponse(solrRsp, response, responseWriter, solrReq, reqMethod);
             }
             return; // we are done with a valid handler
           }

@@ -1,0 +1,177 @@
+  public void testIndividualStatLocalParams() throws Exception {
+    final String kpre = XPRE + "lst[@name='stats_fields']/lst[@name='k']/";
+    
+    assertU(adoc("id", "1", "a_f", "2.3", "b_f", "9.7", "a_i", "9", "foo_t", "how now brown cow"));
+    assertU(commit());
+    
+    AVLTreeDigest tdigest = new AVLTreeDigest(100);
+    
+    // some quick sanity check assertions...
+    // trivial check that we only get the exact 2 we ask for
+    assertQ("ask for and get only 2 stats",
+            req("q","*:*", "stats", "true",
+                "stats.field", "{!key=k mean=true min=true}a_i")
+            , kpre + "double[@name='mean'][.='9.0']"
+            , kpre + "double[@name='min'][.='9.0']"
+            , "count(" + kpre + "*)=2"
+            );
+
+    // for stats that are true/false, sanity check false does it's job
+    assertQ("min=true & max=false: only min should come back",
+            req("q","*:*", "stats", "true",
+                "stats.field", "{!key=k max=false min=true}a_i")
+            , kpre + "double[@name='min'][.='9.0']"
+            , "count(" + kpre + "*)=1"
+            );
+    assertQ("min=false: localparam stat means ignore default set, "+
+            "but since only local param is false no stats should be returned",
+            req("q","*:*", "stats", "true",
+                "stats.field", "{!key=k min=false}a_i")
+            // section of stats for this field should exist ...
+            , XPRE + "lst[@name='stats_fields']/lst[@name='k']"
+            // ...but be empty 
+            , "count(" + kpre + "*)=0"
+            );
+
+    double sum = 0;
+    double sumOfSquares = 0;
+    final int count = 20;
+    for (int i = 0; i < count; i++) {
+      assertU(adoc("id", String.valueOf(i), "a_f", "2.3", "b_f", "9.7", "a_i",
+          String.valueOf(i % 10), "foo_t", "how now brown cow"));
+      tdigest.add(i % 10);
+      sum += i % 10;
+      sumOfSquares += (i % 10) * (i % 10);
+    }
+   
+    assertU(commit());
+    
+    ByteBuffer buf = ByteBuffer.allocate(tdigest.smallByteSize());
+    tdigest.asSmallBytes(buf);
+    EnumSet<Stat> allStats = EnumSet.allOf(Stat.class);
+    
+    Map<Stat,String> expectedStats = new HashMap<>();
+    expectedStats.put(Stat.min, "0.0");
+    expectedStats.put(Stat.max, "9.0");
+    expectedStats.put(Stat.missing, "0");
+    expectedStats.put(Stat.sum, String.valueOf(sum));
+    expectedStats.put(Stat.count, String.valueOf(count));
+    expectedStats.put(Stat.mean, String.valueOf(sum / count));
+    expectedStats.put(Stat.sumOfSquares, String.valueOf(sumOfSquares));
+    expectedStats.put(Stat.stddev, String.valueOf(Math.sqrt(((count * sumOfSquares) - (sum * sum))/ (20 * (count - 1.0D)))));
+    expectedStats.put(Stat.calcdistinct, "10");
+    // NOTE: per shard expected value
+    expectedStats.put(Stat.percentiles, Base64.byteArrayToBase64(buf.array(), 0, buf.array().length));
+    
+    Map<Stat,String> expectedType = new HashMap<>();
+    expectedType.put(Stat.min, "double");
+    expectedType.put(Stat.max, "double");
+    expectedType.put(Stat.missing, "long");
+    expectedType.put(Stat.sum, "double");
+    expectedType.put(Stat.count, "long");
+    expectedType.put(Stat.mean, "double");
+    expectedType.put(Stat.sumOfSquares, "double");
+    expectedType.put(Stat.stddev, "double");
+    expectedType.put(Stat.calcdistinct, "long");
+    expectedType.put(Stat.percentiles, "str");
+   
+    Map<Stat,String> localParasInput = new HashMap<>();
+    localParasInput.put(Stat.min, "true");
+    localParasInput.put(Stat.max, "true");
+    localParasInput.put(Stat.missing, "true");
+    localParasInput.put(Stat.sum, "true");
+    localParasInput.put(Stat.count, "true");
+    localParasInput.put(Stat.mean, "true");
+    localParasInput.put(Stat.sumOfSquares, "true");
+    localParasInput.put(Stat.stddev, "true");
+    localParasInput.put(Stat.calcdistinct, "true");
+    localParasInput.put(Stat.percentiles, "'90, 99'");
+
+   // canary in the coal mine
+   assertEquals("size of expectedStats doesn't match all known stats; " + 
+                "enum was updated w/o updating test?",
+                expectedStats.size(), allStats.size());
+   assertEquals("size of expectedType doesn't match all known stats; " + 
+                "enum was updated w/o updating test?",
+                expectedType.size(), allStats.size());
+
+   // whitebox test: explicitly ask for isShard=true with an individual stat
+   for (Stat stat : expectedStats.keySet()) {
+     EnumSet<Stat> distribDeps = stat.getDistribDeps();
+
+     StringBuilder exclude = new StringBuilder();
+     List<String> testParas = new ArrayList<String>(distribDeps.size() + 2);
+     int calcdistinctFudge = 0;
+
+     for (Stat perShardStat : distribDeps ){
+       String key = perShardStat.toString();
+       if (perShardStat.equals(Stat.calcdistinct)) {
+         // this abomination breaks all the rules - uses a diff response key and triggers
+         // the additional "distinctValues" stat
+         key = "countDistinct";
+         calcdistinctFudge++;
+         testParas.add("count(" + kpre + "arr[@name='distinctValues']/*)=10");
+       }
+       testParas.add(kpre + expectedType.get(perShardStat) + 
+                     "[@name='" + key + "'][.='" + expectedStats.get(perShardStat) + "']");
+       // even if we go out of our way to exclude the dependent stats, 
+       // the shard should return them since they are a dependency for the requested stat
+       if (!stat.equals(Stat.percentiles)){
+         exclude.append(perShardStat + "=false ");
+       }
+     }
+     testParas.add("count(" + kpre + "*)=" + (distribDeps.size() + calcdistinctFudge));
+
+     assertQ("ask for only "+stat+", with isShard=true, and expect only deps: " + distribDeps,
+             req("q", "*:*", "isShard", "true", "stats", "true", 
+                 "stats.field", "{!key=k " + exclude + stat +"=" + localParasInput.get(stat) + "}a_i")
+             , testParas.toArray(new String[testParas.size()])
+             );
+   }
+   
+   // test all the possible combinations (of all possible sizes) of stats params
+   for (int numParams = 1; numParams <= allStats.size(); numParams++) {
+     for (EnumSet<Stat> set : new StatSetCombinations(numParams, allStats)) {
+
+       // EnumSets use natural ordering, we want to randomize the order of the params
+       List<Stat> combo = new ArrayList<Stat>(set);
+       Collections.shuffle(combo, random());
+
+       StringBuilder paras = new StringBuilder("{!key=k ");
+       List<String> testParas = new ArrayList<String>(numParams + 2);
+
+       int calcdistinctFudge = 0;
+       for (Stat stat : combo) {
+         String key = stat.toString();
+         if (stat.equals(Stat.calcdistinct)) {
+           // this abomination breaks all the rules - uses a diff response key and triggers
+           // the additional "distinctValues" stat
+           key = "countDistinct";
+           calcdistinctFudge++; 
+           testParas.add("count(" + kpre + "arr[@name='distinctValues']/*)=10");
+         }
+         paras.append(stat + "=" + localParasInput.get(stat)+ " ");
+         
+         if (!stat.equals(Stat.percentiles)){
+           testParas.add(kpre + expectedType.get(stat) + "[@name='" + key + "'][.='" + expectedStats.get(stat) + "']");
+         } else {
+           testParas.add("count(" + kpre + "lst[@name='percentiles']/*)=2");
+           String p90 = "" + tdigest.quantile(0.90D);
+           String p99 = "" + tdigest.quantile(0.99D);
+           testParas.add(kpre + "lst[@name='percentiles']/double[@name='90.0'][.="+p90+"]");
+           testParas.add(kpre + "lst[@name='percentiles']/double[@name='99.0'][.="+p99+"]");
+         }
+       }
+
+       paras.append("}a_i");
+       testParas.add("count(" + kpre + "*)=" + (combo.size() + calcdistinctFudge));
+
+       assertQ("ask for an get only: "+ combo,
+               req("q","*:*", "stats", "true",
+                   "stats.field", paras.toString())
+               , testParas.toArray(new String[testParas.size()])
+               );
+     }
+   }
+  }
+

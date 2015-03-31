@@ -1,0 +1,87 @@
+  /**
+   * Collects at most Top <code>num</code> completions, filtered by <code>filter</code> on
+   * corresponding documents, which has a prefix accepted by <code>automaton</code>
+   * <p>
+   * Supports near real time deleted document filtering using <code>reader</code>
+   * <p>
+   * {@link TopSuggestDocsCollector#collect(int, CharSequence, long)} is called
+   * for every matched completion
+   * <p>
+   * Completion collection can be early terminated by throwing {@link org.apache.lucene.search.CollectionTerminatedException}
+   */
+  public void lookup(final LeafReader reader, final Automaton automaton, final int num, final DocIdSet filter, final TopSuggestDocsCollector collector) {
+    final Bits filterDocs;
+    try {
+      if (filter != null) {
+        if (filter.iterator() == null) {
+          return;
+        }
+        if (filter.bits() == null) {
+          throw new IllegalArgumentException("DocIDSet does not provide random access interface");
+        } else {
+          filterDocs = filter.bits();
+        }
+      } else {
+        filterDocs = null;
+      }
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+
+    int queueSize = getMaxTopNSearcherQueueSize(num, reader, filterDocs != null);
+    if (queueSize == -1) {
+      return;
+    }
+
+    final Bits liveDocs = reader.getLiveDocs();
+    try {
+      final List<FSTUtil.Path<Pair<Long, BytesRef>>> prefixPaths = FSTUtil.intersectPrefixPaths(automaton, fst);
+      Util.TopNSearcher<Pair<Long, BytesRef>> searcher = new Util.TopNSearcher<Pair<Long, BytesRef>>(fst, num, queueSize, getComparator()) {
+
+        private final CharsRefBuilder spare = new CharsRefBuilder();
+
+        @Override
+        protected boolean acceptResult(IntsRef input, Pair<Long, BytesRef> output) {
+          int payloadSepIndex = parseSurfaceForm(output.output2, payloadSep, spare);
+          int docID = parseDocID(output.output2, payloadSepIndex);
+
+          // filter out deleted docs only if no filter is set
+          if (filterDocs == null && liveDocs != null && !liveDocs.get(docID)) {
+            return false;
+          }
+
+          // filter by filter context
+          if (filterDocs != null && !filterDocs.get(docID)) {
+            return false;
+          }
+
+          try {
+            collector.collect(docID, spare.toCharsRef(), decode(output.output1));
+            return true;
+          } catch (IOException e) {
+            throw new RuntimeException(e);
+          }
+        }
+      };
+
+      // TODO: add fuzzy support
+      for (FSTUtil.Path<Pair<Long, BytesRef>> path : prefixPaths) {
+        searcher.addStartPaths(path.fstNode, path.output, false, path.input);
+      }
+
+      try {
+        // hits are also returned by search()
+        // we do not use it, instead collect at acceptResult
+        Util.TopResults<Pair<Long, BytesRef>> search = searcher.search();
+        // search admissibility is not guaranteed
+        // see comment on getMaxTopNSearcherQueueSize
+        // assert  search.isComplete;
+      } catch (CollectionTerminatedException e) {
+        // terminate
+      }
+
+    } catch (IOException bogus) {
+      throw new RuntimeException(bogus);
+    }
+  }
+

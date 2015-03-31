@@ -1,0 +1,31 @@
+  synchronized void putIfAbsent(Query query, LeafReaderContext context, DocIdSet set) {
+    // under a lock to make sure that mostRecentlyUsedQueries and cache remain sync'ed
+    // we don't want to have user-provided queries as keys in our cache since queries are mutable
+    query = query.clone();
+    query.setBoost(1f);
+    assert query == QueryCache.cacheKey(query);
+    Query singleton = uniqueQueries.putIfAbsent(query, query);
+    if (singleton == null) {
+      onQueryCache(singleton, LINKED_HASHTABLE_RAM_BYTES_PER_ENTRY + ramBytesUsed(query));
+    } else {
+      query = singleton;
+    }
+    final Object key = context.reader().getCoreCacheKey();
+    LeafCache leafCache = cache.get(key);
+    if (leafCache == null) {
+      leafCache = new LeafCache(key);
+      final LeafCache previous = cache.put(context.reader().getCoreCacheKey(), leafCache);
+      ramBytesUsed += HASHTABLE_RAM_BYTES_PER_ENTRY;
+      assert previous == null;
+      // we just created a new leaf cache, need to register a close listener
+      context.reader().addCoreClosedListener(new CoreClosedListener() {
+        @Override
+        public void onClose(Object ownerCoreCacheKey) {
+          clearCoreCacheKey(ownerCoreCacheKey);
+        }
+      });
+    }
+    leafCache.putIfAbsent(query, set);
+    evictIfNecessary();
+  }
+

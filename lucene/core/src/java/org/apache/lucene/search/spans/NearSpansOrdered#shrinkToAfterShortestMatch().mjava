@@ -1,77 +1,49 @@
   /** The subSpans are ordered in the same doc, so there is a possible match.
-   * Compute the slop while making the match as short as possible by advancing
-   * all subSpans except the last one in reverse order.
+   * Compute the slop while making the match as short as possible by using nextStartPosition
+   * on all subSpans, except the last one, in reverse order.
    */
-  private boolean shrinkToAfterShortestMatch() throws IOException {
-    matchStart = subSpans[subSpans.length - 1].start();
-    matchEnd = subSpans[subSpans.length - 1].end();
-    Set<byte[]> possibleMatchPayloads = new HashSet<>();
-    if (subSpans[subSpans.length - 1].isPayloadAvailable()) {
-      possibleMatchPayloads.addAll(subSpans[subSpans.length - 1].getPayload());
-    }
+  protected boolean shrinkToAfterShortestMatch() throws IOException {
+    Spans lastSubSpans = subSpans.get(subSpans.size() - 1);
+    matchStart = lastSubSpans.startPosition();
+    matchEnd = lastSubSpans.endPosition();
 
-    Collection<byte[]> possiblePayload = null;
-    
     int matchSlop = 0;
     int lastStart = matchStart;
     int lastEnd = matchEnd;
-    for (int i = subSpans.length - 2; i >= 0; i--) {
-      Spans prevSpans = subSpans[i];
-      if (collectPayloads && prevSpans.isPayloadAvailable()) {
-        Collection<byte[]> payload = prevSpans.getPayload();
-        possiblePayload = new ArrayList<>(payload.size());
-        possiblePayload.addAll(payload);
-      }
-      
-      int prevStart = prevSpans.start();
-      int prevEnd = prevSpans.end();
-      while (true) { // Advance prevSpans until after (lastStart, lastEnd)
-        if (! prevSpans.next()) {
-          inSameDoc = false;
-          more = false;
-          break; // Check remaining subSpans for final match.
-        } else if (matchDoc != prevSpans.doc()) {
-          inSameDoc = false; // The last subSpans is not advanced here.
-          break; // Check remaining subSpans for last match in this document.
-        } else {
-          int ppStart = prevSpans.start();
-          int ppEnd = prevSpans.end(); // Cannot avoid invoking .end()
-          if (! docSpansOrderedNonOverlap(ppStart, ppEnd, lastStart, lastEnd)) {
-            break; // Check remaining subSpans.
-          } else { // prevSpans still before (lastStart, lastEnd)
-            prevStart = ppStart;
-            prevEnd = ppEnd;
-            if (collectPayloads && prevSpans.isPayloadAvailable()) {
-              Collection<byte[]> payload = prevSpans.getPayload();
-              possiblePayload = new ArrayList<>(payload.size());
-              possiblePayload.addAll(payload);
-            }
-          }
+    for (int i = subSpans.size() - 2; i >= 0; i--) {
+      Spans prevSpans = subSpans.get(i);
+
+      int prevStart = prevSpans.startPosition();
+      int prevEnd = prevSpans.endPosition();
+      while (true) { // prevSpans nextStartPosition until after (lastStart, lastEnd)
+        if (prevSpans.nextStartPosition() == NO_MORE_POSITIONS) {
+          oneExhaustedInCurrentDoc = true;
+          break; // Check remaining subSpans for match.
         }
+        int ppStart = prevSpans.startPosition();
+        int ppEnd = prevSpans.endPosition();
+        if (ppEnd > lastStart) { // if overlapping spans
+          break; // Check remaining subSpans.
+        }
+        // prevSpans still before (lastStart, lastEnd)
+        prevStart = ppStart;
+        prevEnd = ppEnd;
       }
 
-      if (collectPayloads && possiblePayload != null) {
-        possibleMatchPayloads.addAll(possiblePayload);
-      }
-      
       assert prevStart <= matchStart;
       if (matchStart > prevEnd) { // Only non overlapping spans add to slop.
         matchSlop += (matchStart - prevEnd);
       }
 
       /* Do not break on (matchSlop > allowedSlop) here to make sure
-       * that subSpans[0] is advanced after the match, if any.
+       * that on return the first subSpans has nextStartPosition called.
        */
       matchStart = prevStart;
       lastStart = prevStart;
       lastEnd = prevEnd;
     }
-    
+
     boolean match = matchSlop <= allowedSlop;
-    
-    if(collectPayloads && match && possibleMatchPayloads.size() > 0) {
-      matchPayload.addAll(possibleMatchPayloads);
-    }
 
     return match; // ordered and allowed slop
   }

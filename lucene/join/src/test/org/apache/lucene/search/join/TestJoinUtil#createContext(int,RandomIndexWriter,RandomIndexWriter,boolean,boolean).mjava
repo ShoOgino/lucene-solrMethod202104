@@ -1,4 +1,8 @@
-  private IndexIterationContext createContext(int nDocs, RandomIndexWriter fromWriter, RandomIndexWriter toWriter, boolean multipleValuesPerDocument) throws IOException {
+  private IndexIterationContext createContext(int nDocs, RandomIndexWriter fromWriter, RandomIndexWriter toWriter, boolean multipleValuesPerDocument, boolean globalOrdinalJoin) throws IOException {
+    if (globalOrdinalJoin) {
+      assertFalse("ordinal join doesn't support multiple join values per document", multipleValuesPerDocument);
+    }
+
     IndexIterationContext context = new IndexIterationContext();
     int numRandomValues = nDocs / 2;
     context.randomUniqueValues = new String[numRandomValues];
@@ -7,8 +11,8 @@
     for (int i = 0; i < numRandomValues; i++) {
       String uniqueRandomValue;
       do {
-        uniqueRandomValue = TestUtil.randomRealisticUnicodeString(random());
-//        uniqueRandomValue = _TestUtil.randomSimpleString(random);
+//        uniqueRandomValue = TestUtil.randomRealisticUnicodeString(random());
+        uniqueRandomValue = TestUtil.randomSimpleString(random());
       } while ("".equals(uniqueRandomValue) || trackSet.contains(uniqueRandomValue));
       // Generate unique values and empty strings aren't allowed.
       trackSet.add(uniqueRandomValue);
@@ -28,15 +32,18 @@
       boolean from = context.randomFrom[randomI];
       int numberOfLinkValues = multipleValuesPerDocument ? 2 + random().nextInt(10) : 1;
       docs[i] = new RandomDoc(id, numberOfLinkValues, value, from);
+      if (globalOrdinalJoin) {
+        document.add(newStringField("type", from ? "from" : "to", Field.Store.NO));
+      }
       for (int j = 0; j < numberOfLinkValues; j++) {
         String linkValue = context.randomUniqueValues[random().nextInt(context.randomUniqueValues.length)];
         docs[i].linkValues.add(linkValue);
         if (from) {
           if (!context.fromDocuments.containsKey(linkValue)) {
-            context.fromDocuments.put(linkValue, new ArrayList<RandomDoc>());
+            context.fromDocuments.put(linkValue, new ArrayList<>());
           }
           if (!context.randomValueFromDocs.containsKey(value)) {
-            context.randomValueFromDocs.put(value, new ArrayList<RandomDoc>());
+            context.randomValueFromDocs.put(value, new ArrayList<>());
           }
 
           context.fromDocuments.get(linkValue).add(docs[i]);
@@ -47,12 +54,15 @@
           } else {
             document.add(new SortedDocValuesField("from", new BytesRef(linkValue)));
           }
+          if (globalOrdinalJoin) {
+            document.add(new SortedDocValuesField("join_field", new BytesRef(linkValue)));
+          }
         } else {
           if (!context.toDocuments.containsKey(linkValue)) {
-            context.toDocuments.put(linkValue, new ArrayList<RandomDoc>());
+            context.toDocuments.put(linkValue, new ArrayList<>());
           }
           if (!context.randomValueToDocs.containsKey(value)) {
-            context.randomValueToDocs.put(value, new ArrayList<RandomDoc>());
+            context.randomValueToDocs.put(value, new ArrayList<>());
           }
 
           context.toDocuments.get(linkValue).add(docs[i]);
@@ -62,6 +72,9 @@
             document.add(new SortedSetDocValuesField("to", new BytesRef(linkValue)));
           } else {
             document.add(new SortedDocValuesField("to", new BytesRef(linkValue)));
+          }
+          if (globalOrdinalJoin) {
+            document.add(new SortedDocValuesField("join_field", new BytesRef(linkValue)));
           }
         }
       }
@@ -154,6 +167,9 @@
             if (joinScore == null) {
               joinValueToJoinScores.put(BytesRef.deepCopyOf(joinValue), joinScore = new JoinScore());
             }
+            if (VERBOSE) {
+              System.out.println("expected val=" + joinValue.utf8ToString() + " expected score=" + scorer.score());
+            }
             joinScore.addScore(scorer.score());
           }
 
@@ -167,7 +183,7 @@
           public void setScorer(Scorer scorer) {
             this.scorer = scorer;
           }
-          
+
           @Override
           public boolean needsScores() {
             return true;
@@ -224,7 +240,7 @@
 
           @Override
           public void setScorer(Scorer scorer) {}
-          
+
           @Override
           public boolean needsScores() {
             return false;

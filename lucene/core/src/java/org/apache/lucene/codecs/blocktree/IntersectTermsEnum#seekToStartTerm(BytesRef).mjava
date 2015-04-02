@@ -3,7 +3,7 @@
   // arbitrary seekExact/Ceil.  Note that this is a
   // seekFloor!
   private void seekToStartTerm(BytesRef target) throws IOException {
-    //if (DEBUG) System.out.println("seek to startTerm=" + target.utf8ToString());
+    //if (DEBUG) System.out.println("seek to startTerm=" + target.utf8ToString() + " length=" + target.length);
     assert currentFrame.ord == 0;
     if (term.length < target.length) {
       term.bytes = ArrayUtil.grow(term.bytes, target.length);
@@ -12,22 +12,28 @@
     assert arc == currentFrame.arc;
 
     for(int idx=0;idx<=target.length;idx++) {
+      //if (DEBUG) System.out.println("cycle idx=" + idx);
 
       while (true) {
+        final int savNextEnt = currentFrame.nextEnt;
         final int savePos = currentFrame.suffixesReader.getPosition();
         final int saveStartBytePos = currentFrame.startBytePos;
         final int saveSuffix = currentFrame.suffix;
         final long saveLastSubFP = currentFrame.lastSubFP;
         final int saveTermBlockOrd = currentFrame.termState.termBlockOrd;
+        final boolean saveIsAutoPrefixTerm = currentFrame.isAutoPrefixTerm;
+
+        //if (DEBUG) System.out.println("    cycle isAutoPrefix=" + saveIsAutoPrefixTerm + " ent=" + currentFrame.nextEnt + " (of " + currentFrame.entCount + ") prefix=" + currentFrame.prefix + " suffix=" + currentFrame.suffix + " firstLabel=" + (currentFrame.suffix == 0 ? "" : (currentFrame.suffixBytes[currentFrame.startBytePos])&0xff));
 
         final boolean isSubBlock = currentFrame.next();
 
-        //if (DEBUG) System.out.println("    cycle ent=" + currentFrame.nextEnt + " (of " + currentFrame.entCount + ") prefix=" + currentFrame.prefix + " suffix=" + currentFrame.suffix + " isBlock=" + isSubBlock + " firstLabel=" + (currentFrame.suffix == 0 ? "" : (currentFrame.suffixBytes[currentFrame.startBytePos])&0xff));
         term.length = currentFrame.prefix + currentFrame.suffix;
         if (term.bytes.length < term.length) {
           term.bytes = ArrayUtil.grow(term.bytes, term.length);
         }
         System.arraycopy(currentFrame.suffixBytes, currentFrame.startBytePos, term.bytes, currentFrame.prefix, currentFrame.suffix);
+
+        //if (DEBUG) System.out.println("      isSubBlock=" + isSubBlock + " term/prefix=" + brToString(term) + " saveIsAutoPrefixTerm=" + saveIsAutoPrefixTerm + " allowAutoPrefixTerms=" + allowAutoPrefixTerms);
 
         if (isSubBlock && StringHelper.startsWith(target, term)) {
           // Recurse
@@ -36,9 +42,11 @@
           break;
         } else {
           final int cmp = term.compareTo(target);
+          //if (DEBUG) System.out.println("      cmp=" + cmp);
           if (cmp < 0) {
             if (currentFrame.nextEnt == currentFrame.entCount) {
               if (!currentFrame.isLastInFloor) {
+                // Advance to next floor block
                 //if (DEBUG) System.out.println("  load floorBlock");
                 currentFrame.loadNextFloorBlock();
                 continue;
@@ -49,19 +57,24 @@
             }
             continue;
           } else if (cmp == 0) {
+            if (allowAutoPrefixTerms == false && currentFrame.isAutoPrefixTerm) {
+              continue;
+            }
             //if (DEBUG) System.out.println("  return term=" + brToString(term));
             return;
-          } else {
+          } else if (allowAutoPrefixTerms || currentFrame.isAutoPrefixTerm == false) {
             // Fallback to prior entry: the semantics of
             // this method is that the first call to
             // next() will return the term after the
             // requested term
-            currentFrame.nextEnt--;
+            //if (DEBUG) System.out.println("    fallback prior entry");
+            currentFrame.nextEnt = savNextEnt;
             currentFrame.lastSubFP = saveLastSubFP;
             currentFrame.startBytePos = saveStartBytePos;
             currentFrame.suffix = saveSuffix;
             currentFrame.suffixesReader.setPosition(savePos);
             currentFrame.termState.termBlockOrd = saveTermBlockOrd;
+            currentFrame.isAutoPrefixTerm = saveIsAutoPrefixTerm;
             System.arraycopy(currentFrame.suffixBytes, currentFrame.startBytePos, term.bytes, currentFrame.prefix, currentFrame.suffix);
             term.length = currentFrame.prefix + currentFrame.suffix;
             // If the last entry was a block we don't

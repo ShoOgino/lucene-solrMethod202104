@@ -1,0 +1,69 @@
+  /** Create a new writer.  The number of items (terms or
+   *  sub-blocks) per block will aim to be between
+   *  minItemsPerBlock and maxItemsPerBlock, though in some
+   *  cases the blocks may be smaller than the min.
+   *  For DOCS_ONLY fields, this terms dictionary will
+   *  insert automatically generated prefix terms for common
+   *  prefixes, as long as each prefix matches at least
+   *  {@code minItemsInAutoPrefix} other terms or prefixes,
+   *  and at most {@code maxItemsInAutoPrefix} other terms
+   *  or prefixes.  Set {@code minItemsInAutoPrefix} to 0
+   *  to disable auto-prefix terms. */
+  public BlockTreeTermsWriter(SegmentWriteState state,
+                              PostingsWriterBase postingsWriter,
+                              int minItemsInBlock,
+                              int maxItemsInBlock,
+                              int minItemsInAutoPrefix,
+                              int maxItemsInAutoPrefix)
+    throws IOException
+  {
+    validateSettings(minItemsInBlock,
+                     maxItemsInBlock);
+
+    this.minItemsInBlock = minItemsInBlock;
+    this.maxItemsInBlock = maxItemsInBlock;
+
+    validateAutoPrefixSettings(minItemsInAutoPrefix,
+                               maxItemsInAutoPrefix);
+
+    if (minItemsInAutoPrefix != 0) {
+      // TODO: can we used compressed bitset instead?  that auto-upgrades if it's dense enough...
+      prefixDocs = new FixedBitSet(state.segmentInfo.maxDoc());
+      prefixFixedBitsTermsEnum = new BitSetTermsEnum(prefixDocs);
+    } else {
+      prefixDocs = null;
+      prefixFixedBitsTermsEnum = null;
+    }
+
+    this.minItemsInAutoPrefix = minItemsInAutoPrefix;
+    this.maxItemsInAutoPrefix = maxItemsInAutoPrefix;
+
+    this.maxDoc = state.segmentInfo.maxDoc();
+    this.fieldInfos = state.fieldInfos;
+    this.postingsWriter = postingsWriter;
+
+    final String termsName = IndexFileNames.segmentFileName(state.segmentInfo.name, state.segmentSuffix, BlockTreeTermsReader.TERMS_EXTENSION);
+    termsOut = state.directory.createOutput(termsName, state.context);
+    boolean success = false;
+    IndexOutput indexOut = null;
+    try {
+      CodecUtil.writeIndexHeader(termsOut, BlockTreeTermsReader.TERMS_CODEC_NAME, BlockTreeTermsReader.VERSION_CURRENT,
+                                 state.segmentInfo.getId(), state.segmentSuffix);
+
+      final String indexName = IndexFileNames.segmentFileName(state.segmentInfo.name, state.segmentSuffix, BlockTreeTermsReader.TERMS_INDEX_EXTENSION);
+      indexOut = state.directory.createOutput(indexName, state.context);
+      CodecUtil.writeIndexHeader(indexOut, BlockTreeTermsReader.TERMS_INDEX_CODEC_NAME, BlockTreeTermsReader.VERSION_CURRENT,
+                                 state.segmentInfo.getId(), state.segmentSuffix);
+      //segment = state.segmentInfo.name;
+
+      postingsWriter.init(termsOut, state);                          // have consumer write its format/header
+      
+      this.indexOut = indexOut;
+      success = true;
+    } finally {
+      if (!success) {
+        IOUtils.closeWhileHandlingException(termsOut, indexOut);
+      }
+    }
+  }
+

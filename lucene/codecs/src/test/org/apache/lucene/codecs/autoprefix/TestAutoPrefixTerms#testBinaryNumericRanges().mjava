@@ -1,0 +1,126 @@
+  // Numbers are encoded in full binary (4 byte ints):
+  public void testBinaryNumericRanges() throws Exception {
+    if (VERBOSE) {
+      System.out.println("TEST: minItemsPerBlock=" + minItemsPerBlock);
+      System.out.println("TEST: maxItemsPerBlock=" + maxItemsPerBlock);
+      System.out.println("TEST: minTermsAutoPrefix=" + minTermsAutoPrefix);
+      System.out.println("TEST: maxTermsAutoPrefix=" + maxTermsAutoPrefix);
+    }
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+    iwc.setCodec(codec);
+    IndexWriter w = new IndexWriter(dir, iwc);
+    int numTerms = TestUtil.nextInt(random(), 3000, 50000);
+    Set<Integer> terms = new HashSet<>();
+    while (terms.size() < numTerms) {
+      terms.add(random().nextInt());
+    }
+
+    for(Integer term : terms) {
+      Document doc = new Document();
+      doc.add(new BinaryField("field", intToBytes(term)));
+      doc.add(new NumericDocValuesField("field", term));
+      w.addDocument(doc);
+    }
+
+    if (random().nextBoolean()) {
+      if (VERBOSE) System.out.println("TEST: now force merge");
+      w.forceMerge(1);
+    }
+
+    IndexReader r = DirectoryReader.open(w, true);
+
+    List<Integer> sortedTerms = new ArrayList<>(terms);
+    Collections.sort(sortedTerms);
+
+    if (VERBOSE) {
+      System.out.println("TEST: sorted terms:");
+      int idx = 0;
+      for(Integer term : sortedTerms) {
+        System.out.println(idx + ": " + term);
+        idx++;
+      }
+    }
+
+    int iters = atLeast(100);
+    for(int iter=0;iter<iters;iter++) {
+
+      int min, max;
+      while (true) {
+        min = random().nextInt();
+        max = random().nextInt();
+        if (min == max) {
+          continue;
+        } else if (min > max) {
+          int x = min;
+          min = max;
+          max = x;
+        }
+        break;
+      }
+
+      if (VERBOSE) {
+        System.out.println("\nTEST: iter=" + iter + " min=" + min + " (" + intToBytes(min) + ") max=" + max + " (" + intToBytes(max) + ")");
+      }
+      
+      boolean minInclusive = random().nextBoolean();
+      BytesRef minTerm = intToBytes(min);
+      boolean maxInclusive = random().nextBoolean();
+      BytesRef maxTerm = intToBytes(max);
+      CompiledAutomaton ca = new CompiledAutomaton(Automata.makeBinaryInterval(minTerm, minInclusive, maxTerm, maxInclusive),
+                                                   true, false, Integer.MAX_VALUE, true);
+
+      TermsEnum te = ca.getTermsEnum(MultiFields.getTerms(r, "field"));
+      NumericDocValues docValues = MultiDocValues.getNumericValues(r, "field");
+      PostingsEnum postingsEnum = null;
+      VerifyAutoPrefixTerms verifier = new VerifyAutoPrefixTerms(r.maxDoc(), minTerm, maxTerm);
+      while (te.next() != null) {
+        if (VERBOSE) {
+          System.out.println("  got term=" + te.term() + " docFreq=" + te.docFreq());
+        }
+        verifier.sawTerm(te.term());        
+        postingsEnum = te.postings(null, postingsEnum);
+        int docID;
+        while ((docID = postingsEnum.nextDoc()) != PostingsEnum.NO_MORE_DOCS) {
+          long v = docValues.get(docID);
+          assert v >= min && v <= max: "docID=" + docID + " v=" + v;
+          verifier.sawDoc(docID);
+        }
+      }
+      
+      int startLoc = Collections.binarySearch(sortedTerms, min);
+      if (startLoc < 0) {
+        startLoc = -startLoc-1;
+      } else if (minInclusive == false) {
+        startLoc++;
+      }
+      int endLoc = Collections.binarySearch(sortedTerms, max);
+      if (endLoc < 0) {
+        endLoc = -endLoc-2;
+      } else if (maxInclusive == false) {
+        endLoc--;
+      }
+      int expectedHits = endLoc-startLoc+1;
+      try {
+        verifier.finish(expectedHits, maxTermsAutoPrefix);
+      } catch (AssertionError ae) {
+        for(int i=0;i<numTerms;i++) {
+          if (verifier.allHits.get(i) == false) {
+            int v = (int) docValues.get(i);
+            boolean accept = (v > min || (v == min && minInclusive)) &&
+              (v < max || (v == max && maxInclusive));
+            if (accept) {
+              System.out.println("MISSING: docID=" + i + " v=" + v + " term=" + intToBytes(v));
+            }
+          }
+        }
+
+        throw ae;
+      }
+    }
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+

@@ -1,28 +1,65 @@
   @Override
   public void write(Fields fields) throws IOException {
+    //if (DEBUG) System.out.println("\nBTTW.write seg=" + segment);
 
     String lastField = null;
     for(String field : fields) {
       assert lastField == null || lastField.compareTo(field) < 0;
       lastField = field;
 
+      //if (DEBUG) System.out.println("\nBTTW.write seg=" + segment + " field=" + field);
       Terms terms = fields.terms(field);
       if (terms == null) {
         continue;
       }
+      FieldInfo fieldInfo = fieldInfos.fieldInfo(field);
+
+      // First pass to find all prefix terms we should compile into the index:
+      List<PrefixTerm> prefixTerms;
+      if (minItemsInAutoPrefix != 0) {
+        if (fieldInfo.getIndexOptions() != IndexOptions.DOCS) {
+          throw new IllegalStateException("ranges can only be indexed with IndexOptions.DOCS (field: " + fieldInfo.name + ")");
+        }
+        prefixTerms = new AutoPrefixTermsWriter(terms, minItemsInAutoPrefix, maxItemsInAutoPrefix).prefixes;
+        //if (DEBUG) {
+        //  for(PrefixTerm term : prefixTerms) {
+        //    System.out.println("field=" + fieldInfo.name + " PREFIX TERM: " + term);
+        //  }
+        //}
+      } else {
+        prefixTerms = null;
+      }
 
       TermsEnum termsEnum = terms.iterator(null);
-
       TermsWriter termsWriter = new TermsWriter(fieldInfos.fieldInfo(field));
+      int prefixTermUpto = 0;
       while (true) {
         BytesRef term = termsEnum.next();
+        //if (DEBUG) System.out.println("BTTW: next term " + term);
+
+        // Insert (merge sort) next prefix term(s):
+        if (prefixTerms != null) {
+          while (prefixTermUpto < prefixTerms.size() && (term == null || prefixTerms.get(prefixTermUpto).compareTo(term) <= 0)) {
+            PrefixTerm prefixTerm = prefixTerms.get(prefixTermUpto);
+            //if (DEBUG) System.out.println("seg=" + segment + " field=" + fieldInfo.name + " NOW INSERT prefix=" + prefixTerm);
+            termsWriter.write(prefixTerm.term, getAutoPrefixTermsEnum(terms, prefixTerm), prefixTerm);
+            prefixTermUpto++;
+          }
+        }
+
         if (term == null) {
           break;
         }
-        termsWriter.write(term, termsEnum);
+
+        //if (DEBUG) System.out.println("write field=" + fieldInfo.name + " term=" + brToString(term));
+        termsWriter.write(term, termsEnum, null);
       }
 
+      assert prefixTerms == null || prefixTermUpto == prefixTerms.size();
+
       termsWriter.finish();
+
+      //if (DEBUG) System.out.println("\nBTTW.write done seg=" + segment + " field=" + field);
     }
   }
 

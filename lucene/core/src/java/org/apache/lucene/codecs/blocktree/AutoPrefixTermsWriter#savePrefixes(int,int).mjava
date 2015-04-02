@@ -1,0 +1,139 @@
+  void savePrefixes(int prefixLength, int count) throws IOException {
+
+    assert count > 0;
+
+    //if (DEBUG2) {
+    //  BytesRef br = new BytesRef(lastTerm.bytes());
+    //  br.length = prefixLength;
+    //  System.out.println("  savePrefixes: seg=" + segment + " " + brToString(br) + " count=" + count + " pending.size()=" + pending.size());
+    //}
+
+    int lastSuffixLeadLabel = -2;
+
+    int start = pending.size()-count;
+    assert start >=0;
+
+    int end = pending.size();
+    int nextBlockStart = start;
+    int nextFloorLeadLabel = -1;
+    int prefixCount = 0;
+    int pendingCount = 0;
+    PrefixTerm lastPTEntry = null;
+    for (int i=start; i<end; i++) {
+
+      byte[] termBytes;
+      Object o = pending.get(i);
+      PrefixTerm ptEntry;
+      if (o instanceof byte[]) {
+        ptEntry = null;
+        termBytes = (byte[]) o;
+      } else {
+        ptEntry = (PrefixTerm) o;
+        termBytes = ptEntry.term.bytes;
+        if (ptEntry.prefix.length != prefixLength) {
+          assert ptEntry.prefix.length > prefixLength;
+          ptEntry = null;
+        }
+      }
+      pendingCount++;
+
+      //if (DEBUG) System.out.println("    check term=" + brToString(new BytesRef(termBytes)));
+
+      int suffixLeadLabel;
+
+      if (termBytes.length == prefixLength) {
+        // Suffix is 0, i.e. prefix 'foo' and term is
+        // 'foo' so the term has empty string suffix
+        // in this block
+        assert lastSuffixLeadLabel == -2;
+        suffixLeadLabel = -2;
+      } else {
+        suffixLeadLabel = termBytes[prefixLength] & 0xff;
+      }
+
+      // if (DEBUG) System.out.println("  i=" + i + " ent=" + ent + " suffixLeadLabel=" + suffixLeadLabel);
+
+      if (suffixLeadLabel != lastSuffixLeadLabel) {
+        // This is a boundary, a chance to make an auto-prefix term if we want:
+
+        // When we are "recursing" (generating auto-prefix terms on a block of
+        // floor'd auto-prefix terms), this assert is non-trivial because it
+        // ensures the floorLeadEnd of the previous terms is in fact less
+        // than the lead start of the current entry:
+        assert suffixLeadLabel > lastSuffixLeadLabel: "suffixLeadLabel=" + suffixLeadLabel + " vs lastSuffixLeadLabel=" + lastSuffixLeadLabel;
+
+        // NOTE: must check nextFloorLeadLabel in case minItemsInPrefix is 2 and prefix is 'a' and we've seen 'a' and then 'aa'
+        if (pendingCount >= minItemsInPrefix && end-nextBlockStart > maxItemsInPrefix && nextFloorLeadLabel != -1) {
+          // The count is too large for one block, so we must break it into "floor" blocks, where we record
+          // the leading label of the suffix of the first term in each floor block, so at search time we can
+          // jump to the right floor block.  We just use a naive greedy segmenter here: make a new floor
+          // block as soon as we have at least minItemsInBlock.  This is not always best: it often produces
+          // a too-small block as the final block:
+
+          // If the last entry was another prefix term of the same length, then it represents a range of terms, so we must use its ending
+          // prefix label as our ending label:
+          if (lastPTEntry != null) {
+            lastSuffixLeadLabel = lastPTEntry.floorLeadEnd;
+          }
+
+          savePrefix(prefixLength, nextFloorLeadLabel, lastSuffixLeadLabel);
+          pendingCount = 0;
+
+          prefixCount++;
+          nextFloorLeadLabel = suffixLeadLabel;
+          nextBlockStart = i;
+        }
+
+        if (nextFloorLeadLabel == -1) {
+          nextFloorLeadLabel = suffixLeadLabel;
+          //if (DEBUG) System.out.println("set first lead label=" + nextFloorLeadLabel);
+        }
+
+        lastSuffixLeadLabel = suffixLeadLabel;
+      }
+      lastPTEntry = ptEntry;
+    }
+
+    // Write last block, if any:
+    if (nextBlockStart < end) {
+      //System.out.println("  lastPTEntry=" + lastPTEntry + " lastSuffixLeadLabel=" + lastSuffixLeadLabel);
+      if (lastPTEntry != null) {
+        lastSuffixLeadLabel = lastPTEntry.floorLeadEnd;
+      }
+      assert lastSuffixLeadLabel >= nextFloorLeadLabel: "lastSuffixLeadLabel=" + lastSuffixLeadLabel + " nextFloorLeadLabel=" + nextFloorLeadLabel;
+      if (prefixCount == 0) {
+        if (prefixLength > 0) {
+          savePrefix(prefixLength, -2, 0xff);
+          prefixCount++;
+        } else {
+          // Don't add a prefix term for all terms in the index!
+        }
+      } else {
+        if (lastSuffixLeadLabel == -2) {
+          // Special case when closing the empty string root block:
+          lastSuffixLeadLabel = 0xff;
+        }
+        savePrefix(prefixLength, nextFloorLeadLabel, lastSuffixLeadLabel);
+        prefixCount++;
+      }
+    }
+
+    // Remove slice from the top of the pending stack, that we just wrote:
+    int sizeToClear = count;
+    if (prefixCount > 1) {
+      Object o = pending.get(pending.size()-count);
+      if (o instanceof byte[] && ((byte[]) o).length == prefixLength) {
+        // If we were just asked to write all f* terms, but there were too many and so we made floor blocks, the exact term 'f' will remain
+        // as its own item, followed by floor block terms like f[a-m]*, f[n-z]*, so in this case we leave 3 (not 2) items on the pending stack:
+        sizeToClear--;
+      }
+    }
+    pending.subList(pending.size()-sizeToClear, pending.size()).clear();
+
+    // Append prefix terms for each prefix, since these count like real terms that also need to be "rolled up":
+    for(int i=0;i<prefixCount;i++) {
+      PrefixTerm pt = prefixes.get(prefixes.size()-(prefixCount-i));
+      pending.add(pt);
+    }
+  }
+

@@ -2,7 +2,7 @@
   // scan the entries check if the suffix matches.
   public SeekStatus scanToTermNonLeaf(BytesRef target, boolean exactOnly) throws IOException {
 
-    //if (DEBUG) System.out.println("    scanToTermNonLeaf: block fp=" + fp + " prefix=" + prefix + " nextEnt=" + nextEnt + " (of " + entCount + ") target=" + brToString(target) + " term=" + brToString(term));
+    //if (DEBUG) System.out.println("    scanToTermNonLeaf: block fp=" + fp + " prefix=" + prefix + " nextEnt=" + nextEnt + " (of " + entCount + ") target=" + brToString(target) + " term=" + brToString(target));
 
     assert nextEnt != -1;
 
@@ -17,30 +17,60 @@
     assert prefixMatches(target);
 
     // Loop over each entry (term or sub-block) in this block:
-    //nextTerm: while(nextEnt < entCount) {
-    nextTerm: while (true) {
+    nextTerm: while(nextEnt < entCount) {
+
       nextEnt++;
 
       final int code = suffixesReader.readVInt();
-      suffix = code >>> 1;
-      // if (DEBUG) {
-      //   BytesRef suffixBytesRef = new BytesRef();
-      //   suffixBytesRef.bytes = suffixBytes;
-      //   suffixBytesRef.offset = suffixesReader.getPosition();
-      //   suffixBytesRef.length = suffix;
-      //   System.out.println("      cycle: " + ((code&1)==1 ? "sub-block" : "term") + " " + (nextEnt-1) + " (of " + entCount + ") suffix=" + brToString(suffixBytesRef));
-      // }
+      if (versionAutoPrefix == false) {
+        suffix = code >>> 1;
+      } else {
+        suffix = code >>> 2;
+      }
 
-      ste.termExists = (code & 1) == 0;
+      //if (DEBUG) {
+      //  BytesRef suffixBytesRef = new BytesRef();
+      //  suffixBytesRef.bytes = suffixBytes;
+      //  suffixBytesRef.offset = suffixesReader.getPosition();
+      //  suffixBytesRef.length = suffix;
+      //  System.out.println("      cycle: " + ((code&1)==1 ? "sub-block" : "term") + " " + (nextEnt-1) + " (of " + entCount + ") suffix=" + brToString(suffixBytesRef));
+      //}
+
       final int termLen = prefix + suffix;
       startBytePos = suffixesReader.getPosition();
       suffixesReader.skipBytes(suffix);
-      if (ste.termExists) {
-        state.termBlockOrd++;
-        subCode = 0;
+      if (versionAutoPrefix == false) {
+        ste.termExists = (code & 1) == 0;
+        if (ste.termExists) {
+          state.termBlockOrd++;
+          subCode = 0;
+        } else {
+          subCode = suffixesReader.readVLong();
+          lastSubFP = fp - subCode;
+        }
       } else {
-        subCode = suffixesReader.readVLong();
-        lastSubFP = fp - subCode;
+        switch (code & 3) {
+        case 0:
+          // Normal term
+          ste.termExists = true;
+          state.termBlockOrd++;
+          subCode = 0;
+          break;
+        case 1:
+          // Sub-block
+          ste.termExists = false;
+          subCode = suffixesReader.readVLong();
+          lastSubFP = fp - subCode;
+          break;
+        case 2:
+        case 3:
+          // Floor prefix term: skip it
+          //if (DEBUG) System.out.println("        skip floor prefix term");
+          suffixesReader.readByte();
+          ste.termExists = false;
+          state.termBlockOrd++;
+          continue;
+        }
       }
 
       final int targetLimit = target.offset + (target.length < termLen ? target.length : termLen);
@@ -49,7 +79,7 @@
       // Loop over bytes in the suffix, comparing to
       // the target
       int bytePos = startBytePos;
-      while(true) {
+      while (true) {
         final int cmp;
         final boolean stop;
         if (targetPos < targetLimit) {
@@ -64,24 +94,18 @@
         if (cmp < 0) {
           // Current entry is still before the target;
           // keep scanning
-
-          if (nextEnt == entCount) {
-            if (exactOnly) {
-              fillTerm();
-              //termExists = true;
-            }
-            // We are done scanning this block
-            break nextTerm;
-          } else {
-            continue nextTerm;
-          }
+          continue nextTerm;
         } else if (cmp > 0) {
 
           // Done!  Current entry is after target --
           // return NOT_FOUND:
           fillTerm();
 
+          //if (DEBUG) System.out.println("        maybe done exactOnly=" + exactOnly + " ste.termExists=" + ste.termExists);
+
           if (!exactOnly && !ste.termExists) {
+            //System.out.println("  now pushFrame");
+            // TODO this 
             // We are on a sub-block, and caller wants
             // us to position to the next term after
             // the target, so we must recurse into the

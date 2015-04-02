@@ -19,6 +19,7 @@
     
     String lastField = null;
     for (String field : fields) {
+
       // MultiFieldsEnum relies upon this order...
       if (lastField != null && field.compareTo(lastField) <= 0) {
         throw new RuntimeException("fields out of order: lastField=" + lastField + " field=" + field);
@@ -128,7 +129,8 @@
         if (term == null) {
           break;
         }
-
+        // System.out.println("CI: field=" + field + " check term=" + term + " docFreq=" + termsEnum.docFreq());
+        
         assert term.isValid();
         
         // make sure terms arrive in order according to
@@ -428,13 +430,21 @@
         // docs got deleted and then merged away):
         
       } else {
+
+        long fieldTermCount = (status.delTermCount+status.termCount)-termCountStart;
+
+        if (hasFreqs == false) {
+          // For DOCS_ONLY fields we recursively test term ranges:
+          checkTermRanges(field, maxDoc, fieldTerms, fieldTermCount);
+        }
+
         final Object stats = fieldTerms.getStats();
         assert stats != null;
         if (status.blockTreeStats == null) {
           status.blockTreeStats = new HashMap<>();
         }
         status.blockTreeStats.put(field, stats);
-        
+
         if (sumTotalTermFreq != 0) {
           final long v = fields.terms(field).getSumTotalTermFreq();
           if (v != -1 && sumTotalTermFreq != v) {
@@ -449,17 +459,18 @@
           }
         }
         
-        if (fieldTerms != null) {
-          final int v = fieldTerms.getDocCount();
-          if (v != -1 && visitedDocs.cardinality() != v) {
-            throw new RuntimeException("docCount for field " + field + "=" + v + " != recomputed docCount=" + visitedDocs.cardinality());
-          }
+        final int v = fieldTerms.getDocCount();
+        if (v != -1 && visitedDocs.cardinality() != v) {
+          throw new RuntimeException("docCount for field " + field + "=" + v + " != recomputed docCount=" + visitedDocs.cardinality());
         }
         
         // Test seek to last term:
         if (lastTerm != null) {
           if (termsEnum.seekCeil(lastTerm.get()) != TermsEnum.SeekStatus.FOUND) { 
             throw new RuntimeException("seek to last term " + lastTerm + " failed");
+          }
+          if (termsEnum.term().equals(lastTerm.get()) == false) {
+            throw new RuntimeException("seek to last term " + lastTerm.get() + " returned FOUND but seeked to the wrong term " + termsEnum.term());
           }
           
           int expectedDocFreq = termsEnum.docFreq();
@@ -469,21 +480,21 @@
             docFreq++;
           }
           if (docFreq != expectedDocFreq) {
-            throw new RuntimeException("docFreq for last term " + lastTerm + "=" + expectedDocFreq + " != recomputed docFreq=" + docFreq);
+            throw new RuntimeException("docFreq for last term " + lastTerm.toBytesRef() + "=" + expectedDocFreq + " != recomputed docFreq=" + docFreq);
           }
         }
         
         // check unique term count
         long termCount = -1;
         
-        if ((status.delTermCount+status.termCount)-termCountStart > 0) {
+        if (fieldTermCount > 0) {
           termCount = fields.terms(field).size();
           
-          if (termCount != -1 && termCount != status.delTermCount + status.termCount - termCountStart) {
-            throw new RuntimeException("termCount mismatch " + (status.delTermCount + termCount) + " vs " + (status.termCount - termCountStart));
+          if (termCount != -1 && termCount != fieldTermCount) {
+            throw new RuntimeException("termCount mismatch " + termCount + " vs " + fieldTermCount);
           }
         }
-        
+
         // Test seeking by ord
         if (hasOrd && status.termCount-termCountStart > 0) {
           int seekCount = (int) Math.min(10000L, termCount);
@@ -502,6 +513,9 @@
             for(int i=seekCount-1;i>=0;i--) {
               if (termsEnum.seekCeil(seekTerms[i]) != TermsEnum.SeekStatus.FOUND) {
                 throw new RuntimeException("seek to existing term " + seekTerms[i] + " failed");
+              }
+              if (termsEnum.term().equals(seekTerms[i]) == false) {
+                throw new RuntimeException("seek to existing term " + seekTerms[i] + " returned FOUND but seeked to the wrong term " + termsEnum.term());
               }
               
               docs = termsEnum.postings(liveDocs, docs, PostingsEnum.NONE);

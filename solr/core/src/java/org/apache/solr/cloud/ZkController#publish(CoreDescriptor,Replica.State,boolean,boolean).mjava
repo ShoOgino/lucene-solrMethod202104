@@ -1,7 +1,7 @@
   /**
    * Publish core state to overseer.
    */
-  public void publish(final CoreDescriptor cd, final String state, boolean updateLastState, boolean forcePublish) throws KeeperException, InterruptedException {
+  public void publish(final CoreDescriptor cd, final Replica.State state, boolean updateLastState, boolean forcePublish) throws KeeperException, InterruptedException {
     if (!forcePublish) {
       try (SolrCore core = cc.getCore(cd.getName())) {
         if (core == null || core.isClosed()) {
@@ -17,7 +17,7 @@
     try {
       if (cd != null && cd.getName() != null)
         MDCUtils.setCore(cd.getName());
-      log.info("publishing core={} state={} collection={}", cd.getName(), state, collection);
+      log.info("publishing core={} state={} collection={}", cd.getName(), state.toString(), collection);
       //System.out.println(Thread.currentThread().getStackTrace()[3]);
       Integer numShards = cd.getCloudDescriptor().getNumShards();
       if (numShards == null) { //XXX sys prop hack
@@ -32,21 +32,21 @@
       String coreNodeName = cd.getCloudDescriptor().getCoreNodeName();
       // If the leader initiated recovery, then verify that this replica has performed
       // recovery as requested before becoming active; don't even look at lirState if going down
-      if (!ZkStateReader.DOWN.equals(state)) {
-        String lirState = getLeaderInitiatedRecoveryState(collection, shardId, coreNodeName);
+      if (state != Replica.State.DOWN) {
+        final Replica.State lirState = getLeaderInitiatedRecoveryState(collection, shardId, coreNodeName);
         if (lirState != null) {
-          if (ZkStateReader.ACTIVE.equals(state)) {
+          if (state == Replica.State.ACTIVE) {
             // trying to become active, so leader-initiated state must be recovering
-            if (ZkStateReader.RECOVERING.equals(lirState)) {
-              updateLeaderInitiatedRecoveryState(collection, shardId, coreNodeName, ZkStateReader.ACTIVE, null, true);
-            } else if (ZkStateReader.DOWN.equals(lirState)) {
+            if (lirState == Replica.State.RECOVERING) {
+              updateLeaderInitiatedRecoveryState(collection, shardId, coreNodeName, Replica.State.ACTIVE, null);
+            } else if (lirState == Replica.State.DOWN) {
               throw new SolrException(ErrorCode.INVALID_STATE,
                   "Cannot publish state of core '" + cd.getName() + "' as active without recovering first!");
             }
-          } else if (ZkStateReader.RECOVERING.equals(state)) {
+          } else if (state == Replica.State.RECOVERING) {
             // if it is currently DOWN, then trying to enter into recovering state is good
-            if (ZkStateReader.DOWN.equals(lirState)) {
-              updateLeaderInitiatedRecoveryState(collection, shardId, coreNodeName, ZkStateReader.RECOVERING, null, true);
+            if (lirState == Replica.State.DOWN) {
+              updateLeaderInitiatedRecoveryState(collection, shardId, coreNodeName, Replica.State.RECOVERING, null);
             }
           }
         }
@@ -54,7 +54,7 @@
 
       Map<String, Object> props = new HashMap<>();
       props.put(Overseer.QUEUE_OPERATION, "state");
-      props.put(ZkStateReader.STATE_PROP, state);
+      props.put(ZkStateReader.STATE_PROP, state.toString());
       props.put(ZkStateReader.BASE_URL_PROP, getBaseUrl());
       props.put(ZkStateReader.CORE_NAME_PROP, cd.getName());
       props.put(ZkStateReader.ROLES_PROP, cd.getCloudDescriptor().getRoles());

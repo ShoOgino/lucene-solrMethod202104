@@ -7,8 +7,9 @@
     assert badReplica != null;
     assert badReplica.collection != null;
     assert badReplica.slice != null;
-    Map<String,Counts> counts = new HashMap<>();
-    ValueComparator vc = new ValueComparator(counts);
+    log.debug("getBestCreateUrl for " + badReplica.replica);
+    Map<String,Counts> counts = new HashMap<String, Counts>();
+    Set<String> unsuitableHosts = new HashSet<String>();
     
     Set<String> liveNodes = new HashSet<>(zkStateReader.getClusterState().getLiveNodes());
     
@@ -23,20 +24,20 @@
         for (Slice slice : slices) {
           // only look at active shards
           if (slice.getState() == Slice.State.ACTIVE) {
-            log.debug("look at slice {} as possible create candidate", slice.getName()); 
+            log.debug("look at slice {} for collection {} as possible create candidate", slice.getName(), collection); 
             Collection<Replica> replicas = slice.getReplicas();
 
             for (Replica replica : replicas) {
               liveNodes.remove(replica.getNodeName());
-              if (replica.getStr(ZkStateReader.BASE_URL_PROP).equals(
+              String baseUrl = replica.getStr(ZkStateReader.BASE_URL_PROP);
+              if (baseUrl.equals(
                   badReplica.replica.getStr(ZkStateReader.BASE_URL_PROP))) {
                 continue;
               }
-              String baseUrl = replica.getStr(ZkStateReader.BASE_URL_PROP);
               // on a live node?
-              log.debug("nodename={} livenodes={}", replica.getNodeName(), clusterState.getLiveNodes());
+              log.debug("collection={} nodename={} livenodes={}", collection, replica.getNodeName(), clusterState.getLiveNodes());
               boolean live = clusterState.liveNodesContain(replica.getNodeName());
-              log.debug("look at replica {} as possible create candidate, live={}", replica.getName(), live); 
+              log.debug("collection={} look at replica {} as possible create candidate, live={}", collection, replica.getName(), live); 
               if (live) {
                 Counts cnt = counts.get(baseUrl);
                 if (cnt == null) {
@@ -54,8 +55,12 @@
                 
                 // TODO: this is collection wide and we want to take into
                 // account cluster wide - use new cluster sys prop
-                int maxShardsPerNode = docCollection.getMaxShardsPerNode();
-                log.debug("max shards per node={} good replicas={}", maxShardsPerNode, cnt);
+                Integer maxShardsPerNode = badReplica.collection.getMaxShardsPerNode();
+                if (maxShardsPerNode == null) {
+                  log.warn("maxShardsPerNode is not defined for collection, name=" + badReplica.collection.getName());
+                  maxShardsPerNode = Integer.MAX_VALUE;
+                }
+                log.debug("collection={} node={} max shards per node={} potential hosts={}", collection, baseUrl, maxShardsPerNode, cnt);
                 
                 Collection<Replica> badSliceReplicas = null;
                 DocCollection c = clusterState.getCollection(badReplica.collection.getName());
@@ -66,10 +71,13 @@
                   }
                 }
                 boolean alreadyExistsOnNode = replicaAlreadyExistsOnNode(zkStateReader.getClusterState(), badSliceReplicas, badReplica, baseUrl);
-                if (alreadyExistsOnNode || cnt.collectionShardsOnNode >= maxShardsPerNode) {
-                  counts.remove(replica.getStr(ZkStateReader.BASE_URL_PROP));
+                if (unsuitableHosts.contains(baseUrl) || alreadyExistsOnNode || cnt.collectionShardsOnNode >= maxShardsPerNode) {
+                  counts.remove(baseUrl);
+                  unsuitableHosts.add(baseUrl);
+                  log.debug("not a candidate node, collection={} node={} max shards per node={} good replicas={}", collection, baseUrl, maxShardsPerNode, cnt);
                 } else {
-                  counts.put(replica.getStr(ZkStateReader.BASE_URL_PROP), cnt);
+                  counts.put(baseUrl, cnt);
+                  log.debug("is a candidate node, collection={} node={} max shards per node={} good replicas={}", collection, baseUrl, maxShardsPerNode, cnt);
                 }
               }
             }
@@ -83,14 +91,17 @@
     }
     
     if (counts.size() == 0) {
+      log.debug("no suitable hosts found for getBestCreateUrl for collection={}", badReplica.collection.getName());
       return null;
     }
     
-    Map<String,Counts> sortedCounts = new TreeMap<>(vc);
+    ValueComparator vc = new ValueComparator(counts);
+    Map<String,Counts> sortedCounts = new TreeMap<String, Counts>(vc);
     sortedCounts.putAll(counts);
     
-    log.debug("empty nodes={}", liveNodes);
-    log.debug("sorted hosts={}", sortedCounts);
+    log.debug("empty nodes={} for collection={}", liveNodes, badReplica.collection.getName());
+    log.debug("sorted hosts={} for collection={}", sortedCounts, badReplica.collection.getName());
+    log.debug("unsuitable hosts={} for collection={}", unsuitableHosts, badReplica.collection.getName());
     
     return sortedCounts.keySet().iterator().next();
   }

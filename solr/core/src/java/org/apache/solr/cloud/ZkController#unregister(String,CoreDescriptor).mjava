@@ -1,0 +1,40 @@
+  public void unregister(String coreName, CoreDescriptor cd) throws InterruptedException, KeeperException {
+    final String coreNodeName = cd.getCloudDescriptor().getCoreNodeName();
+    final String collection = cd.getCloudDescriptor().getCollectionName();
+
+    if (Strings.isNullOrEmpty(collection)) {
+      log.error("No collection was specified.");
+      assert false : "No collection was specified [" + collection + "]";
+      return;
+    }
+
+    ElectionContext context = electionContexts.remove(new ContextKey(collection, coreNodeName));
+
+    if (context != null) {
+      context.cancelElection();
+    }
+    
+    final Collection<SolrCore> cores = cc.getCores();
+    
+    // if there is no SolrCore which is a member of this collection, remove the watch
+    CloudDescriptor cloudDescriptor = cd.getCloudDescriptor();
+    boolean removeWatch = true;
+    for (SolrCore solrCore : cores) {
+      final CloudDescriptor cloudDesc = solrCore.getCoreDescriptor().getCloudDescriptor();
+      if (cloudDesc != null && cloudDescriptor.getCollectionName().equals(cloudDesc.getCollectionName())) {
+        removeWatch = false;
+        break;
+      }
+    }
+    
+    if (removeWatch) {
+      zkStateReader.removeZKWatch(collection);
+    }
+    ZkNodeProps m = new ZkNodeProps(Overseer.QUEUE_OPERATION,
+        OverseerAction.DELETECORE.toLower(), ZkStateReader.CORE_NAME_PROP, coreName,
+        ZkStateReader.NODE_NAME_PROP, getNodeName(),
+        ZkStateReader.COLLECTION_PROP, cloudDescriptor.getCollectionName(),
+        ZkStateReader.CORE_NODE_NAME_PROP, coreNodeName);
+    overseerJobQueue.offer(ZkStateReader.toJSON(m));
+  }
+

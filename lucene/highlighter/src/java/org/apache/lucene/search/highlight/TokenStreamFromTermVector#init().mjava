@@ -1,14 +1,21 @@
   //We delay initialization because we can see which attributes the consumer wants, particularly payloads
   private void init() throws IOException {
     assert !initialized;
+    short dpEnumFlags = PostingsEnum.POSITIONS;
     if (vector.hasOffsets()) {
+      dpEnumFlags |= PostingsEnum.OFFSETS;
       offsetAttribute = addAttribute(OffsetAttribute.class);
     }
     if (vector.hasPayloads() && hasAttribute(PayloadAttribute.class)) {
+      dpEnumFlags |= (PostingsEnum.OFFSETS | PostingsEnum.PAYLOADS);//must ask for offsets too
       payloadAttribute = getAttribute(PayloadAttribute.class);
       payloadsBytesRefArray = new BytesRefArray(Counter.newCounter());
       spareBytesRefBuilder = new BytesRefBuilder();
     }
+
+    // We put term data here
+    termCharsBuilder = new CharsRefBuilder();
+    termCharsBuilder.grow((int) (vector.size() * 7));//7 is over-estimate of average term len
 
     // Step 1: iterate termsEnum and create a token, placing into an array of tokens by position
 
@@ -19,14 +26,17 @@
     final TermsEnum termsEnum = vector.iterator();
     BytesRef termBytesRef;
     PostingsEnum dpEnum = null;
+    CharsRefBuilder tempCharsRefBuilder = new CharsRefBuilder();//only for UTF8->UTF16 call
     //int sumFreq = 0;
     while ((termBytesRef = termsEnum.next()) != null) {
       //Grab the term (in same way as BytesRef.utf8ToString() but we don't want a String obj)
       // note: if term vectors supported seek by ord then we might just keep an int and seek by ord on-demand
-      final char[] termChars = new char[termBytesRef.length];
-      final int termCharsLen = UnicodeUtil.UTF8toUTF16(termBytesRef, termChars);
+      tempCharsRefBuilder.grow(termBytesRef.length);
+      final int termCharsLen = UnicodeUtil.UTF8toUTF16(termBytesRef, tempCharsRefBuilder.chars());
+      final int termCharsOff = termCharsBuilder.length();
+      termCharsBuilder.append(tempCharsRefBuilder.chars(), 0, termCharsLen);
 
-      dpEnum = termsEnum.postings(null, dpEnum, PostingsEnum.POSITIONS);
+      dpEnum = termsEnum.postings(null, dpEnum, dpEnumFlags);
       assert dpEnum != null; // presumably checked by TokenSources.hasPositions earlier
       dpEnum.nextDoc();
       final int freq = dpEnum.freq();
@@ -34,11 +44,14 @@
       for (int j = 0; j < freq; j++) {
         int pos = dpEnum.nextPosition();
         TokenLL token = new TokenLL();
-        token.termChars = termChars;
-        token.termCharsLen = termCharsLen;
+        token.termCharsOff = termCharsOff;
+        token.termCharsLen = (short) Math.min(termCharsLen, Short.MAX_VALUE);
         if (offsetAttribute != null) {
           token.startOffset = dpEnum.startOffset();
-          token.endOffset = dpEnum.endOffset();
+          if (token.startOffset > maxStartOffset) {
+            continue;//filter this token out; exceeds threshold
+          }
+          token.endOffsetInc = (short) Math.min(dpEnum.endOffset() - token.startOffset, Short.MAX_VALUE);
           if (pos == -1) {
             pos = token.startOffset >> 3;//divide by 8
           }

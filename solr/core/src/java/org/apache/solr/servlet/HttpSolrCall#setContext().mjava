@@ -1,0 +1,127 @@
+  private void setContext() throws Exception {
+    //The states of client that is invalid in this request
+    Aliases aliases = null;
+    String corename = "";
+    String origCorename = null;
+    // set a request timer which can be reused by requests if needed
+    req.setAttribute(SolrRequestParsers.REQUEST_TIMER_SERVLET_ATTRIBUTE, new RTimer());
+    // put the core container in request attribute
+    req.setAttribute("org.apache.solr.CoreContainer", cores);
+    path = req.getServletPath();
+    if (req.getPathInfo() != null) {
+      // this lets you handle /update/commit when /update is a servlet
+      path += req.getPathInfo();
+    }
+    if (solrDispatchFilter.pathPrefix != null && path.startsWith(solrDispatchFilter.pathPrefix)) {
+      path = path.substring(solrDispatchFilter.pathPrefix.length());
+    }
+    // check for management path
+    String alternate = cores.getManagementPath();
+    if (alternate != null && path.startsWith(alternate)) {
+      path = path.substring(0, alternate.length());
+    }
+    // unused feature ?
+    int idx = path.indexOf(':');
+    if (idx > 0) {
+      // save the portion after the ':' for a 'handler' path parameter
+      path = path.substring(0, idx);
+    }
+
+    boolean usingAliases = false;
+    List<String> collectionsList = null;
+
+    // Check for container handlers
+    handler = cores.getRequestHandler(path);
+    if (handler != null) {
+      solrReq = SolrRequestParsers.DEFAULT.parse(null, path, req);
+      solrReq.getContext().put(CoreContainer.class.getName(), cores);
+      action = ADMIN;
+      return;
+    } else {
+      //otherwise, we should find a core from the path
+      idx = path.indexOf("/", 1);
+      if (idx > 1) {
+        // try to get the corename as a request parameter first
+        corename = path.substring(1, idx);
+
+        // look at aliases
+        if (cores.isZooKeeperAware()) {
+          origCorename = corename;
+          ZkStateReader reader = cores.getZkController().getZkStateReader();
+          aliases = reader.getAliases();
+          if (aliases != null && aliases.collectionAliasSize() > 0) {
+            usingAliases = true;
+            String alias = aliases.getCollectionAlias(corename);
+            if (alias != null) {
+              collectionsList = StrUtils.splitSmart(alias, ",", true);
+              corename = collectionsList.get(0);
+            }
+          }
+        }
+
+        core = cores.getCore(corename);
+        if (core != null) {
+          path = path.substring(idx);
+        }
+      }
+      if (core == null) {
+        if (!cores.isZooKeeperAware()) {
+          core = cores.getCore("");
+        }
+      }
+    }
+
+    if (core != null) addMDCValues();
+
+    if (core == null && cores.isZooKeeperAware()) {
+      // we couldn't find the core - lets make sure a collection was not specified instead
+      core = getCoreByCollection(corename);
+      if (core != null) {
+        // we found a core, update the path
+        path = path.substring(idx);
+        addMDCValues();
+      }
+
+      // if we couldn't find it locally, look on other nodes
+      extractRemotePath(corename, origCorename, idx);
+      if (action != null) return;
+
+      // try the default core
+      if (core == null) {
+        core = cores.getCore("");
+        if (core != null) addMDCValues();
+      }
+    }
+
+    // With a valid core...
+    if (core != null) {
+      config = core.getSolrConfig();
+      // get or create/cache the parser for the core
+      SolrRequestParsers parser = config.getRequestParsers();
+
+
+      // Determine the handler from the url path if not set
+      // (we might already have selected the cores handler)
+      extractHandlerFromURLPath(parser);
+      if (action != null) return;
+
+      // With a valid handler and a valid core...
+      if (handler != null) {
+        // if not a /select, create the request
+        if (solrReq == null) {
+          solrReq = parser.parse(core, path, req);
+        }
+
+        if (usingAliases) {
+          processAliases(aliases, collectionsList);
+        }
+
+        action = PROCESS;
+        return; // we are done with a valid handler
+      }
+    }
+    SolrDispatchFilter.log.debug("no handler or core retrieved for " + path + ", follow through...");
+
+    action = PASSTHROUGH;
+  }
+

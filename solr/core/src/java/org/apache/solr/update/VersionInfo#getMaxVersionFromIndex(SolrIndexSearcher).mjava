@@ -1,0 +1,34 @@
+  public Long getMaxVersionFromIndex(SolrIndexSearcher searcher) throws IOException {
+
+    String versionFieldName = versionField.getName();
+
+    log.info("Refreshing highest value of {} for {} version buckets from index", versionFieldName, buckets.length);
+    long maxVersionInIndex = 0L;
+
+    // if indexed, then we have terms to get the max from
+    if (versionField.indexed()) {
+      Terms versionTerms = searcher.getLeafReader().terms(versionFieldName);
+      if (versionTerms != null) {
+        maxVersionInIndex = NumericUtils.getMaxLong(versionTerms);
+        log.info("Found MAX value {} from Terms for {} in index", maxVersionInIndex, versionFieldName);
+      } else {
+        log.warn("No terms found for {}, cannot seed version bucket highest value from index", versionFieldName);
+      }
+    } else {
+      ValueSource vs = versionField.getType().getValueSource(versionField, null);
+      Map funcContext = ValueSource.newContext(searcher);
+      vs.createWeight(funcContext, searcher);
+      // TODO: multi-thread this
+      for (LeafReaderContext ctx : searcher.getTopReaderContext().leaves()) {
+        int maxDoc = ctx.reader().maxDoc();
+        FunctionValues fv = vs.getValues(funcContext, ctx);
+        for (int doc = 0; doc < maxDoc; doc++) {
+          long v = fv.longVal(doc);
+          maxVersionInIndex = Math.max(v, maxVersionInIndex);
+        }
+      }
+    }
+
+    return maxVersionInIndex;
+  }
+

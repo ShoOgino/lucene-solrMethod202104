@@ -36,6 +36,8 @@
     FastVectorHighlighter fvh = null; // lazy
     FieldQuery fvhFieldQuery = null; // lazy
 
+    IndexReader reader = new TermVectorReusingLeafReader(req.getSearcher().getLeafReader()); // SOLR-5855
+
     // Highlight each document
     NamedList fragments = new SimpleOrderedMap();
     DocIterator iterator = docs.iterator();
@@ -43,9 +45,19 @@
       int docId = iterator.nextDoc();
       StoredDocument doc = searcher.doc(docId, preFetchFieldNames);
 
-      NamedList docSummaries = new SimpleOrderedMap();
+      @SuppressWarnings("rawtypes")
+      NamedList docHighlights = new SimpleOrderedMap();
+      // Highlight per-field
       for (String fieldName : fieldNames) {
-        if (useFastVectorHighlighter(params, schema, fieldName)) {
+        SchemaField schemaField = schema.getFieldOrNull(fieldName);
+
+        Object fieldHighlights; // object type allows flexibility for subclassers
+        if (schemaField == null) {
+          fieldHighlights = null;
+        } else if (schemaField.getType() instanceof org.apache.solr.schema.TrieField) {
+          // TODO: highlighting numeric fields is broken (Lucene) - so we disable them until fixed (see LUCENE-3080)!
+          fieldHighlights = null;
+        } else if (useFastVectorHighlighter(params, schemaField)) {
           if (fvhFieldQuery == null) {
             fvh = new FastVectorHighlighter(
                 // FVH cannot process hl.usePhraseHighlighter parameter per-field basis
@@ -53,14 +65,24 @@
                 // FVH cannot process hl.requireFieldMatch parameter per-field basis
                 params.getBool(HighlightParams.FIELD_MATCH, false));
             fvh.setPhraseLimit(params.getInt(HighlightParams.PHRASE_LIMIT, SolrHighlighter.DEFAULT_PHRASE_LIMIT));
-            fvhFieldQuery = fvh.getFieldQuery(query, searcher.getIndexReader());
+            fvhFieldQuery = fvh.getFieldQuery(query, reader);
           }
-          doHighlightingByFastVectorHighlighter(fvh, fvhFieldQuery, req, docSummaries, docId, doc, fieldName);
-        } else {
-          doHighlightingByHighlighter(query, req, docSummaries, docId, doc, fieldName);
+          fieldHighlights =
+              doHighlightingByFastVectorHighlighter(doc, docId, schemaField, fvh, fvhFieldQuery, reader, req);
+        } else { // standard/default highlighter
+          fieldHighlights = doHighlightingByHighlighter(doc, docId, schemaField, query, reader, req);
+        }
+
+        if (fieldHighlights == null) {
+          // no summaries made; copy text from alternate field
+          fieldHighlights = alternateField(doc, fieldName, req);
+        }
+
+        if (fieldHighlights != null) {
+          docHighlights.add(fieldName, fieldHighlights);
         }
       } // for each field
-      fragments.add(schema.printableUniqueKey(doc), docSummaries);
+      fragments.add(schema.printableUniqueKey(doc), docHighlights);
     } // for each doc
     return fragments;
   }

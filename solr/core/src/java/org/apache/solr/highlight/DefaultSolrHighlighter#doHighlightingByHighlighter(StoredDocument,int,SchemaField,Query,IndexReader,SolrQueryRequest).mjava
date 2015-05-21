@@ -1,24 +1,19 @@
+  /** Highlights and returns the highlight object for this field -- a String[] by default. Null if none. */
   @SuppressWarnings("unchecked")
-  protected void doHighlightingByHighlighter( Query query, SolrQueryRequest req, NamedList docSummaries,
-                                              int docId, StoredDocument doc, String fieldName ) throws IOException {
-    final SolrIndexSearcher searcher = req.getSearcher();
-    final IndexSchema schema = searcher.getSchema();
+  protected Object doHighlightingByHighlighter(StoredDocument doc, int docId, SchemaField schemaField, Query query,
+                                               IndexReader reader, SolrQueryRequest req) throws IOException {
     final SolrParams params = req.getParams();
-
-    // TODO: highlighting numeric fields is broken (Lucene) - so we disable them until fixed (see LUCENE-3080)!
-    // BEGIN: Hack
-    final SchemaField schemaField = schema.getFieldOrNull(fieldName);
-    if (schemaField != null && schemaField.getType() instanceof org.apache.solr.schema.TrieField) return;
-    // END: Hack
+    final String fieldName = schemaField.getName();
 
     final int mvToExamine =
         req.getParams().getFieldInt(fieldName, HighlightParams.MAX_MULTIVALUED_TO_EXAMINE,
-            (schemaField != null && schemaField.multiValued()) ? Integer.MAX_VALUE : 1);
+            (schemaField.multiValued()) ? Integer.MAX_VALUE : 1);
+
     // Technically this is the max *fragments* (snippets), not max values:
     int mvToMatch =
         req.getParams().getFieldInt(fieldName, HighlightParams.MAX_MULTIVALUED_TO_MATCH, Integer.MAX_VALUE);
     if (mvToExamine <= 0 || mvToMatch <= 0) {
-      return;
+      return null;
     }
 
     int maxCharsToAnalyze = params.getFieldInt(fieldName,
@@ -28,9 +23,9 @@
       maxCharsToAnalyze = Integer.MAX_VALUE;
     }
 
-    List<String> fieldValues = getFieldValues(req, doc, fieldName, mvToExamine, maxCharsToAnalyze);
+    List<String> fieldValues = getFieldValues(doc, fieldName, mvToExamine, maxCharsToAnalyze, req);
     if (fieldValues.isEmpty()) {
-      return;
+      return null;
     }
 
     // preserve order of values in a multiValued list
@@ -42,7 +37,8 @@
     List<TextFragment> frags = new ArrayList<>();
 
     //Try term vectors, which is faster
-    final Fields tvFields = searcher.getIndexReader().getTermVectors(docId); // TODO add as param; see SOLR-5855
+    //  note: offsets are minimally sufficient for this HL.
+    final Fields tvFields = schemaField.storeTermOffsets() ? reader.getTermVectors(docId) : null;
     final TokenStream tvStream =
         TokenSources.getTermVectorTokenStreamOrNull(fieldName, tvFields, maxCharsToAnalyze - 1);
     //  We need to wrap in OffsetWindowTokenFilter if multi-valued
@@ -66,7 +62,7 @@
         tstream = tvStream; // single-valued with term vectors
       } else {
         // fall back to analyzer
-        tstream = createAnalyzerTStream(schema, fieldName, thisText);
+        tstream = createAnalyzerTStream(schemaField, thisText);
       }
 
       Highlighter highlighter;
@@ -91,7 +87,7 @@
         highlighter = getPhraseHighlighter(query, fieldName, req, tempTokenStream);
 
         // if the CachingTokenFilter was consumed then use it going forward.
-        if (tempTokenStream instanceof CachingTokenFilter && ((CachingTokenFilter)tempTokenStream).isCached()) {
+        if (tempTokenStream instanceof CachingTokenFilter && ((CachingTokenFilter) tempTokenStream).isCached()) {
           tstream = tempTokenStream;
         }
         //tstream.reset(); not needed; getBestTextFragments will reset it.
@@ -138,10 +134,8 @@
       if (frags.size() > numFragments && !preserveMulti) {
         frags = frags.subList(0, numFragments);
       }
-      docSummaries.add(fieldName, getResponseForFragments(frags, req));
-    } else {
-      // no summaries made, copy text from alternate field
-      alternateField(docSummaries, params, doc, fieldName);
+      return getResponseForFragments(frags, req);
     }
+    return null;//no highlights for this field
   }
 

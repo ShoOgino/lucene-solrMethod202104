@@ -10,10 +10,20 @@
         // order to protect highlighters
       }
 
-      @Override
-      public Scorer scorer(LeafReaderContext context, Bits acceptDocs) throws IOException {
+      /**
+       * On the given leaf context, try to either rewrite to a disjunction if
+       * there are few matching terms, or build a bitset containing matching docs.
+       */
+      private WeightOrBitSet rewrite(LeafReaderContext context, Bits acceptDocs) throws IOException {
         final LeafReader reader = context.reader();
-        BitDocIdSet.Builder builder = new BitDocIdSet.Builder(reader.maxDoc());
+
+        // We will first try to collect up to 'threshold' terms into 'matchingTerms'
+        // if there are two many terms, we will fall back to building the 'builder'
+        final int threshold = Math.min(BOOLEAN_REWRITE_TERM_COUNT_THRESHOLD, BooleanQuery.getMaxClauseCount());
+        assert termData.size() > threshold : "Query should have been rewritten";
+        List<TermAndState> matchingTerms = new ArrayList<>(threshold);
+        BitDocIdSet.Builder builder = null;
+
         final Fields fields = reader.fields();
         String lastField = null;
         Terms terms = null;
@@ -30,23 +40,78 @@
             } else {
               termsEnum = terms.iterator();
             }
+            lastField = field;
           }
           if (termsEnum != null && termsEnum.seekExact(term)) {
-            docs = termsEnum.postings(acceptDocs, docs, PostingsEnum.NONE);
-            builder.or(docs);
+            if (matchingTerms == null) {
+              docs = termsEnum.postings(acceptDocs, docs, PostingsEnum.NONE);
+              builder.or(docs);
+            } else if (matchingTerms.size() < threshold) {
+              matchingTerms.add(new TermAndState(field, termsEnum));
+            } else {
+              assert matchingTerms.size() == threshold;
+              builder = new BitDocIdSet.Builder(reader.maxDoc());
+              docs = termsEnum.postings(acceptDocs, docs, PostingsEnum.NONE);
+              builder.or(docs);
+              for (TermAndState t : matchingTerms) {
+                t.termsEnum.seekExact(t.term, t.state);
+                docs = t.termsEnum.postings(acceptDocs, docs, PostingsEnum.NONE);
+                builder.or(docs);
+              }
+              matchingTerms = null;
+            }
           }
         }
-        BitDocIdSet result = builder.build();
-        if (result == null) {
+        if (matchingTerms != null) {
+          assert builder == null;
+          BooleanQuery bq = new BooleanQuery();
+          for (TermAndState t : matchingTerms) {
+            final TermContext termContext = new TermContext(searcher.getTopReaderContext());
+            termContext.register(t.state, context.ord, t.docFreq, t.totalTermFreq);
+            bq.add(new TermQuery(new Term(t.field, t.term), termContext), Occur.SHOULD);
+          }
+          Query q = new ConstantScoreQuery(bq);
+          q.setBoost(score());
+          return new WeightOrBitSet(searcher.rewrite(q).createWeight(searcher, needsScores));
+        } else {
+          assert builder != null;
+          return new WeightOrBitSet(builder.build());
+        }
+      }
+
+      private Scorer scorer(BitDocIdSet set) {
+        if (set == null) {
           return null;
         }
-
-        final DocIdSetIterator disi = result.iterator();
+        final DocIdSetIterator disi = set.iterator();
         if (disi == null) {
           return null;
         }
-
         return new ConstantScoreScorer(this, score(), disi);
+      }
+
+      @Override
+      public BulkScorer bulkScorer(LeafReaderContext context, Bits acceptDocs) throws IOException {
+        final WeightOrBitSet weightOrBitSet = rewrite(context, acceptDocs);
+        if (weightOrBitSet.weight != null) {
+          return weightOrBitSet.weight.bulkScorer(context, acceptDocs);
+        } else {
+          final Scorer scorer = scorer(weightOrBitSet.bitset);
+          if (scorer == null) {
+            return null;
+          }
+          return new DefaultBulkScorer(scorer);
+        }
+      }
+
+      @Override
+      public Scorer scorer(LeafReaderContext context, Bits acceptDocs) throws IOException {
+        final WeightOrBitSet weightOrBitSet = rewrite(context, acceptDocs);
+        if (weightOrBitSet.weight != null) {
+          return weightOrBitSet.weight.scorer(context, acceptDocs);
+        } else {
+          return scorer(weightOrBitSet.bitset);
+        }
       }
     };
   }

@@ -1,0 +1,63 @@
+    @SuppressWarnings("unchecked")
+    @Override
+    public FunctionValues getValues(Map context, LeafReaderContext readerContext) throws IOException {
+      final FunctionValues targetFuncValues = targetValueSource.getValues(context, readerContext);
+      // The key is a pair of leaf reader with a docId relative to that reader. The value is a Map from field to Shape.
+      final SolrCache<PerSegCacheKey,Shape> cache =
+          SolrRequestInfo.getRequestInfo().getReq().getSearcher().getCache(CACHE_KEY_PREFIX + fieldName);
+      if (cache == null) {
+        return targetFuncValues; // no caching; no configured cache
+      }
+
+      return new FunctionValues() {
+        int docId = -1;
+        Shape shape = null;
+
+        private void setShapeFromDoc(int doc) {
+          if (docId == doc) {
+            return;
+          }
+          docId = doc;
+          //lookup in cache
+          PerSegCacheKey key = new PerSegCacheKey(readerContext.reader().getCoreCacheKey(), doc);
+          shape = cache.get(key);
+          if (shape == null) {
+            shape = (Shape) targetFuncValues.objectVal(doc);
+            if (shape != null) {
+              cache.put(key, shape);
+            }
+          } else {
+            //optimize shape on a cache hit if possible. This must be thread-safe and it is.
+            if (shape instanceof JtsGeometry) {
+              ((JtsGeometry) shape).index(); // TODO would be nice if some day we didn't have to cast
+            }
+          }
+        }
+
+        // Use the cache for exists & objectVal;
+
+        @Override
+        public boolean exists(int doc) {
+          setShapeFromDoc(doc);
+          return shape != null;
+        }
+
+        @Override
+        public Object objectVal(int doc) {
+          setShapeFromDoc(doc);
+          return shape;
+        }
+
+        @Override
+        public Explanation explain(int doc) {
+          return targetFuncValues.explain(doc);
+        }
+
+        @Override
+        public String toString(int doc) {
+          return targetFuncValues.toString(doc);
+        }
+      };
+
+    }
+

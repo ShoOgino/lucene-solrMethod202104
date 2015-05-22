@@ -1,0 +1,40 @@
+  /**
+   * Creates and starts a given number of servers.
+   */
+  protected List<String> startServers(int nServer) throws Exception {
+    String temporaryCollection = "tmp_collection";
+    System.setProperty("collection", temporaryCollection);
+    for (int i = 1; i <= nServer; i++) {
+      // give everyone there own solrhome
+      File jettyDir = createTempDir("jetty").toFile();
+      jettyDir.mkdirs();
+      setupJettySolrHome(jettyDir);
+      JettySolrRunner jetty = createJetty(jettyDir, null, "shard" + i);
+      jettys.add(jetty);
+    }
+
+    ZkStateReader zkStateReader = ((SolrDispatchFilter) jettys.get(0)
+        .getDispatchFilter().getFilter()).getCores().getZkController()
+        .getZkStateReader();
+
+    // now wait till we see the leader for each shard
+    for (int i = 1; i <= shardCount; i++) {
+      this.printLayout();
+      zkStateReader.getLeaderRetry(temporaryCollection, "shard" + i, 15000);
+    }
+
+    // store the node names
+    List<String> nodeNames = new ArrayList<>();
+    for (Slice shard : zkStateReader.getClusterState().getCollection(temporaryCollection).getSlices()) {
+      for (Replica replica : shard.getReplicas()) {
+        nodeNames.add(replica.getNodeName());
+      }
+    }
+
+    // delete the temporary collection - we will create our own collections later
+    this.deleteCollection(temporaryCollection);
+    System.clearProperty("collection");
+
+    return nodeNames;
+  }
+

@@ -4,39 +4,38 @@
    * @return the shardId for the SolrCore
    */
   public String register(String coreName, final CoreDescriptor desc, boolean recoverReloadedCores, boolean afterExpiration) throws Exception {
-    // pre register has published our down state
-    final String baseUrl = getBaseUrl();
-
-    final CloudDescriptor cloudDesc = desc.getCloudDescriptor();
-    final String collection = cloudDesc.getCollectionName();
-
-    Map previousMDCContext = MDC.getCopyOfContextMap();
-    MDCUtils.setCollection(collection);
-
-    final String coreZkNodeName = desc.getCloudDescriptor().getCoreNodeName();
-    assert coreZkNodeName != null : "we should have a coreNodeName by now";
-
-    String shardId = cloudDesc.getShardId();
-    MDCUtils.setShard(shardId);
-    Map<String, Object> props = new HashMap<>();
-    // we only put a subset of props into the leader node
-    props.put(ZkStateReader.BASE_URL_PROP, baseUrl);
-    props.put(ZkStateReader.CORE_NAME_PROP, coreName);
-    props.put(ZkStateReader.NODE_NAME_PROP, getNodeName());
-
-
-    if (log.isInfoEnabled()) {
-      log.info("Register replica - core:" + coreName + " address:"
-          + baseUrl + " collection:" + cloudDesc.getCollectionName() + " shard:" + shardId);
+    try (SolrCore core = cc.getCore(desc.getName())) {
+      MDCLoggingContext.setCore(core);
     }
-
-    ZkNodeProps leaderProps = new ZkNodeProps(props);
-
     try {
+      // pre register has published our down state
+      final String baseUrl = getBaseUrl();
+      
+      final CloudDescriptor cloudDesc = desc.getCloudDescriptor();
+      final String collection = cloudDesc.getCollectionName();
+      
+      final String coreZkNodeName = desc.getCloudDescriptor().getCoreNodeName();
+      assert coreZkNodeName != null : "we should have a coreNodeName by now";
+      
+      String shardId = cloudDesc.getShardId();
+      Map<String,Object> props = new HashMap<>();
+      // we only put a subset of props into the leader node
+      props.put(ZkStateReader.BASE_URL_PROP, baseUrl);
+      props.put(ZkStateReader.CORE_NAME_PROP, coreName);
+      props.put(ZkStateReader.NODE_NAME_PROP, getNodeName());
+      
+      if (log.isInfoEnabled()) {
+        log.info("Register replica - core:" + coreName + " address:" + baseUrl + " collection:"
+            + cloudDesc.getCollectionName() + " shard:" + shardId);
+      }
+      
+      ZkNodeProps leaderProps = new ZkNodeProps(props);
+      
       try {
         // If we're a preferred leader, insert ourselves at the head of the queue
         boolean joinAtHead = false;
-        Replica replica = zkStateReader.getClusterState().getReplica(desc.getCloudDescriptor().getCollectionName(), coreZkNodeName);
+        Replica replica = zkStateReader.getClusterState().getReplica(desc.getCloudDescriptor().getCollectionName(),
+            coreZkNodeName);
         if (replica != null) {
           joinAtHead = replica.getBool(SliceMutator.PREFERRED_LEADER_PROP, false);
         }
@@ -48,25 +47,24 @@
       } catch (KeeperException | IOException e) {
         throw new ZooKeeperException(SolrException.ErrorCode.SERVER_ERROR, "", e);
       }
-
-
-      // in this case, we want to wait for the leader as long as the leader might 
+      
+      // in this case, we want to wait for the leader as long as the leader might
       // wait for a vote, at least - but also long enough that a large cluster has
       // time to get its act together
       String leaderUrl = getLeader(cloudDesc, leaderVoteWait + 600000);
-
+      
       String ourUrl = ZkCoreNodeProps.getCoreUrl(baseUrl, coreName);
       log.info("We are " + ourUrl + " and leader is " + leaderUrl);
       boolean isLeader = leaderUrl.equals(ourUrl);
-
+      
       try (SolrCore core = cc.getCore(desc.getName())) {
-
+        
         // recover from local transaction log and wait for it to complete before
         // going active
         // TODO: should this be moved to another thread? To recoveryStrat?
         // TODO: should this actually be done earlier, before (or as part of)
         // leader election perhaps?
-
+        
         UpdateLog ulog = core.getUpdateHandler().getUpdateLog();
         
         // we will call register again after zk expiration and on reload
@@ -86,18 +84,18 @@
             }
           }
         }
-        boolean didRecovery = checkRecovery(coreName, desc, recoverReloadedCores, isLeader, cloudDesc,
-            collection, coreZkNodeName, shardId, leaderProps, core, cc, afterExpiration);
+        boolean didRecovery = checkRecovery(coreName, desc, recoverReloadedCores, isLeader, cloudDesc, collection,
+            coreZkNodeName, shardId, leaderProps, core, cc, afterExpiration);
         if (!didRecovery) {
           publish(desc, Replica.State.ACTIVE);
         }
       }
-
+      
       // make sure we have an update cluster state right away
       zkStateReader.updateClusterState(true);
       return shardId;
     } finally {
-      MDCUtils.cleanupMDC(previousMDCContext);
+      MDCLoggingContext.clear();
     }
   }
 

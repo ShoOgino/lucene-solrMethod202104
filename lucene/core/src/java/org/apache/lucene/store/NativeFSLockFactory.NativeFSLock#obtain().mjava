@@ -1,9 +1,11 @@
     @Override
     public synchronized boolean obtain() throws IOException {
 
-      if (lock != null) {
+      if (channel != null) {
         // Our instance is already locked:
-        return false;
+        assert channel.isOpen();
+        assert realPath != null;
+        throw new LockObtainFailedException("this lock instance was already obtained");
       }
 
       // Ensure that lockDir exists and is a directory.
@@ -14,7 +16,7 @@
         // we must create the file to have a truly canonical path.
         // if it's already created, we don't care. if it cant be created, it will fail below.
       }
-      final Path canonicalPath = path.toRealPath();
+      realPath = path.toRealPath();
       // Make sure nobody else in-process has this lock held
       // already, and, mark it held if not:
       // This is a pretty crazy workaround for some documented
@@ -29,12 +31,15 @@
       // is that we can't re-obtain the lock in the same JVM but from a different process if that happens. Nevertheless
       // this is super trappy. See LUCENE-5738
       boolean obtained = false;
-      if (LOCK_HELD.add(canonicalPath.toString())) {
+      if (LOCK_HELD.add(realPath.toString())) {
+        FileChannel ch = null;
         try {
-          channel = FileChannel.open(path, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+          ch = FileChannel.open(realPath, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
           try {
-            lock = channel.tryLock();
-            obtained = lock != null;
+            if (ch.tryLock() != null) {
+              channel = ch;
+              obtained = true;
+            }
           } catch (IOException | OverlappingFileLockException e) {
             // At least on OS X, we will sometimes get an
             // intermittent "Permission Denied" IOException,
@@ -49,10 +54,8 @@
           }
         } finally {
           if (obtained == false) { // not successful - clear up and move out
-            clearLockHeld(path);
-            final FileChannel toClose = channel;
-            channel = null;
-            IOUtils.closeWhileHandlingException(toClose);
+            IOUtils.closeWhileHandlingException(ch);
+            clearLockHeld(realPath);  // clear LOCK_HELD last 
           }
         }
       }

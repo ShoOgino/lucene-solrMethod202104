@@ -1,0 +1,86 @@
+  /** Fast path: this is called when the query rect fully encompasses all cells under this node. */
+  private int addAll(Bits acceptDocs, QueryState state, int nodeID) throws IOException {
+    if (nodeID >= leafNodeOffset) {
+      // Leaf node
+      long fp = leafBlockFPs[nodeID-leafNodeOffset];
+      //System.out.println("    leaf nodeID=" + nodeID + " vs leafNodeOffset=" + leafNodeOffset + " fp=" + fp);
+      if (fp == 0) {
+        // Dead end node (adversary case):
+        return 0;
+      }
+      //IndexInput in = leafDISI.in;
+      state.in.seek(fp);
+      //allLeafDISI.reset(fp);
+      
+      //System.out.println("    seek to leafFP=" + fp);
+      // How many points are stored in this leaf cell:
+      int count = state.in.readVInt();
+      if (state.latLonFilter != null) {
+        // Handle this differently since we must also look up lat/lon:
+
+        int hitCount = 0;
+        for(int i=0;i<count;i++) {
+
+          int docID = state.in.readInt();
+          
+          if (acceptDocs == null || acceptDocs.get(docID)) {
+
+            state.sndv.setDocument(docID);
+
+            // How many values this doc has:
+            int docValueCount = state.sndv.count();
+            for(int j=0;j<docValueCount;j++) {
+              long enc = state.sndv.valueAt(j);
+              int latEnc = (int) ((enc>>32) & 0xffffffffL);
+              int lonEnc = (int) (enc & 0xffffffffL);
+
+              // TODO: maybe we can fix LatLonFilter to operate on encoded forms?
+              if (state.latLonFilter.accept(BKDTreeWriter.decodeLat(latEnc), BKDTreeWriter.decodeLon(lonEnc))) {
+                state.bits.set(docID);
+                hitCount++;
+
+                // Stop processing values for this doc since it's now accepted:
+                break;
+              }
+            }
+          }
+        }
+
+        return hitCount;
+
+      } else if (acceptDocs != null) {
+        for(int i=0;i<count;i++) {
+          int docID = state.in.readInt();
+          if (acceptDocs.get(docID)) {
+            state.bits.set(docID);
+          }
+        }
+      } else {
+        for(int i=0;i<count;i++) {
+          int docID = state.in.readInt();
+          state.bits.set(docID);
+        }
+      }
+
+      //bits.or(allLeafDISI);
+      //return allLeafDISI.getHitCount();
+      return count;
+    } else {
+      int splitValue = splitValues[nodeID];
+
+      if (splitValue == Integer.MAX_VALUE) {
+        // Dead end node (adversary case):
+        return 0;
+      }
+
+      //System.out.println("  splitValue=" + splitValue);
+
+      //System.out.println("  addAll: inner");
+      int count = 0;
+      count += addAll(acceptDocs, state, 2*nodeID);
+      count += addAll(acceptDocs, state, 2*nodeID+1);
+      //System.out.println("  addAll: return count=" + count);
+      return count;
+    }
+  }
+

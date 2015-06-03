@@ -1,0 +1,103 @@
+  /** Writes the BKD tree to the provided {@link IndexOutput} and returns the file offset where index was written. */
+  public long finish(IndexOutput out) throws IOException {
+    //System.out.println("\nBKDTreeWriter.finish pointCount=" + pointCount + " out=" + out + " heapWriter=" + heapWriter);
+
+    if (writer != null) {
+      writer.close();
+    }
+
+    LongBitSet bitSet = new LongBitSet(pointCount);
+
+    // TODO: we should use in-memory sort here, if number of points is small enough:
+
+    long countPerLeaf = pointCount;
+    long innerNodeCount = 1;
+
+    while (countPerLeaf > maxPointsInLeafNode) {
+      countPerLeaf /= 2;
+      innerNodeCount *= 2;
+    }
+
+    //System.out.println("innerNodeCount=" + innerNodeCount);
+
+    if (1+2*innerNodeCount >= Integer.MAX_VALUE) {
+      throw new IllegalStateException("too many nodes; increase maxPointsInLeafNode (currently " + maxPointsInLeafNode + ") and reindex");
+    }
+
+    innerNodeCount--;
+
+    int numLeaves = (int) (innerNodeCount+1);
+
+    // Indexed by nodeID, but first (root) nodeID is 1
+    int[] splitValues = new int[numLeaves];
+
+    // +1 because leaf count is power of 2 (e.g. 8), and innerNodeCount is power of 2 minus 1 (e.g. 7)
+    long[] leafBlockFPs = new long[numLeaves];
+
+    // Make sure the math above "worked":
+    assert pointCount / splitValues.length <= maxPointsInLeafNode: "pointCount=" + pointCount + " splitValues.length=" + splitValues.length + " maxPointsInLeafNode=" + maxPointsInLeafNode;
+    //System.out.println("  avg pointsPerLeaf=" + (pointCount/splitValues.length));
+
+    // Sort all docs once by lat, once by lon:
+    LatLonWriter latSortedWriter = null;
+    LatLonWriter lonSortedWriter = null;
+
+    boolean success = false;
+    try {
+      lonSortedWriter = sort(true);
+      latSortedWriter = sort(false);
+      heapWriter = null;
+
+      build(1, numLeaves, new PathSlice(latSortedWriter, 0, pointCount),
+            new PathSlice(lonSortedWriter, 0, pointCount),
+            bitSet, out,
+            Integer.MIN_VALUE, Integer.MAX_VALUE,
+            Integer.MIN_VALUE, Integer.MAX_VALUE,
+            //encodeLat(-90.0), encodeLat(Math.nextAfter(90.0, Double.POSITIVE_INFINITY)),
+            //encodeLon(-180.0), encodeLon(Math.nextAfter(180.0, Double.POSITIVE_INFINITY)),
+            splitValues,
+            leafBlockFPs);
+      success = true;
+    } finally {
+      if (success) {
+        latSortedWriter.destroy();
+        lonSortedWriter.destroy();
+        IOUtils.rm(tempInput);
+      } else {
+        try {
+          latSortedWriter.destroy();
+        } catch (Throwable t) {
+          // Suppress to keep throwing original exc
+        }
+        try {
+          lonSortedWriter.destroy();
+        } catch (Throwable t) {
+          // Suppress to keep throwing original exc
+        }
+        IOUtils.deleteFilesIgnoringExceptions(tempInput);
+      }
+    }
+
+    //System.out.println("Total nodes: " + innerNodeCount);
+
+    // Write index:
+    long indexFP = out.getFilePointer();
+    out.writeVInt(numLeaves);
+
+    // NOTE: splitValues[0] is unused, because nodeID is 1-based:
+    for (int i=0;i<splitValues.length;i++) {
+      out.writeInt(splitValues[i]);
+    }
+    for (int i=0;i<leafBlockFPs.length;i++) {
+      out.writeVLong(leafBlockFPs[i]);
+    }
+
+    if (tempDir != null) {
+      // If we had to go offline, we should have removed all temp files we wrote:
+      assert directoryIsEmpty(tempDir);
+      IOUtils.rm(tempDir);
+    }
+
+    return indexFP;
+  }
+

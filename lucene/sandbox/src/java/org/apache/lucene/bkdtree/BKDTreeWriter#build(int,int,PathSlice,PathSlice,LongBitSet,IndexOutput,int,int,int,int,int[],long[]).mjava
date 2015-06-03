@@ -1,0 +1,256 @@
+  /** dim=0 means we split on lat, dim=1 means lon.  The incoming PathSlice for the dim we will split is already partitioned/sorted. */
+  private void build(int nodeID, int leafNodeOffset,
+                     PathSlice lastLatSorted,
+                     PathSlice lastLonSorted,
+                     LongBitSet bitSet,
+                     IndexOutput out,
+                     int minLatEnc, int maxLatEnc, int minLonEnc, int maxLonEnc,
+                     int[] splitValues,
+                     long[] leafBlockFPs) throws IOException {
+
+    PathSlice source;
+    PathSlice nextSource;
+
+    long latRange = (long) maxLatEnc - (long) minLatEnc;
+    long lonRange = (long) maxLonEnc - (long) minLonEnc;
+
+    int splitDim;
+    if (latRange >= lonRange) {
+      // Split by lat:
+      splitDim = 0;
+      source = lastLatSorted;
+      nextSource = lastLonSorted;
+    } else {
+      // Split by lon:
+      splitDim = 1;
+      source = lastLonSorted;
+      nextSource = lastLatSorted;
+    }
+
+    long count = source.count;
+
+    //if (DEBUG) System.out.println("\nBUILD: nodeID=" + nodeID + " leafNodeOffset=" + leafNodeOffset + " splitDim=" + splitDim + "\n  lastLatSorted=" + lastLatSorted + "\n  lastLonSorted=" + lastLonSorted + "\n  count=" + count + " lat=" + decodeLat(minLatEnc) + " TO " + decodeLat(maxLatEnc) + " lon=" + decodeLon(minLonEnc) + " TO " + decodeLon(maxLonEnc));
+
+    if (count == 0) {
+      // Dead end in the tree, due to adversary cases, e.g. many identical points:
+      if (nodeID < splitValues.length) {
+        // Sentinel used to mark that the tree is dead under here:
+        splitValues[nodeID] = Integer.MAX_VALUE;
+      }
+      //if (DEBUG) System.out.println("  dead-end sub-tree");
+      return;
+    }
+
+    if (nodeID >= leafNodeOffset) {
+      // Leaf node: write block
+      //if (DEBUG) System.out.println("  leaf");
+      assert maxLatEnc > minLatEnc;
+      assert maxLonEnc > minLonEnc;
+
+      //System.out.println("\nleaf:\n  lat range: " + ((long) maxLatEnc-minLatEnc));
+      //System.out.println("  lon range: " + ((long) maxLonEnc-minLonEnc));
+
+      assert count == source.count: "count=" + count + " vs source.count=" + source.count;
+
+      // Sort by docID in the leaf so we can .or(DISI) at search time:
+      LatLonReader reader = source.writer.getReader(source.start);
+
+      int[] docIDs = new int[(int) count];
+
+      boolean success = false;
+      try {
+        for (int i=0;i<source.count;i++) {
+
+          // NOTE: we discard ord at this point; we only needed it temporarily
+          // during building to uniquely identify each point to properly handle
+          // the multi-valued case (one docID having multiple values):
+
+          // We also discard lat/lon, since at search time, we reside on the
+          // wrapped doc values for this:
+
+          boolean result = reader.next();
+          assert result;
+          docIDs[i] = reader.docID();
+        }
+        success = true;
+      } finally {
+        if (success) {
+          IOUtils.close(reader);
+        } else {
+          IOUtils.closeWhileHandlingException(reader);
+        }
+      }
+
+      Arrays.sort(docIDs);
+
+      // Dedup docIDs: for the multi-valued case where more than one value for the doc
+      // wound up in this leaf cell, we only need to store the docID once:
+      int lastDocID = -1;
+      int uniqueCount = 0;
+      for(int i=0;i<docIDs.length;i++) {
+        int docID = docIDs[i];
+        if (docID != lastDocID) {
+          uniqueCount++;
+          lastDocID = docID;
+        }
+      }
+      assert uniqueCount <= count;
+
+      long startFP = out.getFilePointer();
+      out.writeVInt(uniqueCount);
+
+      // Save the block file pointer:
+      leafBlockFPs[nodeID - leafNodeOffset] = startFP;
+      //System.out.println("    leafFP=" + startFP);
+
+      lastDocID = -1;
+      for (int i=0;i<docIDs.length;i++) {
+        // Absolute int encode; with "vInt of deltas" encoding, the .kdd size dropped from
+        // 697 MB -> 539 MB, but query time for 225 queries went from 1.65 sec -> 2.64 sec.
+        // I think if we also indexed prefix terms here we could do less costly compression
+        // on those lists:
+        int docID = docIDs[i];
+        if (docID != lastDocID) {
+          out.writeInt(docID);
+          lastDocID = docID;
+        }
+      }
+      //long endFP = out.getFilePointer();
+      //System.out.println("  bytes/doc: " + ((endFP - startFP) / count));
+    } else {
+      // Inner node: sort, partition/recurse
+
+      assert nodeID < splitValues.length: "nodeID=" + nodeID + " splitValues.length=" + splitValues.length;
+
+      int[] splitValueArray = new int[1];
+
+      assert source.count == count;
+      long leftCount = markLeftTree(splitDim, source, bitSet, splitValueArray,
+                                    minLatEnc, maxLatEnc, minLonEnc, maxLonEnc);
+      int splitValue = splitValueArray[0];
+
+      // TODO: we could save split value in here so we don't have to re-open file later:
+
+      // Partition nextSource into sorted left and right sets, so we can recurse.  This is somewhat hairy: we partition the next lon set
+      // according to how we had just partitioned the lat set, and vice/versa:
+
+      LatLonWriter leftWriter = null;
+      LatLonWriter rightWriter = null;
+      LatLonReader reader = null;
+
+      boolean success = false;
+
+      int nextLeftCount = 0;
+
+      try {
+        leftWriter = getWriter(leftCount);
+        rightWriter = getWriter(nextSource.count - leftCount);
+
+        //if (DEBUG) System.out.println("  partition:\n    splitValueEnc=" + splitValue + "\n    " + nextSource + "\n      --> leftSorted=" + leftWriter + "\n      --> rightSorted=" + rightWriter + ")");
+        assert nextSource.count == count;
+        reader = nextSource.writer.getReader(nextSource.start);
+
+        // TODO: we could compute the split value here for each sub-tree and save an O(N) pass on recursion, but makes code hairier and only
+        // changes the constant factor of building, not the big-oh:
+        for (int i=0;i<nextSource.count;i++) {
+          boolean result = reader.next();
+          assert result;
+          int latEnc = reader.latEnc();
+          int lonEnc = reader.lonEnc();
+          long ord = reader.ord();
+          int docID = reader.docID();
+          assert docID >= 0: "docID=" + docID + " reader=" + reader;
+          if (bitSet.get(ord)) {
+            if (splitDim == 0) {
+              assert latEnc < splitValue: "latEnc=" + latEnc + " splitValue=" + splitValue;
+            } else {
+              assert lonEnc < splitValue: "lonEnc=" + lonEnc + " splitValue=" + splitValue;
+            }
+            leftWriter.append(latEnc, lonEnc, ord, docID);
+            nextLeftCount++;
+          } else {
+            if (splitDim == 0) {
+              assert latEnc >= splitValue: "latEnc=" + latEnc + " splitValue=" + splitValue;
+            } else {
+              assert lonEnc >= splitValue: "lonEnc=" + lonEnc + " splitValue=" + splitValue;
+            }
+            rightWriter.append(latEnc, lonEnc, ord, docID);
+          }
+        }
+        bitSet.clear(0, pointCount);
+        success = true;
+      } finally {
+        if (success) {
+          IOUtils.close(reader, leftWriter, rightWriter);
+        } else {
+          IOUtils.closeWhileHandlingException(reader, leftWriter, rightWriter);
+        }
+      }
+
+      assert leftCount == nextLeftCount: "leftCount=" + leftCount + " nextLeftCount=" + nextLeftCount;
+      assert count == nextSource.count: "count=" + count + " nextSource.count=" + count;
+
+      success = false;
+      try {
+        if (splitDim == 0) {
+          //if (DEBUG) System.out.println("  recurse left");
+          build(2*nodeID, leafNodeOffset,
+                new PathSlice(source.writer, source.start, leftCount),
+                new PathSlice(leftWriter, 0, leftCount),
+                bitSet,
+                out,
+                minLatEnc, splitValue, minLonEnc, maxLonEnc,
+                splitValues, leafBlockFPs);
+          leftWriter.destroy();
+
+          //if (DEBUG) System.out.println("  recurse right");
+          build(2*nodeID+1, leafNodeOffset,
+                new PathSlice(source.writer, source.start+leftCount, count-leftCount),
+                new PathSlice(rightWriter, 0, count - leftCount),
+                bitSet,
+                out,
+                splitValue, maxLatEnc, minLonEnc, maxLonEnc,
+                splitValues, leafBlockFPs);
+          rightWriter.destroy();
+        } else {
+          //if (DEBUG) System.out.println("  recurse left");
+          build(2*nodeID, leafNodeOffset,
+                new PathSlice(leftWriter, 0, leftCount),
+                new PathSlice(source.writer, source.start, leftCount),
+                bitSet,
+                out,
+                minLatEnc, maxLatEnc, minLonEnc, splitValue,
+                splitValues, leafBlockFPs);
+
+          leftWriter.destroy();
+
+          //if (DEBUG) System.out.println("  recurse right");
+          build(2*nodeID+1, leafNodeOffset,
+                new PathSlice(rightWriter, 0, count-leftCount),
+                new PathSlice(source.writer, source.start+leftCount, count-leftCount),    
+                bitSet,
+                out,
+                minLatEnc, maxLatEnc, splitValue, maxLonEnc,
+                splitValues, leafBlockFPs);
+          rightWriter.destroy();
+        }
+        success = true;
+      } finally {
+        if (success == false) {
+          try {
+            leftWriter.destroy();
+          } catch (Throwable t) {
+            // Suppress to keep throwing original exc
+          }
+          try {
+            rightWriter.destroy();
+          } catch (Throwable t) {
+            // Suppress to keep throwing original exc
+          }
+        }
+      }
+
+      splitValues[nodeID] = splitValue;
+    }
+  }
+

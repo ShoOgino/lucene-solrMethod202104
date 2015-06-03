@@ -1,0 +1,118 @@
+  private LatLonWriter sort(boolean lon) throws IOException {
+    if (heapWriter != null) {
+
+      assert pointCount < Integer.MAX_VALUE;
+
+      // All buffered points are still in heap
+      new InPlaceMergeSorter() {
+        @Override
+        protected void swap(int i, int j) {
+          int docID = heapWriter.docIDs[i];
+          heapWriter.docIDs[i] = heapWriter.docIDs[j];
+          heapWriter.docIDs[j] = docID;
+
+          long ord = heapWriter.ords[i];
+          heapWriter.ords[i] = heapWriter.ords[j];
+          heapWriter.ords[j] = ord;
+
+          int latEnc = heapWriter.latEncs[i];
+          heapWriter.latEncs[i] = heapWriter.latEncs[j];
+          heapWriter.latEncs[j] = latEnc;
+
+          int lonEnc = heapWriter.lonEncs[i];
+          heapWriter.lonEncs[i] = heapWriter.lonEncs[j];
+          heapWriter.lonEncs[j] = lonEnc;
+        }
+
+        @Override
+        protected int compare(int i, int j) {
+          int cmp;
+          if (lon) {
+            cmp = Integer.compare(heapWriter.lonEncs[i], heapWriter.lonEncs[j]);
+          } else {
+            cmp = Integer.compare(heapWriter.latEncs[i], heapWriter.latEncs[j]);
+          }
+          if (cmp != 0) {
+            return cmp;
+          }
+
+          // Tie-break
+          cmp = Integer.compare(heapWriter.docIDs[i], heapWriter.docIDs[j]);
+          if (cmp != 0) {
+            return cmp;
+          }
+
+          return Long.compare(heapWriter.ords[i], heapWriter.ords[j]);
+        }
+      }.sort(0, (int) pointCount);
+
+      HeapLatLonWriter sorted = new HeapLatLonWriter((int) pointCount);
+      for(int i=0;i<pointCount;i++) {
+        sorted.append(heapWriter.latEncs[i],
+                      heapWriter.lonEncs[i],
+                      heapWriter.ords[i],
+                      heapWriter.docIDs[i]);
+      }
+
+      return sorted;
+    } else {
+
+      // Offline sort:
+      assert tempDir != null;
+
+      final ByteArrayDataInput reader = new ByteArrayDataInput();
+      Comparator<BytesRef> cmp = new Comparator<BytesRef>() {
+        private final ByteArrayDataInput readerB = new ByteArrayDataInput();
+
+        @Override
+        public int compare(BytesRef a, BytesRef b) {
+          reader.reset(a.bytes, a.offset, a.length);
+          final int latAEnc = reader.readInt();
+          final int lonAEnc = reader.readInt();
+          final int docIDA = reader.readVInt();
+          final long ordA = reader.readVLong();
+
+          reader.reset(b.bytes, b.offset, b.length);
+          final int latBEnc = reader.readInt();
+          final int lonBEnc = reader.readInt();
+          final int docIDB = reader.readVInt();
+          final long ordB = reader.readVLong();
+
+          int cmp;
+          if (lon) {
+            cmp = Integer.compare(lonAEnc, lonBEnc);
+          } else {
+            cmp = Integer.compare(latAEnc, latBEnc);
+          }
+          if (cmp != 0) {
+            return cmp;
+          }
+
+          // Tie-break
+          cmp = Integer.compare(docIDA, docIDB);
+          if (cmp != 0) {
+            return cmp;
+          }
+
+          return Long.compare(ordA, ordB);
+        }
+      };
+
+      Path sorted = tempDir.resolve("sorted");
+      boolean success = false;
+      try {
+        OfflineSorter latSorter = new OfflineSorter(cmp, OfflineSorter.BufferSize.automatic(), tempDir, OfflineSorter.MAX_TEMPFILES);
+        latSorter.sort(tempInput, sorted);
+        LatLonWriter writer = convertToFixedWidth(sorted);
+        success = true;
+        return writer;
+      } finally {
+        if (success) {
+          IOUtils.rm(sorted);
+        } else {
+          IOUtils.deleteFilesIgnoringExceptions(sorted);
+        }
+      }
+    }
+  }
+

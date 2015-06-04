@@ -1,0 +1,77 @@
+  @Test
+  public void test() throws Exception {
+    handle.clear();
+    handle.put("timestamp", SKIPVAL);
+    
+    int[] maxDocList = new int[] {300, 700, 1200};
+    int maxDoc = maxDocList[random().nextInt(maxDocList.length - 1)];
+
+    indexThread = new StoppableIndexingThread(controlClient, cloudClient, "1", true, maxDoc, 1, true);
+    indexThread.start();
+
+    // give some time to index...
+    int[] waitTimes = new int[] {200, 2000, 3000};
+    Thread.sleep(waitTimes[random().nextInt(waitTimes.length - 1)]);
+
+    // create some "old" index directories
+    JettySolrRunner jetty = chaosMonkey.getShard("shard1", 1);
+    SolrDispatchFilter filter = (SolrDispatchFilter)jetty.getDispatchFilter().getFilter();
+    CoreContainer coreContainer = filter.getCores();
+    File dataDir = null;
+    try (SolrCore solrCore = coreContainer.getCore("collection1")) {
+      dataDir = new File(solrCore.getDataDir());
+    }
+    assertTrue(dataDir.isDirectory());
+
+    long msInDay = 60*60*24L;
+    String timestamp1 = new SimpleDateFormat(SnapShooter.DATE_FMT, Locale.ROOT).format(new Date(1*msInDay));
+    String timestamp2 = new SimpleDateFormat(SnapShooter.DATE_FMT, Locale.ROOT).format(new Date(2*msInDay));
+    File oldIndexDir1 = new File(dataDir, "index."+timestamp1);
+    FileUtils.forceMkdir(oldIndexDir1);
+    File oldIndexDir2 = new File(dataDir, "index."+timestamp2);
+    FileUtils.forceMkdir(oldIndexDir2);
+
+    // verify the "old" index directories exist
+    assertTrue(oldIndexDir1.isDirectory());
+    assertTrue(oldIndexDir2.isDirectory());
+
+    // bring shard replica down
+    JettySolrRunner replica = chaosMonkey.stopShard("shard1", 1).jetty;
+
+    // wait a moment - lets allow some docs to be indexed so replication time is non 0
+    Thread.sleep(waitTimes[random().nextInt(waitTimes.length - 1)]);
+    
+    // bring shard replica up
+    replica.start();
+    
+    // make sure replication can start
+    Thread.sleep(3000);
+    ZkStateReader zkStateReader = cloudClient.getZkStateReader();
+    
+    // stop indexing threads
+    indexThread.safeStop();
+    indexThread.join();
+
+    Thread.sleep(1000);
+  
+    waitForThingsToLevelOut(120);
+    waitForRecoveriesToFinish(DEFAULT_COLLECTION, zkStateReader, false, true);
+
+    // test that leader and replica have same doc count
+    
+    String fail = checkShardConsistency("shard1", false, false);
+    if (fail != null)
+      fail(fail);
+
+    SolrQuery query = new SolrQuery("*:*");
+    query.setParam("distrib", "false");
+    long client1Docs = shardToJetty.get("shard1").get(0).client.solrClient.query(query).getResults().getNumFound();
+    long client2Docs = shardToJetty.get("shard1").get(1).client.solrClient.query(query).getResults().getNumFound();
+    
+    assertTrue(client1Docs > 0);
+    assertEquals(client1Docs, client2Docs);
+
+    assertTrue(!oldIndexDir1.isDirectory());
+    assertTrue(!oldIndexDir2.isDirectory());
+  }
+

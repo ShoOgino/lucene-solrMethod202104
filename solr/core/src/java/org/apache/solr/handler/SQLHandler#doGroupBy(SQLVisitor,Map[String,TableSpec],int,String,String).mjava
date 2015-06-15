@@ -1,0 +1,69 @@
+  private static TupleStream doGroupBy(SQLVisitor sqlVisitor,
+                                       Map<String, TableSpec> tableMap,
+                                       int numWorkers,
+                                       String workerCollection,
+                                       String workerZkHost) throws IOException {
+
+    Set<String> fieldSet = new HashSet();
+    Bucket[] buckets = getBuckets(sqlVisitor.groupBy, fieldSet);
+    Metric[] metrics = getMetrics(sqlVisitor.fields, fieldSet);
+
+    String fl = fields(fieldSet);
+    String sortDirection = getSortDirection(sqlVisitor.sorts);
+    String sort = bucketSort(buckets, sortDirection);
+
+    TableSpec tableSpec = tableMap.get(sqlVisitor.table);
+    String zkHost = tableSpec.zkHost;
+    String collection = tableSpec.collection;
+    Map<String, String> params = new HashMap();
+
+    params.put(CommonParams.FL, fl);
+    params.put(CommonParams.Q, sqlVisitor.query);
+    //Always use the /export handler for Group By Queries because it requires exporting full result sets.
+    params.put(CommonParams.QT, "/export");
+
+    if(numWorkers > 1) {
+      params.put("partitionKeys", getPartitionKeys(buckets));
+    }
+
+    params.put("sort", sort);
+
+    TupleStream tupleStream = null;
+
+    CloudSolrStream cstream = new CloudSolrStream(zkHost, collection, params);
+    tupleStream = new RollupStream(cstream, buckets, metrics);
+
+    if(numWorkers > 1) {
+      // Do the rollups in parallel
+      // Maintain the sort of the Tuples coming from the workers.
+      Comparator<Tuple> comp = bucketSortComp(buckets, sortDirection);
+      tupleStream = new ParallelStream(workerZkHost, workerCollection, tupleStream, numWorkers, comp);
+    }
+
+    //TODO: This should be done on the workers, but it won't serialize because it relies on Presto classes.
+    // Once we make this a Expressionable the problem will be solved.
+
+    if(sqlVisitor.havingExpression != null) {
+      tupleStream = new HavingStream(tupleStream, sqlVisitor.havingExpression);
+    }
+
+    if(sqlVisitor.sorts != null && sqlVisitor.sorts.size() > 0) {
+      if(!sortsEqual(buckets, sortDirection, sqlVisitor.sorts)) {
+        int limit = sqlVisitor.limit == -1 ? 100 : sqlVisitor.limit;
+        Comparator<Tuple> comp = getComp(sqlVisitor.sorts);
+        //Rank the Tuples
+        //If parallel stream is used ALL the Rolled up tuples from the workers will be ranked
+        //Providing a true Top or Bottom.
+        tupleStream = new RankStream(tupleStream, limit, comp);
+      } else {
+        // Sort is the same as the same as the underlying stream
+        // Only need to limit the result, not Rank the result
+        if(sqlVisitor.limit > -1) {
+          tupleStream = new LimitStream(tupleStream, sqlVisitor.limit);
+        }
+      }
+    }
+
+    return tupleStream;
+  }
+

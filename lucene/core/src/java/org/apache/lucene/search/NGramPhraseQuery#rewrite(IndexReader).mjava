@@ -1,35 +1,33 @@
   @Override
   public Query rewrite(IndexReader reader) throws IOException {
-    if(getSlop() != 0) return super.rewrite(reader);
-    
-    // check whether optimizable or not
-    if(n < 2 || // non-overlap n-gram cannot be optimized
-        getTerms().length < 3)  // too short to optimize
-      return super.rewrite(reader);
+    final Term[] terms = phraseQuery.getTerms();
+    final int[] positions = phraseQuery.getPositions();
 
-    // check all posIncrement is 1
-    // if not, cannot optimize
-    int[] positions = getPositions();
-    Term[] terms = getTerms();
-    int prevPosition = positions[0];
-    for(int i = 1; i < positions.length; i++){
-      int pos = positions[i];
-      if(prevPosition + 1 != pos) return super.rewrite(reader);
-      prevPosition = pos;
-    }
+    boolean isOptimizable = phraseQuery.getSlop() == 0
+        && n >= 2 // non-overlap n-gram cannot be optimized
+        && terms.length >= 3; // short ones can't be optimized
 
-    // now create the new optimized phrase query for n-gram
-    PhraseQuery optimized = new PhraseQuery();
-    optimized.setBoost(getBoost());
-    int pos = 0;
-    final int lastPos = terms.length - 1;
-    for(int i = 0; i < terms.length; i++){
-      if(pos % n == 0 || pos >= lastPos){
-        optimized.add(terms[i], positions[i]);
+    if (isOptimizable) {
+      for (int i = 1; i < positions.length; ++i) {
+        if (positions[i] != positions[i-1] + 1) {
+          isOptimizable = false;
+          break;
+        }
       }
-      pos++;
     }
     
-    return optimized;
+    if (isOptimizable == false) {
+      return phraseQuery.rewrite(reader);
+    }
+
+    PhraseQuery.Builder builder = new PhraseQuery.Builder();
+    for (int i = 0; i < terms.length; ++i) {
+      if (i % n == 0 || i == terms.length - 1) {
+        builder.add(terms[i], i);
+      }
+    }
+    PhraseQuery rewritten = builder.build();
+    rewritten.setBoost(phraseQuery.getBoost());
+    return rewritten;
   }
 

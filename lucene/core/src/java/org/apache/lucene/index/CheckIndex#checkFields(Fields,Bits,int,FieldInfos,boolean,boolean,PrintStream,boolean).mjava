@@ -120,7 +120,6 @@
       
       long sumTotalTermFreq = 0;
       long sumDocFreq = 0;
-      long upto = 0;
       FixedBitSet visitedDocs = new FixedBitSet(maxDoc);
       while(true) {
         
@@ -166,7 +165,7 @@
         }
         sumDocFreq += docFreq;
 
-        postings = termsEnum.postings(liveDocs, postings, PostingsEnum.ALL);
+        postings = termsEnum.postings(postings, PostingsEnum.ALL);
 
         if (hasFreqs == false) {
           if (termsEnum.totalTermFreq() != -1) {
@@ -192,13 +191,13 @@
         
         int lastDoc = -1;
         int docCount = 0;
+        boolean hasNonDeletedDocs = false;
         long totalTermFreq = 0;
         while(true) {
           final int doc = postings.nextDoc();
           if (doc == DocIdSetIterator.NO_MORE_DOCS) {
             break;
           }
-          status.totFreq++;
           visitedDocs.set(doc);
           int freq = -1;
           if (hasFreqs) {
@@ -206,7 +205,6 @@
             if (freq <= 0) {
               throw new RuntimeException("term " + term + ": doc " + doc + ": freq " + freq + " is out of bounds");
             }
-            status.totPos += freq;
             totalTermFreq += freq;
           } else {
             // When a field didn't index freq, it must
@@ -214,6 +212,13 @@
             // 1:
             if (postings.freq() != 1) {
               throw new RuntimeException("term " + term + ": doc " + doc + ": freq " + freq + " != 1 when Terms.hasFreqs() is false");
+            }
+          }
+          if (liveDocs == null || liveDocs.get(doc)) {
+            hasNonDeletedDocs = true;
+            status.totFreq++;
+            if (freq >= 0) {
+              status.totPos += freq;
             }
           }
           docCount++;
@@ -275,7 +280,7 @@
           }
         }
         
-        if (docCount != 0) {
+        if (hasNonDeletedDocs) {
           status.termCount++;
         } else {
           status.delTermCount++;
@@ -283,28 +288,6 @@
         
         final long totalTermFreq2 = termsEnum.totalTermFreq();
         final boolean hasTotalTermFreq = hasFreqs && totalTermFreq2 != -1;
-        
-        // Re-count if there are deleted docs:
-        if (liveDocs != null) {
-          if (hasFreqs) {
-            postings = termsEnum.postings(null, postings);
-            docCount = 0;
-            totalTermFreq = 0;
-            while(postings.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
-              visitedDocs.set(postings.docID());
-              docCount++;
-              totalTermFreq += postings.freq();
-            }
-          } else {
-            postings = termsEnum.postings(null, postings, PostingsEnum.NONE);
-            docCount = 0;
-            totalTermFreq = -1;
-            while(postings.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
-              visitedDocs.set(postings.docID());
-              docCount++;
-            }
-          }
-        }
         
         if (docCount != docFreq) {
           throw new RuntimeException("term " + term + " docFreq=" + docFreq + " != tot docs w/o deletions " + docCount);
@@ -323,7 +306,7 @@
         if (hasPositions) {
           for(int idx=0;idx<7;idx++) {
             final int skipDocID = (int) (((idx+1)*(long) maxDoc)/8);
-            postings = termsEnum.postings(liveDocs, postings, PostingsEnum.ALL);
+            postings = termsEnum.postings(postings, PostingsEnum.ALL);
             final int docID = postings.advance(skipDocID);
             if (docID == DocIdSetIterator.NO_MORE_DOCS) {
               break;
@@ -387,7 +370,7 @@
         } else {
           for(int idx=0;idx<7;idx++) {
             final int skipDocID = (int) (((idx+1)*(long) maxDoc)/8);
-            postings = termsEnum.postings(liveDocs, postings, PostingsEnum.NONE);
+            postings = termsEnum.postings(postings, PostingsEnum.NONE);
             final int docID = postings.advance(skipDocID);
             if (docID == DocIdSetIterator.NO_MORE_DOCS) {
               break;
@@ -469,7 +452,7 @@
           }
           
           int expectedDocFreq = termsEnum.docFreq();
-          PostingsEnum d = termsEnum.postings(null, null, PostingsEnum.NONE);
+          PostingsEnum d = termsEnum.postings(null, PostingsEnum.NONE);
           int docFreq = 0;
           while (d.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
             docFreq++;
@@ -508,7 +491,6 @@
             }
             
             // Seek by term
-            long totDocCount = 0;
             for(int i=seekCount-1;i>=0;i--) {
               if (termsEnum.seekCeil(seekTerms[i]) != TermsEnum.SeekStatus.FOUND) {
                 throw new RuntimeException("seek to existing term " + seekTerms[i] + " failed");
@@ -517,40 +499,10 @@
                 throw new RuntimeException("seek to existing term " + seekTerms[i] + " returned FOUND but seeked to the wrong term " + termsEnum.term());
               }
               
-              postings = termsEnum.postings(liveDocs, postings, PostingsEnum.NONE);
+              postings = termsEnum.postings(postings, PostingsEnum.NONE);
               if (postings == null) {
                 throw new RuntimeException("null DocsEnum from to existing term " + seekTerms[i]);
               }
-
-              while (postings.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
-                totDocCount++;
-              }
-            }
-            
-            long totDocCountNoDeletes = 0;
-            long totDocFreq = 0;
-            for(int i=0;i<seekCount;i++) {
-              if (!termsEnum.seekExact(seekTerms[i])) {
-                throw new RuntimeException("seek to existing term " + seekTerms[i] + " failed");
-              }
-              
-              totDocFreq += termsEnum.docFreq();
-              postings = termsEnum.postings(null, postings, PostingsEnum.NONE);
-              if (postings == null) {
-                throw new RuntimeException("null DocsEnum from to existing term " + seekTerms[i]);
-              }
-              
-              while(postings.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
-                totDocCountNoDeletes++;
-              }
-            }
-            
-            if (totDocCount > totDocCountNoDeletes) {
-              throw new RuntimeException("more postings with deletes=" + totDocCount + " than without=" + totDocCountNoDeletes);
-            }
-            
-            if (totDocCountNoDeletes != totDocFreq) {
-              throw new RuntimeException("docfreqs=" + totDocFreq + " != recomputed docfreqs=" + totDocCountNoDeletes);
             }
           }
         }

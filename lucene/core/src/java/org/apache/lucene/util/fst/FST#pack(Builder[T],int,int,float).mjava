@@ -10,7 +10,7 @@
    *  However, this is not a strict implementation of the
    *  algorithms described in this paper.
    */
-  FST<T> pack(int minInCountDeref, int maxDerefNodes, float acceptableOverheadRatio) throws IOException {
+  FST<T> pack(Builder<T> builder, int minInCountDeref, int maxDerefNodes, float acceptableOverheadRatio) throws IOException {
 
     // NOTE: maxDerefNodes is intentionally int: we cannot
     // support > 2.1B deref nodes
@@ -29,6 +29,8 @@
     if (nodeAddress == null) {
       throw new IllegalArgumentException("this FST was not built with willPackFST=true");
     }
+
+    T NO_OUTPUT = outputs.getNoOutput();
 
     Arc<T> arc = new Arc<>();
 
@@ -66,11 +68,11 @@
 
     // +1 because node ords start at 1 (0 is reserved as stop node):
     final GrowableWriter newNodeAddress = new GrowableWriter(
-                       PackedInts.bitsRequired(this.bytes.getPosition()), (int) (1 + nodeCount), acceptableOverheadRatio);
+                                                             PackedInts.bitsRequired(builder.bytes.getPosition()), (int) (1 + builder.nodeCount), acceptableOverheadRatio);
 
     // Fill initial coarse guess:
-    for(int node=1;node<=nodeCount;node++) {
-      newNodeAddress.set(node, 1 + this.bytes.getPosition() - nodeAddress.get(node));
+    for(int node=1;node<=builder.nodeCount;node++) {
+      newNodeAddress.set(node, 1 + builder.bytes.getPosition() - nodeAddress.get(node));
     }
 
     int absCount;
@@ -89,16 +91,12 @@
       // for assert:
       boolean negDelta = false;
 
-      fst = new FST<>(inputType, outputs, bytes.getBlockBits());
+      fst = new FST<>(inputType, outputs, builder.bytes.getBlockBits());
       
       final BytesStore writer = fst.bytes;
 
       // Skip 0 byte since 0 is reserved target:
       writer.writeByte((byte) 0);
-
-      fst.arcWithOutputCount = 0;
-      fst.nodeCount = 0;
-      fst.arcCount = 0;
 
       absCount = deltaCount = topCount = nextCount = 0;
 
@@ -111,8 +109,7 @@
       // Since we re-reverse the bytes, we now write the
       // nodes backwards, so that BIT_TARGET_NEXT is
       // unchanged:
-      for(int node=(int)nodeCount;node>=1;node--) {
-        fst.nodeCount++;
+      for(int node=(int) builder.nodeCount;node>=1;node--) {
         final long address = writer.getPosition();
 
         //System.out.println("  node: " + node + " address=" + address);
@@ -224,9 +221,6 @@
 
             if (arc.output != NO_OUTPUT) {
               outputs.write(arc.output, writer);
-              if (!retry) {
-                fst.arcWithOutputCount++;
-              }
             }
             if (arc.nextFinalOutput != NO_OUTPUT) {
               outputs.writeFinalOutput(arc.nextFinalOutput, writer);
@@ -309,8 +303,6 @@
         }
 
         negDelta |= anyNegDelta;
-
-        fst.arcCount += nodeArcCount;
       }
 
       if (!changed) {
@@ -323,7 +315,6 @@
         // Converged!
         break;
       }
-      //System.out.println("  " + changedCount + " of " + fst.nodeCount + " changed; retry");
     }
 
     long maxAddress = 0;
@@ -344,10 +335,6 @@
     if (emptyOutput != null) {
       fst.setEmptyOutput(emptyOutput);
     }
-
-    assert fst.nodeCount == nodeCount: "fst.nodeCount=" + fst.nodeCount + " nodeCount=" + nodeCount;
-    assert fst.arcCount == arcCount;
-    assert fst.arcWithOutputCount == arcWithOutputCount: "fst.arcWithOutputCount=" + fst.arcWithOutputCount + " arcWithOutputCount=" + arcWithOutputCount;
 
     fst.bytes.finish();
     fst.cacheRootArcs();

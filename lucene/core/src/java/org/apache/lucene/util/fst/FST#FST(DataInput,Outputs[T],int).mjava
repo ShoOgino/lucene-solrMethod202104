@@ -9,7 +9,7 @@
 
     // NOTE: only reads most recent format; we don't have
     // back-compat promise for FSTs (they are experimental):
-    version = CodecUtil.checkHeader(in, FILE_FORMAT_NAME, VERSION_PACKED, VERSION_VINT_TARGET);
+    version = CodecUtil.checkHeader(in, FILE_FORMAT_NAME, VERSION_PACKED, VERSION_NO_NODE_ARC_COUNTS);
     packed = in.readByte() == 1;
     if (in.readByte() == 1) {
       // accepts empty string
@@ -55,29 +55,24 @@
       nodeRefToAddress = null;
     }
     startNode = in.readVLong();
-    nodeCount = in.readVLong();
-    arcCount = in.readVLong();
-    arcWithOutputCount = in.readVLong();
+    if (version < VERSION_NO_NODE_ARC_COUNTS) {
+      in.readVLong();
+      in.readVLong();
+      in.readVLong();
+    }
 
     long numBytes = in.readVLong();
-    bytes = new BytesStore(in, numBytes, 1<<maxBlockBits);
-    
-    NO_OUTPUT = outputs.getNoOutput();
-
-    cacheRootArcs();
-
-    // NOTE: bogus because this is only used during
-    // building; we need to break out mutable FST from
-    // immutable
-    allowArrayArcs = false;
-
-    /*
-    if (bytes.length == 665) {
-      Writer w = new OutputStreamWriter(new FileOutputStream("out.dot"), StandardCharsets.UTF_8);
-      Util.toDot(this, w, false, false);
-      w.close();
-      System.out.println("Wrote FST to out.dot");
+    if (numBytes > 1 << maxBlockBits) {
+      // FST is big: we need multiple pages
+      bytes = new BytesStore(in, numBytes, 1<<maxBlockBits);
+      bytesArray = null;
+    } else {
+      // FST fits into a single block: use ByteArrayBytesStoreReader for less overhead
+      bytes = null;
+      bytesArray = new byte[(int) numBytes];
+      in.readBytes(bytesArray, 0, bytesArray.length);
     }
-    */
+    
+    cacheRootArcs();
   }
 

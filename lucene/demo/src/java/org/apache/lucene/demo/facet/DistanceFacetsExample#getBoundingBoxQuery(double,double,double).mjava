@@ -1,0 +1,68 @@
+  /** Given a latitude and longitude (in degrees) and the
+   *  maximum great circle (surface of the earth) distance,
+   *  returns a simple Filter bounding box to "fast match"
+   *  candidates. */
+  public static Query getBoundingBoxQuery(double originLat, double originLng, double maxDistanceKM) {
+
+    // Basic bounding box geo math from
+    // http://JanMatuschek.de/LatitudeLongitudeBoundingCoordinates,
+    // licensed under creative commons 3.0:
+    // http://creativecommons.org/licenses/by/3.0
+
+    // TODO: maybe switch to recursive prefix tree instead
+    // (in lucene/spatial)?  It should be more efficient
+    // since it's a 2D trie...
+
+    // Degrees -> Radians:
+    double originLatRadians = Math.toRadians(originLat);
+    double originLngRadians = Math.toRadians(originLng);
+
+    double angle = maxDistanceKM / (SloppyMath.earthDiameter(originLat) / 2.0);
+
+    double minLat = originLatRadians - angle;
+    double maxLat = originLatRadians + angle;
+
+    double minLng;
+    double maxLng;
+    if (minLat > Math.toRadians(-90) && maxLat < Math.toRadians(90)) {
+      double delta = Math.asin(Math.sin(angle)/Math.cos(originLatRadians));
+      minLng = originLngRadians - delta;
+      if (minLng < Math.toRadians(-180)) {
+        minLng += 2 * Math.PI;
+      }
+      maxLng = originLngRadians + delta;
+      if (maxLng > Math.toRadians(180)) {
+        maxLng -= 2 * Math.PI;
+      }
+    } else {
+      // The query includes a pole!
+      minLat = Math.max(minLat, Math.toRadians(-90));
+      maxLat = Math.min(maxLat, Math.toRadians(90));
+      minLng = Math.toRadians(-180);
+      maxLng = Math.toRadians(180);
+    }
+
+    BooleanQuery.Builder f = new BooleanQuery.Builder();
+
+    // Add latitude range filter:
+    f.add(NumericRangeQuery.newDoubleRange("latitude", Math.toDegrees(minLat), Math.toDegrees(maxLat), true, true),
+          BooleanClause.Occur.FILTER);
+
+    // Add longitude range filter:
+    if (minLng > maxLng) {
+      // The bounding box crosses the international date
+      // line:
+      BooleanQuery.Builder lonF = new BooleanQuery.Builder();
+      lonF.add(NumericRangeQuery.newDoubleRange("longitude", Math.toDegrees(minLng), null, true, true),
+               BooleanClause.Occur.SHOULD);
+      lonF.add(NumericRangeQuery.newDoubleRange("longitude", null, Math.toDegrees(maxLng), true, true),
+               BooleanClause.Occur.SHOULD);
+      f.add(lonF.build(), BooleanClause.Occur.MUST);
+    } else {
+      f.add(NumericRangeQuery.newDoubleRange("longitude", Math.toDegrees(minLng), Math.toDegrees(maxLng), true, true),
+            BooleanClause.Occur.FILTER);
+    }
+
+    return f.build();
+  }
+

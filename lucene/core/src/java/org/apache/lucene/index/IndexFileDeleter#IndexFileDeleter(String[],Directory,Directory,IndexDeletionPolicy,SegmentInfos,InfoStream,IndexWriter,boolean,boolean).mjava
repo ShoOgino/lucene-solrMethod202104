@@ -5,7 +5,7 @@
    * any files not referenced by any of the commits.
    * @throws IOException if there is a low-level IO error
    */
-  public IndexFileDeleter(Directory directoryOrig, Directory directory, IndexDeletionPolicy policy, SegmentInfos segmentInfos,
+  public IndexFileDeleter(String[] files, Directory directoryOrig, Directory directory, IndexDeletionPolicy policy, SegmentInfos segmentInfos,
                           InfoStream infoStream, IndexWriter writer, boolean initialIndexExists,
                           boolean isReaderInit) throws IOException {
     Objects.requireNonNull(writer);
@@ -25,7 +25,6 @@
     // First pass: walk the files and initialize our ref
     // counts:
     CommitPoint currentCommitPoint = null;
-    String[] files = directory.listAll();
 
     if (currentSegmentsFile != null) {
       Matcher m = IndexFileNames.CODEC_FILE_PATTERN.matcher("");
@@ -44,32 +43,17 @@
             if (infoStream.isEnabled("IFD")) {
               infoStream.message("IFD", "init: load commit \"" + fileName + "\"");
             }
-            SegmentInfos sis = null;
-            try {
-              sis = SegmentInfos.readCommit(directoryOrig, fileName);
-            } catch (FileNotFoundException | NoSuchFileException e) {
-              // LUCENE-948: on NFS (and maybe others), if
-              // you have writers switching back and forth
-              // between machines, it's very likely that the
-              // dir listing will be stale and will claim a
-              // file segments_X exists when in fact it
-              // doesn't.  So, we catch this and handle it
-              // as if the file does not exist
-              if (infoStream.isEnabled("IFD")) {
-                infoStream.message("IFD", "init: hit FileNotFoundException when loading commit \"" + fileName + "\"; skipping this commit point");
-              }
+            SegmentInfos sis = SegmentInfos.readCommit(directoryOrig, fileName);
+
+            final CommitPoint commitPoint = new CommitPoint(commitsToDelete, directoryOrig, sis);
+            if (sis.getGeneration() == segmentInfos.getGeneration()) {
+              currentCommitPoint = commitPoint;
             }
-            if (sis != null) {
-              final CommitPoint commitPoint = new CommitPoint(commitsToDelete, directoryOrig, sis);
-              if (sis.getGeneration() == segmentInfos.getGeneration()) {
-                currentCommitPoint = commitPoint;
-              }
-              commits.add(commitPoint);
-              incRef(sis, true);
+            commits.add(commitPoint);
+            incRef(sis, true);
               
-              if (lastSegmentInfos == null || sis.getGeneration() > lastSegmentInfos.getGeneration()) {
-                lastSegmentInfos = sis;
-              }
+            if (lastSegmentInfos == null || sis.getGeneration() > lastSegmentInfos.getGeneration()) {
+              lastSegmentInfos = sis;
             }
           }
         }
@@ -116,6 +100,10 @@
       RefCount rc = entry.getValue();
       final String fileName = entry.getKey();
       if (0 == rc.count) {
+        // A segments_N file should never have ref count 0 on init:
+        if (fileName.startsWith(IndexFileNames.SEGMENTS)) {
+          throw new IllegalStateException("file \"" + fileName + "\" has refCount=0, which should never happen on init");
+        }
         if (infoStream.isEnabled("IFD")) {
           infoStream.message("IFD", "init: removing unreferenced file \"" + fileName + "\"");
         }

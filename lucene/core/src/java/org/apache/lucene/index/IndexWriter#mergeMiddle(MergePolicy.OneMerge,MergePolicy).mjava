@@ -172,31 +172,27 @@
         try {
           createCompoundFile(infoStream, trackingCFSDir, merge.info.info, context);
           success = true;
-        } catch (IOException ioe) {
+        } catch (Throwable t) {
           synchronized(this) {
             if (merge.rateLimiter.getAbort()) {
-              // This can happen if rollback or close(false)
-              // is called -- fall through to logic below to
-              // remove the partially created CFS:
+              // This can happen if rollback is called while we were building
+              // our CFS -- fall through to logic below to remove the non-CFS
+              // merged files:
+              if (infoStream.isEnabled("IW")) {
+                infoStream.message("IW", "hit merge abort exception creating compound file during merge");
+              }
+              return 0;
             } else {
-              handleMergeException(ioe, merge);
+              handleMergeException(t, merge);
             }
           }
-        } catch (Throwable t) {
-          handleMergeException(t, merge);
         } finally {
-          if (!success) {
+          if (success == false) {
             if (infoStream.isEnabled("IW")) {
               infoStream.message("IW", "hit exception creating compound file during merge");
             }
-
-            synchronized(this) {
-              Set<String> cfsFiles = new HashSet<>(trackingCFSDir.getCreatedFiles());
-              for (String cfsFile : cfsFiles) {
-                deleter.deleteFile(cfsFile);
-              }
-              deleter.deleteNewFiles(merge.info.files());
-            }
+            // Safe: these files must exist
+            deleteNewFiles(merge.info.files());
           }
         }
 
@@ -209,16 +205,14 @@
 
           // delete new non cfs files directly: they were never
           // registered with IFD
-          deleter.deleteNewFiles(filesToRemove);
+          deleteNewFiles(filesToRemove);
 
           if (merge.rateLimiter.getAbort()) {
             if (infoStream.isEnabled("IW")) {
               infoStream.message("IW", "abort merge after building CFS");
             }
-            Set<String> cfsFiles = new HashSet<>(trackingCFSDir.getCreatedFiles());
-            for (String cfsFile : cfsFiles) {
-              deleter.deleteFile(cfsFile);
-            }
+            // Safe: these files must exist
+            deleteNewFiles(merge.info.files());
             return 0;
           }
         }
@@ -241,9 +235,8 @@
         success2 = true;
       } finally {
         if (!success2) {
-          synchronized(this) {
-            deleter.deleteNewFiles(merge.info.files());
-          }
+          // Safe: these files must exist
+          deleteNewFiles(merge.info.files());
         }
       }
 
@@ -280,7 +273,7 @@
     } finally {
       // Readers are already closed in commitMerge if we didn't hit
       // an exc:
-      if (!success) {
+      if (success == false) {
         closeMergeReaders(merge, true);
       }
     }

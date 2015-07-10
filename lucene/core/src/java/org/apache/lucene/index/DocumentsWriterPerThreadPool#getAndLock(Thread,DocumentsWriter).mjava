@@ -2,43 +2,32 @@
   ThreadState getAndLock(Thread requestingThread, DocumentsWriter documentsWriter) {
     ThreadState threadState = null;
     synchronized (this) {
-      while (true) {
-        if (freeCount > 0) {
-          // Important that we are LIFO here! This way if number of concurrent indexing threads was once high, but has now reduced, we only use a
-          // limited number of thread states:
-          threadState = freeList[freeCount-1];
+      if (freeList.isEmpty()) {
+        // ThreadState is already locked before return by this method:
+        return newThreadState();
+      } else {
+        // Important that we are LIFO here! This way if number of concurrent indexing threads was once high, but has now reduced, we only use a
+        // limited number of thread states:
+        threadState = freeList.remove(freeList.size()-1);
 
-          if (threadState.dwpt == null) {
-            // This thread-state is not initialized, e.g. it
-            // was just flushed. See if we can instead find
-            // another free thread state that already has docs
-            // indexed. This way if incoming thread concurrency
-            // has decreased, we don't leave docs
-            // indefinitely buffered, tying up RAM.  This
-            // will instead get those thread states flushed,
-            // freeing up RAM for larger segment flushes:
-            for(int i=0;i<freeCount;i++) {
-              if (freeList[i].dwpt != null) {
-                // Use this one instead, and swap it with
-                // the un-initialized one:
-                ThreadState ts = freeList[i];
-                freeList[i] = threadState;
-                threadState = ts;
-                break;
-              }
+        if (threadState.dwpt == null) {
+          // This thread-state is not initialized, e.g. it
+          // was just flushed. See if we can instead find
+          // another free thread state that already has docs
+          // indexed. This way if incoming thread concurrency
+          // has decreased, we don't leave docs
+          // indefinitely buffered, tying up RAM.  This
+          // will instead get those thread states flushed,
+          // freeing up RAM for larger segment flushes:
+          for(int i=0;i<freeList.size();i++) {
+            ThreadState ts = freeList.get(i);
+            if (ts.dwpt != null) {
+              // Use this one instead, and swap it with
+              // the un-initialized one:
+              freeList.set(i, threadState);
+              threadState = ts;
+              break;
             }
-          }
-          freeCount--;
-          break;
-        } else if (numThreadStatesActive < threadStates.length) {
-          // ThreadState is already locked before return by this method:
-          return newThreadState();
-        } else {
-          // Wait until a thread state frees up:
-          try {
-            wait();
-          } catch (InterruptedException ie) {
-            throw new ThreadInterruptedException(ie);
           }
         }
       }

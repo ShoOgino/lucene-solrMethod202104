@@ -27,7 +27,8 @@
 
     Slot bottom = null;
     for (int i = (startTermIndex == -1) ? 1 : 0; i < nTerms; i++) {
-      if (countAcc.getCount(i) < effectiveMincount) {
+      // screen out buckets not matching mincount immediately (i.e. don't even increment numBuckets)
+      if (effectiveMincount > 0 && countAcc.getCount(i) < effectiveMincount) {
         continue;
       }
 
@@ -77,9 +78,9 @@
 
     if (freq.allBuckets) {
       SimpleOrderedMap<Object> allBuckets = new SimpleOrderedMap<>();
-      countAcc.setValues(allBuckets, allBucketsSlot);
-      for (SlotAcc acc : accs) {
-        acc.setValues(allBuckets, allBucketsSlot);
+      allBuckets.add("count", allBucketsAcc.getSpecialCount());
+      if (allBucketsAcc != null) {
+        allBucketsAcc.setValues(allBuckets, allBucketsSlot);
       }
       res.add("allBuckets", allBuckets);
     }
@@ -87,6 +88,9 @@
     ArrayList bucketList = new ArrayList(collectCount);
     res.add("buckets", bucketList);
 
+
+    // TODO: do this with a callback instead?
+    boolean needFilter = deferredAggs != null || freq.getSubFacets().size() > 0;
 
     for (int slotNum : sortedSlots) {
       SimpleOrderedMap<Object> bucket = new SimpleOrderedMap<>();
@@ -98,52 +102,38 @@
       Object val = sf.getType().toObject(sf, br);
 
       bucket.add("val", val);
-      // add stats for this bucket
-      addStats(bucket, slotNum);
 
-      // handle sub-facets for this bucket
-      if (freq.getSubFacets().size() > 0) {
-        TermQuery filter = new TermQuery(new Term(sf.getName(), br.clone()));
-        try {
-          processSubs(bucket, filter, fcontext.searcher.getDocSet(filter, fcontext.base) );
-        } finally {
-          // subContext.base.decref();  // OFF-HEAP
-          // subContext.base = null;  // do not modify context after creation... there may be deferred execution (i.e. streaming)
-        }
-      }
+      TermQuery filter = needFilter ? new TermQuery(new Term(sf.getName(), br.clone())) : null;
+      fillBucket(bucket, countAcc.getCount(slotNum), slotNum, null, filter);
 
       bucketList.add(bucket);
     }
 
     if (freq.missing) {
       SimpleOrderedMap<Object> missingBucket = new SimpleOrderedMap<>();
+      fillBucket(missingBucket, getFieldMissingQuery(fcontext.searcher, freq.field));
+      res.add("missing", missingBucket);
+
+      /*** TODO - OPTIMIZE
       DocSet missingDocSet = null;
-      try {
-        if (startTermIndex == -1) {
-          addStats(missingBucket, 0);
-        } else {
-          missingDocSet = getFieldMissing(fcontext.searcher, fcontext.base, freq.field);
-          // an extra slot was added to the end for this missing bucket
-          countAcc.incrementCount(nTerms, missingDocSet.size());
-          collect(missingDocSet, nTerms);
-          addStats(missingBucket, nTerms);
-        }
-
-        if (freq.getSubFacets().size() > 0) {
-          // TODO: we can do better than this!
-          if (missingDocSet == null) {
-            missingDocSet = getFieldMissing(fcontext.searcher, fcontext.base, freq.field);
-          }
-          processSubs(missingBucket, getFieldMissingQuery(fcontext.searcher, freq.field), missingDocSet);
-        }
-
-        res.add("missing", missingBucket);
-      } finally {
-        if (missingDocSet != null) {
-          // missingDocSet.decref(); // OFF-HEAP
-          missingDocSet = null;
-        }
+      if (startTermIndex == -1) {
+        fillBucket(missingBucket, countAcc.getCount(0), null);
+      } else {
+        missingDocSet = getFieldMissing(fcontext.searcher, fcontext.base, freq.field);
+        // an extra slot was added to the end for this missing bucket
+        countAcc.incrementCount(nTerms, missingDocSet.size());
+        collect(missingDocSet, nTerms);
+        addStats(missingBucket, nTerms);
       }
+
+      if (freq.getSubFacets().size() > 0) {
+        // TODO: we can do better than this!
+        if (missingDocSet == null) {
+          missingDocSet = getFieldMissing(fcontext.searcher, fcontext.base, freq.field);
+        }
+        processSubs(missingBucket, getFieldMissingQuery(fcontext.searcher, freq.field), missingDocSet);
+      }
+       ***/
     }
 
     return res;

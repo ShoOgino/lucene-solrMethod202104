@@ -1,0 +1,82 @@
+  @Test
+  @ShardsFixed(num = 1)
+  public void testAddTooManyReplicas() throws Exception {
+    String collectionName = "TooManyReplicasInSeveralFlavors";
+    CollectionAdminRequest.Create create = new CollectionAdminRequest.Create()
+        .setCollectionName(collectionName)
+        .setNumShards(2)
+        .setReplicationFactor(1)
+        .setMaxShardsPerNode(2)
+        .setStateFormat(2);
+
+    CollectionAdminResponse response = create.process(cloudClient);
+    assertEquals(0, response.getStatus());
+    assertTrue(response.isSuccess());
+    // Now I have the fixed Jetty plus the control instnace, I have two replicas, one for each shard
+
+    // Curiously, I should be able to add a bunch of replicas if I specify the node, even more than maxShardsPerNode
+    // Just get the first node any way we can.
+    // Get a node to use for the "node" parameter.
+
+    String nodeName = getAllNodeNames(collectionName).get(0);
+    // Add a replica using the "node" parameter (no "too many replicas check")
+    // this node should have 2 replicas on it
+    CollectionAdminRequest.AddReplica addReplicaNode = new CollectionAdminRequest.AddReplica()
+        .setCollectionName(collectionName)
+        .setShardName("shard1")
+        .setNode(nodeName);
+    response = addReplicaNode.process(cloudClient);
+    assertEquals(0, response.getStatus());
+
+    // Three replicas so far, should be able to create another one "normally"
+    CollectionAdminRequest.AddReplica addReplica = new CollectionAdminRequest.AddReplica()
+        .setCollectionName(collectionName)
+        .setShardName("shard1");
+
+    response = addReplica.process(cloudClient);
+    assertEquals(0, response.getStatus());
+
+    // This one should fail though, no "node" parameter specified
+    try {
+      addReplica.process(cloudClient);
+      fail("Should have thrown an error because the nodes are full");
+    } catch (HttpSolrClient.RemoteSolrException se) {
+      assertTrue("Should have gotten the right error message back",
+          se.getMessage().contains("given the current number of live nodes and a maxShardsPerNode of"));
+    }
+
+    // Oddly, we should succeed next just because setting property.name will not check for nodes being "full up"
+    Properties props = new Properties();
+    props.setProperty("name", "bogus2");
+    addReplicaNode.setProperties(props);
+    response = addReplicaNode.process(cloudClient);
+    assertEquals(0, response.getStatus());
+
+    ZkStateReader zkStateReader = getCommonCloudSolrClient().getZkStateReader();
+    zkStateReader.updateClusterState(true);
+    Slice slice = zkStateReader.getClusterState().getSlicesMap(collectionName).get("shard1");
+
+    Replica rep = null;
+    for (Replica rep1 : slice.getReplicas()) { // Silly compiler
+      if (rep1.get("core").equals("bogus2")) {
+        rep = rep1;
+        break;
+      }
+    }
+    assertNotNull("Should have found a replica named 'bogus2'", rep);
+    assertEquals("Replica should have been put on correct core", nodeName, rep.getNodeName());
+
+    // Shard1 should have 4 replicas
+    assertEquals("There should be 4 replicas for shard 1", 4, slice.getReplicas().size());
+
+    // And let's fail one more time because to insure that the math doesn't do weird stuff it we have more replicas
+    // than simple calcs would indicate.
+    try {
+      addReplica.process(cloudClient);
+      fail("Should have thrown an error because the nodes are full");
+    } catch (HttpSolrClient.RemoteSolrException se) {
+      assertTrue("Should have gotten the right error message back",
+          se.getMessage().contains("given the current number of live nodes and a maxShardsPerNode of"));
+    }
+  }
+

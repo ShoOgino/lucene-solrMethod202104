@@ -1,8 +1,14 @@
   void tragicEvent(Throwable tragedy, String location) throws IOException {
+
     // unbox our internal AbortingException
     if (tragedy instanceof AbortingException) {
       tragedy = tragedy.getCause();
     }
+
+    // This is not supposed to be tragic: IW is supposed to catch this and
+    // ignore, because it means we asked the merge to abort:
+    assert tragedy instanceof MergePolicy.MergeAbortedException == false;
+
     // We cannot hold IW's lock here else it can lead to deadlock:
     assert Thread.holdsLock(this) == false;
 
@@ -14,22 +20,18 @@
     }
 
     synchronized (this) {
-      // it's possible you could have a really bad day
-      if (this.tragedy == null) {
-        this.tragedy = tragedy;
+      // It's possible you could have a really bad day
+      if (this.tragedy != null) {
+        // Another thread is already dealing / has dealt with the tragedy:
+        IOUtils.reThrow(tragedy);
       }
+
+      this.tragedy = tragedy;
     }
 
     // if we are already closed (e.g. called by rollback), this will be a no-op.
-    synchronized(commitLock) {
-      if (closing == false) {
-        try {
-          rollback();
-        } catch (Throwable ignored) {
-          // it would be confusing to addSuppressed here, it's unrelated to the disaster,
-          // and it's possible our internal state is amiss anyway.
-        }
-      }
+    if (shouldClose(false)) {
+      rollbackInternal();
     }
 
     IOUtils.reThrow(tragedy);

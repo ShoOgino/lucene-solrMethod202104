@@ -1,0 +1,101 @@
+  private SliceWriter sort() throws IOException {
+    if (heapWriter != null) {
+
+      assert valueCount < Integer.MAX_VALUE;
+
+      // All buffered points are still in heap
+      new InPlaceMergeSorter() {
+        @Override
+        protected void swap(int i, int j) {
+          int docID = heapWriter.docIDs[i];
+          heapWriter.docIDs[i] = heapWriter.docIDs[j];
+          heapWriter.docIDs[j] = docID;
+
+          long ord = heapWriter.ords[i];
+          heapWriter.ords[i] = heapWriter.ords[j];
+          heapWriter.ords[j] = ord;
+
+          long value = heapWriter.values[i];
+          heapWriter.values[i] = heapWriter.values[j];
+          heapWriter.values[j] = value;
+        }
+
+        @Override
+        protected int compare(int i, int j) {
+          int cmp = Long.compare(heapWriter.values[i], heapWriter.values[j]);
+          if (cmp != 0) {
+            return cmp;
+          }
+
+          // Tie-break
+          cmp = Integer.compare(heapWriter.docIDs[i], heapWriter.docIDs[j]);
+          if (cmp != 0) {
+            return cmp;
+          }
+
+          return Long.compare(heapWriter.ords[i], heapWriter.ords[j]);
+        }
+      }.sort(0, (int) valueCount);
+
+      HeapSliceWriter sorted = new HeapSliceWriter((int) valueCount);
+      for(int i=0;i<valueCount;i++) {
+        sorted.append(heapWriter.values[i],
+                      heapWriter.ords[i],
+                      heapWriter.docIDs[i]);
+      }
+
+      return sorted;
+    } else {
+
+      // Offline sort:
+      assert tempDir != null;
+
+      final ByteArrayDataInput reader = new ByteArrayDataInput();
+      Comparator<BytesRef> cmp = new Comparator<BytesRef>() {
+        private final ByteArrayDataInput readerB = new ByteArrayDataInput();
+
+        @Override
+        public int compare(BytesRef a, BytesRef b) {
+          reader.reset(a.bytes, a.offset, a.length);
+          final long valueA = reader.readLong();
+          final int docIDA = reader.readVInt();
+          final long ordA = reader.readVLong();
+
+          reader.reset(b.bytes, b.offset, b.length);
+          final long valueB = reader.readLong();
+          final int docIDB = reader.readVInt();
+          final long ordB = reader.readVLong();
+
+          int cmp = Long.compare(valueA, valueB);
+          if (cmp != 0) {
+            return cmp;
+          }
+
+          // Tie-break
+          cmp = Integer.compare(docIDA, docIDB);
+          if (cmp != 0) {
+            return cmp;
+          }
+
+          return Long.compare(ordA, ordB);
+        }
+      };
+
+      Path sorted = tempDir.resolve("sorted");
+      boolean success = false;
+      try {
+        OfflineSorter sorter = new OfflineSorter(cmp, OfflineSorter.BufferSize.automatic(), tempDir, OfflineSorter.MAX_TEMPFILES);
+        sorter.sort(tempInput, sorted);
+        SliceWriter writer = convertToFixedWidth(sorted);
+        success = true;
+        return writer;
+      } finally {
+        if (success) {
+          IOUtils.rm(sorted);
+        } else {
+          IOUtils.deleteFilesIgnoringExceptions(sorted);
+        }
+      }
+    }
+  }
+

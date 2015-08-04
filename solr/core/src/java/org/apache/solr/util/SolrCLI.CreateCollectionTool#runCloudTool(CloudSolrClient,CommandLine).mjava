@@ -1,9 +1,15 @@
-    protected int runCloudTool(CloudSolrClient cloudSolrClient, CommandLine cli) throws Exception {
+    protected void runCloudTool(CloudSolrClient cloudSolrClient, CommandLine cli) throws Exception {
+
       Set<String> liveNodes = cloudSolrClient.getZkStateReader().getClusterState().getLiveNodes();
       if (liveNodes.isEmpty())
         throw new IllegalStateException("No live nodes found! Cannot create a collection until " +
             "there is at least 1 live node in the cluster.");
-      String firstLiveNode = liveNodes.iterator().next();
+      
+      String baseUrl = cli.getOptionValue("solrUrl");
+      if (baseUrl == null) {
+        String firstLiveNode = liveNodes.iterator().next();
+        baseUrl = cloudSolrClient.getZkStateReader().getBaseUrlForNodeName(firstLiveNode);
+      }
 
       String collectionName = cli.getOptionValue(NAME);
 
@@ -22,12 +28,12 @@
 
       String confname = cli.getOptionValue("confname", collectionName);
       boolean configExistsInZk =
-          cloudSolrClient.getZkStateReader().getZkClient().exists("/configs/"+confname, true);
+          cloudSolrClient.getZkStateReader().getZkClient().exists("/configs/" + confname, true);
 
       if (".system".equals(collectionName)) {
         //do nothing
       } else if (configExistsInZk) {
-        System.out.println("Re-using existing configuration directory "+confname);
+        echo("Re-using existing configuration directory "+confname);
       } else {
         String configSet = cli.getOptionValue("confdir", DEFAULT_CONFIG_SET);
         File configSetDir = null;
@@ -54,27 +60,23 @@
           if ((new File(configSetDir, "solrconfig.xml")).isFile()) {
             confDir = configSetDir;
           } else {
-            System.err.println("Specified configuration directory "+configSetDir.getAbsolutePath()+
+            throw new IllegalArgumentException("Specified configuration directory "+configSetDir.getAbsolutePath()+
                 " is invalid;\nit should contain either conf sub-directory or solrconfig.xml");
-            return 1;
           }
         }
 
         // test to see if that config exists in ZK
-        System.out.println("Uploading "+confDir.getAbsolutePath()+
+        echo("Uploading "+confDir.getAbsolutePath()+
             " for config "+confname+" to ZooKeeper at "+cloudSolrClient.getZkHost());
         cloudSolrClient.uploadConfig(confDir.toPath(), confname);
       }
 
-      String baseUrl = cloudSolrClient.getZkStateReader().getBaseUrlForNodeName(firstLiveNode);
-
       // since creating a collection is a heavy-weight operation, check for existence first
       String collectionListUrl = baseUrl+"/admin/collections?action=list";
       if (safeCheckCollectionExists(collectionListUrl, collectionName)) {
-        System.err.println("\nCollection '"+collectionName+"' already exists!");
-        System.err.println("\nChecked collection existence using Collections API command:\n"+collectionListUrl);
-        System.err.println();
-        return 1;
+        throw new IllegalStateException("\nCollection '"+collectionName+
+            "' already exists!\nChecked collection existence using Collections API command:\n"+
+            collectionListUrl);
       }
 
       // doesn't seem to exist ... try to create
@@ -88,7 +90,7 @@
               maxShardsPerNode,
               confname);
 
-      System.out.println("\nCreating new collection '"+collectionName+"' using command:\n"+createCollectionUrl+"\n");
+      echo("\nCreating new collection '"+collectionName+"' using command:\n"+createCollectionUrl+"\n");
 
       Map<String,Object> json = null;
       try {
@@ -96,20 +98,15 @@
       } catch (SolrServerException sse) {
         // check if already exists
         if (safeCheckCollectionExists(collectionListUrl, collectionName)) {
-          System.err.println("Collection '"+collectionName+"' already exists!");
-          System.err.println("\nChecked collection existence using Collections API command:\n"+collectionListUrl);
+          throw new IllegalArgumentException("Collection '"+collectionName+
+              "' already exists!\nChecked collection existence using Collections API command:\n"+collectionListUrl);
         } else {
-          System.err.println("Failed to create collection '"+collectionName+"' due to: "+sse.getMessage());
+          throw new Exception("Failed to create collection '"+collectionName+"' due to: "+sse.getMessage());
         }
-        System.err.println();
-        return 1;
       }
 
       CharArr arr = new CharArr();
       new JSONWriter(arr, 2).write(json);
-      System.out.println(arr.toString());
-      System.out.println();
-
-      return 0;
+      echo(arr.toString());
     }
 

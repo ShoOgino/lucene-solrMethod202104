@@ -1,20 +1,18 @@
-    @Override
     public void run() {
-
-      final TimerContext timerContext = stats.time("collection_" + operation);
+      String statsName = messageHandler.getTimerName(operation);
+      final TimerContext timerContext = stats.time(statsName);
 
       boolean success = false;
       final String asyncId = message.getStr(ASYNC);
-      String collectionName = message.containsKey(COLLECTION_PROP) ?
-          message.getStr(COLLECTION_PROP) : message.getStr(NAME);
+      String taskKey = messageHandler.getTaskKey(message);
 
       try {
         try {
           log.debug("Runner processing {}", head.getId());
-          response = processMessage(message, operation);
+          response = messageHandler.processMessage(message, operation);
         } finally {
           timerContext.stop();
-          updateStats();
+          updateStats(statsName);
         }
 
         if(asyncId != null) {
@@ -31,24 +29,24 @@
           log.debug("Completed task:[{}]", head.getId());
         }
 
-        markTaskComplete(head.getId(), asyncId, collectionName);
+        markTaskComplete(messageHandler, head.getId(), asyncId, taskKey);
         log.debug("Marked task [{}] as completed.", head.getId());
         printTrackingMaps();
 
-        log.info("Overseer Collection Processor: Message id:" + head.getId() +
+        log.info(messageHandler.getName() + ": Message id:" + head.getId() +
             " complete, response:" + response.getResponse().toString());
         success = true;
       } catch (KeeperException e) {
         SolrException.log(log, "", e);
       } catch (InterruptedException e) {
         // Reset task from tracking data structures so that it can be retried.
-        resetTaskWithException(head.getId(), asyncId, collectionName);
+        resetTaskWithException(messageHandler, head.getId(), asyncId, taskKey);
         log.warn("Resetting task {} as the thread was interrupted.", head.getId());
         Thread.currentThread().interrupt();
       } finally {
         if(!success) {
           // Reset task from tracking data structures so that it can be retried.
-          resetTaskWithException(head.getId(), asyncId, collectionName);
+          resetTaskWithException(messageHandler, head.getId(), asyncId, taskKey);
         }
         synchronized (waitLock){
           waitLock.notifyAll();

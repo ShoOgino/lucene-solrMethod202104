@@ -1,6 +1,6 @@
   @Override
   public void run() {
-    log.info("Process current queue of collection creations");
+    log.info("Process current queue of overseer operations");
     LeaderStatus isLeader = amILeader();
     while (isLeader == LeaderStatus.DONT_KNOW) {
       log.debug("am_i_leader unclear {}", isLeader);
@@ -30,7 +30,7 @@
       log.debug("Found already existing elements in the work-queue. Last element: {}", oldestItemInWorkQueue);
 
     try {
-      prioritizeOverseerNodes();
+      prioritizer.prioritizeOverseerNodes(myId);
     } catch (Exception e) {
       log.error("Unable to prioritize overseer ", e);
     }
@@ -79,8 +79,8 @@
 
           for (QueueEvent head : heads) {
             final ZkNodeProps message = ZkNodeProps.load(head.getBytes());
-            String collectionName = message.containsKey(COLLECTION_PROP) ?
-                message.getStr(COLLECTION_PROP) : message.getStr(NAME);
+            OverseerMessageHandler messageHandler = selector.selectOverseerMessageHandler(message);
+            String taskKey = messageHandler.getTaskKey(message);
             final String asyncId = message.getStr(ASYNC);
             if (hasLeftOverItems) {
               if (head.getId().equals(oldestItemInWorkQueue))
@@ -92,13 +92,13 @@
               }
             }
 
-            if (!checkExclusivity(message, head.getId())) {
+            if (!checkExclusivity(messageHandler, message, head.getId())) {
               log.debug("Exclusivity check failed for [{}]", message.toString());
               continue;
             }
 
             try {
-              markTaskAsRunning(head, collectionName, asyncId, message);
+              markTaskAsRunning(messageHandler, head, taskKey, asyncId, message);
               log.debug("Marked task [{}] as running", head.getId());
             } catch (KeeperException.NodeExistsException e) {
               // This should never happen
@@ -108,9 +108,9 @@
               Thread.currentThread().interrupt();
             }
 
-            log.info("Overseer Collection Processor: Get the message id:" + head.getId() + " message:" + message.toString());
+            log.info(messageHandler.getName() + ": Get the message id:" + head.getId() + " message:" + message.toString());
             String operation = message.getStr(Overseer.QUEUE_OPERATION);
-            Runner runner = new Runner(message,
+            Runner runner = new Runner(messageHandler, message,
                 operation, head);
             tpe.execute(runner);
           }

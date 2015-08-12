@@ -1,0 +1,38 @@
+  public static DocSet createDocSet(SolrIndexSearcher searcher, Term term) throws IOException {
+    DirectoryReader reader = searcher.getRawReader();  // raw reader to avoid extra wrapping overhead
+    int maxDoc = searcher.getIndexReader().maxDoc();
+    int smallSetSize = (maxDoc >> 6) + 5;
+
+
+    String field = term.field();
+    BytesRef termVal = term.bytes();
+
+    int maxCount = 0;
+    int firstReader = -1;
+    List<LeafReaderContext> leaves = reader.leaves();
+    PostingsEnum[] postList = new PostingsEnum[leaves.size()]; // use array for slightly higher scanning cost, but fewer memory allocations
+    for (LeafReaderContext ctx : leaves) {
+      assert leaves.get(ctx.ord) == ctx;
+      LeafReader r = ctx.reader();
+      Fields f = r.fields();
+      Terms t = f.terms(field);
+      if (t == null) continue;  // field is missing
+      TermsEnum te = t.iterator();
+      if (te.seekExact(termVal)) {
+        maxCount += te.docFreq();
+        postList[ctx.ord] = te.postings(null, PostingsEnum.NONE);
+        if (firstReader < 0) firstReader = ctx.ord;
+      }
+    }
+
+    if (maxCount == 0) {
+      return DocSet.EMPTY;
+    }
+
+    if (maxCount <= smallSetSize) {
+      return createSmallSet(leaves, postList, maxCount, firstReader);
+    }
+
+    return createBigSet(leaves, postList, maxDoc, firstReader);
+  }
+

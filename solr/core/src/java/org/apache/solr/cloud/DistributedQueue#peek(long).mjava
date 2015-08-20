@@ -1,34 +1,31 @@
   /**
    * Returns the data at the first element of the queue, or null if the queue is
    * empty after wait ms.
-   * 
+   *
    * @param wait max wait time in ms.
    * @return data at the first element of the queue, or null.
    */
-  public QueueEvent peek(long wait) throws KeeperException, InterruptedException {
-    TimerContext time = null;
+  public byte[] peek(long wait) throws KeeperException, InterruptedException {
+    Preconditions.checkArgument(wait > 0);
+    TimerContext time;
     if (wait == Long.MAX_VALUE) {
       time = stats.time(dir + "_peek_wait_forever");
     } else {
       time = stats.time(dir + "_peek_wait" + wait);
     }
+    updateLock.lockInterruptibly();
     try {
-      if (wait == 0) {
-        return element();
-      }
-
-      Map<Long, String> orderedChildren = getChildren(wait);
-      for (String headNode : orderedChildren.values()) {
-        String path = dir + "/" + headNode;
-        try {
-          byte[] data = zookeeper.getData(path, null, null, true);
-          return new QueueEvent(path, data, null);
-        } catch (KeeperException.NoNodeException e) {
-          // Another client deleted the node first.
+      long waitNanos = TimeUnit.MILLISECONDS.toNanos(wait);
+      while (waitNanos > 0) {
+        byte[] result = firstElement();
+        if (result != null) {
+          return result;
         }
+        waitNanos = notEmpty.awaitNanos(waitNanos);
       }
       return null;
     } finally {
+      updateLock.unlock();
       time.stop();
     }
   }

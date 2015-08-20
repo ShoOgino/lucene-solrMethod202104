@@ -1,38 +1,23 @@
-  private Map<Long, String> getChildren(long wait) throws InterruptedException, KeeperException
-  {
-    LatchWatcher watcher;
-    TreeMap<Long,String> children;
-    synchronized (childrenWatcherLock) {
-      watcher = childrenWatcher;
-      children = fetchedChildren;
-    }
-
-    if (watcher == null ||  watcher.getWatchedEvent() != null) {
-      // this watcher is only interested in child change events
-      watcher = new LatchWatcher(Watcher.Event.EventType.NodeChildrenChanged);
-      while (true) {
-        try {
-          children = orderedChildren(watcher);
-          break;
-        } catch (KeeperException.NoNodeException e) {
-          zookeeper.create(dir, new byte[0], CreateMode.PERSISTENT, true);
-          // go back to the loop and try again
+  /**
+   * Return the currently-known set of children from memory. If there are no children,
+   * waits up to {@code waitMillis} for at least one child to become available. May
+   * update the set of known children.
+   */
+  SortedSet<String> getChildren(long waitMillis) throws KeeperException, InterruptedException {
+    long waitNanos = TimeUnit.MILLISECONDS.toNanos(waitMillis);
+    while (waitNanos > 0) {
+      // Trigger a fetch if needed.
+      firstElement();
+      updateLock.lockInterruptibly();
+      try {
+        if (!knownChildren.isEmpty()) {
+          return new TreeSet<>(knownChildren);
         }
-      }
-      synchronized (childrenWatcherLock) {
-        childrenWatcher = watcher;
-        fetchedChildren = children;
+        waitNanos = notEmpty.awaitNanos(waitNanos);
+      } finally {
+        updateLock.unlock();
       }
     }
-
-    while (true) {
-      if (!children.isEmpty()) break;
-      watcher.await(wait == Long.MAX_VALUE ? DEFAULT_TIMEOUT : wait);
-      if (watcher.getWatchedEvent() != null) {
-        children = orderedChildren(null);
-      }
-      if (wait != Long.MAX_VALUE) break;
-    }
-    return Collections.unmodifiableMap(children);
+    return Collections.emptySortedSet();
   }
 

@@ -1,0 +1,34 @@
+  /**
+   * Returns the name if the first known child node, or {@code null} if the queue is empty.
+   * This is the only place {@link #knownChildren} is ever updated!
+   * The caller must double check that the actual node still exists, since the in-memory
+   * list is inherently stale.
+   */
+  private String firstChild(boolean remove) throws KeeperException, InterruptedException {
+    updateLock.lockInterruptibly();
+    try {
+      // Try to fetch the first in-memory child.
+      if (!knownChildren.isEmpty()) {
+        return remove ? knownChildren.pollFirst() : knownChildren.first();
+      }
+
+      if (lastWatcher != null && !isDirty) {
+        // No children, no known updates, and a watcher is already set; nothing we can do.
+        return null;
+      }
+
+      // Try to fetch an updated list of children from ZK.
+      ChildWatcher newWatcher = new ChildWatcher();
+      knownChildren = fetchZkChildren(newWatcher);
+      lastWatcher = newWatcher; // only set after fetchZkChildren returns successfully
+      isDirty = false;
+      if (knownChildren.isEmpty()) {
+        return null;
+      }
+      notEmpty.signalAll();
+      return remove ? knownChildren.pollFirst() : knownChildren.first();
+    } finally {
+      updateLock.unlock();
+    }
+  }
+

@@ -1,0 +1,41 @@
+  /**
+   * Search for any lazy-loadable state format2 collections.
+   *
+   * A stateFormat=1 collection which is not interesting to us can also
+   * be put into the {@link #lazyCollectionStates} map here. But that is okay
+   * because {@link #constructState()} will give priority to collections in the
+   * shared collection state over this map.
+   * In fact this is a clever way to avoid doing a ZK exists check on
+   * the /collections/collection_name/state.json znode
+   * Such an exists check is done in {@link ClusterState#hasCollection(String)} and
+   * {@link ClusterState#getCollections()} method as a safeguard against exposing wrong collection names to the users
+   */
+  private void refreshCollectionList(Watcher watcher) throws KeeperException, InterruptedException {
+    List<String> children = null;
+    try {
+      children = zkClient.getChildren(COLLECTIONS_ZKNODE, watcher, true);
+    } catch (KeeperException.NoNodeException e) {
+      log.warn("Error fetching collection names");
+      // fall through
+    }
+    if (children == null || children.isEmpty()) {
+      lazyCollectionStates.clear();
+      return;
+    }
+
+    // Don't mess with watchedCollections, they should self-manage.
+
+    // First, drop any children that disappeared.
+    this.lazyCollectionStates.keySet().retainAll(children);
+    for (String coll : children) {
+      // We will create an eager collection for any interesting collections, so don't add to lazy.
+      if (!interestingCollections.contains(coll)) {
+        // Double check contains just to avoid allocating an object.
+        LazyCollectionRef existing = lazyCollectionStates.get(coll);
+        if (existing == null) {
+          lazyCollectionStates.putIfAbsent(coll, new LazyCollectionRef(coll));
+        }
+      }
+    }
+  }
+

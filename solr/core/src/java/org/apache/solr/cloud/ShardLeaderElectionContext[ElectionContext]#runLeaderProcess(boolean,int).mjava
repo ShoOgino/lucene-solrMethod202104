@@ -8,7 +8,6 @@
     ActionThrottle lt;
     try (SolrCore core = cc.getCore(coreName)) {
       if (core == null) {
-        cancelElection();
         throw new SolrException(ErrorCode.SERVER_ERROR, "SolrCore not found:" + coreName + " in " + cc.getCoreNames());
       }
       MDCLoggingContext.setCore(core);
@@ -28,6 +27,13 @@
       int leaderVoteWait = cc.getZkController().getLeaderVoteWait();
       if (!weAreReplacement) {
         waitForReplicasToComeUp(leaderVoteWait);
+      }
+      
+      if (isClosed) {
+        // Solr is shutting down or the ZooKeeper session expired while waiting for replicas. If the later, 
+        // we cannot be sure we are still the leader, so we should bail out. The OnReconnect handler will 
+        // re-register the cores and handle a new leadership election.
+        return;
       }
       
       try (SolrCore core = cc.getCore(coreName)) {
@@ -117,34 +123,38 @@
       }
       
       boolean isLeader = true;
-      try {
-        super.runLeaderProcess(weAreReplacement, 0);
-      } catch (Exception e) {
-        isLeader = false;
-        SolrException.log(log, "There was a problem trying to register as the leader", e);
-        
-        try (SolrCore core = cc.getCore(coreName)) {
-          
-          if (core == null) {
-            log.debug("SolrCore not found:" + coreName + " in " + cc.getCoreNames());
-            return;
-          }
-          
-          core.getCoreDescriptor().getCloudDescriptor().setLeader(false);
-          
-          // we could not publish ourselves as leader - try and rejoin election
-          rejoinLeaderElection(core);
-        }
-      }
-      
-      if (isLeader) {
-        // check for any replicas in my shard that were set to down by the previous leader
+      if (!isClosed) {
         try {
-          startLeaderInitiatedRecoveryOnReplicas(coreName);
-        } catch (Exception exc) {
-          // don't want leader election to fail because of
-          // an error trying to tell others to recover
+          super.runLeaderProcess(weAreReplacement, 0);
+        } catch (Exception e) {
+          isLeader = false;
+          SolrException.log(log, "There was a problem trying to register as the leader", e);
+          
+          try (SolrCore core = cc.getCore(coreName)) {
+            
+            if (core == null) {
+              log.debug("SolrCore not found:" + coreName + " in " + cc.getCoreNames());
+              return;
+            }
+            
+            core.getCoreDescriptor().getCloudDescriptor().setLeader(false);
+            
+            // we could not publish ourselves as leader - try and rejoin election
+            rejoinLeaderElection(core);
+          }
         }
+        
+        if (isLeader) {
+          // check for any replicas in my shard that were set to down by the previous leader
+          try {
+            startLeaderInitiatedRecoveryOnReplicas(coreName);
+          } catch (Exception exc) {
+            // don't want leader election to fail because of
+            // an error trying to tell others to recover
+          }
+        }
+      } else {
+        cancelElection();
       }
     } finally {
       MDCLoggingContext.clear();

@@ -1,0 +1,26 @@
+  @Override
+  public synchronized BinaryDocValues getBinary(FieldInfo field) throws IOException {
+    BKD3DTreeReader treeReader = treeReaders.get(field.name);
+    if (treeReader == null) {
+      // Lazy load
+      Long fp = fieldToIndexFPs.get(field.number);
+      if (fp == null) {
+        throw new IllegalArgumentException("this field was not indexed as a BKDPointField");
+      }
+
+      // LUCENE-6697: never do real IOPs with the original IndexInput because search
+      // threads can be concurrently cloning it:
+      IndexInput clone = datIn.clone();
+      clone.seek(fp);
+      treeReader = new BKD3DTreeReader(clone, maxDoc);
+
+      // Only hang onto the reader when we are not merging:
+      if (merging == false) {
+        treeReaders.put(field.name, treeReader);
+        ramBytesUsed.addAndGet(treeReader.ramBytesUsed());
+      }
+    }
+
+    return new Geo3DBinaryDocValues(treeReader, delegate.getBinary(field), planetMax);
+  }
+

@@ -1,38 +1,34 @@
   @Override
   public RefCounted<IndexWriter> getIndexWriter(SolrCore core)
       throws IOException {
-    synchronized (writerPauseLock) {
-      if (closed) {
-        throw new SolrException(ErrorCode.SERVICE_UNAVAILABLE, "SolrCoreState already closed");
-      }
-      
-      while (pauseWriter) {
-        try {
-          writerPauseLock.wait(100);
-        } catch (InterruptedException e) {}
-        
-        if (closed) {
-          throw new SolrException(ErrorCode.SERVICE_UNAVAILABLE, "Already closed");
+
+    boolean succeeded = false;
+    lock(iwLock.readLock());
+    try {
+      // Multiple readers may be executing this, but we only want one to open the writer on demand.
+      synchronized (this) {
+        if (core == null) {
+          // core == null is a signal to just return the current writer, or null if none.
+          initRefCntWriter();
+          if (refCntWriter == null) return null;
+        } else {
+          if (indexWriter == null) {
+            indexWriter = createMainIndexWriter(core, "DirectUpdateHandler2");
+          }
+          initRefCntWriter();
         }
+
+        refCntWriter.incref();
+        succeeded = true;  // the returned RefCounted<IndexWriter> will release the readLock on a decref()
+        return refCntWriter;
       }
 
-      if (core == null) {
-        // core == null is a signal to just return the current writer, or null
-        // if none.
-        initRefCntWriter();
-        if (refCntWriter == null) return null;
-      } else {
-        if (indexWriter == null) {
-          indexWriter = createMainIndexWriter(core, "DirectUpdateHandler2");
-        }
-        initRefCntWriter();
+    } finally {
+      // if we failed to return the IW for some other reason, we should unlock.
+      if (!succeeded) {
+        iwLock.readLock().unlock();
       }
-
-      writerFree = false;
-      refCntWriter.incref();
-      writerPauseLock.notifyAll();
-      return refCntWriter;
-
     }
+
   }
 

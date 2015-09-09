@@ -1,5 +1,5 @@
-  private void updateLeaderInitiatedRecoveryState(String collection, String shardId, String coreNodeName, 
-      Replica.State state, String leaderCoreNodeName) {
+  public void updateLeaderInitiatedRecoveryState(String collection, String shardId, String coreNodeName,
+      Replica.State state, String leaderCoreNodeName, boolean retryOnConnLoss) {
     if (collection == null || shardId == null || coreNodeName == null) {
       log.warn("Cannot set leader-initiated recovery state znode to "
           + state.toString() + " using: collection=" + collection
@@ -12,7 +12,7 @@
     if (state == Replica.State.ACTIVE) {
       // since we're marking it active, we don't need this znode anymore, so delete instead of update
       try {
-        zkClient.delete(znodePath, -1, false);
+        zkClient.delete(znodePath, -1, retryOnConnLoss);
       } catch (Exception justLogIt) {
         log.warn("Failed to delete znode " + znodePath, justLogIt);
       }
@@ -25,24 +25,30 @@
     } catch (Exception exc) {
       log.warn(exc.getMessage(), exc);
     }
-    if (stateObj == null)
+    if (stateObj == null) {
       stateObj = Utils.makeMap();
+    }
 
     stateObj.put(ZkStateReader.STATE_PROP, state.toString());
     // only update the createdBy value if it's not set
-    if (stateObj.get("createdByNodeName") == null)
-      stateObj.put("createdByNodeName", String.valueOf(this.nodeName));
+    if (stateObj.get("createdByNodeName") == null) {
+      stateObj.put("createdByNodeName", this.nodeName);
+    }
+    if (stateObj.get("createdByCoreNodeName") == null && leaderCoreNodeName != null)  {
+      stateObj.put("createdByCoreNodeName", leaderCoreNodeName);
+    }
 
     byte[] znodeData = Utils.toJSON(stateObj);
 
     try {
       if (state == Replica.State.DOWN) {
-        markShardAsDownIfLeader(collection, shardId, leaderCoreNodeName, znodePath, znodeData);
+        markShardAsDownIfLeader(collection, shardId, leaderCoreNodeName, znodePath, znodeData, retryOnConnLoss);
       } else {
+        // must retry on conn loss otherwise future election attempts may assume wrong LIR state
         if (zkClient.exists(znodePath, true)) {
-          zkClient.setData(znodePath, znodeData, true);
+          zkClient.setData(znodePath, znodeData, retryOnConnLoss);
         } else {
-          zkClient.makePath(znodePath, znodeData, true);
+          zkClient.makePath(znodePath, znodeData, retryOnConnLoss);
         }
       }
       log.info("Wrote {} to {}", state.toString(), znodePath);

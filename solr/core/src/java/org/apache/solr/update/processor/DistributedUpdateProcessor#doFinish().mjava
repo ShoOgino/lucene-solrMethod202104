@@ -61,8 +61,6 @@
         break;
       }
 
-      int maxTries = 1;       
-      boolean sendRecoveryCommand = true;
       String collection = null;
       String shardId = null;
 
@@ -103,33 +101,24 @@
         if (cloudDesc.getCoreNodeName().equals(leaderCoreNodeName) && foundErrorNodeInReplicaList) {
           try {
             // if false, then the node is probably not "live" anymore
-            sendRecoveryCommand =
-                zkController.ensureReplicaInLeaderInitiatedRecovery(collection,
-                    shardId,
-                    stdNode.getNodeProps(),
-                    leaderCoreNodeName,
-                    false /* forcePublishState */,
-                    false /* retryOnConnLoss */
-                );
-
-            // we want to try more than once, ~10 minutes
-            if (sendRecoveryCommand) {
-              maxTries = 120;
-            } // else the node is no longer "live" so no need to send any recovery command
+            // and we do not need to send a recovery message
+            Throwable rootCause = SolrException.getRootCause(error.e);
+            log.error("Setting up to try to start recovery on replica {}", replicaUrl, rootCause);
+            zkController.ensureReplicaInLeaderInitiatedRecovery(
+                req.getCore().getCoreDescriptor().getCoreContainer(),
+                collection,
+                shardId,
+                stdNode.getNodeProps(),
+                leaderCoreNodeName,
+                false /* forcePublishState */
+            );
           } catch (Exception exc) {
             Throwable setLirZnodeFailedCause = SolrException.getRootCause(exc);
             log.error("Leader failed to set replica " +
                 error.req.node.getUrl() + " state to DOWN due to: " + setLirZnodeFailedCause, setLirZnodeFailedCause);
-            if (setLirZnodeFailedCause instanceof KeeperException.SessionExpiredException ||
-                setLirZnodeFailedCause instanceof KeeperException.ConnectionLossException) {
-              // our session is expired, which means our state is suspect, so don't go
-              // putting other replicas in recovery (see SOLR-6511)
-              sendRecoveryCommand = false;
-            } // else will go ahead and try to send the recovery command once after this error
           }
         } else {
           // not the leader anymore maybe or the error'd node is not my replica?
-          sendRecoveryCommand = false;
           if (!foundErrorNodeInReplicaList) {
             log.warn("Core "+cloudDesc.getCoreNodeName()+" belonging to "+collection+" "+
                 shardId+", does not have error'd node " + stdNode.getNodeProps().getCoreUrl() + " as a replica. " +
@@ -139,30 +128,6 @@
                 shardId+", no request recovery command will be sent!");
           }
         }
-      } // else not a StdNode, recovery command still gets sent once
-            
-      if (!sendRecoveryCommand)
-        continue; // the replica is already in recovery handling or is not live   
-
-      Throwable rootCause = SolrException.getRootCause(error.e);
-      log.error("Setting up to try to start recovery on replica {}", replicaUrl, rootCause);
-
-      // try to send the recovery command to the downed replica in a background thread
-      CoreContainer coreContainer = req.getCore().getCoreDescriptor().getCoreContainer();
-      LeaderInitiatedRecoveryThread lirThread =
-          new LeaderInitiatedRecoveryThread(zkController,
-              coreContainer,
-              collection,
-              shardId,
-              error.req.node.getNodeProps(),
-              maxTries,
-              cloudDesc.getCoreNodeName()); // core node name of current leader
-      ExecutorService executor = coreContainer.getUpdateShardHandler().getUpdateExecutor();
-      try {
-        MDC.put("DistributedUpdateProcessor.replicaUrlToRecover", error.req.node.getNodeProps().getCoreUrl());
-        executor.execute(lirThread);
-      } finally {
-        MDC.remove("DistributedUpdateProcessor.replicaUrlToRecover");
       }
     }
 

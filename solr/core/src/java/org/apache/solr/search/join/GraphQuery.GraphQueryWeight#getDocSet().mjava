@@ -1,0 +1,70 @@
+    /**
+     * This computes the matching doc set for a given graph query
+     * 
+     * @return DocSet representing the documents in the graph.
+     * @throws IOException - if a sub search fails... maybe other cases too! :)
+     */
+    private DocSet getDocSet() throws IOException {
+      DocSet fromSet = null;
+      FixedBitSet seedResultBits = null;
+      // Size that the bit set needs to be.
+      int capacity = fromSearcher.getRawReader().maxDoc();
+      // The bit set to contain the results that match the query.
+      FixedBitSet resultBits = new FixedBitSet(capacity);
+      // The measure of how deep in the graph we have gone.
+      currentDepth = 0;
+      // the initial query for the frontier for the first query
+      Query frontierQuery = q;
+      // Find all documents in this graph that are leaf nodes to speed traversal
+      // TODO: speed this up in the future with HAS_FIELD type queries
+      BooleanQuery.Builder leafNodeQuery = new BooleanQuery.Builder();
+      WildcardQuery edgeQuery = new WildcardQuery(new Term(toField, "*"));
+      leafNodeQuery.add(edgeQuery, Occur.MUST_NOT);
+      DocSet leafNodes = fromSearcher.getDocSet(leafNodeQuery.build());
+      // Start the breadth first graph traversal.
+      do {
+        // Create the graph result collector for this level
+        GraphTermsCollector graphResultCollector = new GraphTermsCollector(toField,capacity, resultBits, leafNodes);
+        // traverse the level!
+        fromSearcher.search(frontierQuery, graphResultCollector);
+        // All edge ids on the frontier.
+        BytesRefHash collectorTerms = graphResultCollector.getCollectorTerms();
+        frontierSize = collectorTerms.size();
+        // The resulting doc set from the frontier.
+        fromSet = graphResultCollector.getDocSet();
+        if (seedResultBits == null) {
+          // grab a copy of the seed bits  (these are the "rootNodes")
+          seedResultBits = ((BitDocSet)fromSet).getBits().clone();
+        }
+        Integer fs = new Integer(frontierSize);
+        FrontierQuery fq = buildFrontierQuery(collectorTerms, fs);
+        if (fq == null) {
+          // in case we get null back, make sure we know we're done at this level.
+          fq = new FrontierQuery(null, 0);
+        }
+        frontierQuery = fq.getQuery();
+        frontierSize = fq.getFrontierSize();
+        // Add the bits from this level to the result set.
+        resultBits.or(((BitDocSet)fromSet).getBits());
+        // Increment how far we have gone in the frontier.
+        currentDepth++;
+        // Break out if we have reached our max depth
+        if (currentDepth >= maxDepth && maxDepth != -1) {
+          break;
+        }
+        // test if we discovered any new edges, if not , we're done.
+      } while (frontierSize > 0);
+      // helper bit set operations on the final result set
+      if (!returnRoot) {
+        resultBits.andNot(seedResultBits);
+      }
+      BitDocSet resultSet = new BitDocSet(resultBits);
+      // If we only want to return leaf nodes do that here.
+      if (onlyLeafNodes) {
+        return resultSet.intersection(leafNodes);
+      } else {
+        // create a doc set off the bits that we found.
+        return resultSet;
+      }
+    }
+

@@ -1,0 +1,43 @@
+  /** Changes incoming {@link ByteSequencesWriter} file to to fixed-width-per-entry file, because we need to be able to slice
+   *  as we recurse in {@link #build}. */
+  private Writer convertToFixedWidth(String in) throws IOException {
+    BytesRefBuilder scratch = new BytesRefBuilder();
+    scratch.grow(BYTES_PER_DOC);
+    BytesRef bytes = scratch.get();
+    ByteArrayDataInput dataReader = new ByteArrayDataInput();
+
+    OfflineSorter.ByteSequencesReader reader = null;
+    Writer sortedWriter = null;
+    boolean success = false;
+    try {
+      reader = new OfflineSorter.ByteSequencesReader(tempDir.openInput(in, IOContext.READONCE));
+      sortedWriter = getWriter(pointCount);
+      for (long i=0;i<pointCount;i++) {
+        boolean result = reader.read(scratch);
+        assert result;
+        dataReader.reset(bytes.bytes, bytes.offset, bytes.length);
+        int x = dataReader.readInt();
+        int y = dataReader.readInt();
+        int z = dataReader.readInt();
+        int docID = dataReader.readVInt();
+        long ord = dataReader.readVLong();
+        assert docID >= 0: "docID=" + docID;
+        sortedWriter.append(x, y, z, ord, docID);
+      }
+      success = true;
+    } finally {
+      if (success) {
+        IOUtils.close(sortedWriter, reader);
+      } else {
+        IOUtils.closeWhileHandlingException(sortedWriter, reader);
+        try {
+          sortedWriter.destroy();
+        } catch (Throwable t) {
+          // Suppress to keep throwing original exc
+        }
+      }
+    }
+
+    return sortedWriter;
+  }
+

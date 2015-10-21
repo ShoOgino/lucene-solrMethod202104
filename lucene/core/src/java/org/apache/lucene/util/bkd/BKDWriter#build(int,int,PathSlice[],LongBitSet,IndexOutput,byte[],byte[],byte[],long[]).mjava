@@ -1,0 +1,158 @@
+  /** The array (sized numDims) of PathSlice describe the cell we have currently recursed to. */
+  private void build(int nodeID, int leafNodeOffset,
+                     PathSlice[] slices,
+                     LongBitSet ordBitSet,
+                     IndexOutput out,
+                     byte[] minPackedValue, byte[] maxPackedValue,
+                     byte[] splitPackedValues,
+                     long[] leafBlockFPs) throws IOException {
+
+    for(PathSlice slice : slices) {
+      assert slice.count == slices[0].count;
+    }
+
+    if (numDims == 1 && slices[0].writer instanceof OfflinePointWriter && slices[0].count <= maxPointsSortInHeap) {
+      // Special case for 1D, to cutover to heap once we recurse deeply enough:
+      slices[0] = switchToHeap(slices[0]);
+    }
+
+    if (nodeID >= leafNodeOffset) {
+      // Leaf node: write block
+
+      PathSlice source = slices[0];
+
+      if (source.writer instanceof HeapPointWriter == false) {
+        // Adversarial cases can cause this, e.g. very lopsided data, all equal points
+        source = switchToHeap(source);
+      }
+
+      // We ensured that maxPointsSortInHeap was >= maxPointsInLeafNode, so we better be in heap at this point:
+      HeapPointWriter heapSource = (HeapPointWriter) source.writer;
+
+      // Sort by docID in the leaf so we can delta-vInt encode:
+      sortHeapPointWriter(heapSource, Math.toIntExact(source.start), Math.toIntExact(source.count), -1);
+
+      int lastDocID = 0;
+
+      // Save the block file pointer:
+      leafBlockFPs[nodeID - leafNodeOffset] = out.getFilePointer();
+
+      out.writeVInt(Math.toIntExact(source.count));
+
+      // Write docIDs first, as their own chunk, so that at intersect time we can add all docIDs w/o
+      // loading the values:
+      for (int i=0;i<source.count;i++) {
+        int docID = heapSource.docIDs[Math.toIntExact(source.start + i)];
+        out.writeVInt(docID - lastDocID);
+        lastDocID = docID;
+      }
+
+      // TODO: we should delta compress / only write suffix bytes, like terms dict (the values will all be "close together" since we are at
+      // a leaf cell):
+
+      // Now write the full values:
+      for (int i=0;i<source.count;i++) {
+        // TODO: we could do bulk copying here, avoiding the intermediate copy:
+        heapSource.readPackedValue(Math.toIntExact(source.start + i), scratchPackedValue);
+
+        // Make sure this value does in fact fall within this leaf cell:
+        assert valueInBounds(scratchPackedValue, minPackedValue, maxPackedValue);
+        out.writeBytes(scratchPackedValue, 0, scratchPackedValue.length);
+      }
+
+    } else {
+      // Inner node: partition/recurse
+
+      int splitDim = split(minPackedValue, maxPackedValue);
+
+      PathSlice source = slices[splitDim];
+
+      assert nodeID < splitPackedValues.length: "nodeID=" + nodeID + " splitValues.length=" + splitPackedValues.length;
+
+      // How many points will be in the left tree:
+      long rightCount = source.count / 2;
+      long leftCount = source.count - rightCount;
+
+      byte[] splitValue = markRightTree(rightCount, splitDim, source, ordBitSet);
+      int address = nodeID * (1+bytesPerDim);
+      splitPackedValues[address] = (byte) splitDim;
+      System.arraycopy(splitValue, 0, splitPackedValues, address + 1, bytesPerDim);
+
+      // Partition all PathSlice that are not the split dim into sorted left and right sets, so we can recurse:
+
+      PathSlice[] leftSlices = new PathSlice[numDims];
+      PathSlice[] rightSlices = new PathSlice[numDims];
+
+      byte[] minSplitPackedValue = new byte[packedBytesLength];
+      System.arraycopy(minPackedValue, 0, minSplitPackedValue, 0, packedBytesLength);
+
+      byte[] maxSplitPackedValue = new byte[packedBytesLength];
+      System.arraycopy(maxPackedValue, 0, maxSplitPackedValue, 0, packedBytesLength);
+
+      for(int dim=0;dim<numDims;dim++) {
+
+        if (dim == splitDim) {
+          // No need to partition on this dim since it's a simple slice of the incoming already sorted slice.
+          leftSlices[dim] = new PathSlice(source.writer, source.start, leftCount);
+          rightSlices[dim] = new PathSlice(source.writer, source.start + leftCount, rightCount);
+          System.arraycopy(splitValue, 0, minSplitPackedValue, dim*bytesPerDim, bytesPerDim);
+          System.arraycopy(splitValue, 0, maxSplitPackedValue, dim*bytesPerDim, bytesPerDim);
+          continue;
+        }
+
+        try (PointWriter leftPointWriter = getPointWriter(leftCount);
+             PointWriter rightPointWriter = getPointWriter(source.count - leftCount);
+             PointReader reader = slices[dim].writer.getReader(slices[dim].start);) {
+
+          // Partition this source according to how the splitDim split the values:
+          int nextRightCount = 0;
+          for (int i=0;i<source.count;i++) {
+            boolean result = reader.next();
+            assert result;
+            byte[] packedValue = reader.packedValue();
+            long ord = reader.ord();
+            int docID = reader.docID();
+            if (ordBitSet.get(ord)) {
+              rightPointWriter.append(packedValue, ord, docID);
+              nextRightCount++;
+            } else {
+              leftPointWriter.append(packedValue, ord, docID);
+            }
+          }
+
+          leftSlices[dim] = new PathSlice(leftPointWriter, 0, leftCount);
+          rightSlices[dim] = new PathSlice(rightPointWriter, 0, rightCount);
+
+          assert rightCount == nextRightCount: "rightCount=" + rightCount + " nextRightCount=" + nextRightCount;
+        }
+      }
+
+      ordBitSet.clear(0, pointCount);
+
+      // Recurse on left tree:
+      build(2*nodeID, leafNodeOffset, leftSlices,
+            ordBitSet, out,
+            minPackedValue, maxSplitPackedValue,
+            splitPackedValues, leafBlockFPs);
+      for(int dim=0;dim<numDims;dim++) {
+        // Don't destroy the dim we split on because we just re-used what our caller above gave us for that dim:
+        if (dim != splitDim) {
+          leftSlices[dim].writer.destroy();
+        }
+      }
+
+      // TODO: we could "tail recurse" here?  have our parent discard its refs as we recurse right?
+      // Recurse on right tree:
+      build(2*nodeID+1, leafNodeOffset, rightSlices,
+            ordBitSet, out,
+            minSplitPackedValue, maxPackedValue,
+            splitPackedValues, leafBlockFPs);
+      for(int dim=0;dim<numDims;dim++) {
+        // Don't destroy the dim we split on because we just re-used what our caller above gave us for that dim:
+        if (dim != splitDim) {
+          rightSlices[dim].writer.destroy();
+        }
+      }
+    }
+  }
+

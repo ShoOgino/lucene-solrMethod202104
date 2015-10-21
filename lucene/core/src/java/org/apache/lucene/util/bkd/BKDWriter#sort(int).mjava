@@ -1,0 +1,106 @@
+  private PointWriter sort(int dim) throws IOException {
+
+    if (heapPointWriter != null) {
+
+      assert tempInput == null;
+
+      // We never spilled the incoming points to disk, so now we sort in heap:
+      HeapPointWriter sorted;
+
+      if (dim == 0) {
+        // First dim can re-use the current heap writer
+        sorted = heapPointWriter;
+      } else {
+        // Subsequent dims need a private copy
+        sorted = new HeapPointWriter((int) pointCount, (int) pointCount, packedBytesLength);
+        sorted.copyFrom(heapPointWriter);
+      }
+
+      sortHeapPointWriter(sorted, 0, (int) pointCount, dim);
+
+      sorted.close();
+      return sorted;
+    } else {
+
+      // Offline sort:
+      assert tempInput != null;
+
+      final ByteArrayDataInput reader = new ByteArrayDataInput();
+      Comparator<BytesRef> cmp = new Comparator<BytesRef>() {
+        private final ByteArrayDataInput readerB = new ByteArrayDataInput();
+
+        @Override
+        public int compare(BytesRef a, BytesRef b) {
+          reader.reset(a.bytes, a.offset, a.length);
+          reader.readBytes(scratch1, 0, scratch1.length);
+          final int docIDA = reader.readVInt();
+          final long ordA = reader.readVLong();
+
+          reader.reset(b.bytes, b.offset, b.length);
+          reader.readBytes(scratch2, 0, scratch2.length);
+          final int docIDB = reader.readVInt();
+          final long ordB = reader.readVLong();
+
+          int cmp = BKDUtil.compare(bytesPerDim, scratch1, dim, scratch2, dim);
+
+          if (cmp != 0) {
+            return cmp;
+          }
+
+          // Tie-break
+          cmp = Integer.compare(docIDA, docIDB);
+          if (cmp != 0) {
+            return cmp;
+          }
+
+          return Long.compare(ordA, ordB);
+        }
+      };
+
+      // TODO: this is sort of sneaky way to get the final OfflinePointWriter from OfflineSorter:
+      IndexOutput[] lastWriter = new IndexOutput[1];
+
+      OfflineSorter sorter = new OfflineSorter(tempDir, tempFileNamePrefix, cmp) {
+
+          /** We write/read fixed-byte-width file that {@link OfflinePointReader} can read. */
+          @Override
+          protected ByteSequencesWriter getWriter(IndexOutput out) {
+            lastWriter[0] = out;
+            return new ByteSequencesWriter(out) {
+              @Override
+              public void write(byte[] bytes, int off, int len) throws IOException {
+                if (len != bytesPerDoc) {
+                  throw new IllegalArgumentException("len=" + len + " bytesPerDoc=" + bytesPerDoc);
+                }
+                out.writeBytes(bytes, off, len);
+              }
+            };
+          }
+
+          /** We write/read fixed-byte-width file that {@link OfflinePointReader} can read. */
+          @Override
+          protected ByteSequencesReader getReader(IndexInput in) throws IOException {
+            return new ByteSequencesReader(in) {
+              @Override
+              public boolean read(BytesRefBuilder ref) throws IOException {
+                ref.grow(bytesPerDoc);
+                try {
+                  in.readBytes(ref.bytes(), 0, bytesPerDoc);
+                } catch (EOFException eofe) {
+                  return false;
+                }
+                ref.setLength(bytesPerDoc);
+                return true;
+              }
+            };
+          }
+        };
+
+      sorter.sort(tempInput.getName());
+
+      assert lastWriter[0] != null;
+
+      return new OfflinePointWriter(tempDir, lastWriter[0], packedBytesLength, pointCount);
+    }
+  }
+

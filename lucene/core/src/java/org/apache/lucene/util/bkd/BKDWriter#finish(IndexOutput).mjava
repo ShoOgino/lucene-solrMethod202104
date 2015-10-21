@@ -1,0 +1,104 @@
+  /** Writes the BKD tree to the provided {@link IndexOutput} and returns the file offset where index was written. */
+  public long finish(IndexOutput out) throws IOException {
+    //System.out.println("\nBKDTreeWriter.finish pointCount=" + pointCount + " out=" + out + " heapWriter=" + heapWriter);
+
+    // TODO: specialize the 1D case?  it's much faster at indexing time (no partitioning on recruse...)
+
+    if (offlinePointWriter != null) {
+      offlinePointWriter.close();
+    }
+
+    LongBitSet ordBitSet = new LongBitSet(pointCount);
+
+    long countPerLeaf = pointCount;
+    long innerNodeCount = 1;
+
+    while (countPerLeaf > maxPointsInLeafNode) {
+      countPerLeaf = (countPerLeaf+1)/2;
+      innerNodeCount *= 2;
+    }
+
+    //System.out.println("innerNodeCount=" + innerNodeCount);
+
+    if (1+2*innerNodeCount >= Integer.MAX_VALUE) {
+      throw new IllegalStateException("too many nodes; increase maxPointsInLeafNode (currently " + maxPointsInLeafNode + ") and reindex");
+    }
+
+    innerNodeCount--;
+
+    int numLeaves = (int) (innerNodeCount+1);
+
+    // NOTE: we could save the 1+ here, to use a bit less heap at search time, but then we'd need a somewhat costly check at each
+    // step of the recursion to recompute the split dim:
+
+    // Indexed by nodeID, but first (root) nodeID is 1.  We do 1+ because the lead byte at each recursion says which dim we split on.
+    byte[] splitPackedValues = new byte[Math.toIntExact(numLeaves*(1+bytesPerDim))];
+
+    // +1 because leaf count is power of 2 (e.g. 8), and innerNodeCount is power of 2 minus 1 (e.g. 7)
+    long[] leafBlockFPs = new long[numLeaves];
+
+    // Make sure the math above "worked":
+    assert pointCount / numLeaves <= maxPointsInLeafNode: "pointCount=" + pointCount + " numLeaves=" + numLeaves + " maxPointsInLeafNode=" + maxPointsInLeafNode;
+
+    // Sort all docs once by each dimension:
+    PathSlice[] sortedPointWriters = new PathSlice[numDims];
+
+    byte[] minPacked = new byte[packedBytesLength];
+    byte[] maxPacked = new byte[packedBytesLength];
+    Arrays.fill(maxPacked, (byte) 0xff);
+
+    boolean success = false;
+    try {
+      for(int dim=0;dim<numDims;dim++) {
+        sortedPointWriters[dim] = new PathSlice(sort(dim), 0, pointCount);
+      }
+
+      if (tempInput != null) {
+        tempDir.deleteFile(tempInput.getName());
+        tempInput = null;
+      } else {
+        assert heapPointWriter != null;
+        heapPointWriter = null;
+      }
+
+      build(1, numLeaves, sortedPointWriters,
+            ordBitSet, out,
+            minPacked, maxPacked,
+            splitPackedValues,
+            leafBlockFPs);
+
+      for(PathSlice slice : sortedPointWriters) {
+        slice.writer.destroy();
+      }
+
+      // If no exception, we should have cleaned everything up:
+      assert tempDir.getCreatedFiles().isEmpty();
+
+      success = true;
+    } finally {
+      if (success == false) {
+        IOUtils.deleteFilesIgnoringExceptions(tempDir, tempDir.getCreatedFiles());
+      }
+    }
+
+    //System.out.println("Total nodes: " + innerNodeCount);
+
+    // Write index:
+    long indexFP = out.getFilePointer();
+    CodecUtil.writeHeader(out, CODEC_NAME, VERSION_CURRENT);
+    out.writeVInt(numDims);
+    out.writeVInt(maxPointsInLeafNode);
+    out.writeVInt(bytesPerDim);
+
+    out.writeVInt(numLeaves);
+
+    // NOTE: splitPackedValues[0] is unused, because nodeID is 1-based:
+    out.writeBytes(splitPackedValues, 0, splitPackedValues.length);
+
+    for (int i=0;i<leafBlockFPs.length;i++) {
+      out.writeVLong(leafBlockFPs[i]);
+    }
+
+    return indexFP;
+  }
+

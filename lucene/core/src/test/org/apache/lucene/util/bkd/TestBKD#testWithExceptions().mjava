@@ -1,0 +1,49 @@
+  /** Make sure we close open files, delete temp files, etc., on exception */
+  public void testWithExceptions() throws Exception {
+    int numDocs = atLeast(10000);
+    int numBytesPerDim = TestUtil.nextInt(random(), 2, 30);
+    int numDims = TestUtil.nextInt(random(), 1, 5);
+
+    byte[][][] docValues = new byte[numDocs][][];
+
+    for(int docID=0;docID<numDocs;docID++) {
+      byte[][] values = new byte[numDims][];
+      for(int dim=0;dim<numDims;dim++) {
+        values[dim] = new byte[numBytesPerDim];
+        random().nextBytes(values[dim]);
+      }
+      docValues[docID] = values;
+    }
+
+    double maxMBHeap = 0.05;
+    // Keep retrying until we 1) we allow a big enough heap, and 2) we hit a random IOExc from MDW:
+    boolean done = false;
+    while (done == false) {
+      try (MockDirectoryWrapper dir = newMockFSDirectory(createTempDir())) {
+        try {
+          dir.setRandomIOExceptionRate(0.05);
+          dir.setRandomIOExceptionRateOnOpen(0.05);
+          if (dir instanceof MockDirectoryWrapper) {
+            dir.setEnableVirusScanner(false);
+          }
+          verify(dir, docValues, null, numDims, numBytesPerDim, 50, maxMBHeap);
+        } catch (IllegalArgumentException iae) {
+          // This just means we got a too-small maxMB for the maxPointsInLeafNode; just retry w/ more heap
+          assertTrue(iae.getMessage().contains("either increase maxMBSortInHeap or decrease maxPointsInLeafNode"));
+          System.out.println("  more heap");
+          maxMBHeap *= 1.25;
+        } catch (IOException ioe) {
+          if (ioe.getMessage().contains("a random IOException")) {
+            // BKDWriter should fully clean up after itself:
+            done = true;
+          } else {
+            throw ioe;
+          }
+        }
+
+        String[] files = dir.listAll();
+        assertTrue("files=" + Arrays.toString(files), files.length == 0 || Arrays.equals(files, new String[] {"extra0"}));
+      }
+    }
+  }
+

@@ -1,0 +1,121 @@
+  // Tests on N-dimensional points where each dimension is a BigInteger
+  public void testBigIntNDims() throws Exception {
+
+    int numDocs = atLeast(1000);
+    try (Directory dir = getDirectory(numDocs)) {
+      int numBytesPerDim = TestUtil.nextInt(random(), 2, 30);
+      int numDims = TestUtil.nextInt(random(), 1, 5);
+      int maxPointsInLeafNode = TestUtil.nextInt(random(), 50, 100);
+      float maxMB = (float) 0.1 + (3*random().nextFloat());
+      BKDWriter w = new BKDWriter(dir, "tmp", numDims, numBytesPerDim, maxPointsInLeafNode, maxMB);
+      BigInteger[][] docs = new BigInteger[numDocs][];
+
+      byte[] scratch = new byte[numBytesPerDim*numDims];
+      for(int docID=0;docID<numDocs;docID++) {
+        BigInteger[] values = new BigInteger[numDims];
+        if (VERBOSE) {
+          System.out.println("  docID=" + docID);
+        }
+        for(int dim=0;dim<numDims;dim++) {
+          values[dim] = randomBigInt(numBytesPerDim);
+          BKDUtil.bigIntToBytes(values[dim], scratch, dim, numBytesPerDim);
+          if (VERBOSE) {
+            System.out.println("    " + dim + " -> " + values[dim]);
+          }
+        }
+        docs[docID] = values;
+        w.add(scratch, docID);
+      }
+
+      long indexFP;
+      try (IndexOutput out = dir.createOutput("bkd", IOContext.DEFAULT)) {
+        indexFP = w.finish(out);
+      }
+
+      try (IndexInput in = dir.openInput("bkd", IOContext.DEFAULT)) {
+        in.seek(indexFP);
+        BKDReader r = new BKDReader(in);
+
+        int iters = atLeast(100);
+        for(int iter=0;iter<iters;iter++) {
+          if (VERBOSE) {
+            System.out.println("\nTEST: iter=" + iter);
+          }
+
+          // Random N dims rect query:
+          BigInteger[] queryMin = new BigInteger[numDims];
+          BigInteger[] queryMax = new BigInteger[numDims];    
+          for(int dim=0;dim<numDims;dim++) {
+            queryMin[dim] = randomBigInt(numBytesPerDim);
+            queryMax[dim] = randomBigInt(numBytesPerDim);
+            if (queryMin[dim].compareTo(queryMax[dim]) > 0) {
+              BigInteger x = queryMin[dim];
+              queryMin[dim] = queryMax[dim];
+              queryMax[dim] = x;
+            }
+          }
+
+          final BitSet hits = new BitSet();
+          r.intersect(new BKDReader.IntersectVisitor() {
+            @Override
+            public void visit(int docID) {
+              hits.set(docID);
+              //System.out.println("visit docID=" + docID);
+            }
+
+            @Override
+            public void visit(int docID, byte[] packedValue) {
+              //System.out.println("visit check docID=" + docID);
+              for(int dim=0;dim<numDims;dim++) {
+                BigInteger x = BKDUtil.bytesToBigInt(packedValue, dim, numBytesPerDim);
+                if (x.compareTo(queryMin[dim]) < 0 || x.compareTo(queryMax[dim]) > 0) {
+                  //System.out.println("  no");
+                  return;
+                }
+              }
+
+              //System.out.println("  yes");
+              hits.set(docID);
+            }
+
+            @Override
+            public BKDReader.Relation compare(byte[] minPacked, byte[] maxPacked) {
+              boolean crosses = false;
+              for(int dim=0;dim<numDims;dim++) {
+                BigInteger min = BKDUtil.bytesToBigInt(minPacked, dim, numBytesPerDim);
+                BigInteger max = BKDUtil.bytesToBigInt(maxPacked, dim, numBytesPerDim);
+                assert max.compareTo(min) >= 0;
+
+                if (max.compareTo(queryMin[dim]) < 0 || min.compareTo(queryMax[dim]) > 0) {
+                  return BKDReader.Relation.QUERY_OUTSIDE_CELL;
+                } else if (min.compareTo(queryMin[dim]) < 0 || max.compareTo(queryMax[dim]) > 0) {
+                  crosses = true;
+                }
+              }
+
+              if (crosses) {
+                return BKDReader.Relation.QUERY_CROSSES_CELL;
+              } else {
+                return BKDReader.Relation.CELL_INSIDE_QUERY;
+              }
+            }
+          });
+
+          for(int docID=0;docID<numDocs;docID++) {
+            BigInteger[] docValues = docs[docID];
+            boolean expected = true;
+            for(int dim=0;dim<numDims;dim++) {
+              BigInteger x = docValues[dim];
+              if (x.compareTo(queryMin[dim]) < 0 || x.compareTo(queryMax[dim]) > 0) {
+                expected = false;
+                break;
+              }
+            }
+            boolean actual = hits.get(docID);
+            assertEquals("docID=" + docID, expected, actual);
+          }
+        }
+      }
+    }
+  }
+

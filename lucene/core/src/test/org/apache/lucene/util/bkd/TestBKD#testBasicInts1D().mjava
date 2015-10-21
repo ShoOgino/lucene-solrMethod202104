@@ -1,0 +1,71 @@
+  public void testBasicInts1D() throws Exception {
+    try (Directory dir = getDirectory(100)) {
+      BKDWriter w = new BKDWriter(dir, "tmp", 1, 4, 2, 1.0f);
+      byte[] scratch = new byte[4];
+      for(int docID=0;docID<100;docID++) {
+        BKDUtil.intToBytes(docID, scratch, 0);
+        w.add(scratch, docID);
+      }
+
+      long indexFP;
+      try (IndexOutput out = dir.createOutput("bkd", IOContext.DEFAULT)) {
+        indexFP = w.finish(out);
+      }
+
+      try (IndexInput in = dir.openInput("bkd", IOContext.DEFAULT)) {
+        in.seek(indexFP);
+        BKDReader r = new BKDReader(in);
+
+        // Simple 1D range query:
+        final int queryMin = 42;
+        final int queryMax = 87;
+
+        final BitSet hits = new BitSet();
+        r.intersect(new BKDReader.IntersectVisitor() {
+            @Override
+            public void visit(int docID) {
+              hits.set(docID);
+              if (VERBOSE) {
+                System.out.println("visit docID=" + docID);
+              }
+            }
+
+            @Override
+            public void visit(int docID, byte[] packedValue) {
+              int x = BKDUtil.bytesToInt(packedValue, 0);
+              if (VERBOSE) {
+                System.out.println("visit docID=" + docID + " x=" + x);
+              }
+              if (x >= queryMin && x <= queryMax) {
+                hits.set(docID);
+              }
+            }
+
+            @Override
+            public BKDReader.Relation compare(byte[] minPacked, byte[] maxPacked) {
+              int min = BKDUtil.bytesToInt(minPacked, 0);
+              int max = BKDUtil.bytesToInt(maxPacked, 0);
+              assert max >= min;
+              if (VERBOSE) {
+                System.out.println("compare: min=" + min + " max=" + max + " vs queryMin=" + queryMin + " queryMax=" + queryMax);
+              }
+
+              if (max < queryMin || min > queryMax) {
+                return BKDReader.Relation.QUERY_OUTSIDE_CELL;
+              } else if (min >= queryMin && max <= queryMax) {
+                return BKDReader.Relation.CELL_INSIDE_QUERY;
+              } else {
+                return BKDReader.Relation.QUERY_CROSSES_CELL;
+              }
+            }
+          });
+
+        for(int docID=0;docID<100;docID++) {
+          boolean expected = docID >= queryMin && docID <= queryMax;
+          boolean actual = hits.get(docID);
+          assertEquals("docID=" + docID, expected, actual);
+        }
+      }
+    }
+  }
+

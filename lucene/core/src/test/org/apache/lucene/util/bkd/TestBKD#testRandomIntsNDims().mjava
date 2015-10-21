@@ -1,0 +1,121 @@
+  public void testRandomIntsNDims() throws Exception {
+    int numDocs = atLeast(1000);
+    try (Directory dir = getDirectory(numDocs)) {
+      int numDims = TestUtil.nextInt(random(), 1, 5);
+      int maxPointsInLeafNode = TestUtil.nextInt(random(), 50, 100);
+      float maxMB = (float) 0.1 + (3*random().nextFloat());
+      BKDWriter w = new BKDWriter(dir, "tmp", numDims, 4, maxPointsInLeafNode, maxMB);
+
+      if (VERBOSE) {
+        System.out.println("TEST: numDims=" + numDims + " numDocs=" + numDocs);
+      }
+      int[][] docs = new int[numDocs][];
+      byte[] scratch = new byte[4*numDims];
+      for(int docID=0;docID<numDocs;docID++) {
+        int[] values = new int[numDims];
+        if (VERBOSE) {
+          System.out.println("  docID=" + docID);
+        }
+        for(int dim=0;dim<numDims;dim++) {
+          values[dim] = random().nextInt();
+          BKDUtil.intToBytes(values[dim], scratch, dim);
+          if (VERBOSE) {
+            System.out.println("    " + dim + " -> " + values[dim]);
+          }
+        }
+        docs[docID] = values;
+        w.add(scratch, docID);
+      }
+
+      long indexFP;
+      try (IndexOutput out = dir.createOutput("bkd", IOContext.DEFAULT)) {
+        indexFP = w.finish(out);
+      }
+
+      try (IndexInput in = dir.openInput("bkd", IOContext.DEFAULT)) {
+        in.seek(indexFP);
+        BKDReader r = new BKDReader(in);
+
+        int iters = atLeast(100);
+        for(int iter=0;iter<iters;iter++) {
+          if (VERBOSE) {
+            System.out.println("\nTEST: iter=" + iter);
+          }
+
+          // Random N dims rect query:
+          int[] queryMin = new int[numDims];
+          int[] queryMax = new int[numDims];    
+          for(int dim=0;dim<numDims;dim++) {
+            queryMin[dim] = random().nextInt();
+            queryMax[dim] = random().nextInt();
+            if (queryMin[dim] > queryMax[dim]) {
+              int x = queryMin[dim];
+              queryMin[dim] = queryMax[dim];
+              queryMax[dim] = x;
+            }
+          }
+
+          final BitSet hits = new BitSet();
+          r.intersect(new BKDReader.IntersectVisitor() {
+            @Override
+            public void visit(int docID) {
+              hits.set(docID);
+              //System.out.println("visit docID=" + docID);
+            }
+
+            @Override
+            public void visit(int docID, byte[] packedValue) {
+              //System.out.println("visit check docID=" + docID);
+              for(int dim=0;dim<numDims;dim++) {
+                int x = BKDUtil.bytesToInt(packedValue, dim);
+                if (x < queryMin[dim] || x > queryMax[dim]) {
+                  //System.out.println("  no");
+                  return;
+                }
+              }
+
+              //System.out.println("  yes");
+              hits.set(docID);
+            }
+
+            @Override
+            public BKDReader.Relation compare(byte[] minPacked, byte[] maxPacked) {
+              boolean crosses = false;
+              for(int dim=0;dim<numDims;dim++) {
+                int min = BKDUtil.bytesToInt(minPacked, dim);
+                int max = BKDUtil.bytesToInt(maxPacked, dim);
+                assert max >= min;
+
+                if (max < queryMin[dim] || min > queryMax[dim]) {
+                  return BKDReader.Relation.QUERY_OUTSIDE_CELL;
+                } else if (min < queryMin[dim] || max > queryMax[dim]) {
+                  crosses = true;
+                }
+              }
+
+              if (crosses) {
+                return BKDReader.Relation.QUERY_CROSSES_CELL;
+              } else {
+                return BKDReader.Relation.CELL_INSIDE_QUERY;
+              }
+            }
+          });
+
+          for(int docID=0;docID<numDocs;docID++) {
+            int[] docValues = docs[docID];
+            boolean expected = true;
+            for(int dim=0;dim<numDims;dim++) {
+              int x = docValues[dim];
+              if (x < queryMin[dim] || x > queryMax[dim]) {
+                expected = false;
+                break;
+              }
+            }
+            boolean actual = hits.get(docID);
+            assertEquals("docID=" + docID, expected, actual);
+          }
+        }
+      }
+    }
+  }
+

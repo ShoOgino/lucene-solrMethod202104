@@ -1,59 +1,34 @@
   private void intersect(IntersectState state,
-                        int nodeID,
-                        byte[] cellMinPacked, byte[] cellMaxPacked)
+                         int nodeID,
+                         byte[] cellMinPacked, byte[] cellMaxPacked)
     throws IOException {
 
-    //System.out.println("\nR: intersect nodeID=" + nodeID + " cellMin=" + BKDUtil.bytesToInt(cellMinPacked, 0) + " cellMax=" + BKDUtil.bytesToInt(cellMaxPacked, 0));
+    /*
+    System.out.println("\nR: intersect nodeID=" + nodeID);
+    for(int dim=0;dim<numDims;dim++) {
+      System.out.println("  dim=" + dim + "\n    cellMin=" + new BytesRef(cellMinPacked, dim*bytesPerDim, bytesPerDim) + "\n    cellMax=" + new BytesRef(cellMaxPacked, dim*bytesPerDim, bytesPerDim));
+    }
+    */
 
-    // Optimization: only check the visitor when the current cell does not fully contain the bbox.  E.g. if the
-    // query is a small area around London, UK, most of the high nodes in the BKD tree as we recurse will fully
-    // contain the query, so we quickly recurse down until the nodes cross the query:
-    boolean cellContainsQuery = BKDUtil.contains(bytesPerDim,
-                                                 cellMinPacked, cellMaxPacked,
-                                                 state.minPacked, state.maxPacked);
+    Relation r = state.visitor.compare(cellMinPacked, cellMaxPacked);
 
-    //System.out.println("R: cellContainsQuery=" + cellContainsQuery);
-
-    if (cellContainsQuery == false) {
-
-      Relation r = state.visitor.compare(cellMinPacked, cellMaxPacked);
-      //System.out.println("R: relation=" + r);
-
-      if (r == Relation.QUERY_OUTSIDE_CELL) {
-        // This cell is fully outside of the query shape: stop recursing
-        return;
-      } else if (r == Relation.CELL_INSIDE_QUERY) {
-        // This cell is fully inside of the query shape: recursively add all points in this cell without filtering
-        addAll(state, nodeID);
-        return;
-      } else {
-        // The cell crosses the shape boundary, so we fall through and do full filtering
-      }
+    if (r == Relation.QUERY_OUTSIDE_CELL) {
+      // This cell is fully outside of the query shape: stop recursing
+      return;
+    } else if (r == Relation.CELL_INSIDE_QUERY) {
+      // This cell is fully inside of the query shape: recursively add all points in this cell without filtering
+      addAll(state, nodeID);
+      return;
+    } else {
+      // The cell crosses the shape boundary, or the cell fully contains the query, so we fall through and do full filtering
     }
 
     if (nodeID >= leafNodeOffset) {
       // Leaf node; scan and filter all points in this block:
-      //System.out.println("    intersect leaf nodeID=" + nodeID + " vs leafNodeOffset=" + leafNodeOffset + " fp=" + leafBlockFPs[nodeID-leafNodeOffset]);
-
-      state.in.seek(leafBlockFPs[nodeID-leafNodeOffset]);
-
-      // How many points are stored in this leaf cell:
-      int count = state.in.readVInt();
-
-      // TODO: we could maybe pollute the IntersectVisitor API with a "grow" method if this maybe helps perf
-      // enough (it did before, esp. for the 1D case):
-      //state.docs.grow(count);
-      int docID = 0;
-      for(int i=0;i<count;i++) {
-        docID += state.in.readVInt();
-        state.scratchDocIDs[i] = docID;
-      }
+      int count = readDocIDs(state.in, leafBlockFPs[nodeID-leafNodeOffset], state.scratchDocIDs);
 
       // Again, this time reading values and checking with the visitor
-      for(int i=0;i<count;i++) {
-        state.in.readBytes(state.scratchPackedValue, 0, state.scratchPackedValue.length);
-        state.visitor.visit(state.scratchDocIDs[i], state.scratchPackedValue);
-      }
+      visitDocValues(state.scratchPackedValue, state.in, state.scratchDocIDs, count, state.visitor);
 
     } else {
       
@@ -70,23 +45,19 @@
       // TODO: can we alloc & reuse this up front?
       byte[] splitPackedValue = new byte[packedBytesLength];
 
-      if (BKDUtil.compare(bytesPerDim, state.minPacked, splitDim, splitValue, 0) <= 0) {
-        // The query bbox overlaps our left cell, so we must recurse:
-        System.arraycopy(state.maxPacked, 0, splitPackedValue, 0, packedBytesLength);
-        System.arraycopy(splitValue, 0, splitPackedValue, splitDim*bytesPerDim, bytesPerDim);
-        intersect(state,
-                  2*nodeID,
-                  cellMinPacked, splitPackedValue);
-      }
+      // Recurse on left sub-tree:
+      System.arraycopy(cellMaxPacked, 0, splitPackedValue, 0, packedBytesLength);
+      System.arraycopy(splitValue, 0, splitPackedValue, splitDim*bytesPerDim, bytesPerDim);
+      intersect(state,
+                2*nodeID,
+                cellMinPacked, splitPackedValue);
 
-      if (BKDUtil.compare(bytesPerDim, state.maxPacked, splitDim, splitValue, 0) >= 0) {
-        // The query bbox overlaps our left cell, so we must recurse:
-        System.arraycopy(state.minPacked, 0, splitPackedValue, 0, packedBytesLength);
-        System.arraycopy(splitValue, 0, splitPackedValue, splitDim*bytesPerDim, bytesPerDim);
-        intersect(state,
-                  2*nodeID+1,
-                  splitPackedValue, cellMaxPacked);
-      }
+      // Recurse on right sub-tree:
+      System.arraycopy(cellMinPacked, 0, splitPackedValue, 0, packedBytesLength);
+      System.arraycopy(splitValue, 0, splitPackedValue, splitDim*bytesPerDim, bytesPerDim);
+      intersect(state,
+                2*nodeID+1,
+                splitPackedValue, cellMaxPacked);
     }
   }
 

@@ -1,13 +1,24 @@
-  private MiniSolrCloudCluster(int numServers, File baseDir, File[] baseDirs, File solrXml, JettyConfig jettyConfig, ZkTestServer zkTestServer) throws Exception {
+  /**
+   * Create a MiniSolrCloudCluster
+   *
+   * @param numServers number of Solr servers to start
+   * @param baseDir base directory that the mini cluster should be run from
+   * @param solrXml solr.xml file to be uploaded to ZooKeeper
+   * @param jettyConfig Jetty configuration
+   * @param zkTestServer ZkTestServer to use.  If null, one will be created
+   *
+   * @throws Exception if there was an error starting the cluster
+   */
+  public MiniSolrCloudCluster(int numServers, Path baseDir, String solrXml, JettyConfig jettyConfig, ZkTestServer zkTestServer) throws Exception {
 
-    this.testDir = baseDir;
-    this.testDirs = baseDirs;
+    this.baseDir = baseDir;
     this.jettyConfig = jettyConfig;
+
+    Files.createDirectories(baseDir);
 
     this.externalZkServer = zkTestServer != null;
     if (!externalZkServer) {
-      String zkDir = (testDir != null ? testDir : testDirs[0]).getAbsolutePath() + File.separator
-        + "zookeeper/server1/data";
+      String zkDir = baseDir.resolve("zookeeper/server1/data").toString();
       zkTestServer = new ZkTestServer(zkDir);
       zkTestServer.run();
     }
@@ -15,7 +26,7 @@
 
     try(SolrZkClient zkClient = new SolrZkClient(zkServer.getZkHost(),
         AbstractZkTestCase.TIMEOUT, 45000, null)) {
-      zkClient.makePath("/solr/solr.xml", solrXml, false, true);
+      zkClient.makePath("/solr/solr.xml", solrXml.getBytes(Charset.defaultCharset()), true);
       if (jettyConfig.sslConfig != null && jettyConfig.sslConfig.isSSLMode()) {
         zkClient.makePath("/solr" + ZkStateReader.CLUSTER_PROPS, "{'urlScheme':'https'}".getBytes(Charsets.UTF_8), true);
       }
@@ -26,14 +37,10 @@
 
     List<Callable<JettySolrRunner>> startups = new ArrayList<>(numServers);
     for (int i = 0; i < numServers; ++i) {
-      final Integer testDirsIdx = new Integer(i);
       startups.add(new Callable<JettySolrRunner>() {
         @Override
         public JettySolrRunner call() throws Exception {
-          if (testDir != null)
-            return startJettySolrRunner(jettyConfig);
-          else
-            return startJettySolrRunner(testDirsIdx, jettyConfig.context, jettyConfig);
+          return startJettySolrRunner(newNodeName(), jettyConfig.context, jettyConfig);
         }
       });
     }

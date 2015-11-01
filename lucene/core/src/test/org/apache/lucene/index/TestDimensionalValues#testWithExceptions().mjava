@@ -15,7 +15,6 @@
       docValues[docID] = values;
     }
 
-    double maxMBHeap = 0.05;
     // Keep retrying until we 1) we allow a big enough heap, and 2) we hit a random IOExc from MDW:
     boolean done = false;
     while (done == false) {
@@ -26,7 +25,18 @@
           if (dir instanceof MockDirectoryWrapper) {
             dir.setEnableVirusScanner(false);
           }
-          verify(dir, docValues, null, numDims, numBytesPerDim, 50, maxMBHeap);
+          verify(dir, docValues, null, numDims, numBytesPerDim, true);
+        } catch (IllegalStateException ise) {
+          if (ise.getMessage().contains("this writer hit an unrecoverable error")) {
+            Throwable cause = ise.getCause();
+            if (cause != null && cause.getMessage().contains("a random IOException")) {
+              done = true;
+            } else {
+              throw ise;
+            }
+          } else {
+            throw ise;
+          }
         } catch (AssertionError ae) {
           if (ae.getMessage().contains("does not exist; files=")) {
             // OK: likely we threw the random IOExc when IW was asserting the commit files exist
@@ -37,10 +47,9 @@
         } catch (IllegalArgumentException iae) {
           // This just means we got a too-small maxMB for the maxPointsInLeafNode; just retry w/ more heap
           assertTrue(iae.getMessage().contains("either increase maxMBSortInHeap or decrease maxPointsInLeafNode"));
-          System.out.println("  more heap");
-          maxMBHeap *= 1.25;
         } catch (IOException ioe) {
-          if (ioe.getMessage().contains("a random IOException")) {
+          String message = ioe.getMessage();
+          if (message.contains("a random IOException") || message.contains("background merge hit exception")) {
             // BKDWriter should fully clean up after itself:
             done = true;
           } else {

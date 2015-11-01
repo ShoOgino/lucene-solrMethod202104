@@ -1,17 +1,57 @@
-  private void verify(Directory dir, byte[][][] docValues, int[] ids, int numDims, int numBytesPerDim, int maxPointsInLeafNode, double maxMB) throws Exception {
+  private void verify(Directory dir, byte[][][] docValues, int[] ids, int numDims, int numBytesPerDim, boolean expectExceptions) throws Exception {
     int numValues = docValues.length;
     if (VERBOSE) {
-      System.out.println("TEST: numValues=" + numValues + " numDims=" + numDims + " numBytesPerDim=" + numBytesPerDim + " maxPointsInLeafNode=" + maxPointsInLeafNode + " maxMB=" + maxMB);
+      System.out.println("TEST: numValues=" + numValues + " numDims=" + numDims + " numBytesPerDim=" + numBytesPerDim);
     }
-    //System.out.println("DIR: " + ((FSDirectory) dir).getDirectory());
 
-    //IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));  
-    IndexWriterConfig iwc = newIndexWriterConfig();
-    //iwc.setUseCompoundFile(false);
-    //iwc.getMergePolicy().setNoCFSRatio(0.0);
-    iwc.setCodec(new SimpleTextCodec());
+    // RandomIndexWriter is too slow:
+    boolean useRealWriter = docValues.length > 10000;
+
+    IndexWriterConfig iwc;
+    if (useRealWriter) {
+      iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+    } else {
+      iwc = newIndexWriterConfig();
+    }
+    iwc.setCodec(getCodec());
+
+    if (expectExceptions) {
+      MergeScheduler ms = iwc.getMergeScheduler();
+      if (ms instanceof ConcurrentMergeScheduler) {
+        ((ConcurrentMergeScheduler) ms).setSuppressExceptions();
+      }
+    }
     RandomIndexWriter w = new RandomIndexWriter(random(), dir, iwc);
     DirectoryReader r = null;
+
+    // 20% of the time we add into a separate directory, then at some point use
+    // addIndexes to bring the indexed dimensional values to the main directory:
+    Directory saveDir;
+    RandomIndexWriter saveW;
+    int addIndexesAt;
+    if (random().nextInt(5) == 1) {
+      saveDir = dir;
+      saveW = w;
+      dir = getDirectory(numValues);
+      if (useRealWriter) {
+        iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      } else {
+        iwc = newIndexWriterConfig();
+      }
+      iwc.setCodec(getCodec());
+      if (expectExceptions) {
+        MergeScheduler ms = iwc.getMergeScheduler();
+        if (ms instanceof ConcurrentMergeScheduler) {
+          ((ConcurrentMergeScheduler) ms).setSuppressExceptions();
+        }
+      }
+      w = new RandomIndexWriter(random(), dir, iwc);
+      addIndexesAt = TestUtil.nextInt(random(), 1, numValues-1);
+    } else {
+      saveW = null;
+      saveDir = null;
+      addIndexesAt = 0;
+    }
 
     try {
 
@@ -26,7 +66,11 @@
         }
         if (id != lastID) {
           if (doc != null) {
-            w.addDocument(doc);
+            if (useRealWriter) {
+              w.w.addDocument(doc);
+            } else {
+              w.addDocument(doc);
+            }
           }
           doc = new Document();
           doc.add(new NumericDocValuesField("id", id));
@@ -36,7 +80,11 @@
 
         if (random().nextInt(30) == 17) {
           // randomly index some documents without this field
-          w.addDocument(new Document());
+          if (useRealWriter) {
+            w.w.addDocument(new Document());
+          } else {
+            w.addDocument(new Document());
+          }
           if (VERBOSE) {
             System.out.println("add empty doc");
           }
@@ -47,9 +95,21 @@
           Document xdoc = new Document();
           xdoc.add(new DimensionalField("field", docValues[ord]));
           xdoc.add(new StringField("nukeme", "yes", Field.Store.NO));
-          w.addDocument(xdoc);
+          if (useRealWriter) {
+            w.w.addDocument(xdoc);
+          } else {
+            w.addDocument(xdoc);
+          }
           if (VERBOSE) {
             System.out.println("add doc doc-to-delete");
+          }
+
+          if (random().nextInt(5) == 1) {
+            if (useRealWriter) {
+              w.w.deleteDocuments(new Term("nukeme", "yes"));
+            } else {
+              w.deleteDocuments(new Term("nukeme", "yes"));
+            }
           }
         }
 
@@ -58,6 +118,14 @@
           for(int dim=0;dim<numDims;dim++) {
             System.out.println("    dim=" + dim + " value=" + new BytesRef(docValues[ord][dim]));
           }
+        }
+
+        if (saveW != null && ord >= addIndexesAt) {
+          switchIndex(w, dir, saveW);
+          w = saveW;
+          dir = saveDir;
+          saveW = null;
+          saveDir = null;
         }
       }
       w.addDocument(doc);
@@ -73,7 +141,9 @@
       r = w.getReader();
       w.close();
 
-      //System.out.println("TEST: r=" + r);
+      if (VERBOSE) {
+        System.out.println("TEST: reader=" + r);
+      }
 
       DimensionalValues dimValues = MultiDimensionalValues.get(r);
       if (VERBOSE) {
@@ -127,7 +197,7 @@
               if (liveDocs != null && liveDocs.get(docID) == false) {
                 return;
               }
-              //System.out.println("visit check docID=" + docID);
+              //System.out.println("visit check docID=" + docID + " id=" + idValues.get(docID));
               for(int dim=0;dim<numDims;dim++) {
                 //System.out.println("  dim=" + dim + " value=" + new BytesRef(packedValue, dim*numBytesPerDim, numBytesPerDim));
                 if (BKDUtil.compare(numBytesPerDim, packedValue, dim, queryMin[dim], 0) < 0 ||
@@ -210,7 +280,7 @@
         }
       }
     } finally {
-      IOUtils.closeWhileHandlingException(r, w);
+      IOUtils.closeWhileHandlingException(r, w, saveW, saveDir == null ? null : dir);
     }
   }
 

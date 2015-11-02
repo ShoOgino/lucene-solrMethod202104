@@ -2,30 +2,27 @@
     lock = new CountDownLatch(1);
     try {
       synchronized (runners) {
+
+        // NOTE: if the executor is shut down, runners may never become empty (a scheduled task may never be run,
+        // which means it would never remove itself from the runners list.  This is why we don't wait forever
+        // and periodically check if the scheduler is shutting down.
         while (!runners.isEmpty()) {
           try {
-            runners.wait();
+            runners.wait(250);
           } catch (InterruptedException e) {
             Thread.interrupted();
           }
           
-          if (scheduler.isTerminated())
+          if (scheduler.isShutdown())
             break;
                       
-          // if we reach here, then we probably got the notifyAll, but need to check if
-          // the queue is empty before really considering this is finished (SOLR-4260)
+          // Need to check if the queue is empty before really considering this is finished (SOLR-4260)
           int queueSize = queue.size();
-          if (queueSize > 0) {
+          if (queueSize > 0 && runners.isEmpty()) {
+            // TODO: can this still happen?
             log.warn("No more runners, but queue still has "+
               queueSize+" adding more runners to process remaining requests on queue");
-            MDC.put("ConcurrentUpdateSolrClient.url", client.getBaseURL());
-            try {
-              Runner r = new Runner();
-              runners.add(r);
-              scheduler.execute(r);
-            } finally {
-              MDC.remove("ConcurrentUpdateSolrClient.url");
-            }
+            addRunner();
           }
         }
       }

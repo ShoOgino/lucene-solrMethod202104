@@ -1,0 +1,55 @@
+  /**
+   * Test that FORCELEADER can set last published state of all down (live) replicas to active (so
+   * that they become worthy candidates for leader election).
+   */
+  @Slow
+  public void testLastPublishedStateIsActive() throws Exception {
+    handle.put("maxScore", SKIPVAL);
+    handle.put("timestamp", SKIPVAL);
+
+    String testCollectionName = "forceleader_last_published";
+    createCollection(testCollectionName, 1, 3, 1);
+    cloudClient.setDefaultCollection(testCollectionName);
+    log.info("Collection created: " + testCollectionName);
+
+    try {
+      List<Replica> notLeaders = ensureAllReplicasAreActive(testCollectionName, SHARD1, 1, 3, maxWaitSecsToSeeAllActive);
+      assertEquals("Expected 2 replicas for collection " + testCollectionName
+          + " but found " + notLeaders.size() + "; clusterState: "
+          + printClusterStateInfo(testCollectionName), 2, notLeaders.size());
+
+      Replica leader = cloudClient.getZkStateReader().getLeaderRetry(testCollectionName, SHARD1);
+      JettySolrRunner notLeader0 = getJettyOnPort(getReplicaPort(notLeaders.get(0)));
+      ZkController zkController = ((SolrDispatchFilter) notLeader0.getDispatchFilter().getFilter()).getCores().getZkController();
+
+      // Mark all replicas down
+      setReplicaState(testCollectionName, SHARD1, leader, State.DOWN);
+      for (Replica rep : notLeaders) {
+        setReplicaState(testCollectionName, SHARD1, rep, State.DOWN);
+      }
+
+      zkController.getZkStateReader().updateClusterState();
+      // Assert all replicas are down and that there is no leader
+      assertEquals(0, getActiveOrRecoveringReplicas(testCollectionName, SHARD1).size());
+
+      // Now force leader
+      doForceLeader(cloudClient, testCollectionName, SHARD1);
+
+      // Assert that last published states of the two replicas are active now
+      for (Replica rep: notLeaders) {
+        assertEquals(Replica.State.ACTIVE, getLastPublishedState(testCollectionName, SHARD1, rep));
+      }
+    } finally {
+      log.info("Cleaning up after the test.");
+      // try to clean up
+      try {
+        CollectionAdminRequest.Delete req = new CollectionAdminRequest.Delete();
+        req.setCollectionName(testCollectionName);
+        req.process(cloudClient);
+      } catch (Exception e) {
+        // don't fail the test
+        log.warn("Could not delete collection {} after test completed", testCollectionName);
+      }
+    }
+  }
+

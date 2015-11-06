@@ -1,4 +1,4 @@
-  void addNumericField(FieldInfo field, Iterable<Number> values, boolean optimizeStorage) throws IOException {
+  void addNumericField(FieldInfo field, Iterable<Number> values, NumberType numberType) throws IOException {
     long count = 0;
     long minValue = Long.MAX_VALUE;
     long maxValue = Long.MIN_VALUE;
@@ -7,7 +7,8 @@
     long zeroCount = 0;
     // TODO: more efficient?
     HashSet<Long> uniqueValues = null;
-    if (optimizeStorage) {
+    long missingOrdCount = 0;
+    if (numberType == NumberType.VALUE) {
       uniqueValues = new HashSet<>();
 
       for (Number nv : values) {
@@ -50,6 +51,9 @@
     } else {
       for (Number nv : values) {
         long v = nv.longValue();
+        if (v == -1L) {
+          missingOrdCount++;
+        }
         minValue = Math.min(minValue, v);
         maxValue = Math.max(maxValue, v);
         ++count;
@@ -62,6 +66,18 @@
         ? Integer.MAX_VALUE
         : DirectWriter.bitsRequired(uniqueValues.size() - 1);
 
+    final boolean sparse; // 1% of docs or less have a value
+    switch (numberType) {
+      case VALUE:
+        sparse = (double) missingCount / count >= 0.99;
+        break;
+      case ORDINAL:
+        sparse = (double) missingOrdCount / count >= 0.99;
+        break;
+      default:
+        throw new AssertionError();
+    }
+
     final int format;
     if (uniqueValues != null 
         && count <= Integer.MAX_VALUE
@@ -69,6 +85,9 @@
            || (uniqueValues.size() == 2 && missingCount > 0 && zeroCount == missingCount))) {
       // either one unique value C or two unique values: "missing" and C
       format = CONST_COMPRESSED;
+    } else if (sparse && count >= 1024) {
+      // require at least 1024 docs to avoid flipping back and forth when doing NRT search
+      format = SPARSE_COMPRESSED;
     } else if (uniqueValues != null && tableBitsRequired < deltaBitsRequired) {
       format = TABLE_COMPRESSED;
     } else if (gcd != 0 && gcd != 1) {
@@ -81,7 +100,22 @@
     meta.writeVInt(field.number);
     meta.writeByte(Lucene54DocValuesFormat.NUMERIC);
     meta.writeVInt(format);
-    if (missingCount == 0) {
+    if (format == SPARSE_COMPRESSED) {
+      meta.writeLong(data.getFilePointer());
+      final long numDocsWithValue;
+      switch (numberType) {
+        case VALUE:
+          numDocsWithValue = count - missingCount;
+          break;
+        case ORDINAL:
+          numDocsWithValue = count - missingOrdCount;
+          break;
+        default:
+          throw new AssertionError();
+      }
+      final long maxDoc = writeSparseMissingBitset(values, numberType, numDocsWithValue);
+      assert maxDoc == count;
+    } else if (missingCount == 0) {
       meta.writeLong(ALL_LIVE);
     } else if (missingCount == count) {
       meta.writeLong(ALL_MISSING);
@@ -136,6 +170,39 @@
           ordsWriter.add(encode.get(nv == null ? 0 : nv.longValue()));
         }
         ordsWriter.finish();
+        break;
+      case SPARSE_COMPRESSED:
+        final Iterable<Number> filteredMissingValues;
+        switch (numberType) {
+          case VALUE:
+            meta.writeByte((byte) 0);
+            filteredMissingValues = new Iterable<Number>() {
+              @Override
+              public Iterator<Number> iterator() {
+                return StreamSupport
+                    .stream(values.spliterator(), false)
+                    .filter(value -> value != null)
+                    .iterator();
+              }
+            };
+            break;
+          case ORDINAL:
+            meta.writeByte((byte) 1);
+            filteredMissingValues = new Iterable<Number>() {
+              @Override
+              public Iterator<Number> iterator() {
+                return StreamSupport
+                    .stream(values.spliterator(), false)
+                    .filter(value -> value.longValue() != -1L)
+                    .iterator();
+              }
+            };
+            break;
+          default:
+            throw new AssertionError();
+        }
+        // Write non-missing values as a numeric field
+        addNumericField(field, filteredMissingValues, numberType);
         break;
       default:
         throw new AssertionError();

@@ -17,6 +17,7 @@
     Directory indexDir = null;
     String indexDirPath;
     boolean deleteTmpIdxDir = true;
+    File tmpTlogDir = null;
 
     if (!solrCore.getSolrCoreState().getLastReplicateIndexSuccess()) {
       // if the last replication was not a success, we force a full replication
@@ -112,6 +113,11 @@
 
       tmpIndexDir = solrCore.getDirectoryFactory().get(tmpIndex, DirContext.DEFAULT, solrCore.getSolrConfig().indexConfig.lockType);
 
+      // tmp dir for tlog files
+      if (tlogFilesToDownload != null) {
+        tmpTlogDir = new File(solrCore.getUpdateHandler().getUpdateLog().getLogDir(), "tlog." + timestamp);
+      }
+
       // cindex dir...
       indexDirPath = solrCore.getIndexDir();
       indexDir = solrCore.getDirectoryFactory().get(indexDirPath, DirContext.DEFAULT, solrCore.getSolrConfig().indexConfig.lockType);
@@ -168,7 +174,8 @@
 
           long bytesDownloaded = downloadIndexFiles(isFullCopyNeeded, indexDir, tmpIndexDir, latestGeneration);
           if (tlogFilesToDownload != null) {
-            bytesDownloaded += downloadTlogFiles(timestamp, latestGeneration);
+            bytesDownloaded += downloadTlogFiles(tmpTlogDir, latestGeneration);
+            reloadCore = true; // reload update log
           }
           final long timeTakenSeconds = getReplicationTimeElapsed();
           final Long bytesDownloadedPerSecond = (timeTakenSeconds != 0 ? new Long(bytesDownloaded/timeTakenSeconds) : null);
@@ -184,6 +191,10 @@
               deleteTmpIdxDir = false;
             } else {
               successfulInstall = moveIndexFiles(tmpIndexDir, indexDir);
+            }
+            if (tlogFilesToDownload != null) {
+              // move tlog files and refresh ulog only if we successfully installed a new index
+              successfulInstall &= moveTlogFiles(tmpTlogDir);
             }
             if (successfulInstall) {
               if (isFullCopyNeeded) {
@@ -209,6 +220,10 @@
             } else {
               successfulInstall = moveIndexFiles(tmpIndexDir, indexDir);
             }
+            if (tlogFilesToDownload != null) {
+              // move tlog files and refresh ulog only if we successfully installed a new index
+              successfulInstall &= moveTlogFiles(tmpTlogDir);
+            }
             if (successfulInstall) {
               logReplicationTimeAndConfFiles(modifiedConfFiles,
                   successfulInstall);
@@ -222,7 +237,7 @@
 
         // we must reload the core after we open the IW back up
        if (successfulInstall && (reloadCore || forceCoreReload)) {
-          LOG.info("Reloading SolrCore {}", solrCore.getName());
+         LOG.info("Reloading SolrCore {}", solrCore.getName());
           reloadCore();
         }
 
@@ -244,7 +259,7 @@
         }
 
         if (!isFullCopyNeeded && !forceReplication && !successfulInstall) {
-          cleanup(solrCore, tmpIndexDir, indexDir, deleteTmpIdxDir, successfulInstall);
+          cleanup(solrCore, tmpIndexDir, indexDir, deleteTmpIdxDir, tmpTlogDir, successfulInstall);
           cleanupDone = true;
           // we try with a full copy of the index
           LOG.warn(
@@ -267,7 +282,7 @@
       }
     } finally {
       if (!cleanupDone) {
-        cleanup(solrCore, tmpIndexDir, indexDir, deleteTmpIdxDir, successfulInstall);
+        cleanup(solrCore, tmpIndexDir, indexDir, deleteTmpIdxDir, tmpTlogDir, successfulInstall);
       }
     }
   }

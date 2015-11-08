@@ -1,0 +1,71 @@
+  @Override
+  public Weight createWeight(IndexSearcher searcher, boolean needsScores) throws IOException {
+
+    // I don't use RandomAccessWeight here: it's no good to approximate with "match all docs"; this is an inverted structure and should be
+    // used in the first pass:
+
+    // TODO: except that the polygon verify is costly!  The approximation should be all docs in all overlapping cells, and matches() should
+    // then check the polygon
+
+    return new ConstantScoreWeight(this) {
+
+      @Override
+      public Scorer scorer(LeafReaderContext context) throws IOException {
+        LeafReader reader = context.reader();
+        DimensionalValues values = reader.getDimensionalValues();
+        if (values == null) {
+          // No docs in this segment had any dimensional fields
+          return null;
+        }
+
+        DocIdSetBuilder result = new DocIdSetBuilder(reader.maxDoc());
+        int[] hitCount = new int[1];
+        values.intersect(field,
+                         new IntersectVisitor() {
+                           @Override
+                           public void visit(int docID) {
+                             hitCount[0]++;
+                             result.add(docID);
+                           }
+
+                           @Override
+                           public void visit(int docID, byte[] packedValue) {
+                             assert packedValue.length == 8;
+                             double lat = DimensionalLatLonField.decodeLat(BKDUtil.bytesToInt(packedValue, 0));
+                             double lon = DimensionalLatLonField.decodeLon(BKDUtil.bytesToInt(packedValue, 1));
+                             if (GeoUtils.pointInPolygon(polyLons, polyLats, lat, lon)) {
+                               hitCount[0]++;
+                               result.add(docID);
+                             }
+                           }
+
+                           @Override
+                           public Relation compare(byte[] minPackedValue, byte[] maxPackedValue) {
+                             double cellMinLat = DimensionalLatLonField.decodeLat(BKDUtil.bytesToInt(minPackedValue, 0));
+                             double cellMinLon = DimensionalLatLonField.decodeLon(BKDUtil.bytesToInt(minPackedValue, 1));
+                             double cellMaxLat = DimensionalLatLonField.decodeLat(BKDUtil.bytesToInt(maxPackedValue, 0));
+                             double cellMaxLon = DimensionalLatLonField.decodeLon(BKDUtil.bytesToInt(maxPackedValue, 1));
+
+                             if (cellMinLat <= minLat && cellMaxLat >= maxLat && cellMinLon <= minLon && cellMaxLon >= maxLon) {
+                               // Cell fully encloses the query
+                               return Relation.CELL_CROSSES_QUERY;
+                             } else  if (GeoUtils.rectWithinPoly(cellMinLon, cellMinLat, cellMaxLon, cellMaxLat,
+                                                                 polyLons, polyLats,
+                                                                 minLon, minLat, maxLon, maxLat)) {
+                               return Relation.CELL_INSIDE_QUERY;
+                             } else if (GeoUtils.rectCrossesPoly(cellMinLon, cellMinLat, cellMaxLon, cellMaxLat,
+                                                                 polyLons, polyLats,
+                                                                 minLon, minLat, maxLon, maxLat)) {
+                               return Relation.CELL_CROSSES_QUERY;
+                             } else {
+                               return Relation.CELL_OUTSIDE_QUERY;
+                             }
+                           }
+                         });
+
+        // NOTE: hitCount[0] will be over-estimate in multi-valued case
+        return new ConstantScoreScorer(this, score(), result.build(hitCount[0]).iterator());
+      }
+    };
+  }
+

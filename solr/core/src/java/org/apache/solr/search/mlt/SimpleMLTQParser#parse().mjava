@@ -6,6 +6,7 @@
 
     SolrIndexSearcher searcher = req.getSearcher();
     Query docIdQuery = createIdQuery(defaultField, uniqueValue);
+    Map<String,Float> boostFields = new HashMap<>();
 
     try {
       TopDocs td = searcher.search(docIdQuery, 1);
@@ -35,6 +36,11 @@
 
       if(localParams.get("maxdf") != null) {
         mlt.setMaxDocFreq(localParams.getInt("maxdf"));
+      }
+
+      if(localParams.get("boost") != null) {
+        mlt.setBoost(localParams.getBool("boost"));
+        boostFields = SolrPluginUtils.parseFieldBoosts(qf);
       }
       
       ArrayList<String> fields = new ArrayList();
@@ -66,8 +72,35 @@
       mlt.setFieldNames(fields.toArray(new String[fields.size()]));
       mlt.setAnalyzer(req.getSchema().getIndexAnalyzer());
 
-      return mlt.like(scoreDocs[0].doc);
+      Query rawMLTQuery = mlt.like(scoreDocs[0].doc);
+      BooleanQuery boostedMLTQuery = (BooleanQuery) rawMLTQuery;
 
+      if (boostFields.size() > 0) {
+        BooleanQuery.Builder newQ = new BooleanQuery.Builder();
+        newQ.setDisableCoord(boostedMLTQuery.isCoordDisabled());
+        newQ.setMinimumNumberShouldMatch(boostedMLTQuery.getMinimumNumberShouldMatch());
+
+        for (BooleanClause clause : boostedMLTQuery) {
+          Query q = clause.getQuery();
+          Float b = boostFields.get(((TermQuery) q).getTerm().field());
+
+          if (b != null) {
+            q = new BoostQuery(q, b);
+          }
+
+          newQ.add(q, clause.getOccur());
+        }
+
+        boostedMLTQuery = newQ.build();
+      }
+
+      // exclude current document from results
+      BooleanQuery.Builder realMLTQuery = new BooleanQuery.Builder();
+      realMLTQuery.setDisableCoord(true);
+      realMLTQuery.add(boostedMLTQuery, BooleanClause.Occur.MUST);
+      realMLTQuery.add(docIdQuery, BooleanClause.Occur.MUST_NOT);
+
+      return realMLTQuery.build();
     } catch (IOException e) {
       throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
           "Error completing MLT request" + e.getMessage());

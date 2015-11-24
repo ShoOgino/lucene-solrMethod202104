@@ -1,10 +1,48 @@
-  /** If dim=-1 we sort by docID, else by that dim. */
+  /** Sort the heap writer by the specified dim */
   private void sortHeapPointWriter(final HeapPointWriter writer, int start, int length, int dim) {
 
     assert pointCount < Integer.MAX_VALUE;
+    //int[] swapCount = new int[1];
+    //int[] cmpCount = new int[1];
+
+    //System.out.println("SORT length=" + length);
 
     // All buffered points are still in heap; just do in-place sort:
-    new InPlaceMergeSorter() {
+    new IntroSorter() {
+      private final byte[] pivotPackedValue = new byte[bytesPerDim];
+      private int pivotDocID;
+      private long pivotOrd;
+
+      @Override
+      protected void setPivot(int i) {
+        pivotDocID = writer.docIDs[i];
+        pivotOrd = writer.ords[i];
+
+        int block = i / writer.valuesPerBlock;
+        int index = i % writer.valuesPerBlock;
+        System.arraycopy(writer.blocks.get(block), index*packedBytesLength+dim*bytesPerDim, pivotPackedValue, 0, bytesPerDim);
+      }
+
+      @Override
+      protected int comparePivot(int j) {
+        //cmpCount[0]++;
+        int block = j / writer.valuesPerBlock;
+        int index = j % writer.valuesPerBlock;
+        assert index >= 0: "index=" + index + " j=" + j;
+        int cmp = BKDUtil.compare(bytesPerDim, pivotPackedValue, 0, writer.blocks.get(block), index*numDims+dim);
+        if (cmp != 0) {
+          return cmp;
+        }
+
+        // Tie-break
+        cmp = Integer.compare(pivotDocID, writer.docIDs[j]);
+        if (cmp != 0) {
+          return cmp;
+        }
+
+        return Long.compare(pivotOrd, writer.ords[j]);
+      }
+
       @Override
       protected void swap(int i, int j) {
         int docID = writer.docIDs[i];
@@ -15,21 +53,27 @@
         writer.ords[i] = writer.ords[j];
         writer.ords[j] = ord;
 
+        byte[] blockI = writer.blocks.get(i / writer.valuesPerBlock);
+        int indexI = (i % writer.valuesPerBlock) * packedBytesLength;
+        byte[] blockJ = writer.blocks.get(j / writer.valuesPerBlock);
+        int indexJ = (j % writer.valuesPerBlock) * packedBytesLength;
+
         // scratch1 = values[i]
-        writer.readPackedValue(i, scratch1);
-        // scratch2 = values[j]
-        writer.readPackedValue(j, scratch2);
-        // values[i] = scratch2
-        writer.writePackedValue(i, scratch2);
+        System.arraycopy(blockI, indexI, scratch1, 0, packedBytesLength);
+        // values[i] = values[j]
+        System.arraycopy(blockJ, indexJ, blockI, indexI, packedBytesLength);
         // values[j] = scratch1
-        writer.writePackedValue(j, scratch1);
+        System.arraycopy(scratch1, 0, blockJ, indexJ, packedBytesLength);
       }
 
       @Override
       protected int compare(int i, int j) {
-        writer.readPackedValue(i, scratch1);
-        writer.readPackedValue(j, scratch2);
-        int cmp = BKDUtil.compare(bytesPerDim, scratch1, dim, scratch2, dim);
+        //cmpCount[0]++;
+        int blockI = i / writer.valuesPerBlock;
+        int dimI = i % writer.valuesPerBlock;
+        int blockJ = j / writer.valuesPerBlock;
+        int dimJ = j % writer.valuesPerBlock;
+        int cmp = BKDUtil.compare(bytesPerDim, writer.blocks.get(blockI), dimI*numDims+dim, writer.blocks.get(blockJ), dimJ*numDims+dim);
         if (cmp != 0) {
           return cmp;
         }
@@ -43,5 +87,6 @@
         return Long.compare(writer.ords[i], writer.ords[j]);
       }
     }.sort(start, start+length);
+    //System.out.println("LEN=" + length + " SWAP=" + swapCount[0] + " CMP=" + cmpCount[0]);
   }
 

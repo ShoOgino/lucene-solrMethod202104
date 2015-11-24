@@ -1,0 +1,45 @@
+  private void verify(IntersectState state, int nodeID, byte[] cellMinPacked, byte[] cellMaxPacked) throws IOException {
+
+    if (nodeID >= leafNodeOffset) {
+      int leafID = nodeID - leafNodeOffset;
+
+      // In the unbalanced case it's possible the left most node only has one child:
+      if (leafID < leafBlockFPs.length) {
+        //System.out.println("CHECK nodeID=" + nodeID + " leaf=" + (nodeID-leafNodeOffset) + " offset=" + leafNodeOffset + " fp=" + leafBlockFPs[leafID]);
+        //System.out.println("BKDR.verify leafID=" + leafID + " nodeID=" + nodeID + " fp=" + leafBlockFPs[leafID] + " min=" + new BytesRef(cellMinPacked) + " max=" + new BytesRef(cellMaxPacked));
+
+        // Leaf node: check that all values are in fact in bounds:
+        VerifyVisitor visitor = (VerifyVisitor) state.visitor;
+        visitor.cellMinPacked = cellMinPacked;
+        visitor.cellMaxPacked = cellMaxPacked;
+
+        int count = readDocIDs(state.in, leafBlockFPs[leafID], state.scratchDocIDs);
+        visitDocValues(state.commonPrefixLengths, state.scratchPackedValue, state.in, state.scratchDocIDs, count, state.visitor);
+      } else {
+        //System.out.println("BKDR.verify skip leafID=" + leafID);
+      }
+    } else {
+      // Non-leaf node:
+
+      int address = nodeID * (bytesPerDim+1);
+      int splitDim = splitPackedValues[address] & 0xff;
+      assert splitDim < numDims;
+
+      byte[] splitPackedValue = new byte[packedBytesLength];
+
+      // Recurse on left sub-tree:
+      System.arraycopy(cellMaxPacked, 0, splitPackedValue, 0, packedBytesLength);
+      System.arraycopy(splitPackedValues, address+1, splitPackedValue, splitDim*bytesPerDim, bytesPerDim);
+      verify(state,
+             2*nodeID,
+             cellMinPacked, splitPackedValue);
+
+      // Recurse on right sub-tree:
+      System.arraycopy(cellMinPacked, 0, splitPackedValue, 0, packedBytesLength);
+      System.arraycopy(splitPackedValues, address+1, splitPackedValue, splitDim*bytesPerDim, bytesPerDim);
+      verify(state,
+             2*nodeID+1,
+             splitPackedValue, cellMaxPacked);
+    }
+  }
+

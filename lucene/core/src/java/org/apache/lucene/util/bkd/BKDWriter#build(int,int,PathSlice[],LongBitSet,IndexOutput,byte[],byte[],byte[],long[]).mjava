@@ -22,7 +22,8 @@
       PathSlice source = slices[0];
 
       if (source.writer instanceof HeapPointWriter == false) {
-        // Adversarial cases can cause this, e.g. very lopsided data, all equal points
+        // Adversarial cases can cause this, e.g. very lopsided data, all equal points, such that we started
+        // offline, but then kept splitting only in one dimension, and so never had to rewrite into heap writer
         source = switchToHeap(source);
       }
 
@@ -31,17 +32,19 @@
 
       // Save the block file pointer:
       leafBlockFPs[nodeID - leafNodeOffset] = out.getFilePointer();
+      //System.out.println("  write leaf block @ fp=" + out.getFilePointer());
 
       // Write docIDs first, as their own chunk, so that at intersect time we can add all docIDs w/o
       // loading the values:
-      writeLeafBlockDocs(out, heapSource.docIDs, Math.toIntExact(source.start), Math.toIntExact(source.count));
+      int count = Math.toIntExact(source.count);
+      writeLeafBlockDocs(out, heapSource.docIDs, Math.toIntExact(source.start), count);
 
       // TODO: we should delta compress / only write suffix bytes, like terms dict (the values will all be "close together" since we are at
       // a leaf cell):
 
       // First pass: find the per-dim common prefix for all values in this block:
       Arrays.fill(commonPrefixLengths, bytesPerDim);
-      for (int i=0;i<source.count;i++) {
+      for (int i=0;i<count;i++) {
         if (i == 0) {
           heapSource.readPackedValue(Math.toIntExact(source.start + i), scratch1);
         } else {
@@ -61,9 +64,11 @@
       writeCommonPrefixes(out, commonPrefixLengths, scratch1);
 
       // Second pass: write the full values:
+      byte[] lastPackedValue = new byte[bytesPerDim];
       for (int i=0;i<source.count;i++) {
         // TODO: we could do bulk copying here, avoiding the intermediate copy:
         heapSource.readPackedValue(Math.toIntExact(source.start + i), scratchPackedValue);
+        assert numDims != 1 || valueInOrder(i, lastPackedValue, scratchPackedValue);
 
         // Make sure this value does in fact fall within this leaf cell:
         assert valueInBounds(scratchPackedValue, minPackedValue, maxPackedValue);
@@ -73,7 +78,12 @@
     } else {
       // Inner node: partition/recurse
 
-      int splitDim = split(minPackedValue, maxPackedValue);
+      int splitDim;
+      if (numDims > 1) {
+        splitDim = split(minPackedValue, maxPackedValue);
+      } else {
+        splitDim = 0;
+      }
 
       PathSlice source = slices[splitDim];
 
@@ -137,7 +147,9 @@
         }
       }
 
-      ordBitSet.clear(0, pointCount);
+      if (numDims > 1) {
+        ordBitSet.clear(0, pointCount);
+      }
 
       // Recurse on left tree:
       build(2*nodeID, leafNodeOffset, leftSlices,

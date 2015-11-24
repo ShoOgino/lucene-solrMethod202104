@@ -11,10 +11,12 @@
     leafNodeOffset = numLeaves;
 
     splitPackedValues = new byte[(1+bytesPerDim)*numLeaves];
+
+    // TODO: don't write split packed values[0]!
     in.readBytes(splitPackedValues, 0, splitPackedValues.length);
 
-    // Tree is fully balanced binary tree, so number of nodes = numLeaves-1, except our nodeIDs are 1-based (splitPackedValues[0] is unused):
-    leafBlockFPs = new long[numLeaves];
+    // Read the file pointers to the start of each leaf block:
+    long[] leafBlockFPs = new long[numLeaves];
     long lastFP = 0;
     for(int i=0;i<numLeaves;i++) {
       long delta = in.readVLong();
@@ -22,6 +24,47 @@
       lastFP += delta;
     }
 
+    // Possibly rotate the leaf block FPs, if the index not fully balanced binary tree (only happens
+    // if it was created by BKDWriter.merge).  In this case the leaf nodes may straddle the two bottom
+    // levels of the binary tree:
+    if (numDims == 1 && numLeaves > 1) {
+      //System.out.println("BKDR: numLeaves=" + numLeaves);
+      int levelCount = 2;
+      while (true) {
+        //System.out.println("  cycle levelCount=" + levelCount);
+        if (numLeaves >= levelCount && numLeaves <= 2*levelCount) {
+          int lastLevel = 2*(numLeaves - levelCount);
+          assert lastLevel >= 0;
+          /*
+          System.out.println("BKDR: lastLevel=" + lastLevel + " vs " + levelCount);
+          System.out.println("FPs before:");
+          for(int i=0;i<leafBlockFPs.length;i++) {
+            System.out.println("  " + i + " " + leafBlockFPs[i]);
+          }
+          */
+          if (lastLevel != 0) {
+            // Last level is partially filled, so we must rotate the leaf FPs to match.  We do this here, after loading
+            // at read-time, so that we can still delta code them on disk at write:
+            //System.out.println("BKDR: now rotate index");
+            long[] newLeafBlockFPs = new long[numLeaves];
+            System.arraycopy(leafBlockFPs, lastLevel, newLeafBlockFPs, 0, leafBlockFPs.length - lastLevel);
+            System.arraycopy(leafBlockFPs, 0, newLeafBlockFPs, leafBlockFPs.length - lastLevel, lastLevel);
+            leafBlockFPs = newLeafBlockFPs;
+          }
+          /*
+          System.out.println("FPs:");
+          for(int i=0;i<leafBlockFPs.length;i++) {
+            System.out.println("  " + i + " " + leafBlockFPs[i]);
+          }
+          */
+          break;
+        }
+
+        levelCount *= 2;
+      }
+    }
+
+    this.leafBlockFPs = leafBlockFPs;
     this.in = in;
   }
 

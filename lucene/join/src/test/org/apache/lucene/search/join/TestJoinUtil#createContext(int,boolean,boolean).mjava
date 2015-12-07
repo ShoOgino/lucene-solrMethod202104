@@ -4,46 +4,61 @@
     }
 
     Directory dir = newDirectory();
+    final Random random = random();
     RandomIndexWriter w = new RandomIndexWriter(
-        random(),
+        random,
         dir,
-        newIndexWriterConfig(new MockAnalyzer(random(), MockTokenizer.KEYWORD, false))
+        newIndexWriterConfig(new MockAnalyzer(random, MockTokenizer.KEYWORD, false))
     );
 
     IndexIterationContext context = new IndexIterationContext();
-    int numRandomValues = nDocs / RandomInts.randomIntBetween(random(), 2, 10);
+    int numRandomValues = nDocs / RandomInts.randomIntBetween(random, 1, 4);
     context.randomUniqueValues = new String[numRandomValues];
     Set<String> trackSet = new HashSet<>();
     context.randomFrom = new boolean[numRandomValues];
     for (int i = 0; i < numRandomValues; i++) {
       String uniqueRandomValue;
       do {
-//        uniqueRandomValue = TestUtil.randomRealisticUnicodeString(random());
-        uniqueRandomValue = TestUtil.randomSimpleString(random());
+        // the trick is to generate values which will be ordered similarly for string, ints&longs, positive nums makes it easier 
+        final int nextInt = random.nextInt(Integer.MAX_VALUE);
+        uniqueRandomValue = String.format(Locale.ROOT, "%08x", nextInt);
+        assert nextInt == Integer.parseUnsignedInt(uniqueRandomValue,16);
       } while ("".equals(uniqueRandomValue) || trackSet.contains(uniqueRandomValue));
+     
       // Generate unique values and empty strings aren't allowed.
       trackSet.add(uniqueRandomValue);
-      context.randomFrom[i] = random().nextBoolean();
+      
+      context.randomFrom[i] = random.nextBoolean();
       context.randomUniqueValues[i] = uniqueRandomValue;
+      
     }
 
+    List<String> randomUniqueValuesReplica = new ArrayList<>(Arrays.asList(context.randomUniqueValues));
+        
     RandomDoc[] docs = new RandomDoc[nDocs];
     for (int i = 0; i < nDocs; i++) {
       String id = Integer.toString(i);
-      int randomI = random().nextInt(context.randomUniqueValues.length);
+      int randomI = random.nextInt(context.randomUniqueValues.length);
       String value = context.randomUniqueValues[randomI];
       Document document = new Document();
-      document.add(newTextField(random(), "id", id, Field.Store.YES));
-      document.add(newTextField(random(), "value", value, Field.Store.NO));
+      document.add(newTextField(random, "id", id, Field.Store.YES));
+      document.add(newTextField(random, "value", value, Field.Store.NO));
 
       boolean from = context.randomFrom[randomI];
-      int numberOfLinkValues = multipleValuesPerDocument ? 2 + random().nextInt(10) : 1;
+      int numberOfLinkValues = multipleValuesPerDocument ? Math.min(2 + random.nextInt(10), context.randomUniqueValues.length) : 1;
       docs[i] = new RandomDoc(id, numberOfLinkValues, value, from);
       if (globalOrdinalJoin) {
         document.add(newStringField("type", from ? "from" : "to", Field.Store.NO));
       }
-      for (int j = 0; j < numberOfLinkValues; j++) {
-        String linkValue = context.randomUniqueValues[random().nextInt(context.randomUniqueValues.length)];
+      final List<String> subValues;
+      {
+      int start = randomUniqueValuesReplica.size()==numberOfLinkValues? 0 : random.nextInt(randomUniqueValuesReplica.size()-numberOfLinkValues);
+      subValues = randomUniqueValuesReplica.subList(start, start+numberOfLinkValues);
+      Collections.shuffle(subValues, random);
+      }
+      for (String linkValue : subValues) {
+        
+        assert !docs[i].linkValues.contains(linkValue);
         docs[i].linkValues.add(linkValue);
         if (from) {
           if (!context.fromDocuments.containsKey(linkValue)) {
@@ -55,15 +70,8 @@
 
           context.fromDocuments.get(linkValue).add(docs[i]);
           context.randomValueFromDocs.get(value).add(docs[i]);
-          document.add(newTextField(random(), "from", linkValue, Field.Store.NO));
-          if (multipleValuesPerDocument) {
-            document.add(new SortedSetDocValuesField("from", new BytesRef(linkValue)));
-          } else {
-            document.add(new SortedDocValuesField("from", new BytesRef(linkValue)));
-          }
-          if (globalOrdinalJoin) {
-            document.add(new SortedDocValuesField("join_field", new BytesRef(linkValue)));
-          }
+          addLinkFields(random, document,  "from", linkValue, multipleValuesPerDocument, globalOrdinalJoin);
+          
         } else {
           if (!context.toDocuments.containsKey(linkValue)) {
             context.toDocuments.put(linkValue, new ArrayList<>());
@@ -74,20 +82,12 @@
 
           context.toDocuments.get(linkValue).add(docs[i]);
           context.randomValueToDocs.get(value).add(docs[i]);
-          document.add(newTextField(random(), "to", linkValue, Field.Store.NO));
-          if (multipleValuesPerDocument) {
-            document.add(new SortedSetDocValuesField("to", new BytesRef(linkValue)));
-          } else {
-            document.add(new SortedDocValuesField("to", new BytesRef(linkValue)));
-          }
-          if (globalOrdinalJoin) {
-            document.add(new SortedDocValuesField("join_field", new BytesRef(linkValue)));
-          }
+          addLinkFields(random, document,  "to", linkValue, multipleValuesPerDocument, globalOrdinalJoin);
         }
       }
 
       w.addDocument(document);
-      if (random().nextInt(10) == 4) {
+      if (random.nextInt(10) == 4) {
         w.commit();
       }
       if (VERBOSE) {
@@ -95,7 +95,7 @@
       }
     }
 
-    if (random().nextBoolean()) {
+    if (random.nextBoolean()) {
       w.forceMerge(1);
     }
     w.close();

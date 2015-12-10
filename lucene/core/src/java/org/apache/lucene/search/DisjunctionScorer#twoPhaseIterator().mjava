@@ -1,0 +1,69 @@
+  @Override
+  public TwoPhaseIterator twoPhaseIterator() {
+    float sumMatchCost = 0;
+    long sumApproxCost = 0;
+
+    // Compute matchCost as the avarage over the matchCost of the subScorers.
+    // This is weighted by the cost, which is an expected number of matching documents.
+    for (DisiWrapper w : subScorers) {
+      if (w.twoPhaseView != null) {
+        long costWeight = (w.cost <= 1) ? 1 : w.cost;
+        sumMatchCost += w.twoPhaseView.matchCost() * costWeight;
+        sumApproxCost += costWeight;
+      }
+    }
+
+    if (sumApproxCost == 0) { // no sub scorer supports approximations
+      return null;
+    }
+
+    final float matchCost = sumMatchCost / sumApproxCost;
+
+    // note it is important to share the same pq as this scorer so that
+    // rebalancing the pq through the approximation will also rebalance
+    // the pq in this scorer.
+    return new TwoPhaseIterator(new DisjunctionDISIApproximation(subScorers)) {
+
+      @Override
+      public boolean matches() throws IOException {
+        DisiWrapper topScorers = subScorers.topList();
+        // remove the head of the list as long as it does not match
+        while (topScorers.twoPhaseView != null && ! topScorers.twoPhaseView.matches()) {
+          topScorers = topScorers.next;
+          if (topScorers == null) {
+            return false;
+          }
+        }
+        // now we know we have at least one match since the first element of 'matchList' matches
+        if (needsScores) {
+          // if scores or freqs are needed, we also need to remove scorers
+          // from the top list that do not actually match
+          DisiWrapper previous = topScorers;
+          for (DisiWrapper w = topScorers.next; w != null; w = w.next) {
+            if (w.twoPhaseView != null && ! w.twoPhaseView.matches()) {
+              // w does not match, remove it
+              previous.next = w.next;
+            } else {
+              previous = w;
+            }
+          }
+        } else {
+          // since we don't need scores, let's pretend we have a single match
+          topScorers.next = null;
+        }
+
+        // We need to explicitely set the list of top scorers to avoid the
+        // laziness of DisjunctionScorer.score() that would take all scorers
+        // positioned on the same doc as the top of the pq, including
+        // non-matching scorers
+        DisjunctionScorer.this.topScorers = topScorers;
+        return true;
+      }
+
+      @Override
+      public float matchCost() {
+        return matchCost;
+      }
+    };
+  }
+

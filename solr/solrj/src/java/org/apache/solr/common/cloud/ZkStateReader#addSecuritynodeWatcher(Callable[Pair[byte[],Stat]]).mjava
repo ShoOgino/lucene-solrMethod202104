@@ -1,0 +1,41 @@
+  private void addSecuritynodeWatcher(final Callable<Pair<byte[], Stat>> callback)
+      throws KeeperException, InterruptedException {
+    zkClient.exists(SOLR_SECURITY_CONF_PATH,
+        new Watcher() {
+
+          @Override
+          public void process(WatchedEvent event) {
+            // session events are not change events,
+            // and do not remove the watcher
+            if (EventType.None.equals(event.getType())) {
+              return;
+            }
+            try {
+              synchronized (ZkStateReader.this.getUpdateLock()) {
+                LOG.info("Updating [{}] ... ", SOLR_SECURITY_CONF_PATH);
+
+                // remake watch
+                final Watcher thisWatch = this;
+                final Stat stat = new Stat();
+                final byte[] data = getZkClient().getData(SOLR_SECURITY_CONF_PATH, thisWatch, stat, true);
+                try {
+                  callback.call(new Pair<>(data, stat));
+                } catch (Exception e) {
+                  LOG.error("Error running collections node listener", e);
+                }
+              }
+            } catch (KeeperException.ConnectionLossException | KeeperException.SessionExpiredException e) {
+              LOG.warn("ZooKeeper watch triggered, but Solr cannot talk to ZK: [{}]", e.getMessage());
+            } catch (KeeperException e) {
+              LOG.error("A ZK error has occurred", e);
+              throw new ZooKeeperException(ErrorCode.SERVER_ERROR, "", e);
+            } catch (InterruptedException e) {
+              // Restore the interrupted status
+              Thread.currentThread().interrupt();
+              LOG.warn("Interrupted", e);
+            }
+          }
+
+        }, true);
+  }
+

@@ -1,0 +1,79 @@
+  private void testBJQFacetComponent() throws Exception {
+    
+    assert ! colors.removeAll(sizes): "there is no colors in sizes";
+    Collections.shuffle(colors,random());
+    List<String> matchingColors = colors.subList(0, Math.min(atLeast(random(), 2), colors.size()));
+        
+    Map<String, Set<Integer>> parentIdsByAttrValue = new HashMap<String, Set<Integer>>(){
+      @Override
+      public Set<Integer> get(Object key) {
+        return super.get(key)==null && put((String)key, new HashSet<>())==null?super.get(key):super.get(key);
+      }
+    };
+    
+    final int parents = atLeast(10);
+    boolean aggregationOccurs = false;
+    for(int parent=0; parent<parents || !aggregationOccurs;parent++){
+      assert parent < 2000000 : "parent num "+parent+
+           " aggregationOccurs:"+aggregationOccurs+". Sorry! too tricky loop condition.";
+      SolrInputDocument pdoc = new SolrInputDocument();
+      pdoc.addField("id", parent);
+      pdoc.addField("type_s", "parent");
+      final String parentBrand = "brand"+(random().nextInt(5));
+      pdoc.addField("BRAND_s", parentBrand);
+      
+      for(int child=0; child<atLeast(colors.size()/2);child++){
+        SolrInputDocument childDoc= new SolrInputDocument();
+        final String color = colors.get(random().nextInt(colors.size()));
+        childDoc.addField("COLOR_s", color);
+        final String size = sizes.get(random().nextInt(sizes.size()));
+        childDoc.addField("SIZE_s",  size);
+        
+        if(matchingColors.contains(color)){
+          final boolean colorDupe = !parentIdsByAttrValue.get(color).add(parent);
+          final boolean sizeDupe = !parentIdsByAttrValue.get(size).add(parent);
+          aggregationOccurs |= colorDupe || sizeDupe;
+        }
+        pdoc.addChildDocument(childDoc);
+      }
+      indexDoc(pdoc);
+    }
+    commit();
+    
+    //handle.clear();
+    handle.put("timestamp", SKIPVAL);
+    handle.put("_version_", SKIPVAL); // not a cloud test, but may use updateLog
+    handle.put("maxScore", SKIP);// see org.apache.solr.TestDistributedSearch.test()
+    handle.put("shards", SKIP);
+    handle.put("distrib", SKIP);
+    handle.put("rid", SKIP);
+    handle.put("track", SKIP);
+    handle.put("facet_fields", UNORDERED);
+    handle.put("SIZE_s", UNORDERED);
+    handle.put("COLOR_s", UNORDERED);
+    
+    // to parent query
+    final String childQueryClause = "COLOR_s:("+(matchingColors.toString().replaceAll("[,\\[\\]]", " "))+")";
+      QueryResponse results = query("q", "{!parent which=\"type_s:parent\"}"+childQueryClause,
+          "facet", random().nextBoolean() ? "true":"false",
+          "qt",  random().nextBoolean() ? "blockJoinDocSetFacetRH" : "blockJoinFacetRH",
+          "child.facet.field", "COLOR_s",
+          "child.facet.field", "SIZE_s",
+          "rows","0" // we care only abt results 
+          );
+      NamedList<Object> resultsResponse = results.getResponse();
+      assertNotNull(resultsResponse);
+      FacetField color_s = results.getFacetField("COLOR_s");
+      FacetField size_s = results.getFacetField("SIZE_s");
+      
+      String msg = ""+parentIdsByAttrValue+" "+color_s+" "+size_s;
+      for (FacetField facet: new FacetField[]{color_s, size_s}) {
+        for (Count c : facet.getValues()) {
+          assertEquals(c.getName()+"("+msg+")", parentIdsByAttrValue.get(c.getName()).size(), c.getCount());
+        }
+      }
+      
+      assertEquals(msg , parentIdsByAttrValue.size(),color_s.getValueCount() + size_s.getValueCount());
+  //  }
+  }
+

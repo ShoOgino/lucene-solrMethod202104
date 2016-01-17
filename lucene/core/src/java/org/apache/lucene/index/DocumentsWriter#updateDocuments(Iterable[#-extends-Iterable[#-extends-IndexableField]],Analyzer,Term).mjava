@@ -1,0 +1,36 @@
+  boolean updateDocuments(final Iterable<? extends Iterable<? extends IndexableField>> docs, final Analyzer analyzer,
+                          final Term delTerm) throws IOException, AbortingException {
+    boolean hasEvents = preUpdate();
+
+    final ThreadState perThread = flushControl.obtainAndLock();
+    final DocumentsWriterPerThread flushingDWPT;
+    
+    try {
+      // This must happen after we've pulled the ThreadState because IW.close
+      // waits for all ThreadStates to be released:
+      ensureOpen();
+      ensureInitialized(perThread);
+      assert perThread.isInitialized();
+      final DocumentsWriterPerThread dwpt = perThread.dwpt;
+      final int dwptNumDocs = dwpt.getNumDocsInRAM();
+      try {
+        dwpt.updateDocuments(docs, analyzer, delTerm);
+      } catch (AbortingException ae) {
+        flushControl.doOnAbort(perThread);
+        dwpt.abort();
+        throw ae;
+      } finally {
+        // We don't know how many documents were actually
+        // counted as indexed, so we must subtract here to
+        // accumulate our separate counter:
+        numDocsInRAM.addAndGet(dwpt.getNumDocsInRAM() - dwptNumDocs);
+      }
+      final boolean isUpdate = delTerm != null;
+      flushingDWPT = flushControl.doAfterDocument(perThread, isUpdate);
+    } finally {
+      perThreadPool.release(perThread);
+    }
+
+    return postUpdate(flushingDWPT, hasEvents);
+  }
+

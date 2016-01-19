@@ -8,7 +8,6 @@
     
     DocCollection coll = clusterState.getCollection(collectionName);
     Slice slice = coll.getSlice(shard);
-    ShardHandler shardHandler = shardHandlerFactory.getShardHandler();
     if (slice == null) {
       throw new SolrException(ErrorCode.BAD_REQUEST,
           "Invalid shard name : " + shard + " in collection : " + collectionName);
@@ -29,35 +28,33 @@
           "Attempted to remove replica : " + collectionName + "/" + shard + "/" + replicaName
               + " with onlyIfDown='true', but state is '" + replica.getStr(ZkStateReader.STATE_PROP) + "'");
     }
-    
-    String baseUrl = replica.getStr(ZkStateReader.BASE_URL_PROP);
+
+    ShardHandler shardHandler = shardHandlerFactory.getShardHandler();
     String core = replica.getStr(ZkStateReader.CORE_NAME_PROP);
-    
-    // assume the core exists and try to unload it
-    Map m = makeMap("qt", adminPath, CoreAdminParams.ACTION, CoreAdminAction.UNLOAD.toString(), CoreAdminParams.CORE,
-        core, CoreAdminParams.DELETE_INSTANCE_DIR, "true", CoreAdminParams.DELETE_DATA_DIR, "true");
-        
-    ShardRequest sreq = new ShardRequest();
-    sreq.purpose = 1;
-    sreq.shards = new String[] {baseUrl};
-    sreq.actualShards = sreq.shards;
-    sreq.params = new ModifiableSolrParams(new MapSolrParams(m));
-    try {
-      shardHandler.submit(sreq, baseUrl, sreq.params);
-    } catch (Exception e) {
-      log.warn("Exception trying to unload core " + sreq, e);
+    String asyncId = message.getStr(ASYNC);
+    Map<String, String> requestMap = null;
+    if (asyncId != null) {
+      requestMap = new HashMap<>(1, 1.0f);
     }
-    
-    collectShardResponses(replica.getState() != Replica.State.ACTIVE ? new NamedList() : results, false, null,
-        shardHandler);
-        
-    if (waitForCoreNodeGone(collectionName, shard, replicaName, 5000)) return;// check if the core unload removed the
-                                                                              // corenode zk enry
-    deleteCoreNode(collectionName, replicaName, replica, core); // try and ensure core info is removed from clusterstate
+
+    ModifiableSolrParams params = new ModifiableSolrParams();
+    params.add(CoreAdminParams.ACTION, CoreAdminAction.UNLOAD.toString());
+    params.add(CoreAdminParams.CORE, core);
+    params.add(CoreAdminParams.DELETE_INSTANCE_DIR, "true");
+    params.add(CoreAdminParams.DELETE_DATA_DIR, "true");
+
+    sendShardRequest(replica.getNodeName(), params, shardHandler, asyncId, requestMap);
+
+    processResponses(results, shardHandler, false, null, asyncId, requestMap);
+
+    //check if the core unload removed the corenode zk entry
+    if (waitForCoreNodeGone(collectionName, shard, replicaName, 5000)) return;
+
+    // try and ensure core info is removed from cluster state
+    deleteCoreNode(collectionName, replicaName, replica, core);
     if (waitForCoreNodeGone(collectionName, shard, replicaName, 30000)) return;
     
     throw new SolrException(ErrorCode.SERVER_ERROR,
         "Could not  remove replica : " + collectionName + "/" + shard + "/" + replicaName);
-        
   }
 

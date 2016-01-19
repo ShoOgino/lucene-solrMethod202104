@@ -9,7 +9,7 @@
     DocCollection collection = clusterState.getCollection(collectionName);
     DocRouter router = collection.getRouter() != null ? collection.getRouter() : DocRouter.DEFAULT;
     
-    Slice parentSlice = null;
+    Slice parentSlice;
     
     if (slice == null) {
       if (router instanceof CompositeIdRouter) {
@@ -150,13 +150,8 @@
         }
       }
       
-      // do not abort splitshard if the unloading fails
-      // this can happen because the replicas created previously may be down
-      // the only side effect of this is that the sub shard may end up having more replicas than we want
-      collectShardResponses(results, false, null, shardHandler);
-      
       final String asyncId = message.getStr(ASYNC);
-      HashMap<String,String> requestMap = new HashMap<>();
+      Map<String,String> requestMap = new HashMap<>();
       
       for (int i = 0; i < subRanges.size(); i++) {
         String subSlice = subSlices.get(i);
@@ -201,10 +196,8 @@
         }
         addReplica(clusterState, new ZkNodeProps(propMap), results);
       }
-      
-      collectShardResponses(results, true, "SPLITSHARD failed to create subshard leaders", shardHandler);
-      
-      completeAsyncRequest(asyncId, requestMap, results);
+
+      processResponses(results, shardHandler, true, "SPLITSHARD failed to create subshard leaders", asyncId, requestMap);
       
       for (String subShardName : subShardNames) {
         // wait for parent leader to acknowledge the sub-shard core
@@ -221,11 +214,9 @@
         ModifiableSolrParams p = new ModifiableSolrParams(cmd.getParams());
         sendShardRequest(nodeName, p, shardHandler, asyncId, requestMap);
       }
-      
-      collectShardResponses(results, true, "SPLITSHARD timed out waiting for subshard leaders to come up",
-          shardHandler);
-          
-      completeAsyncRequest(asyncId, requestMap, results);
+
+      processResponses(results, shardHandler, true, "SPLITSHARD timed out waiting for subshard leaders to come up",
+          asyncId, requestMap);
       
       log.info("Successfully created all sub-shards for collection " + collectionName + " parent shard: " + slice
           + " on: " + parentShardLeader);
@@ -243,9 +234,9 @@
       params.set(CoreAdminParams.RANGES, rangesStr);
       
       sendShardRequest(parentShardLeader.getNodeName(), params, shardHandler, asyncId, requestMap);
-      
-      collectShardResponses(results, true, "SPLITSHARD failed to invoke SPLIT core admin command", shardHandler);
-      completeAsyncRequest(asyncId, requestMap, results);
+
+      processResponses(results, shardHandler, true, "SPLITSHARD failed to invoke SPLIT core admin command", asyncId,
+          requestMap);
       
       log.info("Index on shard: " + nodeName + " split into two successfully");
       
@@ -261,11 +252,9 @@
         
         sendShardRequest(nodeName, params, shardHandler, asyncId, requestMap);
       }
-      
-      collectShardResponses(results, true, "SPLITSHARD failed while asking sub shard leaders to apply buffered updates",
-          shardHandler);
-          
-      completeAsyncRequest(asyncId, requestMap, results);
+
+      processResponses(results, shardHandler, true, "SPLITSHARD failed while asking sub shard leaders" +
+          " to apply buffered updates", asyncId, requestMap);
       
       log.info("Successfully applied buffered updates on : " + subShardNames);
       
@@ -373,11 +362,8 @@
       for (Map<String, Object> replica : replicas) {
         addReplica(clusterState, new ZkNodeProps(replica), results);
       }
-      
-      collectShardResponses(results, true,
-          "SPLITSHARD failed to create subshard replicas", shardHandler);
-          
-      completeAsyncRequest(asyncId, requestMap, results);
+
+      processResponses(results, shardHandler, true, "SPLITSHARD failed to create subshard replicas", asyncId, requestMap);
       
       log.info("Successfully created all replica shards for all sub-slices " + subSlices);
       

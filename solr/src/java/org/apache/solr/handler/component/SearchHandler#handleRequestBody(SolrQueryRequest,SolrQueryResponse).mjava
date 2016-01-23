@@ -1,0 +1,146 @@
+  @Override
+  public void handleRequestBody(SolrQueryRequest req, SolrQueryResponse rsp) throws Exception, ParseException, InstantiationException, IllegalAccessException
+  {
+    // int sleep = req.getParams().getInt("sleep",0);
+    // if (sleep > 0) {log.error("SLEEPING for " + sleep);  Thread.sleep(sleep);}
+    ResponseBuilder rb = new ResponseBuilder();
+    rb.req = req;
+    rb.rsp = rsp;
+    rb.components = components;
+    rb.setDebug(req.getParams().getBool(CommonParams.DEBUG_QUERY, false));
+
+    final RTimer timer = rb.isDebug() ? new RTimer() : null;
+
+    if (timer == null) {
+      // non-debugging prepare phase
+      for( SearchComponent c : components ) {
+        c.prepare(rb);
+      }
+    } else {
+      // debugging prepare phase
+      RTimer subt = timer.sub( "prepare" );
+      for( SearchComponent c : components ) {
+        rb.setTimer( subt.sub( c.getName() ) );
+        c.prepare(rb);
+        rb.getTimer().stop();
+      }
+      subt.stop();
+    }
+
+    if (rb.shards == null) {
+      // a normal non-distributed request
+
+      // The semantics of debugging vs not debugging are different enough that
+      // it makes sense to have two control loops
+      if(!rb.isDebug()) {
+        // Process
+        for( SearchComponent c : components ) {
+          c.process(rb);
+        }
+      }
+      else {
+        // Process
+        RTimer subt = timer.sub( "process" );
+        for( SearchComponent c : components ) {
+          rb.setTimer( subt.sub( c.getName() ) );
+          c.process(rb);
+          rb.getTimer().stop();
+        }
+        subt.stop();
+        timer.stop();
+
+        // add the timing info
+        if( rb.getDebugInfo() == null ) {
+          rb.setDebugInfo( new SimpleOrderedMap<Object>() );
+        }
+        rb.getDebugInfo().add( "timing", timer.asNamedList() );
+      }
+
+    } else {
+      // a distributed request
+
+      HttpCommComponent comm = new HttpCommComponent();
+
+      if (rb.outgoing == null) {
+        rb.outgoing = new LinkedList<ShardRequest>();
+      }
+      rb.finished = new ArrayList<ShardRequest>();
+
+      int nextStage = 0;
+      do {
+        rb.stage = nextStage;
+        nextStage = ResponseBuilder.STAGE_DONE;
+
+        // call all components
+        for( SearchComponent c : components ) {
+          // the next stage is the minimum of what all components report
+          nextStage = Math.min(nextStage, c.distributedProcess(rb));
+        }
+
+
+        // check the outgoing queue and send requests
+        while (rb.outgoing.size() > 0) {
+
+          // submit all current request tasks at once
+          while (rb.outgoing.size() > 0) {
+            ShardRequest sreq = rb.outgoing.remove(0);
+            sreq.actualShards = sreq.shards;
+            if (sreq.actualShards==ShardRequest.ALL_SHARDS) {
+              sreq.actualShards = rb.shards;
+            }
+            sreq.responses = new ArrayList<ShardResponse>();
+
+            // TODO: map from shard to address[]
+            for (String shard : sreq.actualShards) {
+              ModifiableSolrParams params = new ModifiableSolrParams(sreq.params);
+              params.remove(ShardParams.SHARDS);      // not a top-level request
+              params.remove("indent");
+              params.remove(CommonParams.HEADER_ECHO_PARAMS);
+              params.set(ShardParams.IS_SHARD, true);  // a sub (shard) request
+              String shardHandler = req.getParams().get(ShardParams.SHARDS_QT);
+              if (shardHandler == null) {
+                params.remove(CommonParams.QT);
+              } else {
+                params.set(CommonParams.QT, shardHandler);
+              }
+              comm.submit(sreq, shard, params);
+            }
+          }
+
+
+          // now wait for replies, but if anyone puts more requests on
+          // the outgoing queue, send them out immediately (by exiting
+          // this loop)
+          while (rb.outgoing.size() == 0) {
+            ShardResponse srsp = comm.takeCompletedOrError();
+            if (srsp == null) break;  // no more requests to wait for
+
+            // Was there an exception?  If so, abort everything and
+            // rethrow
+            if (srsp.getException() != null) {
+              comm.cancelAll();
+              if (srsp.getException() instanceof SolrException) {
+                throw (SolrException)srsp.getException();
+              } else {
+                throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, srsp.getException());
+              }
+            }
+
+            rb.finished.add(srsp.getShardRequest());
+
+            // let the components see the responses to the request
+            for(SearchComponent c : components) {
+              c.handleResponses(rb, srsp.getShardRequest());
+            }
+          }
+        }
+
+        for(SearchComponent c : components) {
+            c.finishStage(rb);
+         }
+
+        // we are done when the next stage is MAX_VALUE
+      } while (nextStage != Integer.MAX_VALUE);
+    }
+  }
+

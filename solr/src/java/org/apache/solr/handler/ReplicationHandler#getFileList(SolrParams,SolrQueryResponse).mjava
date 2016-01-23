@@ -1,0 +1,40 @@
+  @SuppressWarnings("unchecked")
+  private void getFileList(SolrParams solrParams, SolrQueryResponse rsp) {
+    String v = solrParams.get(CMD_INDEX_VERSION);
+    if (v == null) {
+      rsp.add("status", "no indexversion specified");
+      return;
+    }
+    long version = Long.parseLong(v);
+    IndexCommit commit = core.getDeletionPolicy().getCommitPoint(version);
+    if (commit == null) {
+      rsp.add("status", "invalid indexversion");
+      return;
+    }
+    // reserve the indexcommit for sometime
+    core.getDeletionPolicy().setReserveDuration(version, reserveCommitDuration);
+    List<Map<String, Object>> result = new ArrayList<Map<String, Object>>();
+    try {
+      //get all the files in the commit
+      //use a set to workaround possible Lucene bug which returns same file name multiple times
+      Collection<String> files = new HashSet<String>(commit.getFileNames());
+      for (String fileName : files) {
+        if(fileName.endsWith(".lock")) continue;
+        File file = new File(core.getIndexDir(), fileName);
+        Map<String, Object> fileMeta = getFileInfo(file);
+        result.add(fileMeta);
+      }
+    } catch (IOException e) {
+      rsp.add("status", "unable to get file names for given indexversion");
+      rsp.add("exception", e);
+      LOG.warn("Unable to get file names for indexCommit version: "
+              + version, e);
+    }
+    rsp.add(CMD_GET_FILE_LIST, result);
+    if (confFileNameAlias.size() < 1)
+      return;
+    LOG.debug("Adding config files to list: " + includeConfFiles);
+    //if configuration files need to be included get their details
+    rsp.add(CONF_FILES, getConfFileInfoFromCache(confFileNameAlias, confFileInfoCache));
+  }
+

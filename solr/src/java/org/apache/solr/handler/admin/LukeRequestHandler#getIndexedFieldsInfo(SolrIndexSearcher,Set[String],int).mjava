@@ -1,0 +1,72 @@
+  @SuppressWarnings("unchecked")
+  private static SimpleOrderedMap<Object> getIndexedFieldsInfo( 
+    final SolrIndexSearcher searcher, final Set<String> fields, final int numTerms ) 
+    throws Exception {
+
+    IndexReader reader = searcher.getReader();
+    IndexSchema schema = searcher.getSchema();
+    
+    // Walk the term enum and keep a priority queue for each map in our set
+    Map<String,TopTermQueue> ttinfo = null;
+    if( numTerms > 0 ) {
+      ttinfo = getTopTerms(reader, fields, numTerms, null );
+    }
+    SimpleOrderedMap<Object> finfo = new SimpleOrderedMap<Object>();
+    Collection<String> fieldNames = reader.getFieldNames(IndexReader.FieldOption.ALL);
+    for (String fieldName : fieldNames) {
+      if( fields != null && !fields.contains( fieldName ) ) {
+        continue; // if a field is specified, only them
+      }
+      
+      SimpleOrderedMap<Object> f = new SimpleOrderedMap<Object>();
+      
+      SchemaField sfield = schema.getFieldOrNull( fieldName );
+      FieldType ftype = (sfield==null)?null:sfield.getType();
+
+      f.add( "type", (ftype==null)?null:ftype.getTypeName() );
+      f.add( "schema", getFieldFlags( sfield ) );
+      if (sfield != null && schema.isDynamicField(sfield.getName()) && schema.getDynamicPattern(sfield.getName()) != null) {
+    	  f.add("dynamicBase", schema.getDynamicPattern(sfield.getName()));
+      }
+
+      // If numTerms==0, the call is just asking for a quick field list
+      if( ttinfo != null && sfield != null && sfield.indexed() ) {
+        Query q = new TermRangeQuery(fieldName,null,null,false,false); 
+        TopDocs top = searcher.search( q, 1 );
+        if( top.totalHits > 0 ) {
+          // Find a document with this field
+          try {
+            Document doc = searcher.doc( top.scoreDocs[0].doc );
+            Fieldable fld = doc.getFieldable( fieldName );
+            if( fld != null ) {
+              f.add( "index", getFieldFlags( fld ) );
+            }
+            else {
+              // it is a non-stored field...
+              f.add( "index", "(unstored field)" );
+            }
+          }
+          catch( Exception ex ) {
+            log.warn( "error reading field: "+fieldName );
+          }
+        }
+        f.add( "docs", top.totalHits );
+        
+        TopTermQueue topTerms = ttinfo.get( fieldName );
+        if( topTerms != null ) {
+          f.add( "distinct", topTerms.distinctTerms );
+          
+          // Include top terms
+          f.add( "topTerms", topTerms.toNamedList( searcher.getSchema() ) );
+  
+          // Add a histogram
+          f.add( "histogram", topTerms.histogram.toNamedList() );
+        }
+      }
+      
+      // Add the field
+      finfo.add( fieldName, f );
+    }
+    return finfo;
+  }
+

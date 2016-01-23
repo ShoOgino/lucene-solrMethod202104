@@ -1,0 +1,62 @@
+  /**
+   * Generates a list of Highlighted query fragments for each item in a list
+   * of documents, or returns null if highlighting is disabled.
+   *
+   * @param docs query results
+   * @param query the query
+   * @param req the current request
+   * @param defaultFields default list of fields to summarize
+   *
+   * @return NamedList containing a NamedList for each document, which in 
+   * turns contains sets (field, summary) pairs.
+   */
+  @SuppressWarnings("unchecked")
+  public NamedList<Object> doHighlighting(DocList docs, Query query, SolrQueryRequest req, String[] defaultFields) throws IOException {
+    SolrParams params = req.getParams(); 
+    if (!isHighlightingEnabled(params))
+        return null;
+     
+    SolrIndexSearcher searcher = req.getSearcher();
+    IndexSchema schema = searcher.getSchema();
+    NamedList fragments = new SimpleOrderedMap();
+    String[] fieldNames = getHighlightFields(query, req, defaultFields);
+    Set<String> fset = new HashSet<String>();
+     
+    {
+      // pre-fetch documents using the Searcher's doc cache
+      for(String f : fieldNames) { fset.add(f); }
+      // fetch unique key if one exists.
+      SchemaField keyField = schema.getUniqueKeyField();
+      if(null != keyField)
+        fset.add(keyField.getName());  
+    }
+
+    // get FastVectorHighlighter instance out of the processing loop
+    FastVectorHighlighter fvh = new FastVectorHighlighter(
+        // FVH cannot process hl.usePhraseHighlighter parameter per-field basis
+        params.getBool( HighlightParams.USE_PHRASE_HIGHLIGHTER, true ),
+        // FVH cannot process hl.requireFieldMatch parameter per-field basis
+        params.getBool( HighlightParams.FIELD_MATCH, false ),
+        getFragListBuilder( params ),
+        getFragmentsBuilder( params ) );
+    FieldQuery fieldQuery = fvh.getFieldQuery( query );
+
+    // Highlight each document
+    DocIterator iterator = docs.iterator();
+    for (int i = 0; i < docs.size(); i++) {
+      int docId = iterator.nextDoc();
+      Document doc = searcher.doc(docId, fset);
+      NamedList docSummaries = new SimpleOrderedMap();
+      for (String fieldName : fieldNames) {
+        fieldName = fieldName.trim();
+        if( useFastVectorHighlighter( params, schema, fieldName ) )
+          doHighlightingByFastVectorHighlighter( fvh, fieldQuery, req, docSummaries, docId, doc, fieldName );
+        else
+          doHighlightingByHighlighter( query, req, docSummaries, docId, doc, fieldName );
+      }
+      String printId = schema.printableUniqueKey(doc);
+      fragments.add(printId == null ? null : printId, docSummaries);
+    }
+    return fragments;
+  }
+

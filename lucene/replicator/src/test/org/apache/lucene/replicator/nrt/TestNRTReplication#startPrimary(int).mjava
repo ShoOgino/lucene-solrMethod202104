@@ -1,0 +1,61 @@
+  void startPrimary(int id) throws IOException {
+    message(id + ": top: startPrimary lastPrimaryVersion=" + lastPrimaryVersion);
+    assert nodes[id] == null;
+
+    // Force version of new primary to advance beyond where old primary was, so we never re-use versions.  It may have
+    // already advanced beyond newVersion, e.g. if it flushed new segments while during xlog replay:
+
+    // First start node as primary (it opens an IndexWriter) but do not publish it for searching until we replay xlog:
+    NodeProcess newPrimary = startNode(id, indexPaths[id], true, lastPrimaryVersion+1);
+    if (newPrimary == null) {
+      message("top: newPrimary failed to start; abort");
+      return;
+    }
+
+    // Get xlog location that this node was guaranteed to already have indexed through; this may replay some ops already indexed but it's OK
+    // because the ops are idempotent: we updateDocument (by docid) on replay even for original addDocument:
+    Long startTransLogLoc;
+    Integer markerCount;
+    if (newPrimary.initCommitVersion == 0) {
+      startTransLogLoc = 0L;
+      markerCount = 0;
+    } else {
+      startTransLogLoc = versionToTransLogLocation.get(newPrimary.initCommitVersion);
+      markerCount = versionToMarker.get(newPrimary.initCommitVersion);
+    }
+    assert startTransLogLoc != null: "newPrimary.initCommitVersion=" + newPrimary.initCommitVersion + " is missing from versionToTransLogLocation: keys=" + versionToTransLogLocation.keySet();
+    assert markerCount != null: "newPrimary.initCommitVersion=" + newPrimary.initCommitVersion + " is missing from versionToMarker: keys=" + versionToMarker.keySet();
+
+    // When the primary starts, the userData in its latest commit point tells us which version it had indexed up to, so we know where to
+    // replay from in the xlog.  However, we forcefuly advance the version, and then IW on init (or maybe getReader) also adds 1 to it.
+    // Since we publish the primary in this state (before xlog replay is done), a replica can start up at this point and pull this version,
+    // and possibly later be chosen as a primary, causing problems if the version is known recorded in the translog map.  So we record it
+    // here:
+
+    addTransLogLoc(newPrimary.initInfosVersion, startTransLogLoc);
+    addVersionMarker(newPrimary.initInfosVersion, markerCount);
+
+    assert newPrimary.initInfosVersion >= lastPrimaryVersion;
+    message("top: now change lastPrimaryVersion from " + lastPrimaryVersion + " to " + newPrimary.initInfosVersion);
+    lastPrimaryVersion = newPrimary.initInfosVersion;
+
+    // Publish new primary, before replaying xlog.  This means other indexing ops can come in at the same time as we catch up indexing
+    // previous ops.  Effectively, we have "forked" the indexing ops, by rolling back in time a bit, and replaying old indexing ops (from
+    // translog) concurrently with new incoming ops.
+    nodes[id] = newPrimary;
+    primary = newPrimary;
+
+    sendReplicasToPrimary();
+
+    long nextTransLogLoc = transLog.getNextLocation();
+    int nextMarkerUpto = markerUpto.get();
+    message("top: replay trans log " + startTransLogLoc + " (version=" + newPrimary.initCommitVersion + ") to " + nextTransLogLoc + " (translog end)");
+    try {
+      transLog.replay(newPrimary, startTransLogLoc, nextTransLogLoc);
+    } catch (IOException ioe) {
+      message("top: replay xlog failed; abort");
+      return;
+    }
+    message("top: done replay trans log");
+  }
+

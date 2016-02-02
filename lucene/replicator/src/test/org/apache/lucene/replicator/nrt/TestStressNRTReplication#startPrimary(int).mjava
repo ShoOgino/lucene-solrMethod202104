@@ -36,26 +36,32 @@
     addVersionMarker(newPrimary.initInfosVersion, markerCount);
 
     assert newPrimary.initInfosVersion >= lastPrimaryVersion;
-    message("top: now change lastPrimaryVersion from " + lastPrimaryVersion + " to " + newPrimary.initInfosVersion);
+    message("top: now change lastPrimaryVersion from " + lastPrimaryVersion + " to " + newPrimary.initInfosVersion + "; startup marker count " + markerCount);
     lastPrimaryVersion = newPrimary.initInfosVersion;
 
-    // Publish new primary, before replaying xlog.  This means other indexing ops can come in at the same time as we catch up indexing
-    // previous ops.  Effectively, we have "forked" the indexing ops, by rolling back in time a bit, and replaying old indexing ops (from
-    // translog) concurrently with new incoming ops.
+    long nextTransLogLoc = transLog.getNextLocation();
+    long t0 = System.nanoTime();
+    message("top: start translog replay " + startTransLogLoc + " (version=" + newPrimary.initCommitVersion + ") to " + nextTransLogLoc + " (translog end)");
+    try {
+      transLog.replay(newPrimary, startTransLogLoc, nextTransLogLoc);
+    } catch (IOException ioe) {
+      // nocommit what if primary node is still running here, and we failed for some other reason?
+      message("top: replay xlog failed; abort");
+      return;
+    }
+
+    long t1 = System.nanoTime();
+    message("top: done translog replay; took " + ((t1 - t0)/1000000.0) + " msec; now publish primary");
+
+    // Publish new primary only after translog has succeeded in replaying; this is important, for this test anyway, so we keep a "linear"
+    // history so enforcing marker counts is correct.  E.g., if we publish first and replay translog concurrently with incoming ops, then
+    // a primary commit that happens while translog is still replaying will incorrectly record the translog loc into the commit user data
+    // when in fact that commit did NOT reflect all prior ops.  So if we crash and start up again from that commit point, we are missing
+    // ops.
     nodes[id] = newPrimary;
     primary = newPrimary;
 
     sendReplicasToPrimary();
 
-    long nextTransLogLoc = transLog.getNextLocation();
-    int nextMarkerUpto = markerUpto.get();
-    message("top: replay trans log " + startTransLogLoc + " (version=" + newPrimary.initCommitVersion + ") to " + nextTransLogLoc + " (translog end)");
-    try {
-      transLog.replay(newPrimary, startTransLogLoc, nextTransLogLoc);
-    } catch (IOException ioe) {
-      message("top: replay xlog failed; abort");
-      return;
-    }
-    message("top: done replay trans log");
   }
 

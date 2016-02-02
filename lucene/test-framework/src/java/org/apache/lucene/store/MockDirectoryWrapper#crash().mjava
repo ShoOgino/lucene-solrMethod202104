@@ -1,7 +1,6 @@
   /** Simulates a crash of OS or machine by overwriting
    *  unsynced files. */
   public synchronized void crash() throws IOException {
-    crashed = true;
     openFiles = new HashMap<>();
     openFilesForWrite = new HashSet<>();
     openFilesDeleted = new HashSet<>();
@@ -23,7 +22,7 @@
 
       if (damage == 0) {
         action = "deleted";
-        deleteFile(name, true);
+        deleteFiles(Collections.singleton(name));
       } else if (damage == 1) {
         action = "zeroed";
         // Zero out file entirely
@@ -57,27 +56,44 @@
         ii.close();
 
         // Delete original and copy bytes back:
-        deleteFile(name, true);
+        deleteFiles(Collections.singleton(name));
         
-        final IndexOutput out = in.createOutput(name, LuceneTestCase.newIOContext(randomState));
-        ii = in.openInput(tempFileName, LuceneTestCase.newIOContext(randomState));
-        out.copyBytes(ii, ii.length());
-        out.close();
-        ii.close();
-        deleteFile(tempFileName, true);
+        try(IndexOutput out = in.createOutput(name, LuceneTestCase.newIOContext(randomState))) {
+          ii = in.openInput(tempFileName, LuceneTestCase.newIOContext(randomState));
+          out.copyBytes(ii, ii.length());
+          ii.close();
+        } catch (IOException ioe) {
+          // VirusCheckingFS may have blocked the delete, at which point FSDir cannot overwrite here
+          if (ioe.getMessage().equals("file \"" + name + "\" is pending delete and cannot be overwritten")) {
+            // OK
+            action = "deleted";
+          } else {
+            throw ioe;
+          }
+        }
+        deleteFiles(Collections.singleton(tempFileName));
       } else if (damage == 3) {
         // The file survived intact:
         action = "didn't change";
       } else {
         action = "fully truncated";
         // Totally truncate the file to zero bytes
-        deleteFile(name, true);
-        IndexOutput out = in.createOutput(name, LuceneTestCase.newIOContext(randomState));
-        out.close();
+        deleteFiles(Collections.singleton(name));
+        try (IndexOutput out = in.createOutput(name, LuceneTestCase.newIOContext(randomState))) {
+        } catch (IOException ioe) {
+          // VirusCheckingFS may have blocked the delete, at which point FSDir cannot overwrite here
+          if (ioe.getMessage().equals("file \"" + name + "\" is pending delete and cannot be overwritten")) {
+            // OK
+            action = "deleted";
+          } else {
+            throw ioe;
+          }
+        }
       }
       if (LuceneTestCase.VERBOSE) {
         System.out.println("MockDirectoryWrapper: " + action + " unsynced file: " + name);
       }
     }
+    crashed = true;
   }
 

@@ -1,0 +1,38 @@
+  public void testWithPendingDeletions() throws Exception {
+    // irony: currently we don't emulate windows well enough to work on windows!
+    assumeFalse("windows is not supported", Constants.WINDOWS);
+
+    Path path = createTempDir();
+
+    // Use WindowsFS to prevent open files from being deleted:
+    FileSystem fs = new WindowsFS(path.getFileSystem()).getFileSystem(URI.create("file:///"));
+    Path root = new FilterPath(path, fs);
+
+    // MMapDirectory doesn't work because it closes its file handles after mapping!
+    try (FSDirectory dir = new SimpleFSDirectory(root)) {
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      IndexWriter w = new IndexWriter(dir, iwc);
+      w.commit();
+      IndexInput in = dir.openInput("segments_1", IOContext.DEFAULT);
+      w.addDocument(new Document());
+      w.close();
+      assertTrue(dir.checkPendingDeletions());
+
+      // make sure we get NFSF if we try to delete and already-pending-delete file:
+      try {
+        dir.deleteFile("segments_1");
+        fail("didn't hit exception");
+      } catch (NoSuchFileException nfse) {
+        // expected
+      }
+
+      iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      try {
+        w = new IndexWriter(dir, iwc);
+      } catch (IllegalArgumentException iae) {
+        assertEquals("Directory still has pending deleted files", iae.getMessage());
+      }
+      in.close();
+    }
+  }
+

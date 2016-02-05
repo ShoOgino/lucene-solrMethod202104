@@ -1,6 +1,5 @@
-  /** Returns true if peer sync was successful, meaning that this core may not be considered to have the latest updates
-   *  when considering the last N updates between it and its peers.
-   *  A commit is not performed.
+  /** Returns true if peer sync was successful, meaning that this core may be considered to have the latest updates.
+   * It does not mean that the remote replica is in sync with us.
    */
   public boolean sync() {
     if (ulog == null) {
@@ -39,7 +38,7 @@
         
         ourLowThreshold = percentile(startingVersions, 0.8f);
         ourHighThreshold = percentile(startingVersions, 0.2f);
-        
+
         // now make sure that the starting updates overlap our updates
         // there shouldn't be reorders, so any overlap will do.
         
@@ -60,6 +59,7 @@
         }
         
         ourUpdates = newList;
+        Collections.sort(ourUpdates, absComparator);
       } else {
         
         if (ourUpdates.size() > 0) {
@@ -72,9 +72,10 @@
           return false;
         }
       }
-      
+
+      ourHighest = ourUpdates.get(0);
       ourUpdateSet = new HashSet<>(ourUpdates);
-      requestedUpdateSet = new HashSet<>(ourUpdates);
+      requestedUpdateSet = new HashSet<>();
       
       for (;;) {
         ShardResponse srsp = shardHandler.takeCompletedOrError();
@@ -86,9 +87,18 @@
           return false;
         }
       }
-      
-      log.info(msg() + "DONE. sync succeeded");
-      return true;
+
+      // finish up any comparisons with other shards that we deferred
+      boolean success = true;
+      for (SyncShardRequest sreq : requests) {
+        if (sreq.doFingerprintComparison) {
+          success = compareFingerprint(sreq);
+          if (!success) break;
+        }
+      }
+
+      log.info(msg() + "DONE. sync " + (success ? "succeeded" : "failed"));
+      return success;
     } finally {
       MDCLoggingContext.clear();
     }

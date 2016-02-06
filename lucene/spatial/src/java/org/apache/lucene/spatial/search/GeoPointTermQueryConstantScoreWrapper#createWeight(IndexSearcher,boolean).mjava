@@ -1,0 +1,69 @@
+  @Override
+  public Weight createWeight(IndexSearcher searcher, boolean needsScores) throws IOException {
+    return new ConstantScoreWeight(this) {
+
+      private DocIdSet getDocIDs(LeafReaderContext context) throws IOException {
+        final Terms terms = context.reader().terms(query.getField());
+        if (terms == null) {
+          return DocIdSet.EMPTY;
+        }
+
+        final GeoPointTermsEnum termsEnum = (GeoPointTermsEnum)(query.getTermsEnum(terms, null));
+        assert termsEnum != null;
+
+        LeafReader reader = context.reader();
+        DocIdSetBuilder builder = new DocIdSetBuilder(reader.maxDoc());
+        PostingsEnum docs = null;
+        SortedNumericDocValues sdv = reader.getSortedNumericDocValues(query.getField());
+
+        while (termsEnum.next() != null) {
+          docs = termsEnum.postings(docs, PostingsEnum.NONE);
+          // boundary terms need post filtering by
+          if (termsEnum.boundaryTerm()) {
+            int docId = docs.nextDoc();
+            long hash;
+            do {
+              sdv.setDocument(docId);
+              for (int i=0; i<sdv.count(); ++i) {
+                hash = sdv.valueAt(i);
+                if (termsEnum.postFilter(mortonUnhashLon(hash), mortonUnhashLat(hash))) {
+                  builder.add(docId);
+                  break;
+                }
+              }
+            } while ((docId = docs.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS);
+          } else {
+            builder.add(docs);
+          }
+        }
+
+        return builder.build();
+      }
+
+      private Scorer scorer(DocIdSet set) throws IOException {
+        if (set == null) {
+          return null;
+        }
+        final DocIdSetIterator disi = set.iterator();
+        if (disi == null) {
+          return null;
+        }
+        return new ConstantScoreScorer(this, score(), disi);
+      }
+
+      @Override
+      public BulkScorer bulkScorer(LeafReaderContext context) throws IOException {
+        final Scorer scorer = scorer(getDocIDs(context));
+        if (scorer == null) {
+          return null;
+        }
+        return new DefaultBulkScorer(scorer);
+      }
+
+      @Override
+      public Scorer scorer(LeafReaderContext context) throws IOException {
+        return scorer(getDocIDs(context));
+      }
+    };
+  }
+

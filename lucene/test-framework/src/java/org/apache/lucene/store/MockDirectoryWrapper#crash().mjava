@@ -1,7 +1,6 @@
   /** Simulates a crash of OS or machine by overwriting
    *  unsynced files. */
   public synchronized void crash() throws IOException {
-    crashed = true;
     openFiles = new HashMap<>();
     openFilesForWrite = new HashSet<>();
     openFilesDeleted = new HashSet<>();
@@ -15,7 +14,10 @@
         f.close();
       } catch (Exception ignored) {}
     }
-    
+
+    // Maybe disable virus checker so it doesn't interfere with our efforts to corrupt files below:
+    boolean virusCheckerWasEnabled = TestUtil.disableVirusChecker(in);
+
     while(it.hasNext()) {
       String name = it.next();
       int damage = randomState.nextInt(5);
@@ -23,7 +25,7 @@
 
       if (damage == 0) {
         action = "deleted";
-        deleteFile(name, true);
+        deleteFile(name);
       } else if (damage == 1) {
         action = "zeroed";
         // Zero out file entirely
@@ -57,27 +59,32 @@
         ii.close();
 
         // Delete original and copy bytes back:
-        deleteFile(name, true);
+        deleteFile(name);
         
-        final IndexOutput out = in.createOutput(name, LuceneTestCase.newIOContext(randomState));
-        ii = in.openInput(tempFileName, LuceneTestCase.newIOContext(randomState));
-        out.copyBytes(ii, ii.length());
-        out.close();
-        ii.close();
-        deleteFile(tempFileName, true);
+        try(IndexOutput out = in.createOutput(name, LuceneTestCase.newIOContext(randomState))) {
+          ii = in.openInput(tempFileName, LuceneTestCase.newIOContext(randomState));
+          out.copyBytes(ii, ii.length());
+          ii.close();
+        }
+        deleteFile(tempFileName);
       } else if (damage == 3) {
         // The file survived intact:
         action = "didn't change";
       } else {
         action = "fully truncated";
         // Totally truncate the file to zero bytes
-        deleteFile(name, true);
-        IndexOutput out = in.createOutput(name, LuceneTestCase.newIOContext(randomState));
-        out.close();
+        deleteFile(name);
+        try (IndexOutput out = in.createOutput(name, LuceneTestCase.newIOContext(randomState))) {
+        }
+      }
+      // Re-enable
+      if (virusCheckerWasEnabled) {
+        TestUtil.enableVirusChecker(in);
       }
       if (LuceneTestCase.VERBOSE) {
         System.out.println("MockDirectoryWrapper: " + action + " unsynced file: " + name);
       }
     }
+    crashed = true;
   }
 

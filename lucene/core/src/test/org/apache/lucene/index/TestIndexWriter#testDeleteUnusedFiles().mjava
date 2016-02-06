@@ -1,8 +1,14 @@
   public void testDeleteUnusedFiles() throws Exception {
+
     assumeFalse("test relies on exact filenames", Codec.getDefault() instanceof SimpleTextCodec);
     for(int iter=0;iter<2;iter++) {
-      MockDirectoryWrapper dir = newMockDirectory(); // relies on windows semantics
-      dir.setEnableVirusScanner(false); // but ensures files are actually deleted
+      // relies on windows semantics
+      Path path = createTempDir();
+      FileSystem fs = new WindowsFS(path.getFileSystem()).getFileSystem(URI.create("file:///"));
+      Path indexPath = new FilterPath(path, fs);
+
+      // NOTE: cannot use MMapDir, because WindowsFS doesn't see/think it keeps file handles open?
+      FSDirectory dir = new NIOFSDirectory(indexPath);
 
       MergePolicy mergePolicy = newLogMergePolicy(true);
       
@@ -29,20 +35,15 @@
         r = DirectoryReader.open(dir);
       }
 
-      List<String> files = new ArrayList<>(Arrays.asList(dir.listAll()));
-
-      // RAMDir won't have a write.lock, but fs dirs will:
-      files.remove("write.lock");
-
-      assertTrue(files.contains("_0.cfs"));
-      assertTrue(files.contains("_0.cfe"));
-      assertTrue(files.contains("_0.si"));
+      assertTrue(Files.exists(indexPath.resolve("_0.cfs")));
+      assertTrue(Files.exists(indexPath.resolve("_0.cfe")));
+      assertTrue(Files.exists(indexPath.resolve("_0.si")));
       if (iter == 1) {
         // we run a full commit so there should be a segments file etc.
-        assertTrue(files.contains("segments_1"));
+        assertTrue(Files.exists(indexPath.resolve("segments_1")));
       } else {
         // this is an NRT reopen - no segments files yet
-        assertFalse(files.contains("segments_1"));
+        assertFalse(Files.exists(indexPath.resolve("segments_1")));
       }
       w.addDocument(doc);
       w.forceMerge(1);
@@ -52,34 +53,29 @@
       IndexReader r2 = DirectoryReader.openIfChanged(r);
       assertNotNull(r2);
       assertTrue(r != r2);
-      files = Arrays.asList(dir.listAll());
 
       // NOTE: here we rely on "Windows" behavior, ie, even
       // though IW wanted to delete _0.cfs since it was
       // merged away, because we have a reader open
       // against this file, it should still be here:
-      assertTrue(files.contains("_0.cfs"));
+      assertTrue(Files.exists(indexPath.resolve("_0.cfs")));
       // forceMerge created this
       //assertTrue(files.contains("_2.cfs"));
       w.deleteUnusedFiles();
 
-      files = Arrays.asList(dir.listAll());
       // r still holds this file open
-      assertTrue(files.contains("_0.cfs"));
+      assertTrue(Files.exists(indexPath.resolve("_0.cfs")));
       //assertTrue(files.contains("_2.cfs"));
 
       r.close();
       if (iter == 0) {
         // on closing NRT reader, it calls writer.deleteUnusedFiles
-        files = Arrays.asList(dir.listAll());
-        assertFalse(files.contains("_0.cfs"));
+        assertFalse(Files.exists(indexPath.resolve("_0.cfs")));
       } else {
-        // now writer can remove it
-        w.deleteUnusedFiles();
-        files = Arrays.asList(dir.listAll());
-        assertFalse(files.contains("_0.cfs"));
+        // now FSDir can remove it
+        dir.deletePendingFiles();
+        assertFalse(Files.exists(indexPath.resolve("_0.cfs")));
       }
-      //assertTrue(files.contains("_2.cfs"));
 
       w.close();
       r2.close();

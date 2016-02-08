@@ -1,44 +1,28 @@
   /**
-   * Builds a MergePolicy, may also modify the value returned by
-   * getUseCompoundFile() for use by the IndexWriterConfig if 
-   * "useCompoundFile" is specified as an init arg for 
-   * an out of the box MergePolicy that no longer supports it
-   *
-   * @see #fixUseCFMergePolicyInitArg
-   * @see #getUseCompoundFile
+   * Builds a MergePolicy using the configured MergePolicyFactory
+   * or if no factory is configured uses the configured mergePolicy PluginInfo.
    */
-  private MergePolicy buildMergePolicy(IndexSchema schema) {
-    String mpClassName = mergePolicyInfo == null ? defaultMergePolicyClassName : mergePolicyInfo.className;
-
-    MergePolicy policy = schema.getResourceLoader().newInstance(mpClassName, MergePolicy.class);
-
-    if (policy instanceof LogMergePolicy) {
-      LogMergePolicy logMergePolicy = (LogMergePolicy) policy;
-      fixUseCFMergePolicyInitArg(LogMergePolicy.class);
-
-      if (maxMergeDocs != -1)
-        logMergePolicy.setMaxMergeDocs(maxMergeDocs);
-
-      if (mergeFactor != -1)
-        logMergePolicy.setMergeFactor(mergeFactor);
-
-    } else if (policy instanceof TieredMergePolicy) {
-      TieredMergePolicy tieredMergePolicy = (TieredMergePolicy) policy;
-      fixUseCFMergePolicyInitArg(TieredMergePolicy.class);
-      
-      if (mergeFactor != -1) {
-        tieredMergePolicy.setMaxMergeAtOnce(mergeFactor);
-        tieredMergePolicy.setSegmentsPerTier(mergeFactor);
-      }
-
-
-    } else if (mergeFactor != -1) {
-      log.warn("Use of <mergeFactor> cannot be configured if merge policy is not an instance of LogMergePolicy or TieredMergePolicy. The configured policy's defaults will be used.");
+  @SuppressWarnings("unchecked")
+  private MergePolicy buildMergePolicy(final IndexSchema schema) {
+    if (useMergePolicyInfo()) {
+      return buildMergePolicyFromInfo(schema);
     }
 
-    if (mergePolicyInfo != null)
-      SolrPluginUtils.invokeSetters(policy, mergePolicyInfo.initArgs);
+    final MergePolicyFactory mpf;
+    if (mergePolicyFactoryInfo == null) {
+      mpf = defaultMergePolicyFactory;
+    } else {
+      final String mpfClassName = mergePolicyFactoryInfo.className;
+      final MergePolicyFactoryArgs mpfArgs = new MergePolicyFactoryArgs(mergePolicyFactoryInfo.initArgs);
+      final SolrResourceLoader resourceLoader = schema.getResourceLoader();
+      mpf = resourceLoader.newInstance(
+          mpfClassName,
+          MergePolicyFactory.class,
+          NO_SUB_PACKAGES,
+          new Class[] { SolrResourceLoader.class, MergePolicyFactoryArgs.class },
+          new Object[] { resourceLoader, mpfArgs });
+    }
 
-    return policy;
+    return mpf.getMergePolicy();
   }
 

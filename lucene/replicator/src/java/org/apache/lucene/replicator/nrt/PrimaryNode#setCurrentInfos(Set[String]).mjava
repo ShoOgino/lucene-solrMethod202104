@@ -1,0 +1,56 @@
+  /** Steals incoming infos refCount; returns true if there were changes. */
+  private synchronized boolean setCurrentInfos(Set<String> completedMergeFiles) throws IOException {
+
+    IndexSearcher searcher = null;
+    SegmentInfos infos;
+    try {
+      searcher = mgr.acquire();
+      infos = ((StandardDirectoryReader) searcher.getIndexReader()).getSegmentInfos();
+      // TODO: this is test code specific!!
+      message("setCurrentInfos: marker count: " + searcher.count(new TermQuery(new Term("marker", "marker"))) + " version=" + infos.getVersion() + " searcher=" + searcher);
+    } finally {
+      if (searcher != null) {
+        mgr.release(searcher);
+      }
+    }
+    if (curInfos != null && infos.getVersion() == curInfos.getVersion()) {
+      // no change
+      message("top: skip switch to infos: version=" + infos.getVersion() + " is unchanged: " + infos.toString());
+      return false;
+    }
+
+    SegmentInfos oldInfos = curInfos;
+    writer.incRefDeleter(infos);
+    curInfos = infos;
+    if (oldInfos != null) {
+      writer.decRefDeleter(oldInfos);
+    }
+
+    message("top: switch to infos=" + infos.toString() + " version=" + infos.getVersion());
+
+    // Serialize the SegmentInfos:
+    RAMOutputStream out = new RAMOutputStream(new RAMFile(), true);
+    infos.write(dir, out);
+    byte[] infosBytes = new byte[(int) out.getFilePointer()];
+    out.writeTo(infosBytes, 0);
+
+    Map<String,FileMetaData> filesMetaData = new HashMap<String,FileMetaData>();
+    for(SegmentCommitInfo info : infos) {
+      for(String fileName : info.files()) {
+        FileMetaData metaData = readLocalFileMetaData(fileName);
+        // NOTE: we hold a refCount on this infos, so this file better exist:
+        assert metaData != null;
+        assert filesMetaData.containsKey(fileName) == false;
+        filesMetaData.put(fileName, metaData);
+      }
+    }
+
+    lastFileMetaData = Collections.unmodifiableMap(filesMetaData);
+
+    message("top: set copyState primaryGen=" + primaryGen + " version=" + infos.getVersion() + " files=" + filesMetaData.keySet());
+    copyState = new CopyState(lastFileMetaData,
+                              infos.getVersion(), infos.getGeneration(), infosBytes, completedMergeFiles,
+                              primaryGen, curInfos);
+    return true;
+  }
+

@@ -6,6 +6,20 @@
   private void buildAndRunCollectorChain(QueryResult qr, Query query, Collector collector, QueryCommand cmd,
       DelegatingCollector postFilter) throws IOException {
 
+    EarlyTerminatingSortingCollector earlyTerminatingSortingCollector = null;
+    if (cmd.getSegmentTerminateEarly()) {
+      final Sort cmdSort = cmd.getSort();
+      final int cmdLen = cmd.getLen();
+      final Sort mergeSort = core.getSolrCoreState().getMergePolicySort();
+
+      if (cmdSort == null || cmdLen <= 0 || mergeSort == null ||
+          !EarlyTerminatingSortingCollector.canEarlyTerminate(cmdSort, mergeSort)) {
+        log.warn("unsupported combination: segmentTerminateEarly=true cmdSort={} cmdLen={} mergeSort={}", cmdSort, cmdLen, mergeSort);
+      } else {
+        collector = earlyTerminatingSortingCollector = new EarlyTerminatingSortingCollector(collector, cmdSort, cmd.getLen(), mergeSort);
+      }
+    }
+
     final boolean terminateEarly = cmd.getTerminateEarly();
     if (terminateEarly) {
       collector = new EarlyTerminatingCollector(collector, cmd.getLen());
@@ -31,6 +45,10 @@
         ((DelegatingCollector) collector).finish();
       }
       throw etce;
+    } finally {
+      if (earlyTerminatingSortingCollector != null) {
+        qr.setSegmentTerminatedEarly(earlyTerminatingSortingCollector.terminatedEarly());
+      }
     }
     if (collector instanceof DelegatingCollector) {
       ((DelegatingCollector) collector).finish();

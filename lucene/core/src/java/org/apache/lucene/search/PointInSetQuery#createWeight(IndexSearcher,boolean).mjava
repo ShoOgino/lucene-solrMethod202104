@@ -1,0 +1,55 @@
+  @Override
+  public Weight createWeight(IndexSearcher searcher, boolean needsScores) throws IOException {
+
+    // We don't use RandomAccessWeight here: it's no good to approximate with "match all docs".
+    // This is an inverted structure and should be used in the first pass:
+
+    return new ConstantScoreWeight(this) {
+
+      @Override
+      public Scorer scorer(LeafReaderContext context) throws IOException {
+        LeafReader reader = context.reader();
+        PointValues values = reader.getPointValues();
+        if (values == null) {
+          // No docs in this segment indexed any points
+          return null;
+        }
+        FieldInfo fieldInfo = reader.getFieldInfos().fieldInfo(field);
+        if (fieldInfo == null) {
+          // No docs in this segment indexed this field at all
+          return null;
+        }
+        if (fieldInfo.getPointDimensionCount() != numDims) {
+          throw new IllegalArgumentException("field=\"" + field + "\" was indexed with numDims=" + fieldInfo.getPointDimensionCount() + " but this query has numDims=" + numDims);
+        }
+        if (fieldInfo.getPointNumBytes() != bytesPerDim) {
+          throw new IllegalArgumentException("field=\"" + field + "\" was indexed with bytesPerDim=" + fieldInfo.getPointNumBytes() + " but this query has bytesPerDim=" + bytesPerDim);
+        }
+
+        DocIdSetBuilder result = new DocIdSetBuilder(reader.maxDoc());
+
+        int[] hitCount = new int[1];
+
+        if (numDims == 1) {
+
+          // We optimize this common case, effectively doing a merge sort of the indexed values vs the queried set:
+          values.intersect(field, new MergePointVisitor(sortedPackedPoints.iterator(), hitCount, result));
+
+        } else {
+          // NOTE: this is naive implementation, where for each point we re-walk the KD tree to intersect.  We could instead do a similar
+          // optimization as the 1D case, but I think it'd mean building a query-time KD tree so we could efficiently intersect against the
+          // index, which is probably tricky!
+          SinglePointVisitor visitor = new SinglePointVisitor(hitCount, result);
+          TermIterator iterator = sortedPackedPoints.iterator();
+          for (BytesRef point = iterator.next(); point != null; point = iterator.next()) {
+            visitor.setPoint(point);
+            values.intersect(field, visitor);
+          }
+        }
+
+        // NOTE: hitCount[0] will be over-estimate in multi-valued case
+        return new ConstantScoreScorer(this, score(), result.build(hitCount[0]).iterator());
+      }
+    };
+  }
+

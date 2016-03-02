@@ -34,8 +34,6 @@
       DirectoryReader r = w.getReader();
       w.close();
 
-      PointValues dimValues = MultiPointValues.get(r);
-
       int iters = atLeast(100);
       for(int iter=0;iter<iters;iter++) {
         if (VERBOSE) {
@@ -59,50 +57,59 @@
         }
 
         final BitSet hits = new BitSet();
-        dimValues.intersect("field", new IntersectVisitor() {
-            @Override
-            public void visit(int docID) {
-              hits.set(docID);
-              //System.out.println("visit docID=" + docID);
-            }
+        for(LeafReaderContext ctx : r.leaves()) {
+          PointValues dimValues = ctx.reader().getPointValues();
+          if (dimValues == null) {
+            continue;
+          }
 
-            @Override
-            public void visit(int docID, byte[] packedValue) {
-              //System.out.println("visit check docID=" + docID);
-              for(int dim=0;dim<numDims;dim++) {
-                BigInteger x = NumericUtils.bytesToBigInt(packedValue, dim * numBytesPerDim, numBytesPerDim);
-                if (x.compareTo(queryMin[dim]) < 0 || x.compareTo(queryMax[dim]) > 0) {
-                  //System.out.println("  no");
-                  return;
+          final int docBase = ctx.docBase;
+          
+          dimValues.intersect("field", new IntersectVisitor() {
+              @Override
+              public void visit(int docID) {
+                hits.set(docBase+docID);
+                //System.out.println("visit docID=" + docID);
+              }
+
+              @Override
+              public void visit(int docID, byte[] packedValue) {
+                //System.out.println("visit check docID=" + docID);
+                for(int dim=0;dim<numDims;dim++) {
+                  BigInteger x = NumericUtils.bytesToBigInt(packedValue, dim * numBytesPerDim, numBytesPerDim);
+                  if (x.compareTo(queryMin[dim]) < 0 || x.compareTo(queryMax[dim]) > 0) {
+                    //System.out.println("  no");
+                    return;
+                  }
+                }
+
+                //System.out.println("  yes");
+                hits.set(docBase+docID);
+              }
+
+              @Override
+              public Relation compare(byte[] minPacked, byte[] maxPacked) {
+                boolean crosses = false;
+                for(int dim=0;dim<numDims;dim++) {
+                  BigInteger min = NumericUtils.bytesToBigInt(minPacked, dim * numBytesPerDim, numBytesPerDim);
+                  BigInteger max = NumericUtils.bytesToBigInt(maxPacked, dim * numBytesPerDim, numBytesPerDim);
+                  assert max.compareTo(min) >= 0;
+
+                  if (max.compareTo(queryMin[dim]) < 0 || min.compareTo(queryMax[dim]) > 0) {
+                    return Relation.CELL_OUTSIDE_QUERY;
+                  } else if (min.compareTo(queryMin[dim]) < 0 || max.compareTo(queryMax[dim]) > 0) {
+                    crosses = true;
+                  }
+                }
+
+                if (crosses) {
+                  return Relation.CELL_CROSSES_QUERY;
+                } else {
+                  return Relation.CELL_INSIDE_QUERY;
                 }
               }
-
-              //System.out.println("  yes");
-              hits.set(docID);
-            }
-
-            @Override
-            public Relation compare(byte[] minPacked, byte[] maxPacked) {
-              boolean crosses = false;
-              for(int dim=0;dim<numDims;dim++) {
-                BigInteger min = NumericUtils.bytesToBigInt(minPacked, dim * numBytesPerDim, numBytesPerDim);
-                BigInteger max = NumericUtils.bytesToBigInt(maxPacked, dim * numBytesPerDim, numBytesPerDim);
-                assert max.compareTo(min) >= 0;
-
-                if (max.compareTo(queryMin[dim]) < 0 || min.compareTo(queryMax[dim]) > 0) {
-                  return Relation.CELL_OUTSIDE_QUERY;
-                } else if (min.compareTo(queryMin[dim]) < 0 || max.compareTo(queryMax[dim]) > 0) {
-                  crosses = true;
-                }
-              }
-
-              if (crosses) {
-                return Relation.CELL_CROSSES_QUERY;
-              } else {
-                return Relation.CELL_INSIDE_QUERY;
-              }
-            }
-          });
+            });
+        }
 
         for(int docID=0;docID<numDocs;docID++) {
           BigInteger[] docValues = docs[docID];

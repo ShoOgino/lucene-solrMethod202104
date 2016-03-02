@@ -22,55 +22,18 @@
         if (fieldInfo.getPointDimensionCount() != numDims) {
           throw new IllegalArgumentException("field=\"" + field + "\" was indexed with numDims=" + fieldInfo.getPointDimensionCount() + " but this query has numDims=" + numDims);
         }
-        if (bytesPerDim != null && bytesPerDim.intValue() != fieldInfo.getPointNumBytes()) {
+        if (bytesPerDim != fieldInfo.getPointNumBytes()) {
           throw new IllegalArgumentException("field=\"" + field + "\" was indexed with bytesPerDim=" + fieldInfo.getPointNumBytes() + " but this query has bytesPerDim=" + bytesPerDim);
         }
         int bytesPerDim = fieldInfo.getPointNumBytes();
 
-        byte[] packedLowerIncl = new byte[numDims * bytesPerDim];
-        byte[] packedUpperIncl = new byte[numDims * bytesPerDim];
+        byte[] packedLower = new byte[numDims * bytesPerDim];
+        byte[] packedUpper = new byte[numDims * bytesPerDim];
 
-        byte[] minValue = new byte[bytesPerDim];
-        byte[] maxValue = new byte[bytesPerDim];
-        Arrays.fill(maxValue, (byte) 0xff);
-
-        byte[] one = new byte[bytesPerDim];
-        one[bytesPerDim-1] = 1;
-
-        // Carefully pack lower and upper bounds, taking care of per-dim inclusive:
+        // Carefully pack lower and upper bounds
         for(int dim=0;dim<numDims;dim++) {
-          if (lowerPoint[dim] != null) {
-            if (lowerInclusive[dim] == false) {
-              if (Arrays.equals(lowerPoint[dim], maxValue)) {
-                return null;
-              } else {
-                byte[] value = new byte[bytesPerDim];
-                NumericUtils.add(bytesPerDim, 0, lowerPoint[dim], one, value);
-                System.arraycopy(value, 0, packedLowerIncl, dim*bytesPerDim, bytesPerDim);
-              }
-            } else {
-              System.arraycopy(lowerPoint[dim], 0, packedLowerIncl, dim*bytesPerDim, bytesPerDim);
-            }
-          } else {
-            // Open-ended range: we just leave 0s in this packed dim for the lower value
-          }
-
-          if (upperPoint[dim] != null) {
-            if (upperInclusive[dim] == false) {
-              if (Arrays.equals(upperPoint[dim], minValue)) {
-                return null;
-              } else {
-                byte[] value = new byte[bytesPerDim];
-                NumericUtils.subtract(bytesPerDim, 0, upperPoint[dim], one, value);
-                System.arraycopy(value, 0, packedUpperIncl, dim*bytesPerDim, bytesPerDim);
-              }
-            } else {
-              System.arraycopy(upperPoint[dim], 0, packedUpperIncl, dim*bytesPerDim, bytesPerDim);
-            }
-          } else {
-            // Open-ended range: fill with max point for this dim:
-            System.arraycopy(maxValue, 0, packedUpperIncl, dim*bytesPerDim, bytesPerDim);
-          }
+          System.arraycopy(lowerPoint[dim], 0, packedLower, dim*bytesPerDim, bytesPerDim);
+          System.arraycopy(upperPoint[dim], 0, packedUpper, dim*bytesPerDim, bytesPerDim);
         }
 
         // Now packedLowerIncl and packedUpperIncl are inclusive, and non-empty space:
@@ -94,11 +57,11 @@
                            public void visit(int docID, byte[] packedValue) {
                              for(int dim=0;dim<numDims;dim++) {
                                int offset = dim*bytesPerDim;
-                               if (StringHelper.compare(bytesPerDim, packedValue, offset, packedLowerIncl, offset) < 0) {
+                               if (StringHelper.compare(bytesPerDim, packedValue, offset, packedLower, offset) < 0) {
                                  // Doc's value is too low, in this dimension
                                  return;
                                }
-                               if (StringHelper.compare(bytesPerDim, packedValue, offset, packedUpperIncl, offset) > 0) {
+                               if (StringHelper.compare(bytesPerDim, packedValue, offset, packedUpper, offset) > 0) {
                                  // Doc's value is too high, in this dimension
                                  return;
                                }
@@ -116,13 +79,13 @@
                              for(int dim=0;dim<numDims;dim++) {
                                int offset = dim*bytesPerDim;
 
-                               if (StringHelper.compare(bytesPerDim, minPackedValue, offset, packedUpperIncl, offset) > 0 ||
-                                   StringHelper.compare(bytesPerDim, maxPackedValue, offset, packedLowerIncl, offset) < 0) {
+                               if (StringHelper.compare(bytesPerDim, minPackedValue, offset, packedUpper, offset) > 0 ||
+                                   StringHelper.compare(bytesPerDim, maxPackedValue, offset, packedLower, offset) < 0) {
                                  return Relation.CELL_OUTSIDE_QUERY;
                                }
 
-                               crosses |= StringHelper.compare(bytesPerDim, minPackedValue, offset, packedLowerIncl, offset) < 0 ||
-                                 StringHelper.compare(bytesPerDim, maxPackedValue, offset, packedUpperIncl, offset) > 0;
+                               crosses |= StringHelper.compare(bytesPerDim, minPackedValue, offset, packedLower, offset) < 0 ||
+                                 StringHelper.compare(bytesPerDim, maxPackedValue, offset, packedUpper, offset) > 0;
                              }
 
                              if (crosses) {

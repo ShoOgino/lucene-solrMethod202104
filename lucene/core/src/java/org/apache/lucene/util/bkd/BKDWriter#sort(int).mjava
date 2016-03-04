@@ -28,42 +28,37 @@
       // Offline sort:
       assert tempInput != null;
 
-      final ByteArrayDataInput reader = new ByteArrayDataInput();
       Comparator<BytesRef> cmp = new Comparator<BytesRef>() {
-        private final ByteArrayDataInput readerB = new ByteArrayDataInput();
+ 
+        final ByteArrayDataInput reader = new ByteArrayDataInput();
 
         @Override
         public int compare(BytesRef a, BytesRef b) {
-          reader.reset(a.bytes, a.offset, a.length);
-          reader.readBytes(scratch1, 0, scratch1.length);
-          final int docIDA = reader.readVInt();
-          final long ordA = reader.readVLong();
 
-          reader.reset(b.bytes, b.offset, b.length);
-          reader.readBytes(scratch2, 0, scratch2.length);
-          final int docIDB = reader.readVInt();
-          final long ordB = reader.readVLong();
-
-          int cmp = NumericUtils.compare(bytesPerDim, scratch1, dim, scratch2, dim);
+          // First compare the bytes on the dimension we are sorting on:
+          int cmp = StringHelper.compare(bytesPerDim, a.bytes, a.offset + bytesPerDim*dim, b.bytes, b.offset + bytesPerDim*dim);
 
           if (cmp != 0) {
             return cmp;
           }
 
-          // Tie-break
-          cmp = Integer.compare(docIDA, docIDB);
-          if (cmp != 0) {
-            return cmp;
-          }
+          // Tie-break by docID:
+          reader.reset(a.bytes, a.offset + packedBytesLength + Long.BYTES, a.length);
+          final int docIDA = reader.readInt();
 
-          return Long.compare(ordA, ordB);
+          reader.reset(b.bytes, b.offset + packedBytesLength + Long.BYTES, b.length);
+          final int docIDB = reader.readInt();
+
+          // No need to tie break on ord, for the case where the same doc has the same value in a given dimension indexed more than once: it
+          // can't matter at search time since we don't write ords into the index:
+          return Integer.compare(docIDA, docIDB);
         }
       };
 
       // TODO: this is sort of sneaky way to get the final OfflinePointWriter from OfflineSorter:
       IndexOutput[] lastWriter = new IndexOutput[1];
 
-      OfflineSorter sorter = new OfflineSorter(tempDir, tempFileNamePrefix, cmp) {
+      OfflineSorter sorter = new OfflineSorter(tempDir, tempFileNamePrefix, cmp, OfflineSorter.BufferSize.megabytes(Math.max(1, (long) maxMBSortInHeap)), OfflineSorter.MAX_TEMPFILES) {
 
           /** We write/read fixed-byte-width file that {@link OfflinePointReader} can read. */
           @Override

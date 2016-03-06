@@ -1,0 +1,123 @@
+  @Override
+  public void writeField(FieldInfo fieldInfo, PointsReader values) throws IOException {
+
+    // We use the normal BKDWriter, but subclass to customize how it writes the index and blocks to disk:
+    try (BKDWriter writer = new BKDWriter(writeState.segmentInfo.maxDoc(),
+                                          writeState.directory,
+                                          writeState.segmentInfo.name,
+                                          fieldInfo.getPointDimensionCount(),
+                                          fieldInfo.getPointNumBytes(),
+                                          BKDWriter.DEFAULT_MAX_POINTS_IN_LEAF_NODE,
+                                          BKDWriter.DEFAULT_MAX_MB_SORT_IN_HEAP) {
+
+        @Override
+        protected void writeIndex(IndexOutput out, long[] leafBlockFPs, byte[] splitPackedValues) throws IOException {
+          write(out, NUM_DIMS);
+          writeInt(out, numDims);
+          newline(out);
+
+          write(out, BYTES_PER_DIM);
+          writeInt(out, bytesPerDim);
+          newline(out);
+
+          write(out, MAX_LEAF_POINTS);
+          writeInt(out, maxPointsInLeafNode);
+          newline(out);
+
+          write(out, INDEX_COUNT);
+          writeInt(out, leafBlockFPs.length);
+          newline(out);
+
+          write(out, MIN_VALUE);
+          BytesRef br = new BytesRef(minPackedValue, 0, minPackedValue.length);
+          write(out, br.toString());
+          newline(out);
+
+          write(out, MAX_VALUE);
+          br = new BytesRef(maxPackedValue, 0, maxPackedValue.length);
+          write(out, br.toString());
+          newline(out);
+
+          write(out, POINT_COUNT);
+          writeLong(out, pointCount);
+          newline(out);
+
+          write(out, DOC_COUNT);
+          writeInt(out, docsSeen.cardinality());
+          newline(out);
+
+          for(int i=0;i<leafBlockFPs.length;i++) {
+            write(out, BLOCK_FP);
+            writeLong(out, leafBlockFPs[i]);
+            newline(out);
+          }
+
+          assert (splitPackedValues.length % (1 + fieldInfo.getPointNumBytes())) == 0;
+          int count = splitPackedValues.length / (1 + fieldInfo.getPointNumBytes());
+          assert count == leafBlockFPs.length;
+
+          write(out, SPLIT_COUNT);
+          writeInt(out, count);
+          newline(out);
+
+          for(int i=0;i<count;i++) {
+            write(out, SPLIT_DIM);
+            writeInt(out, splitPackedValues[i * (1 + fieldInfo.getPointNumBytes())] & 0xff);
+            newline(out);
+            write(out, SPLIT_VALUE);
+            br = new BytesRef(splitPackedValues, 1+(i * (1+fieldInfo.getPointNumBytes())), fieldInfo.getPointNumBytes());
+            write(out, br.toString());
+            newline(out);
+          }
+        }
+
+        @Override
+        protected void writeLeafBlockDocs(IndexOutput out, int[] docIDs, int start, int count) throws IOException {
+          write(out, BLOCK_COUNT);
+          writeInt(out, count);
+          newline(out);
+          for(int i=0;i<count;i++) {
+            write(out, BLOCK_DOC_ID);
+            writeInt(out, docIDs[start+i]);
+            newline(out);
+          }
+        }
+
+        @Override
+        protected void writeCommonPrefixes(IndexOutput out, int[] commonPrefixLengths, byte[] packedValue) {
+          // NOTE: we don't do prefix coding, so we ignore commonPrefixLengths
+        }
+
+        @Override
+        protected void writeLeafBlockPackedValue(IndexOutput out, int[] commonPrefixLengths, byte[] bytes) throws IOException {
+          // NOTE: we don't do prefix coding, so we ignore commonPrefixLengths
+          assert bytes.length == packedBytesLength;
+          write(out, BLOCK_VALUE);
+          write(out, new BytesRef(bytes, 0, bytes.length).toString());
+          newline(out);
+        }          
+      }) {
+
+      values.intersect(fieldInfo.name, new IntersectVisitor() {
+          @Override
+          public void visit(int docID) {
+            throw new IllegalStateException();
+          }
+
+          public void visit(int docID, byte[] packedValue) throws IOException {
+            writer.add(packedValue, docID);
+          }
+
+          @Override
+          public Relation compare(byte[] minPackedValue, byte[] maxPackedValue) {
+            return Relation.CELL_CROSSES_QUERY;
+          }
+        });
+
+      // We could have 0 points on merge since all docs with points may be deleted:
+      if (writer.getPointCount() > 0) {
+        indexFPs.put(fieldInfo.name, writer.finish(dataOut));
+      }
+    }
+  }
+

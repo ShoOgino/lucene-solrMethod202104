@@ -17,15 +17,34 @@
     }
 
     if (nodeID >= leafNodeOffset) {
+
       // Leaf node: write block
+      for (int dim=0;dim<numDims;dim++) {
+        if (slices[dim].writer instanceof HeapPointWriter == false) {
+          // Adversarial cases can cause this, e.g. very lopsided data, all equal points, such that we started
+          // offline, but then kept splitting only in one dimension, and so never had to rewrite into heap writer
+          slices[dim] = switchToHeap(slices[dim]);
+        }
+
+        PathSlice source = slices[dim];
+
+        HeapPointWriter heapSource = (HeapPointWriter) source.writer;
+
+        // Find common prefix by comparing first and last values, already sorted in this dimension:
+        heapSource.readPackedValue(Math.toIntExact(source.start), scratch1);
+        heapSource.readPackedValue(Math.toIntExact(source.start + source.count - 1), scratch2);
+
+        int offset = dim * bytesPerDim;
+        commonPrefixLengths[dim] = bytesPerDim;
+        for(int j=0;j<bytesPerDim;j++) {
+          if (scratch1[offset+j] != scratch2[offset+j]) {
+            commonPrefixLengths[dim] = j;
+            break;
+          }
+        }
+      }
 
       PathSlice source = slices[0];
-
-      if (source.writer instanceof HeapPointWriter == false) {
-        // Adversarial cases can cause this, e.g. very lopsided data, all equal points, such that we started
-        // offline, but then kept splitting only in one dimension, and so never had to rewrite into heap writer
-        source = switchToHeap(source);
-      }
 
       // We ensured that maxPointsSortInHeap was >= maxPointsInLeafNode, so we better be in heap at this point:
       HeapPointWriter heapSource = (HeapPointWriter) source.writer;
@@ -40,37 +59,21 @@
       assert count > 0: "nodeID=" + nodeID + " leafNodeOffset=" + leafNodeOffset;
       writeLeafBlockDocs(out, heapSource.docIDs, Math.toIntExact(source.start), count);
 
-      // First pass: find the per-dim common prefix for all values in this block:
-      Arrays.fill(commonPrefixLengths, bytesPerDim);
-      for (int i=0;i<count;i++) {
-        if (i == 0) {
-          heapSource.readPackedValue(Math.toIntExact(source.start + i), scratch1);
-        } else {
-          heapSource.readPackedValue(Math.toIntExact(source.start + i), scratchPackedValue);
-          for(int dim=0;dim<numDims;dim++) {
-            int offset = dim * bytesPerDim;
-            for(int j=0;j<commonPrefixLengths[dim];j++) {
-              if (scratch1[offset+j] != scratchPackedValue[offset+j]) {
-                commonPrefixLengths[dim] = j;
-                break;
-              }
-            }
-          }
-        }
-      }
+      // TODO: minor opto: we don't really have to write the actual common prefixes, because BKDReader on recursing can regenerate it for us
+      // from the index, much like how terms dict does so from the FST:
 
+      // Write the common prefixes:
       writeCommonPrefixes(out, commonPrefixLengths, scratch1);
 
-      // Second pass: write the full values:
+      // Write the full values:
       byte[] lastPackedValue = new byte[bytesPerDim];
       for (int i=0;i<count;i++) {
-        // TODO: we could do bulk copying here, avoiding the intermediate copy:
-        heapSource.readPackedValue(Math.toIntExact(source.start + i), scratchPackedValue);
-        assert numDims != 1 || valueInOrder(i, lastPackedValue, scratchPackedValue);
+        heapSource.getPackedValueSlice(Math.toIntExact(source.start + i), scratchBytesRef);
+        assert numDims != 1 || valueInOrder(i, lastPackedValue, scratchBytesRef.bytes, scratchBytesRef.offset);
 
         // Make sure this value does in fact fall within this leaf cell:
-        assert valueInBounds(scratchPackedValue, minPackedValue, maxPackedValue);
-        writeLeafBlockPackedValue(out, commonPrefixLengths, scratchPackedValue);
+        assert valueInBounds(scratchBytesRef, minPackedValue, maxPackedValue);
+        writeLeafBlockPackedValue(out, commonPrefixLengths, scratchBytesRef.bytes, scratchBytesRef.offset);
       }
 
     } else {

@@ -7,6 +7,7 @@
     sortInfo.totalTime = System.currentTimeMillis();
 
     List<String> segments = new ArrayList<>();
+    int[] levelCounts = new int[1];
 
     // So we can remove any partially written temp files on exception:
     TrackingDirectoryWrapper trackingDir = new TrackingDirectoryWrapper(dir);
@@ -19,15 +20,26 @@
         segments.add(sortPartition(trackingDir));
         sortInfo.tempMergeFiles++;
         sortInfo.lineCount += lineCount;
+        levelCounts[0]++;
 
-        // Handle intermediate merges.
-        if (segments.size() == maxTempFiles) {
+        // Handle intermediate merges; we need a while loop to "cascade" the merge when necessary:
+        int mergeLevel = 0;
+        while (levelCounts[mergeLevel] == maxTempFiles) {
           mergePartitions(trackingDir, segments);
+          if (mergeLevel+2 > levelCounts.length) {
+            levelCounts = ArrayUtil.grow(levelCounts, mergeLevel+2);
+          }
+          levelCounts[mergeLevel+1]++;
+          levelCounts[mergeLevel] = 0;
+          mergeLevel++;
         }
       }
+      
+      // TODO: we shouldn't have to do this?  Can't we return a merged reader to
+      // the caller, who often consumes the result just once, instead?
 
-      // Merge the partitions to the output file with a priority queue.
-      if (segments.size() > 1) {     
+      // Merge all partitions down to 1 (basically a forceMerge(1)):
+      while (segments.size() > 1) {     
         mergePartitions(trackingDir, segments);
       }
 

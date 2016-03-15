@@ -1,16 +1,22 @@
-  /** Merge a list of sorted temporary files (partitions) into an output file.  Note that this closes the
-   *  incoming {@link IndexOutput}. */
+  /** Merge the most recent {@code maxTempFile} partitions into a new partition. */
   void mergePartitions(Directory trackingDir, List<String> segments) throws IOException {
     long start = System.currentTimeMillis();
 
-    PriorityQueue<FileAndTop> queue = new PriorityQueue<FileAndTop>(segments.size()) {
+    List<String> segmentsToMerge;
+    if (segments.size() > maxTempFiles) {
+      segmentsToMerge = segments.subList(segments.size() - maxTempFiles, segments.size());
+    } else {
+      segmentsToMerge = segments;
+    }
+
+    PriorityQueue<FileAndTop> queue = new PriorityQueue<FileAndTop>(segmentsToMerge.size()) {
       @Override
       protected boolean lessThan(FileAndTop a, FileAndTop b) {
         return comparator.compare(a.current.get(), b.current.get()) < 0;
       }
     };
 
-    ByteSequencesReader[] streams = new ByteSequencesReader[segments.size()];
+    ByteSequencesReader[] streams = new ByteSequencesReader[segmentsToMerge.size()];
 
     String newSegmentName = null;
 
@@ -20,8 +26,8 @@
       newSegmentName = out.getName();
       
       // Open streams and read the top for each file
-      for (int i = 0; i < segments.size(); i++) {
-        streams[i] = getReader(dir.openInput(segments.get(i), IOContext.READONCE));
+      for (int i = 0; i < segmentsToMerge.size(); i++) {
+        streams[i] = getReader(dir.openInput(segmentsToMerge.get(i), IOContext.READONCE));
         BytesRefBuilder bytes = new BytesRefBuilder();
         boolean result = streams[i].read(bytes);
         assert result;
@@ -48,9 +54,9 @@
       IOUtils.close(streams);
     }
 
-    IOUtils.deleteFiles(trackingDir, segments);
+    IOUtils.deleteFiles(trackingDir, segmentsToMerge);
 
-    segments.clear();
+    segmentsToMerge.clear();
     segments.add(newSegmentName);
 
     sortInfo.tempMergeFiles++;

@@ -1,4 +1,4 @@
-  protected void verify(boolean small, double[] lats, double[] lons) throws Exception {
+  protected void verify(boolean small, double[] lats, double[] lons, boolean useThreads) throws Exception {
     IndexWriterConfig iwc = newIndexWriterConfig();
     // Else we can get O(N^2) merging:
     int mbd = iwc.getMaxBufferedDocs();
@@ -43,7 +43,12 @@
     IndexSearcher s = newSearcher(r, false);
 
     // Make sure queries are thread safe:
-    int numThreads = TestUtil.nextInt(random(), 2, 5);
+    int numThreads;
+    if (useThreads) {
+      numThreads = TestUtil.nextInt(random(), 2, 5);
+    } else {
+      numThreads = 1;
+    }
 
     List<Thread> threads = new ArrayList<>();
     final int iters = atLeast(75);
@@ -64,7 +69,9 @@
           }
 
           private void _run() throws Exception {
-            startingGun.await();
+            if (useThreads) {
+              startingGun.await();
+            }
 
             NumericDocValues docIDToID = MultiDocValues.getNumericValues(r, "id");
 
@@ -195,12 +202,19 @@
           }
       };
       thread.setName("T" + i);
-      thread.start();
+      if (useThreads) {
+        thread.start();
+      } else {
+        // Just run with main thread:
+        thread.run();
+      }
       threads.add(thread);
     }
-    startingGun.countDown();
-    for(Thread thread : threads) {
-      thread.join();
+    if (useThreads) {
+      startingGun.countDown();
+      for(Thread thread : threads) {
+        thread.join();
+      }
     }
     IOUtils.close(r, dir);
     assertFalse(failed.get());

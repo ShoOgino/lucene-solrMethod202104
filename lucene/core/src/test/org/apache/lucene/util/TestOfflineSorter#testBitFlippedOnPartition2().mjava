@@ -1,0 +1,55 @@
+  /** Make sure corruption on a temp file (partition) is caught, if the corruption did confuse OfflineSorter! */
+  public void testBitFlippedOnPartition2() throws Exception {
+
+    try (Directory dir0 = newMockDirectory()) {
+      if (dir0 instanceof MockDirectoryWrapper) {
+        ((MockDirectoryWrapper) dir0).setPreventDoubleWrite(false);
+      }
+
+      Directory dir = new FilterDirectory(dir0) {
+
+        boolean corrupted;
+
+        @Override
+        public IndexOutput createTempOutput(String prefix, String suffix, IOContext context) throws IOException {
+          IndexOutput out = in.createTempOutput(prefix, suffix, context);
+          if (corrupted == false && suffix.equals("sort")) {
+            corrupted = true;
+            return new CorruptingIndexOutput(dir0, 544677, out) {
+              @Override
+              protected void corruptFile() throws IOException {
+                String newTempName;
+                try(IndexOutput tmpOut = dir0.createTempOutput("tmp", "tmp", IOContext.DEFAULT);
+                    IndexInput in = dir0.openInput(out.getName(), IOContext.DEFAULT)) {
+                  newTempName = tmpOut.getName();
+                  tmpOut.copyBytes(in, 1025905);
+                  short v = in.readShort();
+                  assertEquals(254, v);
+                  tmpOut.writeShort(Short.MAX_VALUE);
+                  tmpOut.copyBytes(in, in.length()-1025905-Short.BYTES);
+                }
+
+                // Delete original and copy corrupt version back:
+                dir0.deleteFile(out.getName());
+                dir0.copyFrom(dir0, newTempName, out.getName(), IOContext.DEFAULT);
+                dir0.deleteFile(newTempName);
+              }
+            };
+          } else {
+            return out;
+          }
+        }
+      };
+
+      IndexOutput unsorted = dir.createTempOutput("unsorted", "tmp", IOContext.DEFAULT);
+      writeAll(unsorted, generateFixed((int) (OfflineSorter.MB * 3)));
+
+      EOFException e = expectThrows(EOFException.class, () -> {
+          new OfflineSorter(dir, "foo", OfflineSorter.DEFAULT_COMPARATOR, BufferSize.megabytes(1), 10).sort(unsorted.getName());
+        });
+      assertEquals(1, e.getSuppressed().length);
+      assertTrue(e.getSuppressed()[0] instanceof CorruptIndexException);
+      assertTrue(e.getSuppressed()[0].getMessage().contains("checksum failed (hardware problem?)"));
+    }
+  }
+

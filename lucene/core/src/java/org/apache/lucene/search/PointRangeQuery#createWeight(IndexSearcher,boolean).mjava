@@ -6,8 +6,7 @@
 
     return new ConstantScoreWeight(this) {
 
-      private DocIdSet buildMatchingDocIdSet(LeafReader reader, PointValues values,
-          byte[] packedLower, byte[] packedUpper) throws IOException {
+      private DocIdSet buildMatchingDocIdSet(LeafReader reader, PointValues values) throws IOException {
         DocIdSetBuilder result = new DocIdSetBuilder(reader.maxDoc());
 
         values.intersect(field,
@@ -27,11 +26,11 @@
               public void visit(int docID, byte[] packedValue) {
                 for(int dim=0;dim<numDims;dim++) {
                   int offset = dim*bytesPerDim;
-                  if (StringHelper.compare(bytesPerDim, packedValue, offset, packedLower, offset) < 0) {
+                  if (StringHelper.compare(bytesPerDim, packedValue, offset, lowerPoint, offset) < 0) {
                     // Doc's value is too low, in this dimension
                     return;
                   }
-                  if (StringHelper.compare(bytesPerDim, packedValue, offset, packedUpper, offset) > 0) {
+                  if (StringHelper.compare(bytesPerDim, packedValue, offset, upperPoint, offset) > 0) {
                     // Doc's value is too high, in this dimension
                     return;
                   }
@@ -49,13 +48,13 @@
                 for(int dim=0;dim<numDims;dim++) {
                   int offset = dim*bytesPerDim;
 
-                  if (StringHelper.compare(bytesPerDim, minPackedValue, offset, packedUpper, offset) > 0 ||
-                      StringHelper.compare(bytesPerDim, maxPackedValue, offset, packedLower, offset) < 0) {
+                  if (StringHelper.compare(bytesPerDim, minPackedValue, offset, upperPoint, offset) > 0 ||
+                      StringHelper.compare(bytesPerDim, maxPackedValue, offset, lowerPoint, offset) < 0) {
                     return Relation.CELL_OUTSIDE_QUERY;
                   }
 
-                  crosses |= StringHelper.compare(bytesPerDim, minPackedValue, offset, packedLower, offset) < 0 ||
-                    StringHelper.compare(bytesPerDim, maxPackedValue, offset, packedUpper, offset) > 0;
+                  crosses |= StringHelper.compare(bytesPerDim, minPackedValue, offset, lowerPoint, offset) < 0 ||
+                    StringHelper.compare(bytesPerDim, maxPackedValue, offset, upperPoint, offset) > 0;
                 }
 
                 if (crosses) {
@@ -87,16 +86,6 @@
         if (bytesPerDim != fieldInfo.getPointNumBytes()) {
           throw new IllegalArgumentException("field=\"" + field + "\" was indexed with bytesPerDim=" + fieldInfo.getPointNumBytes() + " but this query has bytesPerDim=" + bytesPerDim);
         }
-        int bytesPerDim = fieldInfo.getPointNumBytes();
-
-        byte[] packedLower = new byte[numDims * bytesPerDim];
-        byte[] packedUpper = new byte[numDims * bytesPerDim];
-
-        // Carefully pack lower and upper bounds
-        for(int dim=0;dim<numDims;dim++) {
-          System.arraycopy(lowerPoint[dim], 0, packedLower, dim*bytesPerDim, bytesPerDim);
-          System.arraycopy(upperPoint[dim], 0, packedUpper, dim*bytesPerDim, bytesPerDim);
-        }
 
         boolean allDocsMatch;
         if (values.getDocCount(field) == reader.maxDoc()) {
@@ -105,8 +94,8 @@
           allDocsMatch = true;
           for (int i = 0; i < numDims; ++i) {
             int offset = i * bytesPerDim;
-            if (StringHelper.compare(bytesPerDim, packedLower, offset, fieldPackedLower, offset) > 0
-                || StringHelper.compare(bytesPerDim, packedUpper, offset, fieldPackedUpper, offset) < 0) {
+            if (StringHelper.compare(bytesPerDim, lowerPoint, offset, fieldPackedLower, offset) > 0
+                || StringHelper.compare(bytesPerDim, upperPoint, offset, fieldPackedUpper, offset) < 0) {
               allDocsMatch = false;
               break;
             }
@@ -120,7 +109,7 @@
           // all docs have a value and all points are within bounds, so everything matches
           iterator = DocIdSetIterator.all(reader.maxDoc());
         } else {
-          iterator = buildMatchingDocIdSet(reader, values, packedLower, packedUpper).iterator();
+          iterator = buildMatchingDocIdSet(reader, values).iterator();
         }
 
         return new ConstantScoreScorer(this, score(), iterator);

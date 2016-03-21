@@ -5,7 +5,8 @@
                      IndexOutput out,
                      byte[] minPackedValue, byte[] maxPackedValue,
                      byte[] splitPackedValues,
-                     long[] leafBlockFPs) throws IOException {
+                     long[] leafBlockFPs,
+                     List<Closeable> toCloseHeroically) throws IOException {
 
     for(PathSlice slice : slices) {
       assert slice.count == slices[0].count;
@@ -13,7 +14,7 @@
 
     if (numDims == 1 && slices[0].writer instanceof OfflinePointWriter && slices[0].count <= maxPointsSortInHeap) {
       // Special case for 1D, to cutover to heap once we recurse deeply enough:
-      slices[0] = switchToHeap(slices[0]);
+      slices[0] = switchToHeap(slices[0], toCloseHeroically);
     }
 
     if (nodeID >= leafNodeOffset) {
@@ -23,7 +24,7 @@
         if (slices[dim].writer instanceof HeapPointWriter == false) {
           // Adversarial cases can cause this, e.g. very lopsided data, all equal points, such that we started
           // offline, but then kept splitting only in one dimension, and so never had to rewrite into heap writer
-          slices[dim] = switchToHeap(slices[dim]);
+          slices[dim] = switchToHeap(slices[dim], toCloseHeroically);
         }
 
         PathSlice source = slices[dim];
@@ -121,7 +122,8 @@
       for(int dim=0;dim<numDims;dim++) {
 
         if (dim == splitDim) {
-          // No need to partition on this dim since it's a simple slice of the incoming already sorted slice.
+          // No need to partition on this dim since it's a simple slice of the incoming already sorted slice, and we
+          // will re-use its shared reader when visiting it as we recurse:
           leftSlices[dim] = new PathSlice(source.writer, source.start, leftCount);
           rightSlices[dim] = new PathSlice(source.writer, source.start + leftCount, rightCount);
           System.arraycopy(splitValue, 0, minSplitPackedValue, dim*bytesPerDim, bytesPerDim);
@@ -129,9 +131,12 @@
           continue;
         }
 
+        // Not inside the try because we don't want to close this one now, so that after recursion is done,
+        // we will have done a singel full sweep of the file:
+        PointReader reader = slices[dim].writer.getSharedReader(slices[dim].start, slices[dim].count, toCloseHeroically);
+
         try (PointWriter leftPointWriter = getPointWriter(leftCount, "left" + dim);
-             PointWriter rightPointWriter = getPointWriter(source.count - leftCount, "right" + dim);
-             PointReader reader = slices[dim].writer.getReader(slices[dim].start, slices[dim].count);) {
+             PointWriter rightPointWriter = getPointWriter(source.count - leftCount, "right" + dim)) {
 
           long nextRightCount = reader.split(source.count, ordBitSet, leftPointWriter, rightPointWriter, dim == dimToClear);
           if (rightCount != nextRightCount) {
@@ -149,7 +154,7 @@
       build(2*nodeID, leafNodeOffset, leftSlices,
             ordBitSet, out,
             minPackedValue, maxSplitPackedValue,
-            splitPackedValues, leafBlockFPs);
+            splitPackedValues, leafBlockFPs, toCloseHeroically);
       for(int dim=0;dim<numDims;dim++) {
         // Don't destroy the dim we split on because we just re-used what our caller above gave us for that dim:
         if (dim != splitDim) {
@@ -162,7 +167,7 @@
       build(2*nodeID+1, leafNodeOffset, rightSlices,
             ordBitSet, out,
             minSplitPackedValue, maxPackedValue,
-            splitPackedValues, leafBlockFPs);
+            splitPackedValues, leafBlockFPs, toCloseHeroically);
       for(int dim=0;dim<numDims;dim++) {
         // Don't destroy the dim we split on because we just re-used what our caller above gave us for that dim:
         if (dim != splitDim) {

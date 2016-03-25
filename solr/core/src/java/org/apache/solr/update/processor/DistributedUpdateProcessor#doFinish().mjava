@@ -6,38 +6,30 @@
     cmdDistrib.finish();    
     List<Error> errors = cmdDistrib.getErrors();
     // TODO - we may need to tell about more than one error...
-    
-    // if it's a forward, any fail is a problem - 
-    // otherwise we assume things are fine if we got it locally
-    // until we start allowing min replication param
-    if (errors.size() > 0) {
-      // if one node is a RetryNode, this was a forward request
-      if (errors.get(0).req.node instanceof RetryNode) {
-        rsp.setException(errors.get(0).e);
-      } else {
-        if (log.isWarnEnabled()) {
-          for (Error error : errors) {
-            log.warn("Error sending update to " + error.req.node.getBaseUrl(), error.e);
-          }
-        }
-      }
-      // else
-      // for now we don't error - we assume if it was added locally, we
-      // succeeded 
-    }
-   
-    
-    // if it is not a forward request, for each fail, try to tell them to
-    // recover - the doc was already added locally, so it should have been
-    // legit
 
+    List<Error> errorsForClient = new ArrayList<>(errors.size());
+    
     for (final SolrCmdDistributor.Error error : errors) {
       
       if (error.req.node instanceof RetryNode) {
-        // we don't try to force a leader to recover
-        // when we cannot forward to it
+        // if it's a forward, any fail is a problem - 
+        // otherwise we assume things are fine if we got it locally
+        // until we start allowing min replication param
+        errorsForClient.add(error);
         continue;
       }
+
+      // else...
+      
+      // for now we don't error - we assume if it was added locally, we
+      // succeeded 
+      if (log.isWarnEnabled()) {
+        log.warn("Error sending update to " + error.req.node.getBaseUrl(), error.e);
+      }
+      
+      // Since it is not a forward request, for each fail, try to tell them to
+      // recover - the doc was already added locally, so it should have been
+      // legit
        
       DistribPhase phase =
           DistribPhase.parseParam(error.req.uReq.getParams().get(DISTRIB_UPDATE_PARAM));       
@@ -57,8 +49,8 @@
         // let's just fail this request and let the client retry? or just call processAdd again?
         log.error("On "+cloudDesc.getCoreNodeName()+", replica "+replicaUrl+
             " now thinks it is the leader! Failing the request to let the client retry! "+error.e);
-        rsp.setException(error.e);
-        break;
+        errorsForClient.add(error);
+        continue;
       }
 
       String collection = null;
@@ -143,6 +135,11 @@
       rsp.getResponseHeader().add(UpdateRequest.REPFACT, replicationTracker.getAchievedRf());
       rsp.getResponseHeader().add(UpdateRequest.MIN_REPFACT, replicationTracker.minRf);
       replicationTracker = null;
-    }    
+    }
+
+    
+    if (0 < errorsForClient.size()) {
+      throw new DistributedUpdatesAsyncException(errorsForClient);
+    }
   }
 

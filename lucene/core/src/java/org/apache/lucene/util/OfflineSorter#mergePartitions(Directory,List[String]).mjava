@@ -12,7 +12,7 @@
     PriorityQueue<FileAndTop> queue = new PriorityQueue<FileAndTop>(segmentsToMerge.size()) {
       @Override
       protected boolean lessThan(FileAndTop a, FileAndTop b) {
-        return comparator.compare(a.current.get(), b.current.get()) < 0;
+        return comparator.compare(a.current, b.current) < 0;
       }
     };
 
@@ -27,15 +27,14 @@
       // Open streams and read the top for each file
       for (int i = 0; i < segmentsToMerge.size(); i++) {
         streams[i] = getReader(dir.openChecksumInput(segmentsToMerge.get(i), IOContext.READONCE), segmentsToMerge.get(i));
-        BytesRefBuilder bytes = new BytesRefBuilder();
-        boolean result = false;
+        BytesRef item = null;
         try {
-          result = streams[i].read(bytes);
+          item = streams[i].next();
         } catch (Throwable t) {
           verifyChecksum(t, streams[i]);
         }
-        assert result;
-        queue.insertWithOverflow(new FileAndTop(i, bytes));
+        assert item != null;
+        queue.insertWithOverflow(new FileAndTop(i, item));
       }
   
       // Unix utility sort() uses ordered array of files to pick the next line from, updating
@@ -44,15 +43,14 @@
       // so it shouldn't make much of a difference (didn't check).
       FileAndTop top;
       while ((top = queue.top()) != null) {
-        writer.write(top.current.bytes(), 0, top.current.length());
-        boolean result = false;
+        writer.write(top.current);
         try {
-          result = streams[top.fd].read(top.current);
+          top.current = streams[top.fd].next();
         } catch (Throwable t) {
           verifyChecksum(t, streams[top.fd]);
         }
 
-        if (result) {
+        if (top.current != null) {
           queue.updateTop();
         } else {
           queue.pop();

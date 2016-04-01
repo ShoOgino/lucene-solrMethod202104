@@ -1,0 +1,58 @@
+  /**
+   * Creates new http client by using the provided configuration.
+   * 
+   */
+  public static CloseableHttpClient createClient(final SolrParams params, PoolingHttpClientConnectionManager cm, boolean sharedConnectionManager) {
+    final ModifiableSolrParams config = new ModifiableSolrParams(params);
+    if (logger.isDebugEnabled()) {
+      logger.debug("Creating new http client, config:" + config);
+    }
+ 
+    if (params.get(PROP_SO_TIMEOUT) != null || params.get(PROP_CONNECTION_TIMEOUT) != null) {
+      throw new SolrException(ErrorCode.SERVER_ERROR, "The socket connect and read timeout cannot be set here and must be set");
+    }
+    
+    cm.setMaxTotal(params.getInt(HttpClientUtil.PROP_MAX_CONNECTIONS, 10000));
+    cm.setDefaultMaxPerRoute(params.getInt(HttpClientUtil.PROP_MAX_CONNECTIONS_PER_HOST, 10000));
+    cm.setValidateAfterInactivity(Integer.getInteger(VALIDATE_AFTER_INACTIVITY, VALIDATE_AFTER_INACTIVITY_DEFAULT));
+
+    
+    HttpClientBuilder newHttpClientBuilder = HttpClientBuilder.create();
+
+    if (sharedConnectionManager) {
+      newHttpClientBuilder.setConnectionManagerShared(true);
+    } else {
+      newHttpClientBuilder.setConnectionManagerShared(false);
+    }
+    
+    ConnectionKeepAliveStrategy keepAliveStrat = new ConnectionKeepAliveStrategy() {
+      @Override
+      public long getKeepAliveDuration(HttpResponse response, HttpContext context) {
+        // we only close connections based on idle time, not ttl expiration
+        return -1;
+      }
+    };
+
+    if (httpClientBuilder.getAuthSchemeRegistryProvider() != null) {
+      newHttpClientBuilder.setDefaultAuthSchemeRegistry(httpClientBuilder.getAuthSchemeRegistryProvider().getAuthSchemeRegistry());
+    }
+    if (httpClientBuilder.getCookieSpecRegistryProvider() != null) {
+      newHttpClientBuilder.setDefaultCookieSpecRegistry(httpClientBuilder.getCookieSpecRegistryProvider().getCookieSpecRegistry());
+    }
+    if (httpClientBuilder.getCredentialsProviderProvider() != null) {
+      newHttpClientBuilder.setDefaultCredentialsProvider(httpClientBuilder.getCredentialsProviderProvider().getCredentialsProvider());
+    }
+
+    newHttpClientBuilder.addInterceptorLast(new DynamicInterceptor());
+    
+    newHttpClientBuilder = newHttpClientBuilder.setKeepAliveStrategy(keepAliveStrat)
+        .evictIdleConnections((long) Integer.getInteger(EVICT_IDLE_CONNECTIONS, EVICT_IDLE_CONNECTIONS_DEFAULT), TimeUnit.MILLISECONDS);
+    
+    HttpClientBuilder builder = setupBuilder(newHttpClientBuilder, params == null ? new ModifiableSolrParams() : params);
+    
+    HttpClient httpClient = builder.setConnectionManager(cm).build();
+    
+    assert ObjectReleaseTracker.track(httpClient);
+    return (CloseableHttpClient) httpClient;
+  }
+

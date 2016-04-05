@@ -1,0 +1,92 @@
+  /** Build a GeoPolygon out of one concave part and multiple convex parts given points, starting edge, and whether starting edge is internal or not.
+   * @param pointsList        is a list of the GeoPoints to build an arbitrary polygon out of.
+   * @param startPointIndex is the first of the points, constituting the starting edge.
+   * @param startingEdge is the plane describing the starting edge.
+   * @param isInternalEdge is true if the specified edge is an internal one.
+   * @param holes is the list of holes in the polygon, or null if none.
+   * @param testPoint is an (optional) test point, which will be used to determine if we are generating
+   *  a shape with the proper sidedness.  It is passed in only when the test point is supposed to be outside
+   *  of the generated polygon.  In this case, if the generated polygon is found to contain the point, the
+   *  method exits early with a null return value.
+   *  This only makes sense in the context of evaluating both possible choices and using logic to determine
+   *  which result to use.  If the test point is supposed to be within the shape, then it must be outside of the
+   *  complement shape.  If the test point is supposed to be outside the shape, then it must be outside of the
+   *  original shape.  Either way, we can figure out the right thing to use.
+   * @return a GeoMembershipShape corresponding to what was specified, or null if what was specified
+   *  was inconsistent with what we generated.  Specifically, if we specify an exterior point that is
+   *  found in the interior of the shape we create here we return null, which is a signal that we chose
+   *  our initial plane sidedness backwards.
+   */
+  public static GeoPolygon buildPolygonShape(
+    final PlanetModel planetModel,
+    final List<GeoPoint> pointsList,
+    final int startPointIndex,
+    final int endPointIndex,
+    final SidedPlane startingEdge,
+    final boolean isInternalEdge,
+    final List<GeoPolygon> holes,
+    final GeoPoint testPoint) {
+
+    // It could be the case that we need a concave polygon.  So we need to try and look for that case
+    // as part of the general code for constructing complex polygons.
+
+    // Note that there can be only one concave polygon.
+              
+    // The code here must keep track of two lists of sided planes.  The first list contains the planes consistent with
+    // a concave polygon.  This list will grow and shrink.  The second list is built starting at the current edge that
+    // was last consistent with the concave polygon, and contains all edges consistent with a convex polygon.
+    // When that sequence of edges is done, then an internal edge is created and the identified points are converted to a
+    // convex polygon.  That internal edge is used to extend the list of edges in the concave polygon edge list.
+
+    // The edge buffer.
+    final EdgeBuffer edgeBuffer = new EdgeBuffer(pointsList, startPointIndex, endPointIndex, startingEdge, isInternalEdge);
+
+    // Current composite.  This is what we'll actually be returning.  This will have a number of convex polygons, and
+    // maybe a single concave one too.
+    final GeoCompositePolygon rval = new GeoCompositePolygon();
+
+    // Starting state:
+    // The stopping point
+    Edge stoppingPoint = edgeBuffer.pickOne();
+    // The current edge
+    Edge currentEdge = stoppingPoint;
+    
+    // Progressively look for convex sections.  If we find one, we emit it and replace it.
+    // Keep going until we have been around once and nothing needed to change, and then
+    // do the concave polygon, if necessary.
+    while (true) {
+
+      if (currentEdge == null) {
+        // We're done!
+        break;
+      }
+      
+      // Find convexity around the current edge, if any
+      final Boolean foundIt = findConvexPolygon(planetModel, currentEdge, rval, edgeBuffer, holes, testPoint);
+      if (foundIt == null) {
+        return null;
+      }
+      
+      if (foundIt) {
+        // New start point
+        stoppingPoint = edgeBuffer.pickOne();
+        currentEdge = stoppingPoint;
+        // back around
+        continue;
+      }
+      
+      // Otherwise, go on to the next
+      currentEdge = edgeBuffer.getNext(currentEdge);
+      if (currentEdge == stoppingPoint) {
+        break;
+      }
+    }
+    
+    // If there's anything left in the edge buffer, convert to concave polygon.
+    if (makeConcavePolygon(planetModel, rval, edgeBuffer, holes, testPoint) == false) {
+      return null;
+    }
+    
+    return rval;
+  }
+

@@ -1,14 +1,24 @@
   private static void verify(double[] lats, double[] lons) throws Exception {
     IndexWriterConfig iwc = newIndexWriterConfig();
 
+    GeoPoint[] points = new GeoPoint[lats.length];
+
+    // Pre-quantize all lat/lons:
+    for(int i=0;i<lats.length;i++) {
+      if (Double.isNaN(lats[i]) == false) {
+        //System.out.println("lats[" + i + "] = " + lats[i]);
+        points[i] = quantize(new GeoPoint(PlanetModel.WGS84, toRadians(lats[i]), toRadians(lons[i])));
+      }
+    }
+
     // Else we can get O(N^2) merging:
     int mbd = iwc.getMaxBufferedDocs();
-    if (mbd != -1 && mbd < lats.length/100) {
-      iwc.setMaxBufferedDocs(lats.length/100);
+    if (mbd != -1 && mbd < points.length/100) {
+      iwc.setMaxBufferedDocs(points.length/100);
     }
     iwc.setCodec(getCodec());
     Directory dir;
-    if (lats.length > 100000) {
+    if (points.length > 100000) {
       dir = newFSDirectory(createTempDir("TestBKDTree"));
     } else {
       dir = getDirectory();
@@ -16,12 +26,13 @@
     Set<Integer> deleted = new HashSet<>();
     // RandomIndexWriter is too slow here:
     IndexWriter w = new IndexWriter(dir, iwc);
-    for(int id=0;id<lats.length;id++) {
+    for(int id=0;id<points.length;id++) {
       Document doc = new Document();
       doc.add(newStringField("id", ""+id, Field.Store.NO));
       doc.add(new NumericDocValuesField("id", id));
-      if (Double.isNaN(lats[id]) == false) {
-        doc.add(new Geo3DPoint("point", lats[id], lons[id]));
+      GeoPoint point = points[id];
+      if (point != null) {
+        doc.add(new Geo3DPoint("point", point.x, point.y, point.z));
       }
       w.addDocument(doc);
       if (id > 0 && random().nextInt(100) == 42) {
@@ -37,113 +48,83 @@
       w.forceMerge(1);
     }
     final IndexReader r = DirectoryReader.open(w);
+    if (VERBOSE) {
+      System.out.println("TEST: using reader " + r);
+    }
     w.close();
 
     // We can't wrap with "exotic" readers because the geo3d query must see the Geo3DDVFormat:
     IndexSearcher s = newSearcher(r, false);
 
-    int numThreads = TestUtil.nextInt(random(), 2, 5);
-
-    List<Thread> threads = new ArrayList<>();
     final int iters = atLeast(100);
 
-    final CountDownLatch startingGun = new CountDownLatch(1);
-    final AtomicBoolean failed = new AtomicBoolean();
+    NumericDocValues docIDToID = MultiDocValues.getNumericValues(r, "id");
 
-    for(int i=0;i<numThreads;i++) {
-      Thread thread = new Thread() {
-          @Override
-          public void run() {
-            try {
-              _run();
-            } catch (Exception e) {
-              failed.set(true);
-              throw new RuntimeException(e);
-            }
-          }
+    for (int iter=0;iter<iters;iter++) {
 
-          private void _run() throws Exception {
-            startingGun.await();
+      GeoShape shape = randomShape();
 
-            NumericDocValues docIDToID = MultiDocValues.getNumericValues(r, "id");
-
-            for (int iter=0;iter<iters && failed.get() == false;iter++) {
-
-              GeoShape shape = randomShape(PlanetModel.WGS84);
-
-              if (VERBOSE) {
-                System.err.println("\n" + Thread.currentThread() + ": TEST: iter=" + iter + " shape="+shape);
-              }
+      if (VERBOSE) {
+        System.err.println("\nTEST: iter=" + iter + " shape="+shape);
+      }
               
-              Query query = Geo3DPoint.newShapeQuery("point", shape);
+      Query query = Geo3DPoint.newShapeQuery("point", shape);
 
-              if (VERBOSE) {
-                System.err.println("  using query: " + query);
-              }
+      if (VERBOSE) {
+        System.err.println("  using query: " + query);
+      }
 
-              final FixedBitSet hits = new FixedBitSet(r.maxDoc());
+      final FixedBitSet hits = new FixedBitSet(r.maxDoc());
 
-              s.search(query, new SimpleCollector() {
+      s.search(query, new SimpleCollector() {
 
-                  private int docBase;
+          private int docBase;
 
-                  @Override
-                  public boolean needsScores() {
-                    return false;
-                  }
-
-                  @Override
-                  protected void doSetNextReader(LeafReaderContext context) throws IOException {
-                    docBase = context.docBase;
-                  }
-
-                  @Override
-                  public void collect(int doc) {
-                    hits.set(docBase+doc);
-                  }
-                });
-
-              if (VERBOSE) {
-                System.err.println("  hitCount: " + hits.cardinality());
-              }
-      
-              for(int docID=0;docID<r.maxDoc();docID++) {
-                int id = (int) docIDToID.get(docID);
-                if (Double.isNaN(lats[id]) == false) {
-
-                  // Accurate point:
-                  GeoPoint point1 = new GeoPoint(PlanetModel.WGS84, toRadians(lats[id]), toRadians(lons[id]));
-
-                  // Quantized point (32 bits per dim):
-                  GeoPoint point2 = quantize(PlanetModel.WGS84.getMaximumMagnitude(), point1);
-
-                  if (shape.isWithin(point1) != shape.isWithin(point2)) {
-                    if (VERBOSE) {
-                      System.out.println("  skip checking docID=" + docID + " quantization changed the expected result from " + shape.isWithin(point1) + " to " + shape.isWithin(point2));
-                    }
-                    continue;
-                  }
-
-                  boolean expected = ((deleted.contains(id) == false) && shape.isWithin(point2));
-                  if (hits.get(docID) != expected) {
-                    fail(Thread.currentThread().getName() + ": iter=" + iter + " id=" + id + " docID=" + docID + " lat=" + lats[id] + " lon=" + lons[id] + " expected " + expected + " but got: " + hits.get(docID) + " deleted?=" + deleted.contains(id) + "\n  point1=" + point1 + ", iswithin="+shape.isWithin(point1)+"\n  point2=" + point2 + ", iswithin="+shape.isWithin(point2) + "\n  query=" + query);
-                  }
-                } else {
-                  assertFalse(hits.get(docID));
-                }
-
-              }
-            }
+          @Override
+          public boolean needsScores() {
+            return false;
           }
-        };
-      thread.setName("T" + i);
-      thread.start();
-      threads.add(thread);
+
+          @Override
+          protected void doSetNextReader(LeafReaderContext context) throws IOException {
+            docBase = context.docBase;
+          }
+
+          @Override
+          public void collect(int doc) {
+            hits.set(docBase+doc);
+          }
+        });
+
+      if (VERBOSE) {
+        System.err.println("  hitCount: " + hits.cardinality());
+      }
+      
+      for(int docID=0;docID<r.maxDoc();docID++) {
+        int id = (int) docIDToID.get(docID);
+        GeoPoint point = points[id];
+        if (point != null) {
+          boolean expected = ((deleted.contains(id) == false) && shape.isWithin(point));
+          if (hits.get(docID) != expected) {
+            StringBuilder b = new StringBuilder();
+            if (expected) {
+              b.append("FAIL: id=" + id + " should have matched but did not\n");
+            } else {
+              b.append("FAIL: id=" + id + " should not have matched but did\n");
+            }
+            b.append("  shape=" + shape + "\n");
+            b.append("  point=" + point + "\n");
+            b.append("  docID=" + docID + " deleted?=" + deleted.contains(id) + "\n");
+            b.append("  query=" + query + "\n");
+            b.append("  explanation:\n    " + explain("point", shape, r, docID).replace("\n", "\n  "));
+            fail(b.toString());
+          }
+        } else {
+          assertFalse(hits.get(docID));
+        }
+      }
     }
-    startingGun.countDown();
-    for(Thread thread : threads) {
-      thread.join();
-    }
+
     IOUtils.close(r, dir);
   }
 

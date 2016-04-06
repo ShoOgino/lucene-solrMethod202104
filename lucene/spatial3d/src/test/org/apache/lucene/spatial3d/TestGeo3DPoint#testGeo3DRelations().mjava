@@ -1,8 +1,6 @@
   /** Tests consistency of GeoArea.getRelationship vs GeoShape.isWithin */
   public void testGeo3DRelations() throws Exception {
 
-    PlanetModel planetModel = getPlanetModel();
-
     int numDocs = atLeast(1000);
     if (VERBOSE) {
       System.out.println("TEST: " + numDocs + " docs");
@@ -10,13 +8,11 @@
 
     GeoPoint[] docs = new GeoPoint[numDocs];
     for(int docID=0;docID<numDocs;docID++) {
-      docs[docID] = new GeoPoint(planetModel, toRadians(randomLat()), toRadians(randomLon()));
+      docs[docID] = quantize(new GeoPoint(PlanetModel.WGS84, toRadians(GeoTestUtil.nextLatitude()), toRadians(GeoTestUtil.nextLongitude())));
       if (VERBOSE) {
         System.out.println("  doc=" + docID + ": " + docs[docID]);
       }
     }
-
-    double planetMax = planetModel.getMaximumMagnitude();
 
     int iters = atLeast(10);
 
@@ -25,7 +21,7 @@
     iters = atLeast(50);
     
     for(int iter=0;iter<iters;iter++) {
-      GeoShape shape = randomShape(planetModel);
+      GeoShape shape = randomShape();
 
       StringWriter sw = new StringWriter();
       PrintWriter log = new PrintWriter(sw, true);
@@ -39,12 +35,12 @@
 
       // Start with the root cell that fully contains the shape:
       Cell root = new Cell(null,
-                           Geo3DUtil.encodeValueLenient(planetMax, bounds.getMinimumX()),
-                           Geo3DUtil.encodeValueLenient(planetMax, bounds.getMaximumX()),
-                           Geo3DUtil.encodeValueLenient(planetMax, bounds.getMinimumY()),
-                           Geo3DUtil.encodeValueLenient(planetMax, bounds.getMaximumY()),
-                           Geo3DUtil.encodeValueLenient(planetMax, bounds.getMinimumZ()),
-                           Geo3DUtil.encodeValueLenient(planetMax, bounds.getMaximumZ()),
+                           encodeValueLenient(bounds.getMinimumX()),
+                           encodeValueLenient(bounds.getMaximumX()),
+                           encodeValueLenient(bounds.getMinimumY()),
+                           encodeValueLenient(bounds.getMaximumY()),
+                           encodeValueLenient(bounds.getMinimumZ()),
+                           encodeValueLenient(bounds.getMaximumZ()),
                            0);
 
       if (VERBOSE) {
@@ -69,8 +65,8 @@
           // Leaf cell: brute force check all docs that fall within this cell:
           for(int docID=0;docID<numDocs;docID++) {
             GeoPoint point = docs[docID];
-            if (cell.contains(planetMax, point)) {
-              if (shape.isWithin(quantize(planetMax, point))) {
+            if (cell.contains(point)) {
+              if (shape.isWithin(point)) {
                 if (VERBOSE) {
                   log.println("    check doc=" + docID + ": match!");
                 }
@@ -84,15 +80,15 @@
           }
         } else {
           
-          GeoArea xyzSolid = GeoAreaFactory.makeGeoArea(planetModel,
-                                                        Geo3DUtil.decodeValueMin(planetMax, cell.xMinEnc), Geo3DUtil.decodeValueMax(planetMax, cell.xMaxEnc),
-                                                        Geo3DUtil.decodeValueMin(planetMax, cell.yMinEnc), Geo3DUtil.decodeValueMax(planetMax, cell.yMaxEnc),
-                                                        Geo3DUtil.decodeValueMin(planetMax, cell.zMinEnc), Geo3DUtil.decodeValueMax(planetMax, cell.zMaxEnc));
+          GeoArea xyzSolid = GeoAreaFactory.makeGeoArea(PlanetModel.WGS84,
+                                                        PointInShapeIntersectVisitor.decodeValueMin(cell.xMinEnc), PointInShapeIntersectVisitor.decodeValueMax(cell.xMaxEnc),
+                                                        PointInShapeIntersectVisitor.decodeValueMin(cell.yMinEnc), PointInShapeIntersectVisitor.decodeValueMax(cell.yMaxEnc),
+                                                        PointInShapeIntersectVisitor.decodeValueMin(cell.zMinEnc), PointInShapeIntersectVisitor.decodeValueMax(cell.zMaxEnc));
 
           if (VERBOSE) {
-            log.println("    minx="+Geo3DUtil.decodeValueMin(planetMax, cell.xMinEnc)+" maxx="+Geo3DUtil.decodeValueMax(planetMax, cell.xMaxEnc)+
-              " miny="+Geo3DUtil.decodeValueMin(planetMax, cell.yMinEnc)+" maxy="+Geo3DUtil.decodeValueMax(planetMax, cell.yMaxEnc)+
-              " minz="+Geo3DUtil.decodeValueMin(planetMax, cell.zMinEnc)+" maxz="+Geo3DUtil.decodeValueMax(planetMax, cell.zMaxEnc));
+            log.println("    minx="+PointInShapeIntersectVisitor.decodeValueMin(cell.xMinEnc)+" maxx="+PointInShapeIntersectVisitor.decodeValueMax(cell.xMaxEnc)+
+              " miny="+PointInShapeIntersectVisitor.decodeValueMin(cell.yMinEnc)+" maxy="+PointInShapeIntersectVisitor.decodeValueMax(cell.yMaxEnc)+
+              " minz="+PointInShapeIntersectVisitor.decodeValueMin(cell.zMinEnc)+" maxz="+PointInShapeIntersectVisitor.decodeValueMax(cell.zMaxEnc));
           }
 
           switch (xyzSolid.getRelationship(shape)) {          
@@ -102,7 +98,7 @@
               log.println("    GeoArea.CONTAINS: now addAll");
             }
             for(int docID=0;docID<numDocs;docID++) {
-              if (cell.contains(planetMax, docs[docID])) {
+              if (cell.contains(docs[docID])) {
                 if (VERBOSE) {
                   log.println("    addAll doc=" + docID);
                 }
@@ -130,7 +126,7 @@
             if (VERBOSE) {
               log.println("    GeoArea.DISJOINT: drop this cell");
               for(int docID=0;docID<numDocs;docID++) {
-                if (cell.contains(planetMax, docs[docID])) {
+                if (cell.contains(docs[docID])) {
                   if (VERBOSE) {
                     log.println("    skip doc=" + docID);
                   }
@@ -234,23 +230,15 @@
       boolean fail = false;
       for(int docID=0;docID<numDocs;docID++) {
         GeoPoint point = docs[docID];
-        GeoPoint quantized = quantize(planetMax, point);
-        boolean expected = shape.isWithin(quantized);
-
-        if (expected != shape.isWithin(point)) {
-          // Quantization changed the result; skip testing this doc:
-          continue;
-        }
-
+        boolean expected = shape.isWithin(point);
         boolean actual = hits.contains(docID);
         if (actual != expected) {
           if (actual) {
-            log.println("doc=" + docID + " matched but should not");
+            log.println("doc=" + docID + " should not have matched but did");
           } else {
-            log.println("doc=" + docID + " did not match but should");
+            log.println("doc=" + docID + " should match but did not");
           }
           log.println("  point=" + docs[docID]);
-          log.println("  quantized=" + quantize(planetMax, docs[docID]));
           fail = true;
         }
       }

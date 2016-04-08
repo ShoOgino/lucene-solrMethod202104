@@ -2,16 +2,17 @@
    * get the {@link org.apache.lucene.classification.utils.ConfusionMatrixGenerator.ConfusionMatrix} of a given {@link Classifier},
    * generated on the given {@link LeafReader}, class and text fields.
    *
-   * @param reader         the {@link LeafReader} containing the index used for creating the {@link Classifier}
-   * @param classifier     the {@link Classifier} whose confusion matrix has to be generated
-   * @param classFieldName the name of the Lucene field used as the classifier's output
-   * @param textFieldName  the nome the Lucene field used as the classifier's input
-   * @param <T>            the return type of the {@link ClassificationResult} returned by the given {@link Classifier}
+   * @param reader              the {@link LeafReader} containing the index used for creating the {@link Classifier}
+   * @param classifier          the {@link Classifier} whose confusion matrix has to be generated
+   * @param classFieldName      the name of the Lucene field used as the classifier's output
+   * @param textFieldName       the nome the Lucene field used as the classifier's input
+   * @param timeoutMilliseconds timeout to wait before stopping creating the confusion matrix
+   * @param <T>                 the return type of the {@link ClassificationResult} returned by the given {@link Classifier}
    * @return a {@link org.apache.lucene.classification.utils.ConfusionMatrixGenerator.ConfusionMatrix}
    * @throws IOException if problems occurr while reading the index or using the classifier
    */
   public static <T> ConfusionMatrix getConfusionMatrix(LeafReader reader, Classifier<T> classifier, String classFieldName,
-                                                       String textFieldName) throws IOException {
+                                                       String textFieldName, long timeoutMilliseconds) throws IOException {
 
     ExecutorService executorService = Executors.newFixedThreadPool(1, new NamedThreadFactory("confusion-matrix-gen-"));
 
@@ -22,7 +23,13 @@
       TopDocs topDocs = indexSearcher.search(new TermRangeQuery(classFieldName, null, null, true, true), Integer.MAX_VALUE);
       double time = 0d;
 
+      int counter = 0;
       for (ScoreDoc scoreDoc : topDocs.scoreDocs) {
+
+        if (timeoutMilliseconds > 0 && time >= timeoutMilliseconds) {
+          break;
+        }
+
         Document doc = reader.document(scoreDoc.doc);
         String[] correctAnswers = doc.getValues(classFieldName);
 
@@ -41,6 +48,7 @@
               if (result != null) {
                 T assignedClass = result.getAssignedClass();
                 if (assignedClass != null) {
+                  counter++;
                   String classified = assignedClass instanceof BytesRef ? ((BytesRef) assignedClass).utf8ToString() : assignedClass.toString();
 
                   String correctAnswer;
@@ -67,7 +75,7 @@
                 }
               }
             } catch (TimeoutException timeoutException) {
-              // add timeout
+              // add classification timeout
               time += 5000;
             } catch (ExecutionException | InterruptedException executionException) {
               throw new RuntimeException(executionException);
@@ -76,7 +84,7 @@
           }
         }
       }
-      return new ConfusionMatrix(counts, time / topDocs.totalHits, topDocs.totalHits);
+      return new ConfusionMatrix(counts, time / counter, counter);
     } finally {
       executorService.shutdown();
     }

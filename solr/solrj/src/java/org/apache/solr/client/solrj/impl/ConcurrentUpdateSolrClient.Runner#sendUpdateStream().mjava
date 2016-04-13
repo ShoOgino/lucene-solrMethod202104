@@ -9,15 +9,15 @@
 
         InputStream rspBody = null;
         try {
-          final UpdateRequest updateRequest =
+          final Update update = 
               queue.poll(pollQueueTime, TimeUnit.MILLISECONDS);
-          if (updateRequest == null)
+          if (update == null)
             break;
 
           String contentType = client.requestWriter.getUpdateContentType();
           final boolean isXml = ClientUtils.TEXT_XML.equals(contentType);
 
-          final ModifiableSolrParams origParams = new ModifiableSolrParams(updateRequest.getParams());
+          final ModifiableSolrParams origParams = new ModifiableSolrParams(update.getRequest().getParams());
 
           EntityTemplate template = new EntityTemplate(new ContentProducer() {
 
@@ -27,11 +27,12 @@
                 if (isXml) {
                   out.write("<stream>".getBytes(StandardCharsets.UTF_8)); // can be anything
                 }
-                UpdateRequest req = updateRequest;
-                while (req != null) {
+                Update upd = update;
+                while (upd != null) {
+                  UpdateRequest req = upd.getRequest();
                   SolrParams currentParams = new ModifiableSolrParams(req.getParams());
                   if (!origParams.toNamedList().equals(currentParams.toNamedList())) {
-                    queue.add(req); // params are different, push back to queue
+                    queue.add(upd); // params are different, push back to queue
                     break;
                   }
 
@@ -59,9 +60,9 @@
 
                   if (pollQueueTime > 0 && threadCount == 1 && req.isLastDocInBatch()) {
                     // no need to wait to see another doc in the queue if we've hit the last doc in a batch
-                    req = queue.poll(0, TimeUnit.MILLISECONDS);
+                    upd = queue.poll(0, TimeUnit.MILLISECONDS);
                   } else {
-                    req = queue.poll(pollQueueTime, TimeUnit.MILLISECONDS);
+                    upd = queue.poll(pollQueueTime, TimeUnit.MILLISECONDS);
                   }
 
                 }
@@ -83,7 +84,11 @@
           requestParams.set(CommonParams.WT, client.parser.getWriterType());
           requestParams.set(CommonParams.VERSION, client.parser.getVersion());
 
-          method = new HttpPost(client.getBaseURL() + "/update"
+          String basePath = client.getBaseURL();
+          if (update.getCollection() != null)
+            basePath += "/" + update.getCollection();
+
+          method = new HttpPost(basePath + "/update"
               + requestParams.toQueryString());
           
           org.apache.http.client.config.RequestConfig.Builder requestConfigBuilder = HttpClientUtil.createDefaultRequestConfigBuilder();

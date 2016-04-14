@@ -1,8 +1,7 @@
   /**
    * Refresh legacy (shared) clusterstate.json
    */
-  private void refreshLegacyClusterState(Watcher watcher)
-      throws KeeperException, InterruptedException {
+  private void refreshLegacyClusterState(Watcher watcher) throws KeeperException, InterruptedException {
     try {
       final Stat stat = new Stat();
       final byte[] data = zkClient.getData(CLUSTER_STATE, watcher, stat, true);
@@ -11,6 +10,20 @@
         if (this.legacyClusterStateVersion >= stat.getVersion()) {
           // Nothing to do, someone else updated same or newer.
           return;
+        }
+        Set<String> liveNodes = this.liveNodes; // volatile read
+        for (Map.Entry<String, CollectionWatch> watchEntry : this.collectionWatches.entrySet()) {
+          String coll = watchEntry.getKey();
+          CollectionWatch collWatch = watchEntry.getValue();
+          ClusterState.CollectionRef ref = this.legacyCollectionStates.get(coll);
+          if (ref == null)
+            continue;
+          // legacy collections are always in-memory
+          DocCollection newState = ref.get();
+          if (!collWatch.stateWatchers.isEmpty()
+              && !Objects.equals(loadedData.getCollectionStates().get(coll).get(), newState)) {
+            notifyStateWatchers(liveNodes, coll, newState);
+          }
         }
         this.legacyCollectionStates = loadedData.getCollectionStates();
         this.legacyClusterStateVersion = stat.getVersion();

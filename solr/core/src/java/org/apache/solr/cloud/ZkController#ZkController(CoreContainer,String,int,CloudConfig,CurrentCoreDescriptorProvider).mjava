@@ -85,8 +85,8 @@
 
               List<CoreDescriptor> descriptors = registerOnReconnect.getCurrentDescriptors();
               // re register all descriptors
+              ExecutorService executorService = (cc != null) ? cc.getCoreZkRegisterExecutorService() : null;
               if (descriptors != null) {
-                ExecutorService executorService = (cc != null) ? cc.getCoreZkRegisterExecutorService() : null;
                 for (CoreDescriptor descriptor : descriptors) {
                   // TODO: we need to think carefully about what happens when it
                   // was
@@ -109,17 +109,23 @@
               }
 
               // notify any other objects that need to know when the session was re-connected
+              HashSet<OnReconnect> clonedListeners;
               synchronized (reconnectListeners) {
-                for (OnReconnect listener : reconnectListeners) {
-                  try {
+                clonedListeners = (HashSet<OnReconnect>)reconnectListeners.clone();
+              }
+              // the OnReconnect operation can be expensive per listener, so do that async in the background
+              for (OnReconnect listener : clonedListeners) {
+                try {
+                  if (executorService != null) {
+                    executorService.submit(new OnReconnectNotifyAsync(listener));
+                  } else {
                     listener.command();
-                  } catch (Exception exc) {
-                    // not much we can do here other than warn in the log
-                    log.warn("Error when notifying OnReconnect listener " + listener + " after session re-connected.", exc);
                   }
+                } catch (Exception exc) {
+                  // not much we can do here other than warn in the log
+                  log.warn("Error when notifying OnReconnect listener " + listener + " after session re-connected.", exc);
                 }
               }
-
             } catch (InterruptedException e) {
               // Restore the interrupted status
               Thread.currentThread().interrupt();

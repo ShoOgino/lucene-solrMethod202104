@@ -1,4 +1,4 @@
-  protected void verifyRandomPolygons(boolean small, double[] lats, double[] lons) throws Exception {
+  protected void verifyRandomDistances(double[] lats, double[] lons) throws Exception {
     IndexWriterConfig iwc = newIndexWriterConfig();
     // Else seeds may not reproduce:
     iwc.setMergeScheduler(new SerialMergeScheduler());
@@ -41,10 +41,9 @@
     final IndexReader r = DirectoryReader.open(w);
     w.close();
 
-    // We can't wrap with "exotic" readers because points needs to work:
     IndexSearcher s = newSearcher(r);
 
-    final int iters = atLeast(75);
+    int iters = atLeast(25);
 
     NumericDocValues docIDToID = MultiDocValues.getNumericValues(r, "id");
 
@@ -57,15 +56,19 @@
         System.out.println("\nTEST: iter=" + iter + " s=" + s);
       }
 
-      // Polygon
-      final Polygon polygon;
-      if (small) {
-        polygon = nextPolygonNear(originLat, originLon);
-      } else {
-        polygon = nextPolygon();
+      // Distance
+      final double centerLat = nextLatitude();
+      final double centerLon = nextLongitude();
+
+      // So the query can cover at most 50% of the earth's surface:
+      final double radiusMeters = random().nextDouble() * GeoUtils.EARTH_MEAN_RADIUS_METERS * Math.PI / 2.0 + 1.0;
+
+      if (VERBOSE) {
+        final DecimalFormat df = new DecimalFormat("#,###.00", DecimalFormatSymbols.getInstance(Locale.ENGLISH));
+        System.out.println("  radiusMeters = " + df.format(radiusMeters));
       }
-      
-      Query query = newPolygonQuery(FIELD_NAME, polygon);
+
+      Query query = newDistanceQuery(FIELD_NAME, centerLat, centerLon, radiusMeters);
 
       if (VERBOSE) {
         System.out.println("  query=" + query);
@@ -102,7 +105,7 @@
         } else if (Double.isNaN(lats[id])) {
           expected = false;
         } else {
-          expected = polygon.contains(lats[id], lons[id]);
+          expected = SloppyMath.haversinMeters(centerLat, centerLon, lats[id], lons[id]) <= radiusMeters;
         }
 
         if (hits.get(docID) != expected) {
@@ -116,7 +119,10 @@
           b.append("  query=" + query + " docID=" + docID + "\n");
           b.append("  lat=" + lats[id] + " lon=" + lons[id] + "\n");
           b.append("  deleted?=" + (liveDocs != null && liveDocs.get(docID) == false));
-          b.append("  polygon=" + polygon);
+          if (Double.isNaN(lats[id]) == false) {
+            double distanceMeters = SloppyMath.haversinMeters(centerLat, centerLon, lats[id], lons[id]);
+            b.append("  centerLat=" + centerLat + " centerLon=" + centerLon + " distanceMeters=" + distanceMeters + " vs radiusMeters=" + radiusMeters);
+          }
           if (true) {
             fail("wrong hit (first of possibly more):\n\n" + b);
           } else {

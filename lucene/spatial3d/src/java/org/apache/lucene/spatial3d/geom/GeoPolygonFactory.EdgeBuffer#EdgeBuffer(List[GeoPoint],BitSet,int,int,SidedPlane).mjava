@@ -7,24 +7,34 @@
       */
     public EdgeBuffer(final List<GeoPoint> pointList, final BitSet internalEdges, final int startPlaneStartIndex, final int startPlaneEndIndex, final SidedPlane startPlane) {
       /*
-      System.out.println("Initial points:");
+      System.out.println("Start plane index: "+startPlaneStartIndex+" End plane index: "+startPlaneEndIndex+" Initial points:");
       for (final GeoPoint p : pointList) {
         System.out.println(" "+p);
       }
       */
-
-      // We need to detect backtracks, and also situations where someone has tried to stitch together multiple segments into one long arc (> 180 degrees).
-      // To do this, every time we extend by a coplanar segment, we compute the total arc distance to the new endpoint, as
-      // well as a sum of the arc distances we've accumulated as we march forward.  If these two numbers disagree, then
-      // we know there has been a backtrack or other anomaly.
       
-      // extend the edge, we compute the distance along the 
       final Edge startEdge = new Edge(pointList.get(startPlaneStartIndex), pointList.get(startPlaneEndIndex), startPlane, internalEdges.get(startPlaneStartIndex));
       // Fill in the EdgeBuffer by walking around creating more stuff
       Edge currentEdge = startEdge;
       int startIndex = startPlaneStartIndex;
       int endIndex = startPlaneEndIndex;
       while (true) {
+        /*
+        System.out.println("For plane "+currentEdge.plane+", the following points are in/out:");
+        for (final GeoPoint p: pointList) {
+          System.out.println(" "+p+" is: "+(currentEdge.plane.isWithin(p)?"in":"out"));
+        }
+        */
+        
+        // Check termination condition
+        if (currentEdge.endPoint == startEdge.startPoint) {
+          // We finish here.  Link the current edge to the start edge, and exit
+          previousEdges.put(startEdge, currentEdge);
+          nextEdges.put(currentEdge, startEdge);
+          edges.add(startEdge);
+          break;
+        }
+
         // Compute the next edge
         startIndex = endIndex;
         endIndex++;
@@ -34,53 +44,15 @@
         // Get the next point
         final GeoPoint newPoint = pointList.get(endIndex);
         // Build the new edge
-        // We have to be sure that the point we use as a check does not lie on the plane.
-        // In order to meet that goal, we need to go hunting for a point that meets the criteria.  If we don't
-        // find one, we've got a linear "polygon" that we cannot use.
-        
         // We need to know the sidedness of the new plane.  The point we're going to be presenting to it has
         // a certain relationship with the sided plane we already have for the current edge.  If the current edge
         // is colinear with the new edge, then we want to maintain the same relationship.  If the new edge
         // is not colinear, then we can use the new point's relationship with the current edge as our guide.
         
-        final boolean isNewPointWithin;
-        final GeoPoint pointToPresent;
-        if (currentEdge.plane.evaluateIsZero(newPoint)) {
-          // The new point is colinear with the current edge.  We'll have to look backwards for the first point that isn't.
-          int checkPointIndex = -1;
-          // Compute the arc distance before we try to extend, so that we note backtracking when we see it
-          //double accumulatedDistance = newPoint.arcDistance(pointList.get(startIndex));
-          final Plane checkPlane = new Plane(pointList.get(startIndex), newPoint);
-          for (int i = 0; i < pointList.size(); i++) {
-            final int index = getLegalIndex(startIndex - 1 - i, pointList.size());
-            if (!checkPlane.evaluateIsZero(pointList.get(index))) {
-              checkPointIndex = index;
-              break;
-            } else {
-              //accumulatedDistance += pointList.get(getLegalIndex(index+1, pointList.size())).arcDistance(pointList.get(index));
-              //final double actualDistance = newPoint.arcDistance(pointList.get(index));
-              //if (Math.abs(actualDistance - accumulatedDistance) >= Vector.MINIMUM_RESOLUTION) {
-              //  throw new IllegalArgumentException("polygon backtracks over itself");
-              //}
-            }
-          }
-          if (checkPointIndex == -1) {
-            throw new IllegalArgumentException("polygon is illegal (linear)");
-          }
-          pointToPresent = pointList.get(checkPointIndex);
-          isNewPointWithin = currentEdge.plane.isWithin(pointToPresent);
-        } else {
-          isNewPointWithin = currentEdge.plane.isWithin(newPoint);
-          pointToPresent = currentEdge.startPoint;
-        }
+        final boolean isNewPointWithin = currentEdge.plane.isWithin(newPoint);
+        final GeoPoint pointToPresent = currentEdge.startPoint;
 
         final SidedPlane newPlane = new SidedPlane(pointToPresent, isNewPointWithin, pointList.get(startIndex), newPoint);
-        /*
-        System.out.println("For next plane, the following points are in/out:");
-        for (final GeoPoint p: pointList) {
-          System.out.println(" "+p+" is: "+(newPlane.isWithin(p)?"in":"out"));
-        }
-        */
         final Edge newEdge = new Edge(pointList.get(startIndex), pointList.get(endIndex), newPlane, internalEdges.get(startIndex));
         
         // Link it in
@@ -89,13 +61,6 @@
         edges.add(newEdge);
         currentEdge = newEdge;
 
-        if (currentEdge.endPoint == startEdge.startPoint) {
-          // We finish here.  Link the current edge to the start edge, and exit
-          previousEdges.put(startEdge, currentEdge);
-          nextEdges.put(currentEdge, startEdge);
-          edges.add(startEdge);
-          break;
-        }
       }
       
       oneEdge = startEdge;

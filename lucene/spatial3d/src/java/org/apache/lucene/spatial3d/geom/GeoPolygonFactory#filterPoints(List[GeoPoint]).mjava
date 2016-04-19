@@ -1,4 +1,6 @@
   /** Filter duplicate points and coplanar points.
+   * @param start with input list of points
+   * @return the filtered list, or null if we can't get a legit polygon from the input.
    */
   static List<GeoPoint> filterPoints(final List<GeoPoint> input) {
     
@@ -15,7 +17,7 @@
       }
     }
     if (startIndex == -1) {
-      throw new IllegalArgumentException("polygon is degenerate: all points are identical");
+      return null;
     }
     
     // Now we can start the process of walking around, removing duplicate points.
@@ -39,55 +41,29 @@
     }
     
     if (noIdenticalPoints.size() < 3) {
-      throw new IllegalArgumentException("polygon has fewer than three non-identical points");
+      return null;
     }
     
-    // Next step: remove coplanar points and backtracks.  For this, we use a strategy that is similar but we assess whether the points
-    // are on the same plane, taking the first and last points on the same plane only.
+    // Now, do the depth-first search needed to find a path that has no coplanarities in it.
+    // This is, unfortunately, not easy, because coplanarity is not transitive as you walk around the polygon.
+    // If point C is not coplanar with edge A-B, there is no guarantee that A is not coplanar with B-C.
+    // But we have to produce a polygon that is safe no matter which way it is looked at.
+    // The approach I'm taking therefore is to do a depth-first search until we find a valid polygon.
+    // This algorithmically awful in the worst case, but luckily we can presume that real-life data
+    // does not require more than a couple of iterations.
     
-    final List<GeoPoint> nonCoplanarPoints = new ArrayList<>(noIdenticalPoints.size());
-    
-    int startPlaneIndex = -1;
-    final Plane comparePlane = new Plane(noIdenticalPoints.get(0), noIdenticalPoints.get(1));
-    for (int i = 0; i < noIdenticalPoints.size()-1; i++) {
-      final GeoPoint thePoint = noIdenticalPoints.get(getLegalIndex(- i - 1, noIdenticalPoints.size()));
-      if (!comparePlane.evaluateIsZero(thePoint)) {
-        startPlaneIndex = getLegalIndex(-i, noIdenticalPoints.size());
-        break;
+    for  (int i = 0; i < noIdenticalPoints.size(); i++) {
+      final SafePath startPath = new SafePath(null, noIdenticalPoints.get(i), i, null);
+      // Search, with this as the start path.
+      final SafePath resultPath = findSafePath(startPath, noIdenticalPoints, getLegalIndex(i+1, noIdenticalPoints.size()), i);
+      if (resultPath != null && resultPath.previous != null) {
+        // Read out result, maintaining ordering
+        final List<GeoPoint> rval = new ArrayList<>(noIdenticalPoints.size());
+        resultPath.fillInList(rval);
+        return rval;
       }
     }
-    if (startPlaneIndex == -1) {
-      throw new IllegalArgumentException("polygon is degenerate: all points are coplanar");
-    }
-
-    // Now we can start the process of walking around, removing duplicate points.
-    int currentPlaneIndex = startPlaneIndex;
-    while (true) {
-      final GeoPoint currentPoint = noIdenticalPoints.get(currentPlaneIndex);
-      nonCoplanarPoints.add(currentPoint);
-      int nextPlaneIndex = getLegalIndex(currentPlaneIndex + 1, noIdenticalPoints.size());
-      if (nextPlaneIndex == startPlaneIndex) {
-        break;
-      }
-      final Plane testPlane = new Plane(currentPoint, noIdenticalPoints.get(nextPlaneIndex));
-      while (true) {
-        currentPlaneIndex = nextPlaneIndex;
-        if (currentPlaneIndex == startPlaneIndex) {
-          break;
-        }
-        // Check if the next point is off plane
-        nextPlaneIndex = getLegalIndex(currentPlaneIndex + 1, noIdenticalPoints.size());
-        final GeoPoint nextNonCoplanarPoint = noIdenticalPoints.get(nextPlaneIndex);
-        if (!testPlane.evaluateIsZero(nextNonCoplanarPoint)) {
-          // We will want to add the point at currentPlaneIndex to the list (last on of the series)
-          break;
-        }
-      }
-      if (currentPlaneIndex == startPlaneIndex) {
-        break;
-      }
-    }
-    
-    return nonCoplanarPoints;
+    // No path found.  This means that everything was coplanar.
+    return null;
   }
 

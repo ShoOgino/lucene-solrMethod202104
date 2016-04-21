@@ -1,14 +1,25 @@
   private DocCollection fetchCollectionState(String coll, Watcher watcher) throws KeeperException, InterruptedException {
     String collectionPath = getCollectionPath(coll);
-    try {
-      Stat stat = new Stat();
-      byte[] data = zkClient.getData(collectionPath, watcher, stat, true);
-      ClusterState state = ClusterState.load(stat.getVersion(), data,
-              Collections.<String>emptySet(), collectionPath);
-      ClusterState.CollectionRef collectionRef = state.getCollectionStates().get(coll);
-      return collectionRef == null ? null : collectionRef.get();
-    } catch (KeeperException.NoNodeException e) {
-      return null;
+    while (true) {
+      try {
+        Stat stat = new Stat();
+        byte[] data = zkClient.getData(collectionPath, watcher, stat, true);
+        ClusterState state = ClusterState.load(stat.getVersion(), data,
+            Collections.<String>emptySet(), collectionPath);
+        ClusterState.CollectionRef collectionRef = state.getCollectionStates().get(coll);
+        return collectionRef == null ? null : collectionRef.get();
+      } catch (KeeperException.NoNodeException e) {
+        if (watcher != null) {
+          // Leave an exists watch in place in case a state.json is created later.
+          Stat exists = zkClient.exists(collectionPath, watcher, true);
+          if (exists != null) {
+            // Rare race condition, we tried to fetch the data and couldn't find it, then we found it exists.
+            // Loop and try again.
+            continue;
+          }
+        }
+        return null;
+      }
     }
   }
 

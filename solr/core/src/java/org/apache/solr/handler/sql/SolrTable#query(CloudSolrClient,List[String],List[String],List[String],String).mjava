@@ -1,0 +1,59 @@
+  /** Executes a Solr query on the underlying table.
+   *
+   * @param cloudSolrClient Solr CloudSolrClient
+   * @param fields List of fields to project
+   * @param filterQueries A list of filterQueries which should be used in the query
+   * @return Enumerator of results
+   */
+  public Enumerable<Object> query(final CloudSolrClient cloudSolrClient, List<String> fields,
+                                  List<String> filterQueries, List<String> order, String limit) {
+    Map<String, String> solrParams = new HashMap<>();
+    solrParams.put(CommonParams.Q, "*:*");
+    //solrParams.put(CommonParams.QT, "/export");
+
+    if (fields.isEmpty()) {
+      solrParams.put(CommonParams.FL, "*");
+    } else {
+      solrParams.put(CommonParams.FL, String.join(",", fields));
+    }
+
+    if (filterQueries.isEmpty()) {
+      solrParams.put(CommonParams.FQ, "*:*");
+    } else {
+      // SolrParams should be a ModifiableParams instead of a map so we could add multiple FQs
+      solrParams.put(CommonParams.FQ, String.join(" OR ", filterQueries));
+    }
+
+    // Build and issue the query and return an Enumerator over the results
+    if (order.isEmpty()) {
+      String DEFAULT_SORT_FIELD = "_version_";
+      solrParams.put(CommonParams.SORT, DEFAULT_SORT_FIELD + " desc");
+
+      // Make sure the default sort field is in the field list
+      String fl = solrParams.get(CommonParams.FL);
+      if(!fl.contains(DEFAULT_SORT_FIELD)) {
+        solrParams.put(CommonParams.FL, String.join(",", fl, DEFAULT_SORT_FIELD));
+      }
+    } else {
+      solrParams.put(CommonParams.SORT, String.join(",", order));
+    }
+
+//    if (limit != null) {
+//      queryBuilder.append(" LIMIT ").append(limit);
+//    }
+
+    return new AbstractEnumerable<Object>() {
+      public Enumerator<Object> enumerator() {
+        TupleStream cloudSolrStream;
+        try {
+          cloudSolrStream = new CloudSolrStream(cloudSolrClient.getZkHost(), collection, solrParams);
+          cloudSolrStream.open();
+        } catch (IOException e) {
+          throw new RuntimeException(e);
+        }
+
+        return new SolrEnumerator(cloudSolrStream, fields);
+      }
+    };
+  }
+

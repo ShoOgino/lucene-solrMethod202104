@@ -3,34 +3,40 @@
     params = adjustParams(params);
     req.setParams(params);
     String sql = params.get("stmt");
-    int numWorkers = params.getInt("numWorkers", 1);
-    String workerCollection = params.get("workerCollection", defaultWorkerCollection);
-    String workerZkhost = params.get("workerZkhost",defaultZkhost);
-    String mode = params.get("aggregationMode", "map_reduce");
-    StreamContext context = new StreamContext();
 
-    // JDBC driver requires metadata from the SQLHandler. Default to false since this adds a new Metadata stream.
-    boolean includeMetadata = params.getBool("includeMetadata", false);
-
+    TupleStream tupleStream = null;
     try {
-
       if(sql == null) {
         throw new Exception("stmt parameter cannot be null");
       }
 
-      context.setSolrClientCache(StreamHandler.clientCache);
+      Properties info = new Properties();
+      info.setProperty("model",
+          "inline:{\n" +
+              "  \"version\": \"1.0\",\n" +
+              "  \"defaultSchema\": \"" + defaultZkhost + "\",\n" +
+              "  \"schemas\": [\n" +
+              "    {\n" +
+              "      \"name\": \"" + defaultZkhost + "\",\n" +
+              "      \"type\": \"custom\",\n" +
+              "      \"factory\": \"" + SolrSchemaFactory.class.getName() + "\",\n" +
+              "      \"operand\": {\n" +
+              "        \"zk\": \"" + defaultZkhost + "\"\n" +
+              "      }\n" +
+              "    }\n" +
+              "  ]\n" +
+              "}");
+      info.setProperty("lex", "MYSQL");
 
-      TupleStream tupleStream = SQLTupleStreamParser.parse(sql,
-                                                           numWorkers,
-                                                           workerCollection,
-                                                           workerZkhost,
-                                                           AggregationMode.getMode(mode),
-                                                           includeMetadata,
-                                                           context);
+      tupleStream = new StreamHandler.TimerStream(new ExceptionStream(
+          new JDBCStream("jdbc:calcite:", sql, null, info, null)));
 
-      rsp.add("result-set", new StreamHandler.TimerStream(new ExceptionStream(tupleStream)));
+      rsp.add("result-set", tupleStream);
     } catch(Exception e) {
       //Catch the SQL parsing and query transformation exceptions.
+      if(tupleStream != null) {
+        tupleStream.close();
+      }
       SolrException.log(logger, e);
       rsp.add("result-set", new StreamHandler.DummyErrorStream(e));
     }

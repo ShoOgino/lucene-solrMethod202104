@@ -1,8 +1,13 @@
   public void handleRequestBody(SolrQueryRequest req, SolrQueryResponse rsp) throws Exception {
-    SolrParams params = req.getParams();
-    params = adjustParams(params);
-    req.setParams(params);
+    ModifiableSolrParams params = new ModifiableSolrParams(req.getParams());
     String sql = params.get("stmt");
+    // Set defaults for parameters
+    params.set("numWorkers", params.getInt("numWorkers", 1));
+    params.set("workerCollection", params.get("workerCollection", defaultWorkerCollection));
+    params.set("workerZkhost", params.get("workerZkhost", defaultZkhost));
+    params.set("aggregationMode", params.get("aggregationMode", "map_reduce"));
+    // JDBC driver requires metadata from the SQLHandler. Default to false since this adds a new Metadata stream.
+    params.set("includeMetadata", params.getBool("includeMetadata", false));
 
     TupleStream tupleStream = null;
     try {
@@ -10,26 +15,11 @@
         throw new Exception("stmt parameter cannot be null");
       }
 
-      Properties info = new Properties();
-      info.setProperty("model",
-          "inline:{\n" +
-              "  \"version\": \"1.0\",\n" +
-              "  \"defaultSchema\": \"" + defaultZkhost + "\",\n" +
-              "  \"schemas\": [\n" +
-              "    {\n" +
-              "      \"name\": \"" + defaultZkhost + "\",\n" +
-              "      \"type\": \"custom\",\n" +
-              "      \"factory\": \"" + SolrSchemaFactory.class.getName() + "\",\n" +
-              "      \"operand\": {\n" +
-              "        \"zk\": \"" + defaultZkhost + "\"\n" +
-              "      }\n" +
-              "    }\n" +
-              "  ]\n" +
-              "}");
-      info.setProperty("lex", "MYSQL");
-
-      tupleStream = new StreamHandler.TimerStream(new ExceptionStream(
-          new JDBCStream("jdbc:calcite:", sql, null, info, null)));
+      /*
+       * Would be great to replace this with the JDBCStream. Can't do that currently since need to have metadata
+       * added to the stream for the JDBC driver. This could be fixed by using the Calcite Avatica server and client.
+       */
+      tupleStream = new StreamHandler.TimerStream(new ExceptionStream(new SqlHandlerStream(sql, params)));
 
       rsp.add("result-set", tupleStream);
     } catch(Exception e) {

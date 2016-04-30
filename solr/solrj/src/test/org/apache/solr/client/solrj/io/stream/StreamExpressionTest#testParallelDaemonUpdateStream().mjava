@@ -1,23 +1,26 @@
-  private void testParallelDaemonUpdateStream() throws Exception {
-    CloudSolrClient destinationCollectionClient = createCloudClient("parallelDestinationCollection1");
-    createCollection("parallelDestinationCollection1", destinationCollectionClient, 2, 2);
+  @Test
+  public void testParallelDaemonUpdateStream() throws Exception {
 
-    indexr(id, "0", "a_s", "hello0", "a_i", "0", "a_f", "0", "s_multi", "aaaa",  "s_multi", "bbbb",  "i_multi", "4", "i_multi", "7");
-    indexr(id, "2", "a_s", "hello2", "a_i", "2", "a_f", "0", "s_multi", "aaaa1", "s_multi", "bbbb1", "i_multi", "44", "i_multi", "77");
-    indexr(id, "3", "a_s", "hello3", "a_i", "3", "a_f", "3", "s_multi", "aaaa2", "s_multi", "bbbb2", "i_multi", "444", "i_multi", "777");
-    indexr(id, "4", "a_s", "hello4", "a_i", "4", "a_f", "4", "s_multi", "aaaa3", "s_multi", "bbbb3", "i_multi", "4444", "i_multi", "7777");
-    indexr(id, "1", "a_s", "hello1", "a_i", "1", "a_f", "1", "s_multi", "aaaa4", "s_multi", "bbbb4", "i_multi", "44444", "i_multi", "77777");
-    commit();
-    waitForRecoveriesToFinish("parallelDestinationCollection1", false);
+    CollectionAdminRequest.createCollection("parallelDestinationCollection1", "conf", 2, 1).process(cluster.getSolrClient());
+    AbstractDistribZkTestBase.waitForRecoveriesToFinish("parallelDestinationCollection1", cluster.getSolrClient().getZkStateReader(),
+        false, true, TIMEOUT);
+
+    new UpdateRequest()
+        .add(id, "0", "a_s", "hello0", "a_i", "0", "a_f", "0", "s_multi", "aaaa",  "s_multi", "bbbb",  "i_multi", "4", "i_multi", "7")
+        .add(id, "2", "a_s", "hello2", "a_i", "2", "a_f", "0", "s_multi", "aaaa1", "s_multi", "bbbb1", "i_multi", "44", "i_multi", "77")
+        .add(id, "3", "a_s", "hello3", "a_i", "3", "a_f", "3", "s_multi", "aaaa2", "s_multi", "bbbb2", "i_multi", "444", "i_multi", "777")
+        .add(id, "4", "a_s", "hello4", "a_i", "4", "a_f", "4", "s_multi", "aaaa3", "s_multi", "bbbb3", "i_multi", "4444", "i_multi", "7777")
+        .add(id, "1", "a_s", "hello1", "a_i", "1", "a_f", "1", "s_multi", "aaaa4", "s_multi", "bbbb4", "i_multi", "44444", "i_multi", "77777")
+        .commit(cluster.getSolrClient(), "collection1");
 
     StreamExpression expression;
     TupleStream stream;
     Tuple t;
 
-    String zkHost = zkServer.getZkAddress();
+    String zkHost = cluster.getZkServer().getZkAddress();
     StreamFactory factory = new StreamFactory()
-        .withCollectionZkHost("collection1", zkServer.getZkAddress())
-        .withCollectionZkHost("parallelDestinationCollection1", zkServer.getZkAddress())
+        .withCollectionZkHost("collection1", cluster.getZkServer().getZkAddress())
+        .withCollectionZkHost("parallelDestinationCollection1", cluster.getZkServer().getZkAddress())
         .withFunctionName("search", CloudSolrStream.class)
         .withFunctionName("update", UpdateStream.class)
         .withFunctionName("parallel", ParallelStream.class)
@@ -36,11 +39,11 @@
     params.put("action","list");
 
     int workersComplete = 0;
-    for(CloudJettyRunner jetty : this.cloudJettys) {
+    for(JettySolrRunner jetty : cluster.getJettySolrRunners()) {
       int iterations = 0;
       INNER:
       while(iterations == 0) {
-        SolrStream solrStream = new SolrStream(jetty.url, params);
+        SolrStream solrStream = new SolrStream(jetty.getBaseUrl().toString() + "/collection1", params);
         solrStream.open();
         Tuple tupleResponse = solrStream.read();
         if (tupleResponse.EOF) {
@@ -63,17 +66,17 @@
       }
     }
 
-    assert(workersComplete == 2);
+    assertEquals(cluster.getJettySolrRunners().size(), workersComplete);
 
-    destinationCollectionClient.commit();
+    cluster.getSolrClient().commit("parallelDestinationCollection1");
 
     //Lets stop the daemons
     params = new HashMap();
     params.put(CommonParams.QT,"/stream");
     params.put("action", "stop");
     params.put("id", "test");
-    for(CloudJettyRunner jetty : this.cloudJettys) {
-      SolrStream solrStream = new SolrStream(jetty.url, params);
+    for (JettySolrRunner jetty : cluster.getJettySolrRunners()) {
+      SolrStream solrStream = new SolrStream(jetty.getBaseUrl() + "/collection1", params);
       solrStream.open();
       Tuple tupleResponse = solrStream.read();
       solrStream.close();
@@ -84,11 +87,11 @@
     params.put("action","list");
 
     workersComplete = 0;
-    for(CloudJettyRunner jetty : this.cloudJettys) {
+    for (JettySolrRunner jetty : cluster.getJettySolrRunners()) {
       long stopTime = 0;
       INNER:
       while(stopTime == 0) {
-        SolrStream solrStream = new SolrStream(jetty.url, params);
+        SolrStream solrStream = new SolrStream(jetty.getBaseUrl() + "/collection1", params);
         solrStream.open();
         Tuple tupleResponse = solrStream.read();
         if (tupleResponse.EOF) {
@@ -110,7 +113,7 @@
       }
     }
 
-    assertTrue(workersComplete == 2);
+    assertEquals(cluster.getJettySolrRunners().size(), workersComplete);
     //Ensure that destinationCollection actually has the new docs.
     expression = StreamExpressionParser.parse("search(parallelDestinationCollection1, q=*:*, fl=\"id,a_s,a_i,a_f,s_multi,i_multi\", sort=\"a_i asc\")");
     stream = new CloudSolrStream(expression, factory);
@@ -157,10 +160,5 @@
     assertList(tuple.getStrings("s_multi"), "aaaa3", "bbbb3");
     assertList(tuple.getLongs("i_multi"), Long.parseLong("4444"), Long.parseLong("7777"));
 
-    destinationCollectionClient.deleteByQuery("*:*");
-    destinationCollectionClient.commit();
-    destinationCollectionClient.close();
-    del("*:*");
-    commit();
   }
 

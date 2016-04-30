@@ -6,8 +6,7 @@
     params.set("workerCollection", params.get("workerCollection", defaultWorkerCollection));
     params.set("workerZkhost", params.get("workerZkhost", defaultZkhost));
     params.set("aggregationMode", params.get("aggregationMode", "map_reduce"));
-    // JDBC driver requires metadata from the SQLHandler. Default to false since this adds a new Metadata stream.
-    params.set("includeMetadata", params.getBool("includeMetadata", false));
+
 
     TupleStream tupleStream = null;
     try {
@@ -15,11 +14,35 @@
         throw new Exception("stmt parameter cannot be null");
       }
 
-      /*
-       * Would be great to replace this with the JDBCStream. Can't do that currently since need to have metadata
-       * added to the stream for the JDBC driver. This could be fixed by using the Calcite Avatica server and client.
-       */
-      tupleStream = new StreamHandler.TimerStream(new ExceptionStream(new SqlHandlerStream(sql, params)));
+      String url = "jdbc:calcitesolr:";
+
+      Properties properties = new Properties();
+      // Add all query parameters
+      Iterator<String> parameterNamesIterator = params.getParameterNamesIterator();
+      while(parameterNamesIterator.hasNext()) {
+        String param = parameterNamesIterator.next();
+        properties.setProperty(param, params.get(param));
+      }
+
+      // Set these last to ensure that they are set properly
+      properties.setProperty("lex", Lex.MYSQL.toString());
+      properties.setProperty("zk", defaultZkhost);
+
+      String driverClass = CalciteSolrDriver.class.getCanonicalName();
+
+      // JDBC driver requires metadata from the SQLHandler. Default to false since this adds a new Metadata stream.
+      if(params.getBool("includeMetadata", false)) {
+        /*
+         * Would be great to replace this with the JDBCStream. Can't do that currently since need to have metadata
+         * added to the stream for the JDBC driver. This could be fixed by using the Calcite Avatica server and client.
+         */
+        tupleStream = new SqlHandlerStream(url, sql, properties, driverClass);
+      } else {
+        tupleStream = new JDBCStream(url, sql, null, properties, driverClass);
+      }
+
+      tupleStream = new StreamHandler.TimerStream(new ExceptionStream(tupleStream));
+
 
       rsp.add("result-set", tupleStream);
     } catch(Exception e) {

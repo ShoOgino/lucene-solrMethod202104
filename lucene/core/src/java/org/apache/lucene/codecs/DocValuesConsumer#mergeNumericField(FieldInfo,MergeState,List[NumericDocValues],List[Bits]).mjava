@@ -5,20 +5,23 @@
    * an Iterable that merges and filters deleted documents on the fly.
    */
   public void mergeNumericField(final FieldInfo fieldInfo, final MergeState mergeState, final List<NumericDocValues> toMerge, final List<Bits> docsWithField) throws IOException {
-
     addNumericField(fieldInfo,
                     new Iterable<Number>() {
                       @Override
                       public Iterator<Number> iterator() {
+
+                        // We must make a new DocIDMerger for each iterator:
+                        List<NumericDocValuesSub> subs = new ArrayList<>();
+                        assert mergeState.docMaps.length == toMerge.size();
+                        for(int i=0;i<toMerge.size();i++) {
+                          subs.add(new NumericDocValuesSub(mergeState.docMaps[i], mergeState.liveDocs[i], toMerge.get(i), docsWithField.get(i), mergeState.maxDocs[i]));
+                        }
+
+                        final DocIDMerger<NumericDocValuesSub> docIDMerger = new DocIDMerger<>(subs, mergeState.segmentInfo.getIndexSort() != null);
+
                         return new Iterator<Number>() {
-                          int readerUpto = -1;
-                          int docIDUpto;
                           long nextValue;
                           boolean nextHasValue;
-                          int currentMaxDoc;
-                          NumericDocValues currentValues;
-                          Bits currentLiveDocs;
-                          Bits currentDocsWithField;
                           boolean nextIsSet;
 
                           @Override
@@ -33,7 +36,7 @@
 
                           @Override
                           public Number next() {
-                            if (!hasNext()) {
+                            if (hasNext() == false) {
                               throw new NoSuchElementException();
                             }
                             assert nextIsSet;
@@ -43,35 +46,14 @@
 
                           private boolean setNext() {
                             while (true) {
-                              if (readerUpto == toMerge.size()) {
+                              NumericDocValuesSub sub = docIDMerger.next();
+                              if (sub == null) {
                                 return false;
                               }
-
-                              if (docIDUpto == currentMaxDoc) {
-                                readerUpto++;
-                                if (readerUpto < toMerge.size()) {
-                                  currentValues = toMerge.get(readerUpto);
-                                  currentDocsWithField = docsWithField.get(readerUpto);
-                                  currentLiveDocs = mergeState.liveDocs[readerUpto];
-                                  currentMaxDoc = mergeState.maxDocs[readerUpto];
-                                }
-                                docIDUpto = 0;
-                                continue;
-                              }
-
-                              if (currentLiveDocs == null || currentLiveDocs.get(docIDUpto)) {
-                                nextIsSet = true;
-                                nextValue = currentValues.get(docIDUpto);
-                                if (nextValue == 0 && currentDocsWithField.get(docIDUpto) == false) {
-                                  nextHasValue = false;
-                                } else {
-                                  nextHasValue = true;
-                                }
-                                docIDUpto++;
-                                return true;
-                              }
-
-                              docIDUpto++;
+                              nextIsSet = true;
+                              nextValue = sub.values.get(sub.docID);
+                              nextHasValue = nextValue != 0 || sub.docsWithField.get(sub.docID);
+                              return true;
                             }
                           }
                         };

@@ -6,23 +6,26 @@
    *  Implementations can override this method for more sophisticated
    *  merging (bulk-byte copying, etc). */
   public int merge(MergeState mergeState) throws IOException {
-    int docCount = 0;
-    for (int i=0;i<mergeState.storedFieldsReaders.length;i++) {
+    List<StoredFieldsMergeSub> subs = new ArrayList<>();
+    for(int i=0;i<mergeState.storedFieldsReaders.length;i++) {
       StoredFieldsReader storedFieldsReader = mergeState.storedFieldsReaders[i];
       storedFieldsReader.checkIntegrity();
-      MergeVisitor visitor = new MergeVisitor(mergeState, i);
-      int maxDoc = mergeState.maxDocs[i];
-      Bits liveDocs = mergeState.liveDocs[i];
-      for (int docID=0;docID<maxDoc;docID++) {
-        if (liveDocs != null && !liveDocs.get(docID)) {
-          // skip deleted docs
-          continue;
-        }
-        startDocument();
-        storedFieldsReader.visitDocument(docID, visitor);
-        finishDocument();
-        docCount++;
+      subs.add(new StoredFieldsMergeSub(new MergeVisitor(mergeState, i), mergeState.docMaps[i], mergeState.liveDocs[i], storedFieldsReader, mergeState.maxDocs[i]));
+    }
+
+    final DocIDMerger<StoredFieldsMergeSub> docIDMerger = new DocIDMerger<>(subs, mergeState.segmentInfo.getIndexSort() != null);
+
+    int docCount = 0;
+    while (true) {
+      StoredFieldsMergeSub sub = docIDMerger.next();
+      if (sub == null) {
+        break;
       }
+      assert sub.mappedDocID == docCount;
+      startDocument();
+      sub.reader.visitDocument(sub.docID, sub.visitor);
+      finishDocument();
+      docCount++;
     }
     finish(mergeState.mergeFieldInfos, docCount);
     return docCount;

@@ -52,7 +52,7 @@
 
               @Override
               public BytesRef next() {
-                if (!hasNext()) {
+                if (hasNext() == false) {
                   throw new NoSuchElementException();
                 }
                 int segmentNumber = map.getFirstSegmentNumber(currentOrd);
@@ -73,13 +73,17 @@
         new Iterable<Number>() {
           @Override
           public Iterator<Number> iterator() {
+            // We must make a new DocIDMerger for each iterator:
+            List<SortedDocValuesSub> subs = new ArrayList<>();
+            assert mergeState.docMaps.length == toMerge.size();
+            for(int i=0;i<toMerge.size();i++) {
+              subs.add(new SortedDocValuesSub(mergeState.docMaps[i], mergeState.liveDocs[i], toMerge.get(i), mergeState.maxDocs[i], map.getGlobalOrds(i)));
+            }
+
+            final DocIDMerger<SortedDocValuesSub> docIDMerger = new DocIDMerger<>(subs, mergeState.segmentInfo.getIndexSort() != null);
+
             return new Iterator<Number>() {
-              int readerUpto = -1;
-              int docIDUpto;
               int nextValue;
-              int currentMaxDoc;
-              Bits currentLiveDocs;
-              LongValues currentMap;
               boolean nextIsSet;
 
               @Override
@@ -94,7 +98,7 @@
 
               @Override
               public Number next() {
-                if (!hasNext()) {
+                if (hasNext() == false) {
                   throw new NoSuchElementException();
                 }
                 assert nextIsSet;
@@ -105,30 +109,15 @@
 
               private boolean setNext() {
                 while (true) {
-                  if (readerUpto == numReaders) {
+                  SortedDocValuesSub sub = docIDMerger.next();
+                  if (sub == null) {
                     return false;
                   }
 
-                  if (docIDUpto == currentMaxDoc) {
-                    readerUpto++;
-                    if (readerUpto < numReaders) {
-                      currentMap = map.getGlobalOrds(readerUpto);
-                      currentLiveDocs = mergeState.liveDocs[readerUpto];
-                      currentMaxDoc = mergeState.maxDocs[readerUpto];
-                    }
-                    docIDUpto = 0;
-                    continue;
-                  }
-
-                  if (currentLiveDocs == null || currentLiveDocs.get(docIDUpto)) {
-                    nextIsSet = true;
-                    int segOrd = dvs[readerUpto].getOrd(docIDUpto);
-                    nextValue = segOrd == -1 ? -1 : (int) currentMap.get(segOrd);
-                    docIDUpto++;
-                    return true;
-                  }
-
-                  docIDUpto++;
+                  nextIsSet = true;
+                  int segOrd = sub.values.getOrd(sub.docID);
+                  nextValue = segOrd == -1 ? -1 : (int) sub.map.get(segOrd);
+                  return true;
                 }
               }
             };

@@ -1,0 +1,95 @@
+  /** Executes a Solr query on the underlying table.
+   *
+   * @param properties Connections properties
+   * @param fields List of fields to project
+   * @param query A string for the query
+   * @return Enumerator of results
+   */
+  private Enumerable<Object> query(final Properties properties, final List<String> fields,
+                                   final String query, final List<String> order, final List<String> buckets,
+                                   final List<Metric> metrics, final String limit) {
+    // SolrParams should be a ModifiableParams instead of a map
+    Map<String, String> solrParams = new HashMap<>();
+    solrParams.put(CommonParams.OMIT_HEADER, "true");
+
+    if (query == null) {
+      solrParams.put(CommonParams.Q, DEFAULT_QUERY);
+    } else {
+      solrParams.put(CommonParams.Q, DEFAULT_QUERY + " AND " + query);
+    }
+
+    // List<String> doesn't have add so must make a new ArrayList
+    List<String> fieldsList = new ArrayList<>(fields);
+
+    if (order.isEmpty()) {
+      if(limit != null && Integer.parseInt(limit) > -1) {
+        solrParams.put(CommonParams.SORT, DEFAULT_SCORE_FIELD + " desc");
+
+        // Make sure the default score field is in the field list
+        if (!fieldsList.contains(DEFAULT_SCORE_FIELD)) {
+          fieldsList.add(DEFAULT_SCORE_FIELD);
+        }
+      } else {
+        solrParams.put(CommonParams.SORT, DEFAULT_VERSION_FIELD + " desc");
+
+        // Make sure the default sort field is in the field list
+        if (!fieldsList.contains(DEFAULT_VERSION_FIELD)) {
+          fieldsList.add(DEFAULT_VERSION_FIELD);
+        }
+      }
+    } else {
+      solrParams.put(CommonParams.SORT, String.join(",", order));
+    }
+
+    if (fieldsList.isEmpty()) {
+      solrParams.put(CommonParams.FL, "*");
+    } else {
+      solrParams.put(CommonParams.FL, String.join(",", fieldsList));
+    }
+
+    TupleStream tupleStream;
+    String zk = properties.getProperty("zk");
+    try {
+      if(metrics.isEmpty()) {
+        if (limit == null) {
+          solrParams.put(CommonParams.QT, "/export");
+          tupleStream = new CloudSolrStream(zk, collection, solrParams);
+        } else {
+          solrParams.put(CommonParams.ROWS, limit);
+          tupleStream = new LimitStream(new CloudSolrStream(zk, collection, solrParams), Integer.parseInt(limit));
+        }
+      } else {
+        Metric[] metricsArray = metrics.toArray(new Metric[metrics.size()]);
+        if(buckets.isEmpty()) {
+          solrParams.remove(CommonParams.FL);
+          solrParams.remove(CommonParams.SORT);
+          tupleStream = new StatsStream(zk, collection, solrParams, metricsArray);
+        } else {
+          List<Bucket> bucketsList = new ArrayList<>();
+          for(String bucket : buckets) {
+            bucketsList.add(new Bucket(bucket));
+          }
+
+          solrParams.put(CommonParams.QT, "/export");
+          for(Metric metric : metrics) {
+            fieldsList.remove(metric.getIdentifier());
+          }
+          solrParams.put(CommonParams.FL, String.join(",", fieldsList));
+          tupleStream = new CloudSolrStream(zk, collection, solrParams);
+          tupleStream = new RollupStream(tupleStream, bucketsList.toArray(new Bucket[bucketsList.size()]), metricsArray);
+        }
+      }
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+
+    final TupleStream finalStream = tupleStream;
+
+    return new AbstractEnumerable<Object>() {
+      // Use original fields list to make sure only the fields specified are enumerated
+      public Enumerator<Object> enumerator() {
+        return new SolrEnumerator(finalStream, fields);
+      }
+    };
+  }
+

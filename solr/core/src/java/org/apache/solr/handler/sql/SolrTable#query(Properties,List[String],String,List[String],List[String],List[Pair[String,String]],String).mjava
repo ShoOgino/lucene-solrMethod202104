@@ -30,6 +30,14 @@
       }
 
       for(Metric metric : metrics) {
+        List<String> newOrderList = new ArrayList<>();
+        for(String orderItem : orderList) {
+          if(!orderItem.startsWith(metric.getIdentifier())) {
+            newOrderList.add(orderItem);
+          }
+        }
+        orderList = newOrderList;
+
         for(String column : metric.getColumns()) {
           if (!fieldsList.contains(column)) {
             fieldsList.add(column);
@@ -94,6 +102,47 @@
           solrParams.put(CommonParams.FL, String.join(",", fieldsList));
           tupleStream = new CloudSolrStream(zk, collection, solrParams);
           tupleStream = new RollupStream(tupleStream, bucketsList.toArray(new Bucket[bucketsList.size()]), metricsArray);
+
+          String sortDirection = getSortDirection(orderList);
+
+          int numWorkers = Integer.parseInt(properties.getProperty("numWorkers", "1"));
+          if(numWorkers > 1) {
+            String workerZkHost = properties.getProperty("workerZkhost");
+            String workerCollection = properties.getProperty("workerCollection");
+            // Do the rollups in parallel
+            // Maintain the sort of the Tuples coming from the workers.
+            StreamComparator comp = bucketSortComp(bucketsList, sortDirection);
+            ParallelStream parallelStream = new ParallelStream(workerZkHost, workerCollection, tupleStream, numWorkers, comp);
+
+            StreamFactory factory = new StreamFactory()
+                .withFunctionName("search", CloudSolrStream.class)
+                .withFunctionName("parallel", ParallelStream.class)
+                .withFunctionName("rollup", RollupStream.class)
+                .withFunctionName("sum", SumMetric.class)
+                .withFunctionName("min", MinMetric.class)
+                .withFunctionName("max", MaxMetric.class)
+                .withFunctionName("avg", MeanMetric.class)
+                .withFunctionName("count", CountMetric.class);
+
+            parallelStream.setStreamFactory(factory);
+            tupleStream = parallelStream;
+          }
+
+          if (!sortsEqual(bucketsList, sortDirection, orderList)) {
+            int limitVal = limit == null ? 100 : Integer.parseInt(limit);
+            StreamComparator comp = getComp(orderList);
+            //Rank the Tuples
+            //If parallel stream is used ALL the Rolled up tuples from the workers will be ranked
+            //Providing a true Top or Bottom.
+            tupleStream = new RankStream(tupleStream, limitVal, comp);
+          } else {
+            // Sort is the same as the same as the underlying stream
+            // Only need to limit the result, not Rank the result
+            if (limit != null) {
+              solrParams.put(CommonParams.ROWS, limit);
+              tupleStream = new LimitStream(new CloudSolrStream(zk, collection, solrParams), Integer.parseInt(limit));
+            }
+          }
         }
       }
     } catch (IOException e) {

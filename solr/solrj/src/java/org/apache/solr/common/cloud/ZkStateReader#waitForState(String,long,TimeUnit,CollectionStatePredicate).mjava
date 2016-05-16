@@ -1,0 +1,46 @@
+  /**
+   * Block until a CollectionStatePredicate returns true, or the wait times out
+   *
+   * Note that the predicate may be called again even after it has returned true, so
+   * implementors should avoid changing state within the predicate call itself.
+   *
+   * @param collection the collection to watch
+   * @param wait       how long to wait
+   * @param unit       the units of the wait parameter
+   * @param predicate  the predicate to call on state changes
+   * @throws InterruptedException on interrupt
+   * @throws TimeoutException on timeout
+   */
+  public void waitForState(final String collection, long wait, TimeUnit unit, CollectionStatePredicate predicate)
+      throws InterruptedException, TimeoutException {
+
+    final CountDownLatch latch = new CountDownLatch(1);
+
+    CollectionStateWatcher watcher = new CollectionStateWatcher() {
+      @Override
+      public void onStateChanged(Set<String> liveNodes, DocCollection collectionState) {
+        if (predicate.matches(liveNodes, collectionState)) {
+          latch.countDown();
+        } else {
+          registerCollectionStateWatcher(collection, this);
+        }
+      }
+    };
+    registerCollectionStateWatcher(collection, watcher);
+
+    try {
+      // check the current state
+      DocCollection dc = clusterState.getCollectionOrNull(collection);
+      if (predicate.matches(liveNodes, dc))
+        return;
+
+      // wait for the watcher predicate to return true, or time out
+      if (!latch.await(wait, unit))
+        throw new TimeoutException();
+
+    }
+    finally {
+      removeCollectionStateWatcher(collection, watcher);
+    }
+  }
+

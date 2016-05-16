@@ -5,20 +5,23 @@
    * an Iterable that merges and filters deleted documents on the fly.
    */
   public void mergeBinaryField(FieldInfo fieldInfo, final MergeState mergeState, final List<BinaryDocValues> toMerge, final List<Bits> docsWithField) throws IOException {
-
     addBinaryField(fieldInfo,
                    new Iterable<BytesRef>() {
                      @Override
                      public Iterator<BytesRef> iterator() {
+
+                       // We must make a new DocIDMerger for each iterator:
+                       List<BinaryDocValuesSub> subs = new ArrayList<>();
+                       assert mergeState.docMaps.length == toMerge.size();
+                       for(int i=0;i<toMerge.size();i++) {
+                         subs.add(new BinaryDocValuesSub(mergeState.docMaps[i], toMerge.get(i), docsWithField.get(i), mergeState.maxDocs[i]));
+                       }
+
+                       final DocIDMerger<BinaryDocValuesSub> docIDMerger = new DocIDMerger<>(subs, mergeState.segmentInfo.getIndexSort() != null);
+
                        return new Iterator<BytesRef>() {
-                         int readerUpto = -1;
-                         int docIDUpto;
                          BytesRef nextValue;
                          BytesRef nextPointer; // points to null if missing, or nextValue
-                         int currentMaxDoc;
-                         BinaryDocValues currentValues;
-                         Bits currentLiveDocs;
-                         Bits currentDocsWithField;
                          boolean nextIsSet;
 
                          @Override
@@ -33,7 +36,7 @@
 
                          @Override
                          public BytesRef next() {
-                           if (!hasNext()) {
+                           if (hasNext() == false) {
                              throw new NoSuchElementException();
                            }
                            assert nextIsSet;
@@ -43,37 +46,19 @@
 
                          private boolean setNext() {
                            while (true) {
-                             if (readerUpto == toMerge.size()) {
-                               return false;
+                              BinaryDocValuesSub sub = docIDMerger.next();
+                              if (sub == null) {
+                                return false;
+                              }
+                              nextIsSet = true;
+                              if (sub.docsWithField.get(sub.docID)) {
+                                nextPointer = nextValue = sub.values.get(sub.docID);
+                              } else {
+                                nextPointer = null;
+                              }
+                              return true;
                              }
-
-                             if (docIDUpto == currentMaxDoc) {
-                               readerUpto++;
-                               if (readerUpto < toMerge.size()) {
-                                 currentValues = toMerge.get(readerUpto);
-                                 currentDocsWithField = docsWithField.get(readerUpto);
-                                 currentLiveDocs = mergeState.liveDocs[readerUpto];
-                                 currentMaxDoc = mergeState.maxDocs[readerUpto];
-                               }
-                               docIDUpto = 0;
-                               continue;
-                             }
-
-                             if (currentLiveDocs == null || currentLiveDocs.get(docIDUpto)) {
-                               nextIsSet = true;
-                               if (currentDocsWithField.get(docIDUpto)) {
-                                 nextValue = currentValues.get(docIDUpto);
-                                 nextPointer = nextValue;
-                               } else {
-                                 nextPointer = null;
-                               }
-                               docIDUpto++;
-                               return true;
-                             }
-
-                             docIDUpto++;
                            }
-                         }
                        };
                      }
                    });

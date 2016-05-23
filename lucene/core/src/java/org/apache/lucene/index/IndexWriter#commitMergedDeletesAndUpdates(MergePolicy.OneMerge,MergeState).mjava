@@ -20,13 +20,13 @@
 
     // Carefully merge deletes that occurred after we
     // started merging:
-    int docUpto = 0;
     long minGen = Long.MAX_VALUE;
 
     // Lazy init (only when we find a delete to carry over):
     final MergedDeletesAndUpdates holder = new MergedDeletesAndUpdates();
     final DocValuesFieldUpdates.Container mergedDVUpdates = new DocValuesFieldUpdates.Container();
-    
+
+    assert sourceSegments.size() == mergeState.docMaps.length;
     for (int i = 0; i < sourceSegments.size(); i++) {
       SegmentCommitInfo info = sourceSegments.get(i);
       minGen = Math.min(info.getBufferedDeletesGen(), minGen);
@@ -89,21 +89,20 @@
           // since we started the merge, so we
           // must merge them:
           for (int j = 0; j < maxDoc; j++) {
-            if (!prevLiveDocs.get(j)) {
-              assert !currentLiveDocs.get(j);
-            } else {
-              if (!currentLiveDocs.get(j)) {
-                if (holder.mergedDeletesAndUpdates == null || !holder.initializedWritableLiveDocs) {
-                  holder.init(readerPool, merge, mergeState, true);
-                }
-                holder.mergedDeletesAndUpdates.delete(holder.docMap.map(docUpto));
-                if (mergingFields != null) { // advance all iters beyond the deleted document
-                  skipDeletedDoc(updatesIters, j);
-                }
-              } else if (mergingFields != null) {
-                maybeApplyMergedDVUpdates(merge, mergeState, docUpto, holder, mergingFields, dvFieldUpdates, updatesIters, j);
+            if (prevLiveDocs.get(j) == false) {
+              // if the document was deleted before, it better still be deleted!
+              assert currentLiveDocs.get(j) == false;
+            } else if (currentLiveDocs.get(j) == false) {
+              // the document was deleted while we were merging:
+              if (holder.mergedDeletesAndUpdates == null || holder.initializedWritableLiveDocs == false) {
+                holder.init(readerPool, merge, true);
               }
-              docUpto++;
+              holder.mergedDeletesAndUpdates.delete(mergeState.docMaps[i].get(mergeState.leafDocMaps[i].get(j)));
+              if (mergingFields != null) { // advance all iters beyond the deleted document
+                skipDeletedDoc(updatesIters, j);
+              }
+            } else if (mergingFields != null) {
+              maybeApplyMergedDVUpdates(merge, mergeState, holder, mergingFields, dvFieldUpdates, updatesIters, i, j);
             }
           }
         } else if (mergingFields != null) {
@@ -111,49 +110,37 @@
           for (int j = 0; j < maxDoc; j++) {
             if (prevLiveDocs.get(j)) {
               // document isn't deleted, check if any of the fields have an update to it
-              maybeApplyMergedDVUpdates(merge, mergeState, docUpto, holder, mergingFields, dvFieldUpdates, updatesIters, j);
-              // advance docUpto for every non-deleted document
-              docUpto++;
+              maybeApplyMergedDVUpdates(merge, mergeState, holder, mergingFields, dvFieldUpdates, updatesIters, i, j);
             } else {
               // advance all iters beyond the deleted document
               skipDeletedDoc(updatesIters, j);
             }
           }
-        } else {
-          docUpto += info.info.maxDoc() - info.getDelCount() - rld.getPendingDeleteCount();
         }
       } else if (currentLiveDocs != null) {
         assert currentLiveDocs.length() == maxDoc;
         // This segment had no deletes before but now it
         // does:
         for (int j = 0; j < maxDoc; j++) {
-          if (!currentLiveDocs.get(j)) {
+          if (currentLiveDocs.get(j) == false) {
             if (holder.mergedDeletesAndUpdates == null || !holder.initializedWritableLiveDocs) {
-              holder.init(readerPool, merge, mergeState, true);
+              holder.init(readerPool, merge, true);
             }
-            holder.mergedDeletesAndUpdates.delete(holder.docMap.map(docUpto));
+            holder.mergedDeletesAndUpdates.delete(mergeState.docMaps[i].get(mergeState.leafDocMaps[i].get(j)));
             if (mergingFields != null) { // advance all iters beyond the deleted document
               skipDeletedDoc(updatesIters, j);
             }
           } else if (mergingFields != null) {
-            maybeApplyMergedDVUpdates(merge, mergeState, docUpto, holder, mergingFields, dvFieldUpdates, updatesIters, j);
+            maybeApplyMergedDVUpdates(merge, mergeState, holder, mergingFields, dvFieldUpdates, updatesIters, i, j);
           }
-          docUpto++;
         }
       } else if (mergingFields != null) {
         // no deletions before or after, but there were updates
         for (int j = 0; j < maxDoc; j++) {
-          maybeApplyMergedDVUpdates(merge, mergeState, docUpto, holder, mergingFields, dvFieldUpdates, updatesIters, j);
-          // advance docUpto for every non-deleted document
-          docUpto++;
+          maybeApplyMergedDVUpdates(merge, mergeState, holder, mergingFields, dvFieldUpdates, updatesIters, i, j);
         }
-      } else {
-        // No deletes or updates before or after
-        docUpto += info.info.maxDoc();
       }
     }
-
-    assert docUpto == merge.info.info.maxDoc();
 
     if (mergedDVUpdates.any()) {
 //      System.out.println("[" + Thread.currentThread().getName() + "] IW.commitMergedDeletes: mergedDeletes.info=" + mergedDeletes.info + ", mergedFieldUpdates=" + mergedFieldUpdates);

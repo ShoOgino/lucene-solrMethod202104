@@ -3,20 +3,22 @@
    * two stage operation; the caller must ensure (in try/finally) that finishFlush
    * is called after this method, to release the flush lock in DWFlushControl
    */
-  boolean flushAllThreads()
+  long flushAllThreads()
     throws IOException, AbortingException {
     final DocumentsWriterDeleteQueue flushingDeleteQueue;
     if (infoStream.isEnabled("DW")) {
       infoStream.message("DW", "startFullFlush");
     }
-    
+
+    long seqNo;
+
     synchronized (this) {
       pendingChangesInCurrentFullFlush = anyChanges();
       flushingDeleteQueue = deleteQueue;
       /* Cutover to a new delete queue.  This must be synced on the flush control
        * otherwise a new DWPT could sneak into the loop with an already flushing
        * delete queue */
-      flushControl.markForFullFlush(); // swaps the delQueue synced on FlushControl
+      seqNo = flushControl.markForFullFlush(); // swaps the delQueue synced on FlushControl
       assert setFlushingDeleteQueue(flushingDeleteQueue);
     }
     assert currentFullFlushDelQueue != null;
@@ -36,12 +38,16 @@
           infoStream.message("DW", Thread.currentThread().getName() + ": flush naked frozen global deletes");
         }
         ticketQueue.addDeletes(flushingDeleteQueue);
-      } 
+      }
       ticketQueue.forcePurge(writer);
       assert !flushingDeleteQueue.anyChanges() && !ticketQueue.hasTickets();
     } finally {
       assert flushingDeleteQueue == currentFullFlushDelQueue;
     }
-    return anythingFlushed;
+    if (anythingFlushed) {
+      return -seqNo;
+    } else {
+      return seqNo;
+    }
   }
 

@@ -1,11 +1,37 @@
   /** Returns the alternate highlight object for this field -- a String[] by default.  Null if none. */
   @SuppressWarnings("unchecked")
-  protected Object alternateField(Document doc, String fieldName, SolrQueryRequest req) {
+  protected Object alternateField(Document doc, int docId, String fieldName, FvhContainer fvhContainer, Query query,
+                                  IndexReader reader, SolrQueryRequest req) throws IOException {
+    IndexSchema schema = req.getSearcher().getSchema();
     SolrParams params = req.getParams();
     String alternateField = params.getFieldParam(fieldName, HighlightParams.ALTERNATE_FIELD);
+    int alternateFieldLen = params.getFieldInt(fieldName, HighlightParams.ALTERNATE_FIELD_LENGTH, 0);
     if (alternateField == null || alternateField.length() == 0) {
       return null;
     }
+
+    if (params.getFieldBool(fieldName, HighlightParams.HIGHLIGHT_ALTERNATE, true)) {
+      // Try to highlight alternate field
+      Object fieldHighlights = null;
+      SchemaField schemaField = schema.getFieldOrNull(alternateField);
+      if (schemaField != null) {
+        HashMap<String, String> invariants = new HashMap<>();
+        invariants.put("f." + alternateField + "." + HighlightParams.SNIPPETS, "1");
+        // Enforce maxAlternateFieldLength by FRAGSIZE. Minimum 18 due to FVH limitations
+        invariants.put("f." + alternateField + "." + HighlightParams.FRAGSIZE,
+            alternateFieldLen > 0 ? String.valueOf(Math.max(18, alternateFieldLen)) : String.valueOf(Integer.MAX_VALUE));
+        SolrParams origParams = req.getParams();
+        req.setParams(SolrParams.wrapDefaults(new MapSolrParams(invariants), origParams));
+        fieldHighlights = doHighlightingOfField(doc, docId, schemaField, fvhContainer, query, reader, req, params);
+        req.setParams(origParams);
+        if (fieldHighlights != null) {
+          return fieldHighlights;
+        }
+      }
+    }
+
+
+    // Fallback to static non-highlighted
     IndexableField[] docFields = doc.getFields(alternateField);
     if (docFields.length == 0) {
       // The alternate field did not exist, treat the original field as fallback instead
@@ -23,7 +49,6 @@
     String[] altTexts = listFields.toArray(new String[listFields.size()]);
 
     Encoder encoder = getEncoder(fieldName, params);
-    int alternateFieldLen = params.getFieldInt(fieldName, HighlightParams.ALTERNATE_FIELD_LENGTH, 0);
     List<String> altList = new ArrayList<>();
     int len = 0;
     for( String altText: altTexts ){

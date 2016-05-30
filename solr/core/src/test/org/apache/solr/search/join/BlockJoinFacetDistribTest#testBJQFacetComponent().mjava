@@ -1,4 +1,5 @@
-  private void testBJQFacetComponent() throws Exception {
+  @Test
+  public void testBJQFacetComponent() throws Exception {
     
     assert ! colors.removeAll(sizes): "there is no colors in sizes";
     Collections.shuffle(colors,random());
@@ -11,8 +12,11 @@
       }
     };
     
+    cluster.getSolrClient().deleteByQuery(collection, "*:*");
+    
     final int parents = atLeast(10);
     boolean aggregationOccurs = false;
+    List<SolrInputDocument> parentDocs = new ArrayList<>();
     for(int parent=0; parent<parents || !aggregationOccurs;parent++){
       assert parent < 2000000 : "parent num "+parent+
            " aggregationOccurs:"+aggregationOccurs+". Sorry! too tricky loop condition.";
@@ -36,22 +40,18 @@
         }
         pdoc.addChildDocument(childDoc);
       }
-      indexDoc(pdoc);
+      parentDocs.add(pdoc);
+      if (!parentDocs.isEmpty() && rarely()) {
+        indexDocs(parentDocs);
+        parentDocs.clear();
+        cluster.getSolrClient().commit(collection, false, false, true);
+      }
     }
-    commit();
-    
-    //handle.clear();
-    handle.put("timestamp", SKIPVAL);
-    handle.put("_version_", SKIPVAL); // not a cloud test, but may use updateLog
-    handle.put("maxScore", SKIP);// see org.apache.solr.TestDistributedSearch.test()
-    handle.put("shards", SKIP);
-    handle.put("distrib", SKIP);
-    handle.put("rid", SKIP);
-    handle.put("track", SKIP);
-    handle.put("facet_fields", UNORDERED);
-    handle.put("SIZE_s", UNORDERED);
-    handle.put("COLOR_s", UNORDERED);
-    
+    if (!parentDocs.isEmpty()) {
+      indexDocs(parentDocs);
+    }
+    cluster.getSolrClient().commit(collection);
+
     // to parent query
     final String childQueryClause = "COLOR_s:("+(matchingColors.toString().replaceAll("[,\\[\\]]", " "))+")";
       QueryResponse results = query("q", "{!parent which=\"type_s:parent\"}"+childQueryClause,
@@ -69,11 +69,12 @@
       String msg = ""+parentIdsByAttrValue+" "+color_s+" "+size_s;
       for (FacetField facet: new FacetField[]{color_s, size_s}) {
         for (Count c : facet.getValues()) {
-          assertEquals(c.getName()+"("+msg+")", parentIdsByAttrValue.get(c.getName()).size(), c.getCount());
+          assertEquals(c.getName()+"("+msg+")", 
+              parentIdsByAttrValue.get(c.getName()).size(), c.getCount());
         }
       }
       
       assertEquals(msg , parentIdsByAttrValue.size(),color_s.getValueCount() + size_s.getValueCount());
-  //  }
+      //System.out.println(parentIdsByAttrValue);
   }
 

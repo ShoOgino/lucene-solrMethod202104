@@ -2,23 +2,35 @@
       InterruptedException {
 
     publishNodeAsDown(getNodeName());
+    
+    // now wait till the updates are in our state
+    long now = System.nanoTime();
+    long timeout = now + TimeUnit.NANOSECONDS.convert(WAIT_DOWN_STATES_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    boolean foundStates = true;
 
-    Set<String> collections = cc.getLocalCollections();
-    CountDownLatch latch = new CountDownLatch(collections.size());
-
-    for (String collection : collections) {
-      zkStateReader.registerCollectionStateWatcher(collection, (nodes, state) -> {
-        for (Replica replica : state.getReplicasOnNode(getNodeName())) {
-          if (replica.getState() != Replica.State.DOWN)
-            return false;
+    while (System.nanoTime() < timeout) {
+      ClusterState clusterState = zkStateReader.getClusterState();
+      Map<String, DocCollection> collections = clusterState.getCollectionsMap();
+      for (Map.Entry<String, DocCollection> entry : collections.entrySet()) {
+        DocCollection collection = entry.getValue();
+        Collection<Slice> slices = collection.getSlices();
+        for (Slice slice : slices) {
+          Collection<Replica> replicas = slice.getReplicas();
+          for (Replica replica : replicas) {
+            if (getNodeName().equals(replica.getNodeName()) && replica.getState() != Replica.State.DOWN) {
+              foundStates = false;
+            }
+          }
         }
-        latch.countDown();
-        return true;
-      });
-    }
+      }
 
-    if (latch.await(WAIT_DOWN_STATES_TIMEOUT_SECONDS, TimeUnit.SECONDS) == false) {
-      // TODO should we abort here?
+      if (foundStates) {
+        Thread.sleep(1000);
+        break;
+      }
+      Thread.sleep(1000);
+    }
+    if (!foundStates) {
       log.warn("Timed out waiting to see all nodes published as DOWN in our cluster state.");
     }
 

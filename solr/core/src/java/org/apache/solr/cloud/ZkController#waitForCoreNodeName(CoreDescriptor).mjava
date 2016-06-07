@@ -1,21 +1,34 @@
-  private void waitForCoreNodeName(CoreDescriptor descriptor) throws InterruptedException {
-    log.info("Waiting for coreNodeName for core {} in collection {} to be assigned",
-        descriptor.getName(), descriptor.getCollectionName());
-    final String thisNode = getNodeName();
-    try {
-      zkStateReader.waitForState(descriptor.getCollectionName(), 320, TimeUnit.SECONDS, (n, c) -> {
-        if (c == null)
-          return false;
-        for (Replica replica : c.getReplicasOnNode(thisNode)) {
-          if (descriptor.getName().equals(replica.getCoreName())) {
-            descriptor.getCloudDescriptor().setCoreNodeName(replica.getName());
-            return true;
+  private void waitForCoreNodeName(CoreDescriptor descriptor) {
+    int retryCount = 320;
+    log.info("look for our core node name");
+    while (retryCount-- > 0) {
+      Map<String, Slice> slicesMap = zkStateReader.getClusterState()
+          .getSlicesMap(descriptor.getCloudDescriptor().getCollectionName());
+      if (slicesMap != null) {
+
+        for (Slice slice : slicesMap.values()) {
+          for (Replica replica : slice.getReplicas()) {
+            // TODO: for really large clusters, we could 'index' on this
+
+            String nodeName = replica.getStr(ZkStateReader.NODE_NAME_PROP);
+            String core = replica.getStr(ZkStateReader.CORE_NAME_PROP);
+
+            String msgNodeName = getNodeName();
+            String msgCore = descriptor.getName();
+
+            if (msgNodeName.equals(nodeName) && core.equals(msgCore)) {
+              descriptor.getCloudDescriptor()
+                  .setCoreNodeName(replica.getName());
+              return;
+            }
           }
         }
-        return false;
-      });
-    } catch (TimeoutException e) {
-      throw new SolrException(ErrorCode.SERVER_ERROR, "Timed out getting coreNodeName for " + descriptor.getName());
+      }
+      try {
+        Thread.sleep(1000);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+      }
     }
   }
 

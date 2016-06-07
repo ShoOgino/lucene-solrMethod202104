@@ -1,4 +1,4 @@
-  private void prepareCommitInternal(MergePolicy mergePolicy) throws IOException {
+  private long prepareCommitInternal(MergePolicy mergePolicy) throws IOException {
     startCommitTime = System.nanoTime();
     synchronized(commitLock) {
       ensureOpen(false);
@@ -19,6 +19,7 @@
       testPoint("startDoFlush");
       SegmentInfos toCommit = null;
       boolean anySegmentsFlushed = false;
+      long seqNo;
 
       // This is copied from doFlush, except it's modified to
       // clone & incRef the flushed SegmentInfos inside the
@@ -30,7 +31,11 @@
           boolean flushSuccess = false;
           boolean success = false;
           try {
-            anySegmentsFlushed = docWriter.flushAllThreads();
+            seqNo = docWriter.flushAllThreads();
+            if (seqNo < 0) {
+              anySegmentsFlushed = true;
+              seqNo = -seqNo;
+            }
             if (!anySegmentsFlushed) {
               // prevent double increment since docWriter#doFlush increments the flushcount
               // if we flushed anything.
@@ -84,6 +89,9 @@
         }
       } catch (AbortingException | VirtualMachineError tragedy) {
         tragicEvent(tragedy, "prepareCommit");
+
+        // dead code but javac disagrees:
+        seqNo = -1;
       }
      
       boolean success = false;
@@ -93,6 +101,11 @@
         }
         startCommit(toCommit);
         success = true;
+        if (pendingCommit == null) {
+          return -1;
+        } else {
+          return seqNo;
+        }
       } finally {
         if (!success) {
           synchronized (this) {

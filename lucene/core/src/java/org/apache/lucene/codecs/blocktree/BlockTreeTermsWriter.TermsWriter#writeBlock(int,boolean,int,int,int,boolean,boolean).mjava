@@ -4,7 +4,7 @@
      *  same prefix, and so we broke it into multiple floor blocks where
      *  we record the starting label of the suffix of each floor block. */
     private PendingBlock writeBlock(int prefixLength, boolean isFloor, int floorLeadLabel, int start, int end,
-                                    boolean hasTerms, boolean hasPrefixTerms, boolean hasSubBlocks) throws IOException {
+                                    boolean hasTerms, boolean hasSubBlocks) throws IOException {
 
       assert end > start;
 
@@ -38,7 +38,7 @@
 
       // We optimize the leaf block case (block has only terms), writing a more
       // compact format in this case:
-      boolean isLeafBlock = hasSubBlocks == false && hasPrefixTerms == false;
+      boolean isLeafBlock = hasSubBlocks == false;
 
       //System.out.println("  isLeaf=" + isLeafBlock);
 
@@ -54,7 +54,6 @@
           assert ent.isTerm: "i=" + i;
 
           PendingTerm term = (PendingTerm) ent;
-          assert term.prefixTerm == null;
 
           assert StringHelper.startsWith(term.termBytes, prefix): "term.term=" + term.termBytes + " prefix=" + prefix;
           BlockTermState state = term.state;
@@ -91,7 +90,6 @@
       } else {
         // Block has at least one prefix term or a sub block:
         subIndices = new ArrayList<>();
-        boolean sawAutoPrefixTerm = false;
         for (int i=start;i<end;i++) {
           PendingEntry ent = pending.get(i);
           if (ent.isTerm) {
@@ -105,9 +103,6 @@
             //  System.arraycopy(term.termBytes, prefixLength, suffixBytes.bytes, 0, suffix);
             //  suffixBytes.length = suffix;
             //  System.out.println("      write term suffix=" + brToString(suffixBytes));
-            //  if (term.prefixTerm != null) {
-            //    System.out.println("        ** auto-prefix term: " + term.prefixTerm);
-            //  }
             //}
 
             // For non-leaf block we borrow 1 bit to record
@@ -115,33 +110,8 @@
             // it's a prefix term.  Terms cannot be larger than ~32 KB
             // so we won't run out of bits:
 
-            if (minItemsInAutoPrefix == 0) {
-              suffixWriter.writeVInt(suffix << 1);
-              suffixWriter.writeBytes(term.termBytes, prefixLength, suffix);
-            } else {
-              code = suffix<<2;
-              int floorLeadEnd = -1;
-              if (term.prefixTerm != null) {
-                assert minItemsInAutoPrefix > 0;
-                sawAutoPrefixTerm = true;
-                PrefixTerm prefixTerm = term.prefixTerm;
-                floorLeadEnd = prefixTerm.floorLeadEnd;
-                assert floorLeadEnd != -1;
-
-                if (prefixTerm.floorLeadStart == -2) {
-                  // Starts with empty string
-                  code |= 2;
-                } else {
-                  code |= 3;
-                }
-              }
-              suffixWriter.writeVInt(code);
-              suffixWriter.writeBytes(term.termBytes, prefixLength, suffix);
-              if (floorLeadEnd != -1) {
-                suffixWriter.writeByte((byte) floorLeadEnd);
-              }
-              assert floorLeadLabel == -1 || (term.termBytes[prefixLength] & 0xff) >= floorLeadLabel;
-            }
+            suffixWriter.writeVInt(suffix << 1);
+            suffixWriter.writeBytes(term.termBytes, prefixLength, suffix);
 
             // Write term stats, to separate byte[] blob:
             statsWriter.writeVInt(state.docFreq);
@@ -176,13 +146,8 @@
             assert suffix > 0;
 
             // For non-leaf block we borrow 1 bit to record
-            // if entry is term or sub-block, and 1 bit (unset here) to
-            // record if it's a prefix term:
-            if (minItemsInAutoPrefix == 0) {
-              suffixWriter.writeVInt((suffix<<1)|1);
-            } else {
-              suffixWriter.writeVInt((suffix<<2)|1);
-            }
+            // if entry is term or sub-block:f
+            suffixWriter.writeVInt((suffix<<1)|1);
             suffixWriter.writeBytes(block.prefix.bytes, prefixLength, suffix);
 
             //if (DEBUG2) {
@@ -200,7 +165,7 @@
           }
         }
 
-        assert subIndices.size() != 0 || sawAutoPrefixTerm;
+        assert subIndices.size() != 0;
       }
 
       // TODO: we could block-write the term suffix pointers;

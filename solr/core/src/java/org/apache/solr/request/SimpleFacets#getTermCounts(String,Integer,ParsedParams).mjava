@@ -31,54 +31,27 @@
 
     // determine what type of faceting method to use
     final String methodStr = params.getFieldParam(field, FacetParams.FACET_METHOD);
-    FacetMethod method = null;
+    final FacetMethod requestedMethod;
     if (FacetParams.FACET_METHOD_enum.equals(methodStr)) {
-      method = FacetMethod.ENUM;
+      requestedMethod = FacetMethod.ENUM;
     } else if (FacetParams.FACET_METHOD_fcs.equals(methodStr)) {
-      method = FacetMethod.FCS;
+      requestedMethod = FacetMethod.FCS;
     } else if (FacetParams.FACET_METHOD_fc.equals(methodStr)) {
-      method = FacetMethod.FC;
+      requestedMethod = FacetMethod.FC;
     } else if(FacetParams.FACET_METHOD_uif.equals(methodStr)) {
-      method = FacetMethod.UIF;
-    }
-
-    if (method == FacetMethod.ENUM && TrieField.getMainValuePrefix(ft) != null) {
-      // enum can't deal with trie fields that index several terms per value
-      method = sf.multiValued() ? FacetMethod.FC : FacetMethod.FCS;
-    }
-
-    if (method == null && ft instanceof BoolField) {
-      // Always use filters for booleans... we know the number of values is very small.
-      method = FacetMethod.ENUM;
+      requestedMethod = FacetMethod.UIF;
+    }else{
+      requestedMethod=null;
     }
 
     final boolean multiToken = sf.multiValued() || ft.multiValuedFieldCache();
-    
-    if (ft.getNumericType() != null && !sf.multiValued()) {
-      // the per-segment approach is optimal for numeric field types since there
-      // are no global ords to merge and no need to create an expensive
-      // top-level reader
-      method = FacetMethod.FCS;
-    }
 
-    if (method == null) {
-      // TODO: default to per-segment or not?
-      method = FacetMethod.FC;
-    }
-
-    if (method == FacetMethod.FCS && multiToken) {
-      // only fc knows how to deal with multi-token fields
-      method = FacetMethod.FC;
-    }
-    
-    if (method == FacetMethod.ENUM && sf.hasDocValues()) {
-      // only fc can handle docvalues types
-      method = FacetMethod.FC;
-    }
+    FacetMethod appliedFacetMethod = selectFacetMethod(sf, requestedMethod, mincount);
 
     RTimer timer = null;
     if (fdebug != null) {
-       fdebug.putInfoItem("method", method.name());
+       fdebug.putInfoItem("requestedMethod", requestedMethod==null?"not specified":requestedMethod.name());
+       fdebug.putInfoItem("appliedMethod", appliedFacetMethod.name());
        fdebug.putInfoItem("inputDocSetSize", docs.size());
        fdebug.putInfoItem("field", field);
        timer = new RTimer();
@@ -87,8 +60,8 @@
     if (params.getFieldBool(field, GroupParams.GROUP_FACET, false)) {
       counts = getGroupedCounts(searcher, docs, field, multiToken, offset,limit, mincount, missing, sort, prefix, contains, ignoreCase);
     } else {
-      assert method != null;
-      switch (method) {
+      assert appliedFacetMethod != null;
+      switch (appliedFacetMethod) {
         case ENUM:
           assert TrieField.getMainValuePrefix(ft) == null;
           counts = getFacetTermEnumCounts(searcher, docs, field, offset, limit, mincount,missing,sort,prefix, contains, ignoreCase, params);
@@ -112,7 +85,6 @@
           }
           break;
         case UIF:
-
             //Emulate the JSON Faceting structure so we can use the same parsing classes
             Map<String, Object> jsonFacet = new HashMap<>(13);
             jsonFacet.put("type", "terms");

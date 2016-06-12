@@ -1,0 +1,41 @@
+  /** test reopening backwards from an NRT reader with DV updates */
+  public void testNRTMupdates2() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+    SnapshotDeletionPolicy snapshotter = new SnapshotDeletionPolicy(new KeepOnlyLastCommitDeletionPolicy());
+    iwc.setIndexDeletionPolicy(snapshotter);
+    IndexWriter writer = new IndexWriter(dir, iwc);
+    writer.commit(); // make sure all index metadata is written out
+  
+    Document doc = new Document();
+    doc.add(new StringField("key", "value1", Field.Store.YES));
+    doc.add(new NumericDocValuesField("dv", 1));
+    writer.addDocument(doc);
+    
+    writer.commit();
+    
+    IndexCommit ic1 = snapshotter.snapshot();
+    
+    writer.updateNumericDocValue(new Term("key", "value1"), "dv", 2);
+    
+    DirectoryReader latest = DirectoryReader.open(writer);
+    assertEquals(1, latest.leaves().size());
+    
+    // This reader will be used for searching against commit point 1
+    DirectoryReader oldest = DirectoryReader.openIfChanged(latest, ic1);
+    assertEquals(1, oldest.leaves().size());
+    
+    // sharing same core
+    assertSame(latest.leaves().get(0).reader().getCoreCacheKey(), oldest.leaves().get(0).reader().getCoreCacheKey());
+    
+    assertEquals(1, getOnlyLeafReader(oldest).getNumericDocValues("dv").get(0));
+    assertEquals(2, getOnlyLeafReader(latest).getNumericDocValues("dv").get(0));
+    
+    latest.close();
+    oldest.close();
+    
+    snapshotter.release(ic1);
+    writer.close();
+    dir.close();
+  }
+

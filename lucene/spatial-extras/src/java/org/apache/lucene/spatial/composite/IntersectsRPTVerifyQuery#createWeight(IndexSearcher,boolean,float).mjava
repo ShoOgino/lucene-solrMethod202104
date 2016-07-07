@@ -1,0 +1,58 @@
+  @Override
+  public Weight createWeight(IndexSearcher searcher, boolean needsScores, float boost) throws IOException {
+    final Map valueSourceContext = ValueSource.newContext(searcher);
+
+    return new ConstantScoreWeight(this, boost) {
+      @Override
+      public Scorer scorer(LeafReaderContext context) throws IOException {
+        // Compute approx & exact
+        final IntersectsDifferentiatingQuery.IntersectsDifferentiatingVisitor result =
+            intersectsDiffQuery.compute(context);
+        if (result.approxDocIdSet == null) {
+          return null;
+        }
+        final DocIdSetIterator approxDISI = result.approxDocIdSet.iterator();
+        if (approxDISI == null) {
+          return null;
+        }
+        final DocIdSetIterator exactIterator;
+        if (result.exactDocIdSet != null) {
+          // If both sets are the same, there's nothing to verify; we needn't return a TwoPhaseIterator
+          if (result.approxDocIdSet == result.exactDocIdSet) {
+            return new ConstantScoreScorer(this, score(), approxDISI);
+          }
+          exactIterator = result.exactDocIdSet.iterator();
+          assert exactIterator != null;
+        } else {
+          exactIterator = null;
+        }
+
+        final FunctionValues predFuncValues = predicateValueSource.getValues(valueSourceContext, context);
+
+        final TwoPhaseIterator twoPhaseIterator = new TwoPhaseIterator(approxDISI) {
+          @Override
+          public boolean matches() throws IOException {
+            final int doc = approxDISI.docID();
+            if (exactIterator != null) {
+              if (exactIterator.docID() < doc) {
+                exactIterator.advance(doc);
+              }
+              if (exactIterator.docID() == doc) {
+                return true;
+              }
+            }
+
+            return predFuncValues.boolVal(doc);
+          }
+
+          @Override
+          public float matchCost() {
+            return 100; // TODO: use cost of exactIterator.advance() and predFuncValues.boolVal()
+          }
+        };
+
+        return new ConstantScoreScorer(this, score(), twoPhaseIterator);
+      }
+    };
+  }
+

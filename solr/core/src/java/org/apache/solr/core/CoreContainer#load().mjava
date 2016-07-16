@@ -56,16 +56,19 @@
     containerProperties.putAll(cfg.getSolrProperties());
 
     // setup executor to load cores in parallel
-    // do not limit the size of the executor in zk mode since cores may try and wait for each other.
     ExecutorService coreLoadExecutor = ExecutorUtil.newMDCAwareFixedThreadPool(
-        ( zkSys.getZkController() == null ? cfg.getCoreLoadThreadCount() : Integer.MAX_VALUE ),
+        cfg.getCoreLoadThreadCount(isZooKeeperAware() ? DEFAULT_CORE_LOAD_THREADS_IN_CLOUD : DEFAULT_CORE_LOAD_THREADS),
         new DefaultSolrThreadFactory("coreLoadExecutor") );
-    final List<Future<SolrCore>> futures = new ArrayList<Future<SolrCore>>();
+    final List<Future<SolrCore>> futures = new ArrayList<>();
     try {
-
       List<CoreDescriptor> cds = coresLocator.discover(this);
+      if (isZooKeeperAware()) {
+        //sort the cores if it is in SolrCloud. In standalone node the order does not matter
+        CoreSorter coreComparator = new CoreSorter().init(this);
+        cds = new ArrayList<>(cds);//make a copy
+        Collections.sort(cds, coreComparator::compare);
+      }
       checkForDuplicateCoreNames(cds);
-
 
       for (final CoreDescriptor cd : cds) {
         if (cd.isTransient() || !cd.isLoadOnStartup()) {

@@ -98,12 +98,18 @@
     UpdateLog ulog = core.getUpdateHandler().getUpdateLog();
 
     RefCounted<SolrIndexSearcher> searcherHolder = null;
+    
+    // this is initialized & set on the context *after* any searcher (re-)opening
+    ResultContext resultContext = null;
+    final DocTransformer transformer = rsp.getReturnFields().getTransformer();
 
-    DocTransformer transformer = rsp.getReturnFields().getTransformer();
-    if (transformer != null) {
-      ResultContext context = new BasicResultContext(null, rsp.getReturnFields(), null, null, req);
-      transformer.setContext(context);
-    }
+    // true in any situation where we have to use a realtime searcher rather then returning docs
+    // directly from the UpdateLog
+    final boolean mustUseRealtimeSearcher =
+      // if we have filters, we need to check those against the indexed form of the doc
+      (rb.getFilters() != null)
+      || ((null != transformer) && transformer.needsSolrIndexSearcher());
+
    try {
      SolrIndexSearcher searcher = null;
 
@@ -120,13 +126,13 @@
            switch (oper) {
              case UpdateLog.ADD:
 
-               if (rb.getFilters() != null) {
-                 // we have filters, so we need to check those against the indexed form of the doc
+               if (mustUseRealtimeSearcher) {
                  if (searcherHolder != null) {
-                   // close handles to current searchers
+                   // close handles to current searchers & result context
                    searcher = null;
                    searcherHolder.decref();
                    searcherHolder = null;
+                   resultContext = null;
                  }
                  ulog.openRealtimeSearcher();  // force open a new realtime searcher
                  o = null;  // pretend we never found this record and fall through to use the searcher
@@ -134,7 +140,7 @@
                }
 
                SolrDocument doc = toSolrDoc((SolrInputDocument)entry.get(entry.size()-1), core.getLatestSchema());
-               if(transformer!=null) {
+               if (transformer!=null) {
                  transformer.transform(doc, -1, 0); // unknown docID
                }
               docList.add(doc);
@@ -152,6 +158,7 @@
        if (searcher == null) {
          searcherHolder = core.getRealtimeSearcher();
          searcher = searcherHolder.get();
+         // don't bother with ResultContext yet, we won't need it if doc doesn't match filters
        }
 
        int docid = -1;
@@ -173,12 +180,17 @@
          }
        }
 
-
        if (docid < 0) continue;
+       
        Document luceneDocument = searcher.doc(docid, rsp.getReturnFields().getLuceneFieldNames());
        SolrDocument doc = toSolrDoc(luceneDocument,  core.getLatestSchema());
        searcher.decorateDocValueFields(doc, docid, searcher.getNonStoredDVs(true));
-       if( transformer != null ) {
+       if ( null != transformer) {
+         if (null == resultContext) {
+           // either first pass, or we've re-opened searcher - either way now we setContext
+           resultContext = new RTGResultContext(rsp.getReturnFields(), searcher, req);
+           transformer.setContext(resultContext);
+         }
          transformer.transform(doc, docid, 0);
        }
        docList.add(doc);

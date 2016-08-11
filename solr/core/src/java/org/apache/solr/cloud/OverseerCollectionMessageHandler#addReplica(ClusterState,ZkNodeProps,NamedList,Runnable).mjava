@@ -1,9 +1,11 @@
-  private void addReplica(ClusterState clusterState, ZkNodeProps message, NamedList results)
+  ZkNodeProps addReplica(ClusterState clusterState, ZkNodeProps message, NamedList results, Runnable onComplete)
       throws KeeperException, InterruptedException {
+    log.info("addReplica() : {}", Utils.toJSONString(message));
     String collection = message.getStr(COLLECTION_PROP);
     String node = message.getStr(CoreAdminParams.NODE);
     String shard = message.getStr(SHARD_ID_PROP);
     String coreName = message.getStr(CoreAdminParams.NAME);
+    boolean parallel = message.getBool("parallel", false);
     if (StringUtils.isBlank(coreName)) {
       coreName = message.getStr(CoreAdminParams.PROPERTY_PREFIX + CoreAdminParams.NAME);
     }
@@ -26,7 +28,7 @@
       node = getNodesForNewReplicas(clusterState, collection, shard, 1, node,
           overseer.getZkController().getCoreContainer()).get(0).nodeName;
     }
-    log.info("Node not provided, Identified {} for creating new replica", node);
+    log.info("Node Identified {} for creating new replica", node);
 
     if (!clusterState.liveNodesContain(node)) {
       throw new SolrException(ErrorCode.BAD_REQUEST, "Node: " + node + " is not live");
@@ -49,10 +51,14 @@
     
     if (!Overseer.isLegacy(zkStateReader)) {
       if (!skipCreateReplicaInClusterState) {
-        ZkNodeProps props = new ZkNodeProps(Overseer.QUEUE_OPERATION, ADDREPLICA.toLower(), ZkStateReader.COLLECTION_PROP,
-            collection, ZkStateReader.SHARD_ID_PROP, shard, ZkStateReader.CORE_NAME_PROP, coreName,
-            ZkStateReader.STATE_PROP, Replica.State.DOWN.toString(), ZkStateReader.BASE_URL_PROP,
-            zkStateReader.getBaseUrlForNodeName(node), ZkStateReader.NODE_NAME_PROP, node);
+        ZkNodeProps props = new ZkNodeProps(
+            Overseer.QUEUE_OPERATION, ADDREPLICA.toLower(),
+            ZkStateReader.COLLECTION_PROP, collection,
+            ZkStateReader.SHARD_ID_PROP, shard,
+            ZkStateReader.CORE_NAME_PROP, coreName,
+            ZkStateReader.STATE_PROP, Replica.State.DOWN.toString(),
+            ZkStateReader.BASE_URL_PROP, zkStateReader.getBaseUrlForNodeName(node),
+            ZkStateReader.NODE_NAME_PROP, node);
         Overseer.getStateUpdateQueue(zkStateReader.getZkClient()).offer(Utils.toJSON(props));
       }
       params.set(CoreAdminParams.CORE_NODE_NAME,
@@ -92,8 +98,27 @@
     Map<String,String> requestMap = new HashMap<>();
     sendShardRequest(node, params, shardHandler, asyncId, requestMap);
 
-    processResponses(results, shardHandler, true, "ADDREPLICA failed to create replica", asyncId, requestMap);
+    final String fnode = node;
+    final String fcoreName = coreName;
 
-    waitForCoreNodeName(collection, node, coreName);
+    Runnable runnable = () -> {
+      processResponses(results, shardHandler, true, "ADDREPLICA failed to create replica", asyncId, requestMap);
+      waitForCoreNodeName(collection, fnode, fcoreName);
+      if (onComplete != null) onComplete.run();
+    };
+
+    if (!parallel) {
+      runnable.run();
+    } else {
+      tpe.submit(runnable);
+    }
+
+
+    return new ZkNodeProps(
+        ZkStateReader.COLLECTION_PROP, collection,
+        ZkStateReader.SHARD_ID_PROP, shard,
+        ZkStateReader.CORE_NAME_PROP, coreName,
+        ZkStateReader.NODE_NAME_PROP, node
+    );
   }
 

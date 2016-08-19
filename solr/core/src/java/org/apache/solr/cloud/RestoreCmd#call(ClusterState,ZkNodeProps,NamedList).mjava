@@ -1,17 +1,19 @@
-  private void processRestoreAction(ZkNodeProps message, NamedList results) throws IOException, KeeperException, InterruptedException {
+  @Override
+  public void call(ClusterState state, ZkNodeProps message, NamedList results) throws Exception {
     // TODO maybe we can inherit createCollection's options/code
-    String restoreCollectionName =  message.getStr(COLLECTION_PROP);
-    String backupName =  message.getStr(NAME); // of backup
-    ShardHandler shardHandler = shardHandlerFactory.getShardHandler();
+    String restoreCollectionName = message.getStr(COLLECTION_PROP);
+    String backupName = message.getStr(NAME); // of backup
+    ShardHandler shardHandler = ocmh.shardHandlerFactory.getShardHandler();
     String asyncId = message.getStr(ASYNC);
     String repo = message.getStr(CoreAdminParams.BACKUP_REPOSITORY);
     String location = message.getStr(CoreAdminParams.BACKUP_LOCATION);
     Map<String, String> requestMap = new HashMap<>();
 
-    CoreContainer cc = this.overseer.getZkController().getCoreContainer();
+    CoreContainer cc = ocmh.overseer.getZkController().getCoreContainer();
     BackupRepository repository = cc.newBackupRepository(Optional.ofNullable(repo));
 
     URI backupPath = repository.createURI(location, backupName);
+    ZkStateReader zkStateReader = ocmh.zkStateReader;
     BackupManager backupMgr = new BackupManager(repository, zkStateReader, restoreCollectionName);
 
     Properties properties = backupMgr.readBackupProperties(location, backupName);
@@ -65,7 +67,7 @@
         // ClusterStateMutator.createCollection detects that "slices" is in fact a slice structure instead of a
         //   list of names, and if so uses this instead of building it.  We clear the replica list.
         Collection<Slice> backupSlices = backupCollectionState.getActiveSlices();
-        Map<String,Slice> newSlices = new LinkedHashMap<>(backupSlices.size());
+        Map<String, Slice> newSlices = new LinkedHashMap<>(backupSlices.size());
         for (Slice backupSlice : backupSlices) {
           newSlices.put(backupSlice.getName(),
               new Slice(backupSlice.getName(), Collections.emptyMap(), backupSlice.getProperties()));
@@ -73,7 +75,7 @@
         propMap.put(SHARDS_PROP, newSlices);
       }
 
-      createCollection(zkStateReader.getClusterState(), new ZkNodeProps(propMap), new NamedList());
+      ocmh.commandMap.get(CREATE).call(zkStateReader.getClusterState(), new ZkNodeProps(propMap), new NamedList());
       // note: when createCollection() returns, the collection exists (no race)
     }
 
@@ -97,7 +99,7 @@
 
     ClusterState clusterState = zkStateReader.getClusterState();
     //Create one replica per shard and copy backed up data to it
-    for (Slice slice: restoreCollection.getSlices()) {
+    for (Slice slice : restoreCollection.getSlices()) {
       log.debug("Adding replica for shard={} collection={} ", slice.getName(), restoreCollection);
       HashMap<String, Object> propMap = new HashMap<>();
       propMap.put(Overseer.QUEUE_OPERATION, CREATESHARD);
@@ -107,25 +109,25 @@
       if (asyncId != null) {
         propMap.put(ASYNC, asyncId);
       }
-      addPropertyParams(message, propMap);
+      ocmh.addPropertyParams(message, propMap);
 
-      addReplica(clusterState, new ZkNodeProps(propMap), new NamedList(), null);
+      ocmh.addReplica(clusterState, new ZkNodeProps(propMap), new NamedList(), null);
     }
 
     //refresh the location copy of collection state
     restoreCollection = zkStateReader.getClusterState().getCollection(restoreCollectionName);
 
     //Copy data from backed up index to each replica
-    for (Slice slice: restoreCollection.getSlices()) {
+    for (Slice slice : restoreCollection.getSlices()) {
       ModifiableSolrParams params = new ModifiableSolrParams();
-      params.set(CoreAdminParams.ACTION, CoreAdminAction.RESTORECORE.toString());
+      params.set(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.RESTORECORE.toString());
       params.set(NAME, "snapshot." + slice.getName());
       params.set(CoreAdminParams.BACKUP_LOCATION, backupPath.getPath());
       params.set(CoreAdminParams.BACKUP_REPOSITORY, repo);
 
-      sliceCmd(clusterState, params, null, slice, shardHandler, asyncId, requestMap);
+      ocmh.sliceCmd(clusterState, params, null, slice, shardHandler, asyncId, requestMap);
     }
-    processResponses(new NamedList(), shardHandler, true, "Could not restore core", asyncId, requestMap);
+    ocmh.processResponses(new NamedList(), shardHandler, true, "Could not restore core", asyncId, requestMap);
 
     //Mark all shards in ACTIVE STATE
     {
@@ -146,8 +148,8 @@
     if (numReplicas != null && numReplicas > 1) {
       log.info("Adding replicas to restored collection={}", restoreCollection);
 
-      for (Slice slice: restoreCollection.getSlices()) {
-        for(int i=1; i<numReplicas; i++) {
+      for (Slice slice : restoreCollection.getSlices()) {
+        for (int i = 1; i < numReplicas; i++) {
           log.debug("Adding replica for shard={} collection={} ", slice.getName(), restoreCollection);
           HashMap<String, Object> propMap = new HashMap<>();
           propMap.put(COLLECTION_PROP, restoreCollectionName);
@@ -156,9 +158,9 @@
           if (asyncId != null) {
             propMap.put(ASYNC, asyncId);
           }
-          addPropertyParams(message, propMap);
+          ocmh.addPropertyParams(message, propMap);
 
-          addReplica(zkStateReader.getClusterState(), new ZkNodeProps(propMap), results, null);
+          ocmh.addReplica(zkStateReader.getClusterState(), new ZkNodeProps(propMap), results, null);
         }
       }
     }

@@ -1,7 +1,8 @@
-  private void processBackupAction(ZkNodeProps message, NamedList results) throws IOException, KeeperException, InterruptedException {
-    String collectionName =  message.getStr(COLLECTION_PROP);
-    String backupName =  message.getStr(NAME);
-    ShardHandler shardHandler = shardHandlerFactory.getShardHandler();
+  @Override
+  public void call(ClusterState state, ZkNodeProps message, NamedList results) throws Exception {
+    String collectionName = message.getStr(COLLECTION_PROP);
+    String backupName = message.getStr(NAME);
+    ShardHandler shardHandler = ocmh.shardHandlerFactory.getShardHandler();
     String asyncId = message.getStr(ASYNC);
     String repo = message.getStr(CoreAdminParams.BACKUP_REPOSITORY);
     String location = message.getStr(CoreAdminParams.BACKUP_LOCATION);
@@ -9,16 +10,16 @@
     Map<String, String> requestMap = new HashMap<>();
     Instant startTime = Instant.now();
 
-    CoreContainer cc = this.overseer.getZkController().getCoreContainer();
+    CoreContainer cc = ocmh.overseer.getZkController().getCoreContainer();
     BackupRepository repository = cc.newBackupRepository(Optional.ofNullable(repo));
-    BackupManager backupMgr = new BackupManager(repository, zkStateReader, collectionName);
+    BackupManager backupMgr = new BackupManager(repository, ocmh.zkStateReader, collectionName);
 
     // Backup location
     URI backupPath = repository.createURI(location, backupName);
 
     //Validating if the directory already exists.
     if (repository.exists(backupPath)) {
-      throw new SolrException(ErrorCode.BAD_REQUEST, "The backup directory already exists: " + backupPath);
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "The backup directory already exists: " + backupPath);
     }
 
     // Create a directory to store backup details.
@@ -27,34 +28,34 @@
     log.info("Starting backup of collection={} with backupName={} at location={}", collectionName, backupName,
         backupPath);
 
-    for (Slice slice : zkStateReader.getClusterState().getCollection(collectionName).getActiveSlices()) {
+    for (Slice slice : ocmh.zkStateReader.getClusterState().getCollection(collectionName).getActiveSlices()) {
       Replica replica = slice.getLeader();
 
       String coreName = replica.getStr(CORE_NAME_PROP);
 
       ModifiableSolrParams params = new ModifiableSolrParams();
-      params.set(CoreAdminParams.ACTION, CoreAdminAction.BACKUPCORE.toString());
+      params.set(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.BACKUPCORE.toString());
       params.set(NAME, slice.getName());
       params.set(CoreAdminParams.BACKUP_REPOSITORY, repo);
       params.set(CoreAdminParams.BACKUP_LOCATION, backupPath.getPath()); // note: index dir will be here then the "snapshot." + slice name
       params.set(CORE_NAME_PROP, coreName);
 
-      sendShardRequest(replica.getNodeName(), params, shardHandler, asyncId, requestMap);
+      ocmh.sendShardRequest(replica.getNodeName(), params, shardHandler, asyncId, requestMap);
       log.debug("Sent backup request to core={} for backupName={}", coreName, backupName);
     }
     log.debug("Sent backup requests to all shard leaders for backupName={}", backupName);
 
-    processResponses(results, shardHandler, true, "Could not backup all replicas", asyncId, requestMap);
+    ocmh.processResponses(results, shardHandler, true, "Could not backup all replicas", asyncId, requestMap);
 
     log.info("Starting to backup ZK data for backupName={}", backupName);
 
     //Download the configs
-    String configName = zkStateReader.readConfigName(collectionName);
+    String configName = ocmh.zkStateReader.readConfigName(collectionName);
     backupMgr.downloadConfigDir(location, backupName, configName);
 
     //Save the collection's state. Can be part of the monolithic clusterstate.json or a individual state.json
     //Since we don't want to distinguish we extract the state and back it up as a separate json
-    DocCollection collectionState = zkStateReader.getClusterState().getCollection(collectionName);
+    DocCollection collectionState = ocmh.zkStateReader.getClusterState().getCollection(collectionName);
     backupMgr.writeCollectionState(location, backupName, collectionName, collectionState);
 
     Properties properties = new Properties();

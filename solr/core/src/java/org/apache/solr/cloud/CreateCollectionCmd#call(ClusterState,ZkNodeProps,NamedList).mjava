@@ -1,17 +1,18 @@
-  private void createCollection(ClusterState clusterState, ZkNodeProps message, NamedList results) throws KeeperException, InterruptedException {
+  @Override
+  public void call(ClusterState clusterState, ZkNodeProps message, NamedList results) throws Exception {
     final String collectionName = message.getStr(NAME);
     log.info("Create collection {}", collectionName);
     if (clusterState.hasCollection(collectionName)) {
-      throw new SolrException(ErrorCode.BAD_REQUEST, "collection already exists: " + collectionName);
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "collection already exists: " + collectionName);
     }
 
     String configName = getConfigName(collectionName, message);
     if (configName == null) {
-      throw new SolrException(ErrorCode.BAD_REQUEST, "No config set found to associate with the collection.");
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "No config set found to associate with the collection.");
     }
-    
-    validateConfigOrThrowSolrException(configName);
-    
+
+    ocmh.validateConfigOrThrowSolrException(configName);
+
 
     try {
       // look at the replication factor and see if it matches reality
@@ -19,7 +20,7 @@
 
       int repFactor = message.getInt(REPLICATION_FACTOR, 1);
 
-      ShardHandler shardHandler = shardHandlerFactory.getShardHandler();
+      ShardHandler shardHandler = ocmh.shardHandlerFactory.getShardHandler();
       final String async = message.getStr(ASYNC);
 
       Integer numSlices = message.getInt(NUM_SLICES, null);
@@ -30,7 +31,7 @@
         numSlices = shardNames.size();
       } else {
         if (numSlices == null ) {
-          throw new SolrException(ErrorCode.BAD_REQUEST, NUM_SLICES + " is a required param (when using CompositeId router).");
+          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, NUM_SLICES + " is a required param (when using CompositeId router).");
         }
         ClusterStateMutator.getShardNames(numSlices, shardNames);
       }
@@ -38,19 +39,19 @@
       int maxShardsPerNode = message.getInt(MAX_SHARDS_PER_NODE, 1);
 
       if (repFactor <= 0) {
-        throw new SolrException(ErrorCode.BAD_REQUEST, REPLICATION_FACTOR + " must be greater than 0");
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, REPLICATION_FACTOR + " must be greater than 0");
       }
 
       if (numSlices <= 0) {
-        throw new SolrException(ErrorCode.BAD_REQUEST, NUM_SLICES + " must be > 0");
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, NUM_SLICES + " must be > 0");
       }
 
       // we need to look at every node and see how many cores it serves
       // add our new cores to existing nodes serving the least number of cores
       // but (for now) require that each core goes on a distinct node.
 
-      final List<String> nodeList = getLiveOrLiveAndCreateNodeSetList(clusterState.getLiveNodes(), message, RANDOM);
-      Map<Position, String> positionVsNodes;
+      final List<String> nodeList = OverseerCollectionMessageHandler.getLiveOrLiveAndCreateNodeSetList(clusterState.getLiveNodes(), message, RANDOM);
+      Map<ReplicaAssigner.Position, String> positionVsNodes;
       if (nodeList.isEmpty()) {
         log.warn("It is unusual to create a collection ("+collectionName+") without cores.");
 
@@ -67,11 +68,11 @@
               + nodeList.size()
               + "). It's unusual to run two replica of the same slice on the same Solr-instance.");
         }
-        
+
         int maxShardsAllowedToCreate = maxShardsPerNode * nodeList.size();
         int requestedShardsToCreate = numSlices * repFactor;
         if (maxShardsAllowedToCreate < requestedShardsToCreate) {
-          throw new SolrException(ErrorCode.BAD_REQUEST, "Cannot create collection " + collectionName + ". Value of "
+          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Cannot create collection " + collectionName + ". Value of "
               + MAX_SHARDS_PER_NODE + " is " + maxShardsPerNode
               + ", and the number of nodes currently live or live and part of your "+CREATE_NODE_SET+" is " + nodeList.size()
               + ". This allows a maximum of " + maxShardsAllowedToCreate
@@ -81,12 +82,13 @@
               + " shards to be created (higher than the allowed number)");
         }
 
-        positionVsNodes = identifyNodes(clusterState, nodeList, message, shardNames, repFactor);
+        positionVsNodes = ocmh.identifyNodes(clusterState, nodeList, message, shardNames, repFactor);
       }
 
+      ZkStateReader zkStateReader = ocmh.zkStateReader;
       boolean isLegacyCloud =  Overseer.isLegacy(zkStateReader);
 
-      createConfNode(configName, collectionName, isLegacyCloud);
+      ocmh.createConfNode(configName, collectionName, isLegacyCloud);
 
       Overseer.getStateUpdateQueue(zkStateReader.getZkClient()).offer(Utils.toJSON(message));
 
@@ -99,7 +101,7 @@
         if(created) break;
       }
       if (!created)
-        throw new SolrException(ErrorCode.SERVER_ERROR, "Could not fully create collection: " + collectionName);
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Could not fully create collection: " + collectionName);
 
       if (nodeList.isEmpty()) {
         log.info("Finished create command for collection: {}", collectionName);
@@ -113,8 +115,8 @@
       log.info(formatString("Creating SolrCores for new collection {0}, shardNames {1} , replicationFactor : {2}",
           collectionName, shardNames, repFactor));
       Map<String,ShardRequest> coresToCreate = new LinkedHashMap<>();
-      for (Map.Entry<Position, String> e : positionVsNodes.entrySet()) {
-        Position position = e.getKey();
+      for (Map.Entry<ReplicaAssigner.Position, String> e : positionVsNodes.entrySet()) {
+        ReplicaAssigner.Position position = e.getKey();
         String nodeName = e.getValue();
         String coreName = collectionName + "_" + position.shard + "_replica" + (position.index + 1);
         log.info(formatString("Creating core {0} as part of shard {1} of collection {2} on {3}"
@@ -137,7 +139,7 @@
 
         // Need to create new params for each request
         ModifiableSolrParams params = new ModifiableSolrParams();
-        params.set(CoreAdminParams.ACTION, CoreAdminAction.CREATE.toString());
+        params.set(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.CREATE.toString());
 
         params.set(CoreAdminParams.NAME, coreName);
         params.set(COLL_CONF, configName);
@@ -150,11 +152,11 @@
           params.add(ASYNC, coreAdminAsyncId);
           requestMap.put(nodeName, coreAdminAsyncId);
         }
-        addPropertyParams(message, params);
+        ocmh.addPropertyParams(message, params);
 
         ShardRequest sreq = new ShardRequest();
         sreq.nodeName = nodeName;
-        params.set("qt", adminPath);
+        params.set("qt", ocmh.adminPath);
         sreq.purpose = 1;
         sreq.shards = new String[]{baseUrl};
         sreq.actualShards = sreq.shards;
@@ -169,7 +171,7 @@
 
       if(!isLegacyCloud) {
         // wait for all replica entries to be created
-        Map<String, Replica> replicas = waitToSeeReplicasInState(collectionName, coresToCreate.keySet());
+        Map<String, Replica> replicas = ocmh.waitToSeeReplicasInState(collectionName, coresToCreate.keySet());
         for (Map.Entry<String, ShardRequest> e : coresToCreate.entrySet()) {
           ShardRequest sreq = e.getValue();
           sreq.params.set(CoreAdminParams.CORE_NODE_NAME, replicas.get(e.getKey()).getName());
@@ -177,12 +179,12 @@
         }
       }
 
-      processResponses(results, shardHandler, false, null, async, requestMap, Collections.emptySet());
+      ocmh.processResponses(results, shardHandler, false, null, async, requestMap, Collections.emptySet());
       if(results.get("failure") != null && ((SimpleOrderedMap)results.get("failure")).size() > 0) {
         // Let's cleanup as we hit an exception
         // We shouldn't be passing 'results' here for the cleanup as the response would then contain 'success'
         // element, which may be interpreted by the user as a positive ack
-        cleanupCollection(collectionName, new NamedList());
+        ocmh.cleanupCollection(collectionName, new NamedList());
         log.info("Cleaned up  artifacts for failed create collection for [" + collectionName + "]");
       } else {
         log.debug("Finished create command on all shards for collection: "
@@ -191,7 +193,7 @@
     } catch (SolrException ex) {
       throw ex;
     } catch (Exception ex) {
-      throw new SolrException(ErrorCode.SERVER_ERROR, null, ex);
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, null, ex);
     }
   }
 

@@ -1,0 +1,31 @@
+  static void cleanupReplicas(NamedList results,
+                              ClusterState clusterState,
+                              List<ZkNodeProps> sourceReplicas,
+                              OverseerCollectionMessageHandler ocmh, String node) throws InterruptedException {
+    CountDownLatch cleanupLatch = new CountDownLatch(sourceReplicas.size());
+    for (ZkNodeProps sourceReplica : sourceReplicas) {
+      log.info("Deleting replica for collection={} shard={} on node={}", sourceReplica.getStr(COLLECTION_PROP), sourceReplica.getStr(SHARD_ID_PROP), node);
+      NamedList deleteResult = new NamedList();
+      try {
+        ((DeleteReplicaCmd)ocmh.commandMap.get(DELETEREPLICA)).deleteReplica(clusterState, sourceReplica.plus("parallel", "true"), deleteResult, () -> {
+          cleanupLatch.countDown();
+          if (deleteResult.get("failure") != null) {
+            synchronized (results) {
+              results.add("failure", String.format(Locale.ROOT, "Failed to delete replica for collection=%s shard=%s" +
+                  " on node=%s", sourceReplica.getStr(COLLECTION_PROP), sourceReplica.getStr(SHARD_ID_PROP), node));
+            }
+          }
+        });
+      } catch (KeeperException e) {
+        log.warn("Error deleting ", e);
+        cleanupLatch.countDown();
+      } catch (Exception e) {
+        log.warn("Error deleting ", e);
+        cleanupLatch.countDown();
+        throw e;
+      }
+    }
+    log.debug("Waiting for delete node action to complete");
+    cleanupLatch.await(5, TimeUnit.MINUTES);
+  }
+

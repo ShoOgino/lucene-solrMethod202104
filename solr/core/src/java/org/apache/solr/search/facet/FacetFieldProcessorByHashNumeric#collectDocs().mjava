@@ -1,0 +1,60 @@
+  private void collectDocs() throws IOException {
+    if (calc instanceof TermOrdCalc) { // Strings
+
+      // TODO support SortedSetDocValues
+      SortedDocValues globalDocValues = FieldUtil.getSortedDocValues(fcontext.qcontext, sf, null);
+      ((TermOrdCalc)calc).lookupOrdFunction = globalDocValues::lookupOrd;
+
+      DocSetUtil.collectSortedDocSet(fcontext.base, fcontext.searcher.getIndexReader(), new SimpleCollector() {
+          SortedDocValues docValues = globalDocValues; // this segment/leaf. NN
+          LongValues toGlobal = LongValues.IDENTITY; // this segment to global ordinal. NN
+
+          @Override public boolean needsScores() { return false; }
+
+          @Override
+          protected void doSetNextReader(LeafReaderContext ctx) throws IOException {
+            setNextReaderFirstPhase(ctx);
+            if (globalDocValues instanceof MultiDocValues.MultiSortedDocValues) {
+              MultiDocValues.MultiSortedDocValues multiDocValues = (MultiDocValues.MultiSortedDocValues) globalDocValues;
+              docValues = multiDocValues.values[ctx.ord];
+              toGlobal = multiDocValues.mapping.getGlobalOrds(ctx.ord);
+            }
+          }
+
+          @Override
+          public void collect(int segDoc) throws IOException {
+            long ord = docValues.getOrd(segDoc);
+            if (ord != -1) {
+              long val = toGlobal.get(ord);
+              collectValFirstPhase(segDoc, val);
+            }
+          }
+        });
+
+    } else { // Numeric:
+
+      // TODO support SortedNumericDocValues
+      DocSetUtil.collectSortedDocSet(fcontext.base, fcontext.searcher.getIndexReader(), new SimpleCollector() {
+          NumericDocValues values = null; //NN
+          Bits docsWithField = null; //NN
+
+          @Override public boolean needsScores() { return false; }
+
+          @Override
+          protected void doSetNextReader(LeafReaderContext ctx) throws IOException {
+            setNextReaderFirstPhase(ctx);
+            values = DocValues.getNumeric(ctx.reader(), sf.getName());
+            docsWithField = DocValues.getDocsWithField(ctx.reader(), sf.getName());
+          }
+
+          @Override
+          public void collect(int segDoc) throws IOException {
+            long val = values.get(segDoc);
+            if (val != 0 || docsWithField.get(segDoc)) {
+              collectValFirstPhase(segDoc, val);
+            }
+          }
+        });
+    }
+  }
+

@@ -1,13 +1,51 @@
   @Override
   public BytesRef next() throws IOException {
+
     if (queuedBottom != null) {
-      bottomChanged(queuedBottom, false);
+      bottomChanged(queuedBottom);
       queuedBottom = null;
     }
     
-    BytesRef term = actualEnum.next();
-    boostAtt.setBoost(actualBoostAtt.getBoost());
-    
+
+    BytesRef term;
+
+    // while loop because we skip short terms even if they are within the specified edit distance (see the NOTE in FuzzyQuery class javadocs)
+    while (true) {
+
+      term = actualEnum.next();
+      if (term == null) {
+        // end
+        break;
+      }
+
+      int ed = maxEdits;
+      
+      // we know the outer DFA always matches.
+      // now compute exact edit distance
+      while (ed > 0) {
+        if (matches(term, ed - 1)) {
+          ed--;
+        } else {
+          break;
+        }
+      }
+      
+      if (ed == 0) { // exact match
+        boostAtt.setBoost(1.0F);
+        break;
+      } else {
+        final int codePointCount = UnicodeUtil.codePointCount(term);
+        int minTermLength = Math.min(codePointCount, termLength);
+
+        // only accept a matching term if it's longer than the edit distance:
+        if (minTermLength > ed) {
+          float similarity = 1.0f - (float) ed / (float) minTermLength;
+          boostAtt.setBoost(similarity);
+          break;
+        }
+      }
+    }
+      
     final float bottom = maxBoostAtt.getMaxNonCompetitiveBoost();
     final BytesRef bottomTerm = maxBoostAtt.getCompetitiveTerm();
     if (term != null && (bottom != this.bottom || bottomTerm != this.bottomTerm)) {
@@ -15,6 +53,8 @@
       this.bottomTerm = bottomTerm;
       // clone the term before potentially doing something with it
       // this is a rare but wonderful occurrence anyway
+
+      // We must delay bottomChanged until the next next() call otherwise we mess up docFreq(), etc., for the current term:
       queuedBottom = BytesRef.deepCopyOf(term);
     }
     

@@ -1,0 +1,74 @@
+  /**
+   * Find out the number of bytes in the block that match its crc.
+   *
+   * This algorithm assumes that data corruption caused by unexpected
+   * datanode shutdown occurs only in the last crc chunk. So it checks
+   * only the last chunk.
+   *
+   * @param blockFile the block file
+   * @param genStamp generation stamp of the block
+   * @return the number of valid bytes
+   */
+  private long validateIntegrityAndSetLength(File blockFile, long genStamp) {
+    try {
+      final File metaFile = FsDatasetUtil.getMetaFile(blockFile, genStamp);
+      long blockFileLen = blockFile.length();
+      long metaFileLen = metaFile.length();
+      int crcHeaderLen = DataChecksum.getChecksumHeaderSize();
+      if (!blockFile.exists() || blockFileLen == 0 ||
+          !metaFile.exists() || metaFileLen < crcHeaderLen) {
+        return 0;
+      }
+      try (DataInputStream checksumIn = new DataInputStream(
+          new BufferedInputStream(
+              fileIoProvider.getFileInputStream(volume, metaFile),
+              ioFileBufferSize))) {
+        // read and handle the common header here. For now just a version
+        final DataChecksum checksum = BlockMetadataHeader.readDataChecksum(
+            checksumIn, metaFile);
+        int bytesPerChecksum = checksum.getBytesPerChecksum();
+        int checksumSize = checksum.getChecksumSize();
+        long numChunks = Math.min(
+            (blockFileLen + bytesPerChecksum - 1) / bytesPerChecksum,
+            (metaFileLen - crcHeaderLen) / checksumSize);
+        if (numChunks == 0) {
+          return 0;
+        }
+        try (InputStream blockIn = fileIoProvider.getFileInputStream(
+            volume, blockFile);
+             ReplicaInputStreams ris = new ReplicaInputStreams(blockIn,
+                 checksumIn, volume.obtainReference(), fileIoProvider)) {
+          ris.skipChecksumFully((numChunks - 1) * checksumSize);
+          long lastChunkStartPos = (numChunks - 1) * bytesPerChecksum;
+          ris.skipDataFully(lastChunkStartPos);
+          int lastChunkSize = (int) Math.min(
+              bytesPerChecksum, blockFileLen - lastChunkStartPos);
+          byte[] buf = new byte[lastChunkSize + checksumSize];
+          ris.readChecksumFully(buf, lastChunkSize, checksumSize);
+          ris.readDataFully(buf, 0, lastChunkSize);
+          checksum.update(buf, 0, lastChunkSize);
+          long validFileLength;
+          if (checksum.compare(buf, lastChunkSize)) { // last chunk matches crc
+            validFileLength = lastChunkStartPos + lastChunkSize;
+          } else { // last chunk is corrupt
+            validFileLength = lastChunkStartPos;
+          }
+          // truncate if extra bytes are present without CRC
+          if (blockFile.length() > validFileLength) {
+            try (RandomAccessFile blockRAF =
+                     fileIoProvider.getRandomAccessFile(
+                         volume, blockFile, "rw")) {
+              // truncate blockFile
+              blockRAF.setLength(validFileLength);
+            }
+          }
+          return validFileLength;
+        }
+      }
+    } catch (IOException e) {
+      FsDatasetImpl.LOG.warn("Getting exception while validating integrity " +
+          "and setting length for blockFile", e);
+      return 0;
+    }
+  }
+

@@ -1,0 +1,42 @@
+  void getVolumeMap(ReplicaMap volumeMap,
+                    final RamDiskReplicaTracker lazyWriteReplicaMap)
+      throws IOException {
+    // Recover lazy persist replicas, they will be added to the volumeMap
+    // when we scan the finalized directory.
+    if (lazypersistDir.exists()) {
+      int numRecovered = moveLazyPersistReplicasToFinalized(lazypersistDir);
+      FsDatasetImpl.LOG.info(
+          "Recovered " + numRecovered + " replicas from " + lazypersistDir);
+    }
+
+    boolean  success = readReplicasFromCache(volumeMap, lazyWriteReplicaMap);
+    if (!success) {
+      List<IOException> exceptions = Collections
+          .synchronizedList(new ArrayList<IOException>());
+      Queue<RecursiveAction> subTaskQueue =
+          new ConcurrentLinkedQueue<RecursiveAction>();
+
+      // add finalized replicas
+      AddReplicaProcessor task = new AddReplicaProcessor(volumeMap,
+          finalizedDir, lazyWriteReplicaMap, true, exceptions, subTaskQueue);
+      ForkJoinTask<Void> finalizedTask = addReplicaThreadPool.submit(task);
+
+      // add rbw replicas
+      task = new AddReplicaProcessor(volumeMap, rbwDir, lazyWriteReplicaMap,
+          false, exceptions, subTaskQueue);
+      ForkJoinTask<Void> rbwTask = addReplicaThreadPool.submit(task);
+
+      try {
+        finalizedTask.get();
+        rbwTask.get();
+      } catch (InterruptedException | ExecutionException e) {
+        exceptions.add(new IOException(
+            "Failed to start sub tasks to add replica in replica map :"
+                + e.getMessage()));
+      }
+
+      //wait for all the tasks to finish.
+      waitForSubTaskToFinish(subTaskQueue, exceptions);
+    }
+  }
+

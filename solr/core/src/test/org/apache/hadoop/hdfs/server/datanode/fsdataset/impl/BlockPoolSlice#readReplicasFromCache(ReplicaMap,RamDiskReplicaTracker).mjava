@@ -1,0 +1,76 @@
+  private boolean readReplicasFromCache(ReplicaMap volumeMap,
+                                        final RamDiskReplicaTracker lazyWriteReplicaMap) {
+    ReplicaMap tmpReplicaMap = new ReplicaMap(new AutoCloseableLock());
+    File replicaFile = new File(currentDir, REPLICA_CACHE_FILE);
+    // Check whether the file exists or not.
+    if (!replicaFile.exists()) {
+      LOG.info("Replica Cache file: "+  replicaFile.getPath() +
+          " doesn't exist ");
+      return false;
+    }
+    long fileLastModifiedTime = replicaFile.lastModified();
+    if (System.currentTimeMillis() > fileLastModifiedTime + replicaCacheExpiry) {
+      LOG.info("Replica Cache file: " + replicaFile.getPath() +
+          " has gone stale");
+      // Just to make findbugs happy
+      if (!replicaFile.delete()) {
+        LOG.info("Replica Cache file: " + replicaFile.getPath() +
+            " cannot be deleted");
+      }
+      return false;
+    }
+    FileInputStream inputStream = null;
+    try {
+      inputStream = fileIoProvider.getFileInputStream(volume, replicaFile);
+      BlockListAsLongs blocksList =
+          BlockListAsLongs.readFrom(inputStream, maxDataLength);
+      if (blocksList == null) {
+        return false;
+      }
+
+      for (BlockReportReplica replica : blocksList) {
+        switch (replica.getState()) {
+          case FINALIZED:
+            addReplicaToReplicasMap(replica, tmpReplicaMap, lazyWriteReplicaMap, true);
+            break;
+          case RUR:
+          case RBW:
+          case RWR:
+            addReplicaToReplicasMap(replica, tmpReplicaMap, lazyWriteReplicaMap, false);
+            break;
+          default:
+            break;
+        }
+      }
+      // Now it is safe to add the replica into volumeMap
+      // In case of any exception during parsing this cache file, fall back
+      // to scan all the files on disk.
+      for (Iterator<ReplicaInfo> iter =
+           tmpReplicaMap.replicas(bpid).iterator(); iter.hasNext(); ) {
+        ReplicaInfo info = iter.next();
+        // We use a lightweight GSet to store replicaInfo, we need to remove
+        // it from one GSet before adding to another.
+        iter.remove();
+        volumeMap.add(bpid, info);
+      }
+      LOG.info("Successfully read replica from cache file : "
+          + replicaFile.getPath());
+      return true;
+    } catch (Exception e) {
+      // Any exception we need to revert back to read from disk
+      // Log the error and return false
+      LOG.info("Exception occurred while reading the replicas cache file: "
+          + replicaFile.getPath(), e );
+      return false;
+    }
+    finally {
+      // close the inputStream
+      IOUtils.closeStream(inputStream);
+
+      if (!fileIoProvider.delete(volume, replicaFile)) {
+        LOG.info("Failed to delete replica cache file: " +
+            replicaFile.getPath());
+      }
+    }
+  }
+

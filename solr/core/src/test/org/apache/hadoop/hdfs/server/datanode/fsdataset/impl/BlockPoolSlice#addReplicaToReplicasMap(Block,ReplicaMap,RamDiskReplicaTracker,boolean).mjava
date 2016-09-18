@@ -1,0 +1,85 @@
+  private void addReplicaToReplicasMap(Block block, ReplicaMap volumeMap,
+                                       final RamDiskReplicaTracker lazyWriteReplicaMap,boolean isFinalized)
+      throws IOException {
+    ReplicaInfo newReplica = null;
+    long blockId = block.getBlockId();
+    long genStamp = block.getGenerationStamp();
+    if (isFinalized) {
+      newReplica = new ReplicaBuilder(ReplicaState.FINALIZED)
+          .setBlockId(blockId)
+          .setLength(block.getNumBytes())
+          .setGenerationStamp(genStamp)
+          .setFsVolume(volume)
+          .setDirectoryToUse(DatanodeUtil.idToBlockDir(finalizedDir, blockId))
+          .build();
+    } else {
+      File file = new File(rbwDir, block.getBlockName());
+      boolean loadRwr = true;
+      File restartMeta = new File(file.getParent()  +
+          File.pathSeparator + "." + file.getName() + ".restart");
+      Scanner sc = null;
+      try {
+        sc = new Scanner(restartMeta, "UTF-8");
+        // The restart meta file exists
+        if (sc.hasNextLong() && (sc.nextLong() > timer.now())) {
+          // It didn't expire. Load the replica as a RBW.
+          // We don't know the expected block length, so just use 0
+          // and don't reserve any more space for writes.
+          newReplica = new ReplicaBuilder(ReplicaState.RBW)
+              .setBlockId(blockId)
+              .setLength(validateIntegrityAndSetLength(file, genStamp))
+              .setGenerationStamp(genStamp)
+              .setFsVolume(volume)
+              .setDirectoryToUse(file.getParentFile())
+              .setWriterThread(null)
+              .setBytesToReserve(0)
+              .build();
+          loadRwr = false;
+        }
+        sc.close();
+        if (!fileIoProvider.delete(volume, restartMeta)) {
+          FsDatasetImpl.LOG.warn("Failed to delete restart meta file: " +
+              restartMeta.getPath());
+        }
+      } catch (FileNotFoundException fnfe) {
+        // nothing to do hereFile dir =
+      } finally {
+        if (sc != null) {
+          sc.close();
+        }
+      }
+      // Restart meta doesn't exist or expired.
+      if (loadRwr) {
+        ReplicaBuilder builder = new ReplicaBuilder(ReplicaState.RWR)
+            .setBlockId(blockId)
+            .setLength(validateIntegrityAndSetLength(file, genStamp))
+            .setGenerationStamp(genStamp)
+            .setFsVolume(volume)
+            .setDirectoryToUse(file.getParentFile());
+        newReplica = builder.build();
+      }
+    }
+
+    ReplicaInfo tmpReplicaInfo = volumeMap.addAndGet(bpid, newReplica);
+    ReplicaInfo oldReplica = (tmpReplicaInfo == newReplica) ? null
+        : tmpReplicaInfo;
+    if (oldReplica != null) {
+      // We have multiple replicas of the same block so decide which one
+      // to keep.
+      newReplica = resolveDuplicateReplicas(newReplica, oldReplica, volumeMap);
+    }
+
+    // If we are retaining a replica on transient storage make sure
+    // it is in the lazyWriteReplicaMap so it can be persisted
+    // eventually.
+    if (newReplica.getVolume().isTransientStorage()) {
+      lazyWriteReplicaMap.addReplica(bpid, blockId,
+          (FsVolumeImpl) newReplica.getVolume(), 0);
+    } else {
+      lazyWriteReplicaMap.discardReplica(bpid, blockId, false);
+    }
+    if (oldReplica == null) {
+      incrNumBlocks();
+    }
+  }
+

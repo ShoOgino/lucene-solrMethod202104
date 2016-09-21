@@ -143,7 +143,7 @@
       SortedDocValues[] sortedDocValues = null;
       LongValues segmentOrdinalMap = null;
       SortedDocValues currentValues = null;
-      if(values instanceof  MultiDocValues.MultiSortedDocValues) {
+      if(values instanceof MultiDocValues.MultiSortedDocValues) {
         ordinalMap = ((MultiDocValues.MultiSortedDocValues)values).mapping;
         sortedDocValues = ((MultiDocValues.MultiSortedDocValues)values).values;
         currentValues = sortedDocValues[currentContext];
@@ -167,8 +167,11 @@
 
         int contextDoc = globalDoc - currentDocBase;
         if(ordinalMap != null) {
-          int ord = currentValues.getOrd(contextDoc);
-          if(ord > -1) {
+          if (contextDoc > currentValues.docID()) {
+            currentValues.advance(contextDoc);
+          }
+          if (contextDoc == currentValues.docID()) {
+            int ord = currentValues.ordValue();
             ++count;
             BytesRef ref = currentValues.lookupOrd(ord);
             ord = (int)segmentOrdinalMap.get(ord);
@@ -177,8 +180,11 @@
             collapsedSet.add(globalDoc);
           }
         } else {
-          int ord = values.getOrd(globalDoc);
-          if(ord > -1) {
+          if (globalDoc > values.docID()) {
+            values.advance(globalDoc);
+          }
+          if (globalDoc == values.docID()) {
+            int ord = values.ordValue();
             ++count;
             BytesRef ref = values.lookupOrd(ord);
             ordBytes.put(ord, BytesRef.deepCopyOf(ref));
@@ -208,7 +214,16 @@
           collapseValues = contexts.get(currentContext).reader().getNumericDocValues(field);
         }
         int contextDoc = globalDoc - currentDocBase;
-        long value = collapseValues.get(contextDoc);
+        int valueDocID = collapseValues.docID();
+        if (valueDocID < contextDoc) {
+          valueDocID = collapseValues.advance(contextDoc);
+        }
+        long value;
+        if (valueDocID == contextDoc) {
+          value = collapseValues.longValue();
+        } else {
+          value = 0;
+        }
         if(value != nullValue) {
           ++count;
           groupSet.add(value);
@@ -229,6 +244,16 @@
     Collector groupExpandCollector = null;
 
     if(values != null) {
+      //Get The Top Level SortedDocValues again so we can re-iterate:
+      if(CollapsingQParserPlugin.HINT_TOP_FC.equals(hint)) {
+        Map<String, UninvertingReader.Type> mapping = new HashMap();
+        mapping.put(field, UninvertingReader.Type.SORTED);
+        UninvertingReader uninvertingReader = new UninvertingReader(new ReaderWrapper(searcher.getLeafReader(), field), mapping);
+        values = uninvertingReader.getSortedDocValues(field);
+      } else {
+        values = DocValues.getSorted(reader, field);
+      }
+      
       groupExpandCollector = new GroupExpandCollector(values, groupBits, collapsedSet, limit, sort);
     } else {
       groupExpandCollector = new NumericGroupExpandCollector(field, nullValue, groupSet, collapsedSet, limit, sort);

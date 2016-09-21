@@ -5,9 +5,9 @@
     // TODO: optimize if only 1 reader is incoming, though that's a rare case
 
     SortField fields[] = sort.getSort();
-    final CrossReaderComparator[] comparators = new CrossReaderComparator[fields.length];
+    final ComparableProvider[][] comparables = new ComparableProvider[fields.length][];
     for(int i=0;i<fields.length;i++) {
-      comparators[i] = getComparator(readers, fields[i]);
+      comparables[i] = getComparableProviders(readers, fields[i]);
     }
 
     int leafCount = readers.size();
@@ -15,8 +15,8 @@
     PriorityQueue<LeafAndDocID> queue = new PriorityQueue<LeafAndDocID>(leafCount) {
         @Override
         public boolean lessThan(LeafAndDocID a, LeafAndDocID b) {
-          for(int i=0;i<comparators.length;i++) {
-            int cmp = comparators[i].compare(a.readerIndex, a.docID, b.readerIndex, b.docID);
+          for(int i=0;i<comparables.length;i++) {
+            int cmp = a.values[i].compareTo(b.values[i]);
             if (cmp != 0) {
               return cmp < 0;
             }
@@ -25,8 +25,9 @@
           // tie-break by docID natural order:
           if (a.readerIndex != b.readerIndex) {
             return a.readerIndex < b.readerIndex;
+          } else {
+            return a.docID < b.docID;
           }
-          return a.docID < b.docID;
         }
     };
 
@@ -34,10 +35,16 @@
 
     for(int i=0;i<leafCount;i++) {
       CodecReader reader = readers.get(i);
-      queue.add(new LeafAndDocID(i, reader.getLiveDocs(), reader.maxDoc()));
+      LeafAndDocID leaf = new LeafAndDocID(i, reader.getLiveDocs(), reader.maxDoc(), comparables.length);
+      for(int j=0;j<comparables.length;j++) {
+        leaf.values[j] = comparables[j][i].getComparable(leaf.docID);
+        assert leaf.values[j] != null;
+      }
+      queue.add(leaf);
       builders[i] = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
     }
 
+    // merge sort:
     int mappedDocID = 0;
     while (queue.size() != 0) {
       LeafAndDocID top = queue.top();
@@ -47,6 +54,10 @@
       }
       top.docID++;
       if (top.docID < top.maxDoc) {
+        for(int j=0;j<comparables.length;j++) {
+          top.values[j] = comparables[j][top.readerIndex].getComparable(top.docID);
+          assert top.values[j] != null;
+        }
         queue.updateTop();
       } else {
         queue.pop();

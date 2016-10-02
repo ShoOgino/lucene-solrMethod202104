@@ -1,9 +1,9 @@
   /** Returns true if peer sync was successful, meaning that this core may be considered to have the latest updates.
    * It does not mean that the remote replica is in sync with us.
    */
-  public boolean sync() {
+  public PeerSyncResult sync() {
     if (ulog == null) {
-      return false;
+      return PeerSyncResult.failure();
     }
     MDCLoggingContext.setCore(core);
     try {
@@ -14,6 +14,11 @@
           log.debug(msg() + "startingVersions=" + startingVersions.size() + " " + startingVersions);
         }
       }
+      // check if we already in sync to begin with 
+      if(doFingerprint && alreadyInSync()) {
+        return PeerSyncResult.success();
+      }
+      
       
       // Fire off the requests before getting our own recent updates (for better concurrency)
       // This also allows us to avoid getting updates we don't need... if we got our updates and then got their updates,
@@ -32,7 +37,7 @@
       if (startingVersions != null) {
         if (startingVersions.size() == 0) {
           log.warn("no frame of reference to tell if we've missed updates");
-          return false;
+          return PeerSyncResult.failure();
         }
         Collections.sort(startingVersions, absComparator);
         
@@ -47,7 +52,7 @@
         if (Math.abs(startingVersions.get(0)) < smallestNewUpdate) {
           log.warn(msg()
               + "too many updates received since start - startingUpdates no longer overlaps with our currentUpdates");
-          return false;
+          return PeerSyncResult.failure();
         }
         
         // let's merge the lists
@@ -69,7 +74,17 @@
           // we have no versions and hence no frame of reference to tell if we can use a peers
           // updates to bring us into sync
           log.info(msg() + "DONE.  We have no versions.  sync failed.");
-          return false;
+          for (;;)  {
+            ShardResponse srsp = shardHandler.takeCompletedOrError();
+            if (srsp == null) break;
+            if (srsp.getException() == null)  {
+              List<Long> otherVersions = (List<Long>)srsp.getSolrResponse().getResponse().get("versions");
+              if (otherVersions != null && !otherVersions.isEmpty())  {
+                return PeerSyncResult.failure(true);
+              }
+            }
+          }
+          return PeerSyncResult.failure(false);
         }
       }
 
@@ -84,7 +99,7 @@
         if (!success) {
           log.info(msg() + "DONE. sync failed");
           shardHandler.cancelAll();
-          return false;
+          return PeerSyncResult.failure();
         }
       }
 
@@ -98,7 +113,7 @@
       }
 
       log.info(msg() + "DONE. sync " + (success ? "succeeded" : "failed"));
-      return success;
+      return success ?  PeerSyncResult.success() : PeerSyncResult.failure();
     } finally {
       MDCLoggingContext.clear();
     }

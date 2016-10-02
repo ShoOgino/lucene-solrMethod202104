@@ -1,0 +1,96 @@
+  /** Wraps the provided {@link NumericDocValues}, iterating over only
+   *  child documents, in order to only select one value per parent among
+   *  its {@code children} using the configured {@code selection} type. */
+  public static NumericDocValues wrap(final NumericDocValues values, Type selection, BitSet parents, BitSet children) {
+    return new NumericDocValues() {
+
+      private int parentDocID = -1;
+      private long value;
+
+      @Override
+      public int nextDoc() throws IOException {
+
+        if (parentDocID == -1) {
+          values.nextDoc();
+        }
+
+        while (true) {
+
+          // TODO: make this crazy loop more efficient
+
+          int childDocID = values.docID();
+          if (childDocID == NO_MORE_DOCS) {
+            parentDocID = NO_MORE_DOCS;
+            return parentDocID;
+          }
+          if (children.get(childDocID) == false) {
+            values.nextDoc();
+            continue;
+          }
+
+          assert parents.get(childDocID) == false;
+        
+          parentDocID = parents.nextSetBit(childDocID);
+          value = values.longValue();
+
+          while (true) {
+            childDocID = values.nextDoc();
+            assert childDocID != parentDocID;
+            if (childDocID > parentDocID) {
+              break;
+            }
+
+            switch (selection) {
+            case MIN:
+              value = Math.min(value, values.longValue());
+              break;
+            case MAX:
+              value = Math.max(value, values.longValue());
+              break;
+            default:
+              throw new AssertionError();
+            }
+          }
+
+          break;
+        }
+
+        return parentDocID;
+      }
+
+      @Override
+      public int advance(int targetParentDocID) throws IOException {
+        if (targetParentDocID <= parentDocID) {
+          throw new IllegalArgumentException("target must be after the current document: current=" + parentDocID + " target=" + targetParentDocID);
+        }
+
+        if (targetParentDocID == 0) {
+          return nextDoc();
+        }
+        
+        int firstChild = parents.prevSetBit(targetParentDocID - 1) + 1;
+        if (values.advance(firstChild) == NO_MORE_DOCS) {
+          parentDocID = NO_MORE_DOCS;
+          return parentDocID;
+        } else {
+          return nextDoc();
+        }
+      }
+
+      @Override
+      public long longValue() {
+        return value;
+      }
+      
+      @Override
+      public int docID() {
+        return parentDocID;
+      }      
+
+      @Override
+      public long cost() {
+        return values.cost();
+      }      
+    };
+  }
+

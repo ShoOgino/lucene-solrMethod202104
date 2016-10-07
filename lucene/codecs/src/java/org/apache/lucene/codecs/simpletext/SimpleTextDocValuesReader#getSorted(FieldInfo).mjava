@@ -11,55 +11,75 @@
     final DecimalFormat decoder = new DecimalFormat(field.pattern, new DecimalFormatSymbols(Locale.ROOT));
     final DecimalFormat ordDecoder = new DecimalFormat(field.ordPattern, new DecimalFormatSymbols(Locale.ROOT));
 
-    return new LegacySortedDocValuesWrapper(new LegacySortedDocValues() {
-      final BytesRefBuilder term = new BytesRefBuilder();
+    return new SortedDocValues() {
+
+      int doc = -1;
 
       @Override
-      public int getOrd(int docID) {
-        if (docID < 0 || docID >= maxDoc) {
-          throw new IndexOutOfBoundsException("docID must be 0 .. " + (maxDoc-1) + "; got " + docID);
-        }
-        try {
-          in.seek(field.dataStartFilePointer + field.numValues * (9 + field.pattern.length() + field.maxLength) + docID * (1 + field.ordPattern.length()));
+      public int nextDoc() throws IOException {
+        return advance(docID() + 1);
+      }
+      
+      @Override
+      public int docID() {
+        return doc;
+      }
+      
+      @Override
+      public long cost() {
+        return maxDoc;
+      }
+
+      int ord;
+
+      @Override
+      public int advance(int target) throws IOException {
+        for (int i = target; i < maxDoc; ++i) {
+          in.seek(field.dataStartFilePointer + field.numValues * (9 + field.pattern.length() + field.maxLength) + i * (1 + field.ordPattern.length()));
           SimpleTextUtil.readLine(in, scratch);
           try {
-            return (int) ordDecoder.parse(scratch.get().utf8ToString()).longValue()-1;
+            ord = (int) ordDecoder.parse(scratch.get().utf8ToString()).longValue()-1;
           } catch (ParseException pe) {
             throw new CorruptIndexException("failed to parse ord", in, pe);
           }
-        } catch (IOException ioe) {
-          throw new RuntimeException(ioe);
+          if (ord >= 0) {
+            return doc = i;
+          }
         }
+        return doc = NO_MORE_DOCS;
       }
-
+      
       @Override
-      public BytesRef lookupOrd(int ord) {
-        try {
-          if (ord < 0 || ord >= field.numValues) {
-            throw new IndexOutOfBoundsException("ord must be 0 .. " + (field.numValues-1) + "; got " + ord);
-          }
-          in.seek(field.dataStartFilePointer + ord * (9 + field.pattern.length() + field.maxLength));
-          SimpleTextUtil.readLine(in, scratch);
-          assert StringHelper.startsWith(scratch.get(), LENGTH): "got " + scratch.get().utf8ToString() + " in=" + in;
-          int len;
-          try {
-            len = decoder.parse(new String(scratch.bytes(), LENGTH.length, scratch.length() - LENGTH.length, StandardCharsets.UTF_8)).intValue();
-          } catch (ParseException pe) {
-            throw new CorruptIndexException("failed to parse int length", in, pe);
-          }
-          term.grow(len);
-          term.setLength(len);
-          in.readBytes(term.bytes(), 0, len);
-          return term.get();
-        } catch (IOException ioe) {
-          throw new RuntimeException(ioe);
-        }
+      public int ordValue() {
+        return ord;
       }
-
+      
+      final BytesRefBuilder term = new BytesRefBuilder();
+      
+      @Override
+      public BytesRef lookupOrd(int ord) throws IOException {
+        if (ord < 0 || ord >= field.numValues) {
+          throw new IndexOutOfBoundsException("ord must be 0 .. " + (field.numValues-1) + "; got " + ord);
+        }
+        in.seek(field.dataStartFilePointer + ord * (9 + field.pattern.length() + field.maxLength));
+        SimpleTextUtil.readLine(in, scratch);
+        assert StringHelper.startsWith(scratch.get(), LENGTH): "got " + scratch.get().utf8ToString() + " in=" + in;
+        int len;
+        try {
+          len = decoder.parse(new String(scratch.bytes(), LENGTH.length, scratch.length() - LENGTH.length, StandardCharsets.UTF_8)).intValue();
+        } catch (ParseException pe) {
+          throw new CorruptIndexException("failed to parse int length", in, pe);
+        }
+        term.grow(len);
+        term.setLength(len);
+        in.readBytes(term.bytes(), 0, len);
+        return term.get();
+      }
+      
       @Override
       public int getValueCount() {
         return (int)field.numValues;
       }
-    }, maxDoc);
+    };
   }
 

@@ -1,15 +1,13 @@
   @Override
   public void addSortedSetField(FieldInfo field, DocValuesProducer valuesProducer) throws IOException {
-    Iterable<BytesRef> values = LegacyDocValuesIterables.valuesIterable(valuesProducer.getSortedSet(field));
-    Iterable<Number> docToOrdCount = LegacyDocValuesIterables.sortedSetOrdCountIterable(valuesProducer, field, numDocs);
-    Iterable<Number> ords = LegacyDocValuesIterables.sortedSetOrdsIterable(valuesProducer, field);
     assert fieldSeen(field.name);
     assert field.getDocValuesType() == DocValuesType.SORTED_SET;
     writeFieldEntry(field, DocValuesType.SORTED_SET);
 
     long valueCount = 0;
     int maxLength = 0;
-    for(BytesRef value : values) {
+    TermsEnum terms = valuesProducer.getSortedSet(field).termsEnum();
+    for(BytesRef value = terms.next(); value != null; value = terms.next()) {
       maxLength = Math.max(maxLength, value.length);
       valueCount++;
     }
@@ -39,12 +37,10 @@
     // compute ord pattern: this is funny, we encode all values for all docs to find the maximum length
     int maxOrdListLength = 0;
     StringBuilder sb2 = new StringBuilder();
-    Iterator<Number> ordStream = ords.iterator();
-    for (Number n : docToOrdCount) {
+    SortedSetDocValues values = valuesProducer.getSortedSet(field);
+    for (int doc = values.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = values.nextDoc()) {
       sb2.setLength(0);
-      int count = n.intValue();
-      for (int i = 0; i < count; i++) {
-        long ord = ordStream.next().longValue();
+      for (long ord = values.nextOrd(); ord != SortedSetDocValues.NO_MORE_ORDS; ord = values.nextOrd()) {
         if (sb2.length() > 0) {
           sb2.append(",");
         }
@@ -66,7 +62,8 @@
     // for asserts:
     long valuesSeen = 0;
 
-    for(BytesRef value : values) {
+    terms = valuesProducer.getSortedSet(field).termsEnum();
+    for(BytesRef value = terms.next(); value != null; value = terms.next()) {
       // write length
       SimpleTextUtil.write(data, LENGTH);
       SimpleTextUtil.write(data, encoder.format(value.length), scratch);
@@ -87,22 +84,26 @@
 
     assert valuesSeen == valueCount;
 
-    ordStream = ords.iterator();
+    values = valuesProducer.getSortedSet(field);
     
     // write the ords for each doc comma-separated
-    for(Number n : docToOrdCount) {
+    for (int i = 0; i < numDocs; ++i) {
+      if (values.docID() < i) {
+        values.nextDoc();
+        assert values.docID() >= i;
+      }
       sb2.setLength(0);
-      int count = n.intValue();
-      for (int i = 0; i < count; i++) {
-        long ord = ordStream.next().longValue();
-        if (sb2.length() > 0) {
-          sb2.append(",");
+      if (values.docID() == i) {
+        for (long ord = values.nextOrd(); ord != SortedSetDocValues.NO_MORE_ORDS; ord = values.nextOrd()) {
+          if (sb2.length() > 0) {
+            sb2.append(",");
+          }
+          sb2.append(Long.toString(ord));
         }
-        sb2.append(Long.toString(ord));
       }
       // now pad to fit: these are numbers so spaces work well. reader calls trim()
       int numPadding = maxOrdListLength - sb2.length();
-      for (int i = 0; i < numPadding; i++) {
+      for (int j = 0; j < numPadding; j++) {
         sb2.append(' ');
       }
       SimpleTextUtil.write(data, sb2.toString(), scratch);

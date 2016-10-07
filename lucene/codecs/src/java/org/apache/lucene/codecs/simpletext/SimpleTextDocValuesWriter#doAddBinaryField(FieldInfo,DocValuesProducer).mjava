@@ -1,8 +1,8 @@
-  private void doAddBinary(FieldInfo field, Iterable<BytesRef> values) throws IOException {
+  private void doAddBinaryField(FieldInfo field, DocValuesProducer valuesProducer) throws IOException {
     int maxLength = 0;
-    for(BytesRef value : values) {
-      final int length = value == null ? 0 : value.length;
-      maxLength = Math.max(maxLength, length);
+    BinaryDocValues values = valuesProducer.getBinary(field);
+    for (int doc = values.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = values.nextDoc()) {
+      maxLength = Math.max(maxLength, values.binaryValue().length);
     }
     writeFieldEntry(field, DocValuesType.BINARY);
 
@@ -22,26 +22,32 @@
     SimpleTextUtil.writeNewline(data);
     final DecimalFormat encoder = new DecimalFormat(sb.toString(), new DecimalFormatSymbols(Locale.ROOT));
 
+    values = valuesProducer.getBinary(field);
     int numDocsWritten = 0;
-    for(BytesRef value : values) {
+    for (int i = 0; i < numDocs; ++i) {
+      if (values.docID() < i) {
+        values.nextDoc();
+        assert values.docID() >= i;
+      }
       // write length
-      final int length = value == null ? 0 : value.length;
+      final int length = values.docID() != i ? 0 : values.binaryValue().length;
       SimpleTextUtil.write(data, LENGTH);
       SimpleTextUtil.write(data, encoder.format(length), scratch);
       SimpleTextUtil.writeNewline(data);
         
       // write bytes -- don't use SimpleText.write
       // because it escapes:
-      if (value != null) {
+      if (values.docID() == i) {
+        BytesRef value = values.binaryValue();
         data.writeBytes(value.bytes, value.offset, value.length);
       }
 
       // pad to fit
-      for (int i = length; i < maxLength; i++) {
+      for (int j = length; j < maxLength; j++) {
         data.writeByte((byte)' ');
       }
       SimpleTextUtil.writeNewline(data);
-      if (value == null) {
+      if (values.docID() != i) {
         SimpleTextUtil.write(data, "F", scratch);
       } else {
         SimpleTextUtil.write(data, "T", scratch);

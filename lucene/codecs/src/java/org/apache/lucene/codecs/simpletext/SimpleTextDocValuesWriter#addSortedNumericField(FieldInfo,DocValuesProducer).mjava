@@ -1,43 +1,57 @@
   @Override
   public void addSortedNumericField(FieldInfo field, final DocValuesProducer valuesProducer) throws IOException {
-
-    final Iterable<Number> docToValueCount = LegacyDocValuesIterables.sortedNumericToDocCount(valuesProducer, field, numDocs);
-    final Iterable<Number> values = LegacyDocValuesIterables.sortedNumericToValues(valuesProducer, field);
-
     assert fieldSeen(field.name);
     assert field.getDocValuesType() == DocValuesType.SORTED_NUMERIC;
-    doAddBinary(field, new Iterable<BytesRef>() {     
+    doAddBinaryField(field, new EmptyDocValuesProducer() {
       @Override
-      public Iterator<BytesRef> iterator() {
-        final StringBuilder builder = new StringBuilder();
-        final BytesRefBuilder scratch = new BytesRefBuilder();
-        final Iterator<Number> counts = docToValueCount.iterator();
-        final Iterator<Number> numbers = values.iterator();
-        
-        return new Iterator<BytesRef>() {
+      public BinaryDocValues getBinary(FieldInfo field) throws IOException {
+        SortedNumericDocValues values = valuesProducer.getSortedNumeric(field);
+        return new BinaryDocValues() {
 
           @Override
-          public boolean hasNext() {
-            return counts.hasNext();
+          public int nextDoc() throws IOException {
+            int doc = values.nextDoc();
+            setCurrentDoc();
+            return doc;
           }
 
           @Override
-          public BytesRef next() {
+          public int docID() {
+            return values.docID();
+          }
+
+          @Override
+          public long cost() {
+            return values.cost();
+          }
+
+          @Override
+          public int advance(int target) throws IOException {
+            int doc = values.advance(target);
+            setCurrentDoc();
+            return doc;
+          }
+
+          final StringBuilder builder = new StringBuilder();
+          BytesRef binaryValue;
+
+          private void setCurrentDoc() throws IOException {
+            if (docID() == NO_MORE_DOCS) {
+              return;
+            }
             builder.setLength(0);
-            long count = counts.next().longValue();
-            for (int i = 0; i < count; i++) {
+            for (int i = 0, count = values.docValueCount(); i < count; ++i) {
               if (i > 0) {
                 builder.append(',');
               }
-              builder.append(Long.toString(numbers.next().longValue()));
+              builder.append(Long.toString(values.nextValue()));
             }
-            scratch.copyChars(builder);
-            return scratch.get();
+            binaryValue = new BytesRef(builder.toString());
           }
 
           @Override
-          public void remove() {
-            throw new UnsupportedOperationException();
+          public BytesRef binaryValue() throws IOException {
+            return binaryValue;
           }
         };
       }

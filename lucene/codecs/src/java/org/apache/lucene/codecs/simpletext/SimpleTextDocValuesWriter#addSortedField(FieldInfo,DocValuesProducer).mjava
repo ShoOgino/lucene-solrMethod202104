@@ -1,15 +1,13 @@
   @Override
   public void addSortedField(FieldInfo field, DocValuesProducer valuesProducer) throws IOException {
-    Iterable<BytesRef> values = LegacyDocValuesIterables.valuesIterable(valuesProducer.getSorted(field));
-    Iterable<Number> docToOrd = LegacyDocValuesIterables.sortedOrdIterable(valuesProducer, field, numDocs);
-    
     assert fieldSeen(field.name);
     assert field.getDocValuesType() == DocValuesType.SORTED;
     writeFieldEntry(field, DocValuesType.SORTED);
 
     int valueCount = 0;
     int maxLength = -1;
-    for(BytesRef value : values) {
+    TermsEnum terms = valuesProducer.getSorted(field).termsEnum();
+    for(BytesRef value = terms.next(); value != null; value = terms.next()) {
       maxLength = Math.max(maxLength, value.length);
       valueCount++;
     }
@@ -51,7 +49,8 @@
     // for asserts:
     int valuesSeen = 0;
 
-    for(BytesRef value : values) {
+    terms = valuesProducer.getSorted(field).termsEnum();
+    for(BytesRef value = terms.next(); value != null; value = terms.next()) {
       // write length
       SimpleTextUtil.write(data, LENGTH);
       SimpleTextUtil.write(data, encoder.format(value.length), scratch);
@@ -72,8 +71,17 @@
 
     assert valuesSeen == valueCount;
 
-    for(Number ord : docToOrd) {
-      SimpleTextUtil.write(data, ordEncoder.format(ord.longValue()+1), scratch);
+    SortedDocValues values = valuesProducer.getSorted(field);
+    for (int i = 0; i < numDocs; ++i) {
+      if (values.docID() < i) {
+        values.nextDoc();
+        assert values.docID() >= i;
+      }
+      int ord = -1;
+      if (values.docID() == i) {
+        ord = values.ordValue();
+      }
+      SimpleTextUtil.write(data, ordEncoder.format(ord+1L), scratch);
       SimpleTextUtil.writeNewline(data);
     }
   }

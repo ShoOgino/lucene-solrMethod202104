@@ -1,32 +1,29 @@
   @Override
-  public void addSortedNumericField(FieldInfo field, final DocValuesProducer valuesProducer) throws IOException {
-
-    final Iterable<Number> docToValueCount = LegacyDocValuesIterables.sortedNumericToDocCount(valuesProducer, field, maxDoc);
-    final Iterable<Number> values = LegacyDocValuesIterables.sortedNumericToValues(valuesProducer, field);
-    
-    meta.writeVInt(field.number);
+  public void addSortedNumericField(FieldInfo field, DocValuesProducer valuesProducer) throws IOException {
+    meta.writeInt(field.number);
     meta.writeByte(Lucene70DocValuesFormat.SORTED_NUMERIC);
-    if (isSingleValued(docToValueCount)) {
-      meta.writeVInt(SORTED_SINGLE_VALUED);
-      // The field is single-valued, we can encode it as NUMERIC
-      addNumericField(field, singletonView(docToValueCount, values, null), NumberType.VALUE);
-    } else {
-      final SortedSet<LongsRef> uniqueValueSets = uniqueValueSets(docToValueCount, values);
-      if (uniqueValueSets != null) {
-        meta.writeVInt(SORTED_SET_TABLE);
 
-        // write the set_id -> values mapping
-        writeDictionary(uniqueValueSets);
+    long[] stats = writeValues(field, valuesProducer);
+    int numDocsWithField = Math.toIntExact(stats[0]);
+    long numValues = stats[1];
+    assert numValues >= numDocsWithField;
 
-        // write the doc -> set_id as a numeric field
-        addNumericField(field, docToSetId(uniqueValueSets, docToValueCount, values), NumberType.ORDINAL);
-      } else {
-        meta.writeVInt(SORTED_WITH_ADDRESSES);
-        // write the stream of values as a numeric field
-        addNumericField(field, values, NumberType.VALUE);
-        // write the doc -> ord count as a absolute index to the stream
-        addOrdIndex(field, docToValueCount);
+    meta.writeInt(numDocsWithField);
+    if (numValues > numDocsWithField) {
+      long start = data.getFilePointer();
+      meta.writeLong(start);
+      meta.writeVInt(DIRECT_MONOTONIC_BLOCK_SHIFT);
+
+      final DirectMonotonicWriter addressesWriter = DirectMonotonicWriter.getInstance(meta, data, numDocsWithField + 1L, DIRECT_MONOTONIC_BLOCK_SHIFT);
+      long addr = 0;
+      addressesWriter.add(addr);
+      SortedNumericDocValues values = valuesProducer.getSortedNumeric(field);
+      for (int doc = values.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = values.nextDoc()) {
+        addr += values.docValueCount();
+        addressesWriter.add(addr);
       }
+      addressesWriter.finish();
+      meta.writeLong(data.getFilePointer() - start);
     }
   }
 

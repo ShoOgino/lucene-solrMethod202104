@@ -1,0 +1,92 @@
+  /**
+   * Returns a filtered postings where the position must be in the given Spans.
+   * The Spans must be in a positioned state (not initial) and should not be shared between other terms.
+   * {@code postingsEnum} should be positioned at the
+   * document (the same one as the spans) but it hasn't iterated the positions yet.
+   * The Spans should be the result of a simple
+   * lookup from {@link #getTermToSpans(LeafReader, int)}, and so it could be null which could mean
+   * either it's completely filtered or that there should be no filtering; this class knows what to do.
+   * <p>
+   * Due to limitations in filtering, the {@link PostingsEnum#freq()} is un-changed even if some positions
+   * get filtered.  So when {@link PostingsEnum#nextPosition()} is called or {@code startOffset} or {@code
+   * endOffset} beyond the "real" positions, these methods returns {@link Integer#MAX_VALUE}.
+   * <p>
+   * <b>This will return null if it's completely filtered out (i.e. effectively has no postings).</b>
+   */
+  PostingsEnum filterPostings(BytesRef term, PostingsEnum postingsEnum, Spans spans)
+      throws IOException {
+    if (spans == null) {
+      if (hasPositionSensitivity() == false || positionInsensitiveTerms.contains(new Term(fieldName, term))) {
+        return postingsEnum; // no filtering
+      } else {
+        return null; // completely filtered out
+      }
+    }
+    if (postingsEnum.docID() != spans.docID()) {
+      throw new IllegalStateException("Spans & Postings doc ID misaligned or not positioned");
+    }
+
+    return new FilterLeafReader.FilterPostingsEnum(postingsEnum) {
+      // freq() is max times nextPosition can be called. We'll set this var to -1 when exhausted.
+      int remainingPositions = postingsEnum.freq();
+
+      @Override
+      public String toString() {
+        String where;
+        try {
+          where = "[" + startOffset() + ":" + endOffset() + "]";
+        } catch (IOException e) {
+          where = "[" + e + "]";
+        }
+        return "'" + term.utf8ToString() + "'@" + where + " filtered by " + spans;
+      }
+
+      @Override
+      public int nextDoc() throws IOException {
+        throw new IllegalStateException("not expected"); // don't need to implement; just used on one doc
+      }
+
+      @Override
+      public int advance(int target) throws IOException {
+        throw new IllegalStateException("not expected"); // don't need to implement; just used on one doc
+      }
+
+      @Override
+      public int nextPosition() throws IOException {
+        // loop over posting positions...
+        NEXT_POS_LOOP:
+        while (remainingPositions > 0) {
+          final int thisPos = super.nextPosition();
+          remainingPositions--;
+
+          // loop spans forward (if necessary) while the span end is behind thisPos
+          while (spans.endPosition() <= thisPos) {
+            if (spans.nextStartPosition() == Spans.NO_MORE_POSITIONS) { // advance
+              break NEXT_POS_LOOP;
+            }
+            assert spans.docID() == postingsEnum.docID();
+          }
+
+          // is this position within the span?
+          if (thisPos >= spans.startPosition()) {
+            assert thisPos < spans.endPosition(); // guaranteed by previous loop
+            return thisPos; // yay!
+          }
+          // else continue and try the next position
+        }
+        remainingPositions = -1; // signify done
+        return Integer.MAX_VALUE;
+      }
+
+      @Override
+      public int startOffset() throws IOException {
+        return remainingPositions >= 0 ? super.startOffset() : Integer.MAX_VALUE;
+      }
+
+      @Override
+      public int endOffset() throws IOException {
+        return remainingPositions >= 0 ? super.endOffset() : Integer.MAX_VALUE;
+      }
+    };
+  }
+

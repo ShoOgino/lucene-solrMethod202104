@@ -1,0 +1,81 @@
+  @Test
+  public void test() throws Exception {
+    handle.clear();
+    handle.put("timestamp", SKIPVAL);
+
+    waitForThingsToLevelOut(30);
+
+    del("*:*");
+
+    // index enough docs and commit to establish frame of reference for PeerSync
+    for (int i = 0; i < 100; i++) {
+      indexDoc(id, docId, i1, 50, tlong, 50, t1,
+          "document number " + docId++);
+    }
+    commit();
+    waitForThingsToLevelOut(30);
+
+    try {
+      checkShardConsistency(false, true);
+
+      long cloudClientDocs = cloudClient.query(new SolrQuery("*:*")).getResults().getNumFound();
+      assertEquals(docId, cloudClientDocs);
+
+      CloudJettyRunner initialLeaderJetty = shardToLeaderJetty.get("shard1");
+      List<CloudJettyRunner> otherJetties = getOtherAvailableJetties(initialLeaderJetty);
+      CloudJettyRunner neverLeader = otherJetties.get(otherJetties.size() - 1);
+      otherJetties.remove(neverLeader) ;
+
+      // first shutdown a node that will never be a leader
+      forceNodeFailures(singletonList(neverLeader));
+
+      // node failure and recovery via PeerSync
+      log.info("Forcing PeerSync");
+      CloudJettyRunner nodePeerSynced = forceNodeFailureAndDoPeerSync(false);
+
+      // add a few more docs
+      indexDoc(id, docId, i1, 50, tlong, 50, t1,
+          "document number " + docId++);
+      indexDoc(id, docId, i1, 50, tlong, 50, t1,
+          "document number " + docId++);
+      commit();
+
+      cloudClientDocs = cloudClient.query(new SolrQuery("*:*")).getResults().getNumFound();
+      assertEquals(docId, cloudClientDocs);
+
+      // now shutdown all other nodes except for 'nodeShutDownForFailure'
+      otherJetties.remove(nodePeerSynced);
+      forceNodeFailures(otherJetties);
+      waitForThingsToLevelOut(30);
+      checkShardConsistency(false, true);
+
+      // now shutdown the original leader
+      log.info("Now shutting down initial leader");
+      forceNodeFailures(singletonList(initialLeaderJetty));
+      log.info("Updating mappings from zk");
+      LeaderFailureAfterFreshStartTest.waitForNewLeader(cloudClient, "shard1", (Replica) initialLeaderJetty.client.info, 15);
+      updateMappingsFromZk(jettys, clients, true);
+      assertEquals("PeerSynced node did not become leader", nodePeerSynced, shardToLeaderJetty.get("shard1"));
+
+      // bring up node that was down all along, and let it PeerSync from the node that was forced to PeerSynce  
+      bringUpDeadNodeAndEnsureNoReplication(shardToLeaderJetty.get("shard1"), neverLeader, false);
+      waitTillNodesActive();
+
+      checkShardConsistency(false, true);
+
+      
+      // bring back all the nodes including initial leader 
+      // (commented as reports Maximum concurrent create/delete watches above limit violation and reports thread leaks)
+      /*for(int i = 0 ; i < nodesDown.size(); i++) {
+        bringUpDeadNodeAndEnsureNoReplication(shardToLeaderJetty.get("shard1"), neverLeader, false);
+      }
+      checkShardConsistency(false, true);*/
+
+      // make sure leader has not changed after bringing initial leader back
+      assertEquals(nodePeerSynced, shardToLeaderJetty.get("shard1"));
+      success = true;
+    } finally {
+      System.clearProperty("solr.disableFingerprint");
+    }
+  }
+

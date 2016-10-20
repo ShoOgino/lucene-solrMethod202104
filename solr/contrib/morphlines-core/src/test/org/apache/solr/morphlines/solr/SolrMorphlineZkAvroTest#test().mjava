@@ -1,32 +1,32 @@
   @Test
   public void test() throws Exception {
-    Joiner joiner = Joiner.on(File.separator);
-    File file = new File(joiner.join(RESOURCES_DIR, "test-documents", "sample-statuses-20120906-141433-medium.avro"));
-    
-    waitForRecoveriesToFinish(false);
-    
+
+    Path avro = Paths.get(RESOURCES_DIR).resolve("test-documents").resolve("sample-statuses-20120906-141433-medium.avro");
+
     // load avro records via morphline and zk into solr
     morphline = parse("test-morphlines" + File.separator + "tutorialReadAvroContainer");    
     Record record = new Record();
-    byte[] body = Files.toByteArray(file);    
+    byte[] body = Files.readAllBytes(avro);
     record.put(Fields.ATTACHMENT_BODY, body);
     startSession();
     Notifications.notifyBeginTransaction(morphline);
     assertTrue(morphline.process(record));
     assertEquals(1, collector.getNumStartEvents());
     
-    commit();
+    Notifications.notifyCommitTransaction(morphline);
+    new UpdateRequest().commit(cluster.getSolrClient(), COLLECTION);
     
     // fetch sorted result set from solr
-    QueryResponse rsp = cloudClient.query(new SolrQuery("*:*").setRows(100000).addSort("id", SolrQuery.ORDER.asc));   
+    QueryResponse rsp = cluster.getSolrClient()
+        .query(COLLECTION, new SolrQuery("*:*").setRows(100000).addSort("id", SolrQuery.ORDER.asc));
     assertEquals(2104, collector.getRecords().size());
     assertEquals(collector.getRecords().size(), rsp.getResults().size());
     
     Collections.sort(collector.getRecords(), (r1, r2) -> r1.get("id").toString().compareTo(r2.get("id").toString()));
 
     // fetch test input data and sort like solr result set
-    List<GenericData.Record> records = new ArrayList();
-    FileReader<GenericData.Record> reader = new DataFileReader(file, new GenericDatumReader());
+    List<GenericData.Record> records = new ArrayList<>();
+    FileReader<GenericData.Record> reader = new DataFileReader(avro.toFile(), new GenericDatumReader());
     while (reader.hasNext()) {
       GenericData.Record expected = reader.next();
       records.add(expected);
@@ -64,6 +64,6 @@
     
     Notifications.notifyRollbackTransaction(morphline);
     Notifications.notifyShutdown(morphline);
-    cloudClient.close();
+
   }
 

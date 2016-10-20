@@ -20,6 +20,11 @@
     if (nodeID >= leafNodeOffset) {
 
       // Leaf node: write block
+      // We can write the block in any order so by default we write it sorted by the dimension that has the
+      // least number of unique bytes at commonPrefixLengths[dim], which makes compression more efficient
+      int sortedDim = 0;
+      int sortedDimCardinality = Integer.MAX_VALUE;
+
       for (int dim=0;dim<numDims;dim++) {
         if (slices[dim].writer instanceof HeapPointWriter == false) {
           // Adversarial cases can cause this, e.g. very lopsided data, all equal points, such that we started
@@ -43,9 +48,29 @@
             break;
           }
         }
+
+        int prefix = commonPrefixLengths[dim];
+        if (prefix < bytesPerDim) {
+          int cardinality = 1;
+          byte previous = scratch1[offset + prefix];
+          for (long i = 1; i < source.count; ++i) {
+            heapSource.readPackedValue(Math.toIntExact(source.start + i), scratch2);
+            byte b = scratch2[offset + prefix];
+            assert Byte.toUnsignedInt(previous) <= Byte.toUnsignedInt(b);
+            if (b != previous) {
+              cardinality++;
+              previous = b;
+            }
+          }
+          assert cardinality <= 256;
+          if (cardinality < sortedDimCardinality) {
+            sortedDim = dim;
+            sortedDimCardinality = cardinality;
+          }
+        }
       }
 
-      PathSlice source = slices[0];
+      PathSlice source = slices[sortedDim];
 
       // We ensured that maxPointsSortInHeap was >= maxPointsInLeafNode, so we better be in heap at this point:
       HeapPointWriter heapSource = (HeapPointWriter) source.writer;
@@ -67,15 +92,22 @@
       writeCommonPrefixes(out, commonPrefixLengths, scratch1);
 
       // Write the full values:
-      byte[] lastPackedValue = new byte[bytesPerDim];
-      for (int i=0;i<count;i++) {
-        heapSource.getPackedValueSlice(Math.toIntExact(source.start + i), scratchBytesRef);
-        assert numDims != 1 || valueInOrder(i, lastPackedValue, scratchBytesRef.bytes, scratchBytesRef.offset);
+      IntFunction<BytesRef> packedValues = new IntFunction<BytesRef>() {
+        final BytesRef scratch = new BytesRef();
 
-        // Make sure this value does in fact fall within this leaf cell:
-        assert valueInBounds(scratchBytesRef, minPackedValue, maxPackedValue);
-        writeLeafBlockPackedValue(out, commonPrefixLengths, scratchBytesRef.bytes, scratchBytesRef.offset);
-      }
+        {
+          scratch.length = packedBytesLength;
+        }
+
+        @Override
+        public BytesRef apply(int i) {
+          heapSource.getPackedValueSlice(Math.toIntExact(source.start + i), scratch);
+          return scratch;
+        }
+      };
+      assert valuesInOrderAndBounds(count, sortedDim, minPackedValue, maxPackedValue, packedValues,
+          heapSource.docIDs, Math.toIntExact(source.start));
+      writeLeafBlockPackedValues(out, commonPrefixLengths, count, sortedDim, packedValues);
 
     } else {
       // Inner node: partition/recurse

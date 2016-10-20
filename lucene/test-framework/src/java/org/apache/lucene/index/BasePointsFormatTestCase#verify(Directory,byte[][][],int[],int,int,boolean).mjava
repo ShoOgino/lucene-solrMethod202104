@@ -166,6 +166,14 @@
       }
 
       NumericDocValues idValues = MultiDocValues.getNumericValues(r, "id");
+      int[] docIDToID = new int[r.maxDoc()];
+      {
+        int docID;
+        while ((docID = idValues.nextDoc()) != NO_MORE_DOCS) {
+          docIDToID[docID] = (int) idValues.longValue();
+        }
+      }
+
       Bits liveDocs = MultiFields.getLiveDocs(r);
 
       // Verify min/max values are correct:
@@ -175,13 +183,13 @@
       byte[] maxValues = new byte[numDims*numBytesPerDim];
 
       for(LeafReaderContext ctx : r.leaves()) {
-        PointValues dimValues = ctx.reader().getPointValues();
+        PointValues dimValues = ctx.reader().getPointValues("field");
         if (dimValues == null) {
           continue;
         }
 
-        byte[] leafMinValues = dimValues.getMinPackedValue("field");
-        byte[] leafMaxValues = dimValues.getMaxPackedValue("field");
+        byte[] leafMinValues = dimValues.getMinPackedValue();
+        byte[] leafMaxValues = dimValues.getMaxPackedValue();
         for(int dim=0;dim<numDims;dim++) {
           if (StringHelper.compare(numBytesPerDim, leafMinValues, dim*numBytesPerDim, minValues, dim*numBytesPerDim) < 0) {
             System.arraycopy(leafMinValues, dim*numBytesPerDim, minValues, dim*numBytesPerDim, numBytesPerDim);
@@ -232,18 +240,18 @@
         final BitSet hits = new BitSet();
 
         for(LeafReaderContext ctx : r.leaves()) {
-          PointValues dimValues = ctx.reader().getPointValues();
+          PointValues dimValues = ctx.reader().getPointValues("field");
           if (dimValues == null) {
             continue;
           }
 
           final int docBase = ctx.docBase;
 
-          dimValues.intersect("field", new PointValues.IntersectVisitor() {
+          dimValues.intersect(new PointValues.IntersectVisitor() {
               @Override
               public void visit(int docID) {
                 if (liveDocs == null || liveDocs.get(docBase+docID)) {
-                  hits.set((int) idValues.get(docBase+docID));
+                  hits.set(docIDToID[docBase+docID]);
                 }
                 //System.out.println("visit docID=" + docID);
               }
@@ -254,7 +262,6 @@
                   return;
                 }
 
-                //System.out.println("visit check docID=" + docID + " id=" + idValues.get(docID));
                 for(int dim=0;dim<numDims;dim++) {
                   //System.out.println("  dim=" + dim + " value=" + new BytesRef(packedValue, dim*numBytesPerDim, numBytesPerDim));
                   if (StringHelper.compare(numBytesPerDim, packedValue, dim*numBytesPerDim, queryMin[dim], 0) < 0 ||
@@ -265,7 +272,7 @@
                 }
 
                 //System.out.println("  yes");
-                hits.set((int) idValues.get(docBase+docID));
+                hits.set(docIDToID[docBase+docID]);
               }
 
               @Override
@@ -331,7 +338,7 @@
 
         if (failCount != 0) {
           for(int docID=0;docID<r.maxDoc();docID++) {
-            System.out.println("  docID=" + docID + " id=" + idValues.get(docID));
+            System.out.println("  docID=" + docID + " id=" + docIDToID[docID]);
           }
 
           fail(failCount + " docs failed; " + successCount + " docs succeeded");

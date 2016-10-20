@@ -38,6 +38,9 @@
       long latestVersion = (Long) response.get(CMD_INDEX_VERSION);
       long latestGeneration = (Long) response.get(GENERATION);
 
+      LOG.info("Master's generation: " + latestGeneration);
+      LOG.info("Master's version: " + latestVersion);
+
       // TODO: make sure that getLatestCommit only returns commit points for the main index (i.e. no side-car indexes)
       IndexCommit commit = solrCore.getDeletionPolicy().getLatestCommit();
       if (commit == null) {
@@ -56,6 +59,7 @@
         }
       }
 
+      LOG.info("Slave's generation: " + commit.getGeneration());
 
       if (latestVersion == 0L) {
         if (forceReplication && commit.getGeneration() != 0) {
@@ -83,8 +87,6 @@
         successfulInstall = true;
         return true;
       }
-      LOG.info("Master's generation: " + latestGeneration);
-      LOG.info("Slave's generation: " + commit.getGeneration());
       LOG.info("Starting replication process");
       // get the list of files first
       fetchFileList(latestGeneration);
@@ -164,11 +166,15 @@
           } finally {
             writer.decref();
           }
-          solrCore.getUpdateHandler().getSolrCoreState().closeIndexWriter(solrCore, true);
         }
         boolean reloadCore = false;
 
         try {
+          // we have to be careful and do this after we know isFullCopyNeeded won't be flipped
+          if (!isFullCopyNeeded) {
+            solrCore.getUpdateHandler().getSolrCoreState().closeIndexWriter(solrCore, true);
+          }
+
           LOG.info("Starting download (fullCopy={}) to {}", isFullCopyNeeded, tmpIndexDir);
           successfulInstall = false;
 
@@ -201,9 +207,9 @@
                 // let the system know we are changing dir's and the old one
                 // may be closed
                 if (indexDir != null) {
-                  LOG.info("removing old index directory " + indexDir);
                   solrCore.getDirectoryFactory().doneWithDirectory(indexDir);
-                  solrCore.getDirectoryFactory().remove(indexDir);
+                  // Cleanup all index files not associated with any *named* snapshot.
+                  solrCore.deleteNonSnapshotIndexFiles(indexDirPath);
                 }
               }
 

@@ -1,0 +1,48 @@
+  public void collectionCreateSearchDelete(MiniSolrCloudCluster miniCluster) throws Exception {
+
+    final String collectionName = "testcollection";
+
+    final CloudSolrClient cloudSolrClient = miniCluster.getSolrClient();
+
+    assertNotNull(miniCluster.getZkServer());
+    List<JettySolrRunner> jettys = miniCluster.getJettySolrRunners();
+    assertEquals(NUM_SERVERS, jettys.size());
+    for (JettySolrRunner jetty : jettys) {
+      assertTrue(jetty.isRunning());
+    }
+
+    // create collection
+    log.info("#### Creating a collection");
+    final String asyncId = (random().nextBoolean() ? null : "asyncId("+collectionName+".create)="+random().nextInt());
+    createCollection(miniCluster, collectionName, asyncId);
+
+    ZkStateReader zkStateReader = miniCluster.getSolrClient().getZkStateReader();
+    AbstractDistribZkTestBase.waitForRecoveriesToFinish(collectionName, zkStateReader, true, true, 330);
+
+    // modify/query collection
+    log.info("#### updating a querying collection");
+    cloudSolrClient.setDefaultCollection(collectionName);
+    SolrInputDocument doc = new SolrInputDocument();
+    doc.setField("id", "1");
+    cloudSolrClient.add(doc);
+    cloudSolrClient.commit();
+    SolrQuery query = new SolrQuery();
+    query.setQuery("*:*");
+    QueryResponse rsp = cloudSolrClient.query(query);
+    assertEquals(1, rsp.getResults().getNumFound());
+
+    // delete the collection we created earlier
+    CollectionAdminRequest.deleteCollection(collectionName).process(miniCluster.getSolrClient());
+
+    // create it again
+    String asyncId2 = (random().nextBoolean() ? null : "asyncId("+collectionName+".create)="+random().nextInt());
+    createCollection(miniCluster, collectionName, asyncId2);
+    AbstractDistribZkTestBase.waitForRecoveriesToFinish(collectionName, zkStateReader, true, true, 330);
+
+    // check that there's no left-over state
+    assertEquals(0, cloudSolrClient.query(new SolrQuery("*:*")).getResults().getNumFound());
+    cloudSolrClient.add(doc);
+    cloudSolrClient.commit();
+    assertEquals(1, cloudSolrClient.query(new SolrQuery("*:*")).getResults().getNumFound());
+  }
+

@@ -1,5 +1,9 @@
   @Override
   public Query rewrite(IndexReader reader) throws IOException {
+    if (clauses.size() == 0) {
+      return new MatchNoDocsQuery("empty BooleanQuery");
+    }
+    
     // optimize 1-clause queries
     if (clauses.size() == 1) {
       BooleanClause c = clauses.get(0);
@@ -16,7 +20,7 @@
             return new BoostQuery(new ConstantScoreQuery(query), 0);
           case MUST_NOT:
             // no positive clauses
-            return new MatchNoDocsQuery();
+            return new MatchNoDocsQuery("pure negative BooleanQuery");
           default:
             throw new AssertionError();
         }
@@ -26,7 +30,6 @@
     // recursively rewrite
     {
       BooleanQuery.Builder builder = new BooleanQuery.Builder();
-      builder.setDisableCoord(isCoordDisabled());
       builder.setMinimumNumberShouldMatch(getMinimumNumberShouldMatch());
       boolean actuallyRewritten = false;
       for (BooleanClause clause : this) {
@@ -52,7 +55,6 @@
         // since clauseSets implicitly deduplicates FILTER and MUST_NOT
         // clauses, this means there were duplicates
         BooleanQuery.Builder rewritten = new BooleanQuery.Builder();
-        rewritten.setDisableCoord(disableCoord);
         rewritten.setMinimumNumberShouldMatch(minimumNumberShouldMatch);
         for (Map.Entry<Occur, Collection<Query>> entry : clauseSets.entrySet()) {
           final Occur occur = entry.getKey();
@@ -64,6 +66,18 @@
       }
     }
 
+    // Check whether some clauses are both required and excluded
+    final Collection<Query> mustNotClauses = clauseSets.get(Occur.MUST_NOT);
+    if (!mustNotClauses.isEmpty()) {
+      final Predicate<Query> p = clauseSets.get(Occur.MUST)::contains;
+      if (mustNotClauses.stream().anyMatch(p.or(clauseSets.get(Occur.FILTER)::contains))) {
+        return new MatchNoDocsQuery("FILTER or MUST clause also in MUST_NOT");
+      }
+      if (mustNotClauses.contains(new MatchAllDocsQuery())) {
+        return new MatchNoDocsQuery("MUST_NOT clause is MatchAllDocsQuery");
+      }
+    }
+
     // remove FILTER clauses that are also MUST clauses
     // or that match all documents
     if (clauseSets.get(Occur.MUST).size() > 0 && clauseSets.get(Occur.FILTER).size() > 0) {
@@ -72,7 +86,6 @@
       modified |= filters.removeAll(clauseSets.get(Occur.MUST));
       if (modified) {
         BooleanQuery.Builder builder = new BooleanQuery.Builder();
-        builder.setDisableCoord(isCoordDisabled());
         builder.setMinimumNumberShouldMatch(getMinimumNumberShouldMatch());
         for (BooleanClause clause : clauses) {
           if (clause.getOccur() != Occur.FILTER) {
@@ -85,6 +98,35 @@
         return builder.build();
       }
     }
+
+    // convert FILTER clauses that are also SHOULD clauses to MUST clauses
+    if (clauseSets.get(Occur.SHOULD).size() > 0 && clauseSets.get(Occur.FILTER).size() > 0) {
+      final Collection<Query> filters = clauseSets.get(Occur.FILTER);
+      final Collection<Query> shoulds = clauseSets.get(Occur.SHOULD);
+
+      Set<Query> intersection = new HashSet<>(filters);
+      intersection.retainAll(shoulds);
+
+      if (intersection.isEmpty() == false) {
+        BooleanQuery.Builder builder = new BooleanQuery.Builder();
+        int minShouldMatch = getMinimumNumberShouldMatch();
+
+        for (BooleanClause clause : clauses) {
+          if (intersection.contains(clause.getQuery())) {
+            if (clause.getOccur() == Occur.SHOULD) {
+              builder.add(new BooleanClause(clause.getQuery(), Occur.MUST));
+              minShouldMatch--;
+            }
+          } else {
+            builder.add(clause);
+          }
+        }
+
+        builder.setMinimumNumberShouldMatch(Math.max(0, minShouldMatch));
+        return builder.build();
+      }
+    }
+
 
     // Rewrite queries whose single scoring clause is a MUST clause on a
     // MatchAllDocsQuery to a ConstantScoreQuery
@@ -123,7 +165,6 @@
 
           // now add back the SHOULD clauses
           builder = new BooleanQuery.Builder()
-            .setDisableCoord(isCoordDisabled())
             .setMinimumNumberShouldMatch(getMinimumNumberShouldMatch())
             .add(rewritten, Occur.MUST);
           for (Query query : clauseSets.get(Occur.SHOULD)) {

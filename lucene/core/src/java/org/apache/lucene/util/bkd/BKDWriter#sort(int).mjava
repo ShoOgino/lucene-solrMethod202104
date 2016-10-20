@@ -1,4 +1,5 @@
   private PointWriter sort(int dim) throws IOException {
+    assert dim >= 0 && dim < numDims;
 
     if (heapPointWriter != null) {
 
@@ -30,28 +31,28 @@
 
       final int offset = bytesPerDim * dim;
 
-      Comparator<BytesRef> cmp = new Comparator<BytesRef>() {
- 
-        final ByteArrayDataInput reader = new ByteArrayDataInput();
-
-        @Override
-        public int compare(BytesRef a, BytesRef b) {
-          // First compare by the requested dimension we are sorting by:
-          int cmp = StringHelper.compare(bytesPerDim, a.bytes, a.offset + offset, b.bytes, b.offset + offset);
-
-          if (cmp != 0) {
-            return cmp;
+      Comparator<BytesRef> cmp;
+      if (dim == numDims - 1) {
+        // in that case the bytes for the dimension and for the doc id are contiguous,
+        // so we don't need a branch
+        cmp = new BytesRefComparator(bytesPerDim + Integer.BYTES) {
+          @Override
+          protected int byteAt(BytesRef ref, int i) {
+            return ref.bytes[ref.offset + offset + i] & 0xff;
           }
-
-          // Tie-break by docID ... no need to tie break on ord, for the case where the same doc has
-          // the same value in a given dimension indexed more than once: it can't matter at search
-          // time since we don't write ords into the index:
-
-          return StringHelper.compare(Integer.BYTES,
-                                      a.bytes, a.offset + packedBytesLength,
-                                      b.bytes, b.offset + packedBytesLength);
-        }
-      };
+        };
+      } else {
+        cmp = new BytesRefComparator(bytesPerDim + Integer.BYTES) {
+          @Override
+          protected int byteAt(BytesRef ref, int i) {
+            if (i < bytesPerDim) {
+              return ref.bytes[ref.offset + offset + i] & 0xff;
+            } else {
+              return ref.bytes[ref.offset + packedBytesLength + i - bytesPerDim] & 0xff;
+            }
+          }
+        };
+      }
 
       OfflineSorter sorter = new OfflineSorter(tempDir, tempFileNamePrefix + "_bkd" + dim, cmp, offlineSorterBufferMB, offlineSorterMaxTempFiles, bytesPerDoc) {
 

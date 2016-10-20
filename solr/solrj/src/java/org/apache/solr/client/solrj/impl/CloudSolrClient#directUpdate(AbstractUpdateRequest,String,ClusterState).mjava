@@ -38,19 +38,22 @@
     //Create the URL map, which is keyed on slice name.
     //The value is a list of URLs for each replica in the slice.
     //The first value in the list is the leader for the slice.
-    Map<String,List<String>> urlMap = buildUrlMap(col);
-    if (urlMap == null) {
-      // we could not find a leader yet - use unoptimized general path
-      return null;
-    }
-
-    NamedList<Throwable> exceptions = new NamedList<>();
-    NamedList<NamedList> shardResponses = new NamedList<>();
-
-    Map<String, LBHttpSolrClient.Req> routes = updateRequest.getRoutes(router, col, urlMap, routableParams, this.idField);
+    final Map<String,List<String>> urlMap = buildUrlMap(col);
+    final Map<String, LBHttpSolrClient.Req> routes = (urlMap == null ? null : updateRequest.getRoutes(router, col, urlMap, routableParams, this.idField));
     if (routes == null) {
-      return null;
+      if (directUpdatesToLeadersOnly && hasInfoToFindLeaders(updateRequest, idField)) {
+          // we have info (documents with ids and/or ids to delete) with
+          // which to find the leaders but we could not find (all of) them
+          throw new SolrException(ErrorCode.SERVICE_UNAVAILABLE,
+              "directUpdatesToLeadersOnly==true but could not find leader(s)");
+      } else {
+        // we could not find a leader or routes yet - use unoptimized general path
+        return null;
+      }
     }
+
+    final NamedList<Throwable> exceptions = new NamedList<>();
+    final NamedList<NamedList> shardResponses = new NamedList<>(routes.size()+1); // +1 for deleteQuery
 
     long start = System.nanoTime();
 

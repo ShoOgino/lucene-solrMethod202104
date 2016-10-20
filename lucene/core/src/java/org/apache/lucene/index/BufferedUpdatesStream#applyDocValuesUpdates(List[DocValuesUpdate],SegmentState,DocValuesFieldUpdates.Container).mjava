@@ -1,0 +1,73 @@
+  // DocValues updates
+  private synchronized void applyDocValuesUpdates(List<DocValuesUpdate> updates, 
+      SegmentState segState, DocValuesFieldUpdates.Container dvUpdatesContainer) throws IOException {
+    Fields fields = segState.reader.fields();
+
+    // TODO: we can process the updates per DV field, from last to first so that
+    // if multiple terms affect same document for the same field, we add an update
+    // only once (that of the last term). To do that, we can keep a bitset which
+    // marks which documents have already been updated. So e.g. if term T1
+    // updates doc 7, and then we process term T2 and it updates doc 7 as well,
+    // we don't apply the update since we know T1 came last and therefore wins
+    // the update.
+    // We can also use that bitset as 'liveDocs' to pass to TermEnum.docs(), so
+    // that these documents aren't even returned.
+    
+    String currentField = null;
+    TermsEnum termsEnum = null;
+    PostingsEnum postingsEnum = null;
+    
+    for (DocValuesUpdate update : updates) {
+      Term term = update.term;
+      int limit = update.docIDUpto;
+      
+      // TODO: we traverse the terms in update order (not term order) so that we
+      // apply the updates in the correct order, i.e. if two terms udpate the
+      // same document, the last one that came in wins, irrespective of the
+      // terms lexical order.
+      // we can apply the updates in terms order if we keep an updatesGen (and
+      // increment it with every update) and attach it to each NumericUpdate. Note
+      // that we cannot rely only on docIDUpto because an app may send two updates
+      // which will get same docIDUpto, yet will still need to respect the order
+      // those updates arrived.
+      
+      if (!term.field().equals(currentField)) {
+        // if we change the code to process updates in terms order, enable this assert
+//        assert currentField == null || currentField.compareTo(term.field()) < 0;
+        currentField = term.field();
+        Terms terms = fields.terms(currentField);
+        if (terms != null) {
+          termsEnum = terms.iterator();
+        } else {
+          termsEnum = null;
+        }
+      }
+
+      if (termsEnum == null) {
+        // no terms in this field
+        continue;
+      }
+
+      if (termsEnum.seekExact(term.bytes())) {
+        // we don't need term frequencies for this
+        final Bits acceptDocs = segState.rld.getLiveDocs();
+        postingsEnum = termsEnum.postings(postingsEnum, PostingsEnum.NONE);
+
+        DocValuesFieldUpdates dvUpdates = dvUpdatesContainer.getUpdates(update.field, update.type);
+        if (dvUpdates == null) {
+          dvUpdates = dvUpdatesContainer.newUpdates(update.field, update.type, segState.reader.maxDoc());
+        }
+        int doc;
+        while ((doc = postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+          if (doc >= limit) {
+            break; // no more docs that can be updated for this term
+          }
+          if (acceptDocs != null && acceptDocs.get(doc) == false) {
+            continue;
+          }
+          dvUpdates.add(doc, update.value);
+        }
+      }
+    }
+  }
+

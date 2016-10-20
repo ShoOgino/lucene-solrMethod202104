@@ -4,21 +4,42 @@
     FieldType ft = sf.getType();
     boolean multiToken = sf.multiValued() || ft.multiValuedFieldCache();
 
-    if (method == FacetMethod.ENUM && sf.indexed()) {
-      throw new UnsupportedOperationException();
-    } else if (method == FacetMethod.STREAM && sf.indexed()) {
-      return new FacetFieldProcessorStream(fcontext, this, sf);
+    LegacyNumericType ntype = ft.getNumericType();
+    // ensure we can support the requested options for numeric faceting:
+    if (ntype != null) {
+      if (prefix != null) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+            "Doesn't make sense to set facet prefix on a numeric field");
+      }
+      if (mincount == 0) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+            "Numeric fields do not support facet mincount=0; try indexing as terms");
+        // TODO if indexed=true then we could add support
+      }
     }
 
-    org.apache.lucene.document.FieldType.LegacyNumericType ntype = ft.getNumericType();
+    // TODO auto-pick ENUM/STREAM SOLR-9351 when index asc and DocSet cardinality is *not* much smaller than term cardinality
+    if (method == FacetMethod.ENUM) {// at the moment these two are the same
+      method = FacetMethod.STREAM;
+    }
+    if (method == FacetMethod.STREAM && sf.indexed() &&
+        "index".equals(sortVariable) && sortDirection == SortDirection.asc) {
+      return new FacetFieldProcessorByEnumTermsStream(fcontext, this, sf);
+    }
+
+    // TODO if method=UIF and not single-valued numerics then simply choose that now? TODO add FieldType.getDocValuesType()
 
     if (!multiToken) {
-      if (ntype != null) {
-        // single valued numeric (docvalues or fieldcache)
-        return new FacetFieldProcessorNumeric(fcontext, this, sf);
-      } else {
+      if (mincount > 0 && prefix == null && (ntype != null || method == FacetMethod.DVHASH)) {
+        // TODO can we auto-pick for strings when term cardinality is much greater than DocSet cardinality?
+        //   or if we don't know cardinality but DocSet size is very small
+        return new FacetFieldProcessorByHashDV(fcontext, this, sf);
+      } else if (ntype == null) {
         // single valued string...
-        return new FacetFieldProcessorDV(fcontext, this, sf);
+        return new FacetFieldProcessorByArrayDV(fcontext, this, sf);
+      } else {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
+            "Couldn't pick facet algorithm for field " + sf);
       }
     }
 
@@ -26,10 +47,10 @@
 
     if (sf.hasDocValues() || method == FacetMethod.DV) {
       // single and multi-valued string docValues
-      return new FacetFieldProcessorDV(fcontext, this, sf);
+      return new FacetFieldProcessorByArrayDV(fcontext, this, sf);
     }
 
     // Top-level multi-valued field cache (UIF)
-    return new FacetFieldProcessorUIF(fcontext, this, sf);
+    return new FacetFieldProcessorByArrayUIF(fcontext, this, sf);
   }
 

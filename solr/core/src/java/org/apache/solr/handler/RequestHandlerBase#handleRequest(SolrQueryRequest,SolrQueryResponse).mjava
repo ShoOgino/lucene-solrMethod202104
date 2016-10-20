@@ -1,6 +1,6 @@
   @Override
   public void handleRequest(SolrQueryRequest req, SolrQueryResponse rsp) {
-    numRequests.incrementAndGet();
+    numRequests.increment();
     TimerContext timer = requestTimes.time();
     try {
       if(pluginInfo != null && pluginInfo.attributes.containsKey(USEPARAM)) req.getContext().put(USEPARAM,pluginInfo.attributes.get(USEPARAM));
@@ -14,28 +14,38 @@
         Object partialResults = header.get(SolrQueryResponse.RESPONSE_HEADER_PARTIAL_RESULTS_KEY);
         boolean timedOut = partialResults == null ? false : (Boolean)partialResults;
         if( timedOut ) {
-          numTimeouts.incrementAndGet();
+          numTimeouts.increment();
           rsp.setHttpCaching(false);
         }
       }
     } catch (Exception e) {
+      boolean incrementErrors = true;
+      boolean isServerError = true;
       if (e instanceof SolrException) {
         SolrException se = (SolrException)e;
         if (se.code() == SolrException.ErrorCode.CONFLICT.code) {
-          // TODO: should we allow this to be counted as an error (numErrors++)?
-
-        } else {
-          SolrException.log(log, e);
+          incrementErrors = false;
+        } else if (se.code() >= 400 && se.code() < 500) {
+          isServerError = false;
         }
       } else {
-        SolrException.log(log, e);
         if (e instanceof SyntaxError) {
+          isServerError = false;
           e = new SolrException(SolrException.ErrorCode.BAD_REQUEST, e);
         }
       }
 
       rsp.setException(e);
-      numErrors.incrementAndGet();
+
+      if (incrementErrors) {
+        SolrException.log(log, e);
+
+        if (isServerError) {
+          numServerErrors.increment();
+        } else {
+          numClientErrors.increment();
+        }
+      }
     }
     finally {
       timer.stop();

@@ -1,5 +1,5 @@
   @Override
-  public BinaryDocValues getBinary(FieldInfo fieldInfo) throws IOException {
+  public synchronized BinaryDocValues getBinary(FieldInfo fieldInfo) throws IOException {
     final OneField field = fields.get(fieldInfo.name);
 
     // SegmentCoreReaders already verifies this field is
@@ -10,11 +10,13 @@
     final BytesRefBuilder scratch = new BytesRefBuilder();
     final DecimalFormat decoder = new DecimalFormat(field.pattern, new DecimalFormatSymbols(Locale.ROOT));
 
-    return new BinaryDocValues() {
+    DocIdSetIterator docsWithField = getBinaryDocsWithField(fieldInfo);
+    
+    IntFunction<BytesRef> values = new IntFunction<BytesRef>() {
       final BytesRefBuilder term = new BytesRefBuilder();
 
       @Override
-      public BytesRef get(int docID) {
+      public BytesRef apply(int docID) {
         try {
           if (docID < 0 || docID >= maxDoc) {
             throw new IndexOutOfBoundsException("docID must be 0 .. " + (maxDoc-1) + "; got " + docID);
@@ -35,6 +37,33 @@
         } catch (IOException ioe) {
           throw new RuntimeException(ioe);
         }
+      }
+    };
+    return new BinaryDocValues() {
+      
+      @Override
+      public int nextDoc() throws IOException {
+        return docsWithField.nextDoc();
+      }
+      
+      @Override
+      public int docID() {
+        return docsWithField.docID();
+      }
+      
+      @Override
+      public long cost() {
+        return docsWithField.cost();
+      }
+      
+      @Override
+      public int advance(int target) throws IOException {
+        return docsWithField.advance(target);
+      }
+      
+      @Override
+      public BytesRef binaryValue() throws IOException {
+        return values.apply(docsWithField.docID());
       }
     };
   }

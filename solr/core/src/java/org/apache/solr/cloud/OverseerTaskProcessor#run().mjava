@@ -1,6 +1,6 @@
   @Override
   public void run() {
-    log.info("Process current queue of overseer operations");
+    log.debug("Process current queue of overseer operations");
     LeaderStatus isLeader = amILeader();
     while (isLeader == LeaderStatus.DONT_KNOW) {
       log.debug("am_i_leader unclear {}", isLeader);
@@ -32,7 +32,9 @@
     try {
       prioritizer.prioritizeOverseerNodes(myId);
     } catch (Exception e) {
-      log.error("Unable to prioritize overseer ", e);
+      if (!zkStateReader.getZkClient().isClosed()) {
+        log.error("Unable to prioritize overseer ", e);
+      }
     }
 
     // TODO: Make maxThreads configurable.
@@ -68,19 +70,49 @@
           if (waited)
             cleanUpWorkQueue();
 
-          List<QueueEvent> heads = workQueue.peekTopN(MAX_PARALLEL_TASKS, runningZKTasks, 2000L);
 
-          if (heads == null)
-            continue;
+          ArrayList<QueueEvent> heads = new ArrayList<>(blockedTasks.size() + MAX_PARALLEL_TASKS);
+          heads.addAll(blockedTasks.values());
 
-          log.debug("Got {} tasks from work-queue : [{}]", heads.size(), heads.toString());
+          //If we have enough items in the blocked tasks already, it makes
+          // no sense to read more items from the work queue. it makes sense
+          // to clear out at least a few items in the queue before we read more items
+          if (heads.size() < MAX_BLOCKED_TASKS) {
+            //instead of reading MAX_PARALLEL_TASKS items always, we should only fetch as much as we can execute
+            int toFetch = Math.min(MAX_BLOCKED_TASKS - heads.size(), MAX_PARALLEL_TASKS - runningTasks.size());
+            List<QueueEvent> newTasks = workQueue.peekTopN(toFetch, excludedTasks, 2000L);
+            log.debug("Got {} tasks from work-queue : [{}]", newTasks.size(), newTasks);
+            heads.addAll(newTasks);
+          } else {
+            // Prevent free-spinning this loop.
+            Thread.sleep(1000);
+          }
 
           if (isClosed) break;
 
+          if (heads.isEmpty()) {
+            continue;
+          }
+
+          blockedTasks.clear(); // clear it now; may get refilled below.
+
+          taskBatch.batchId++;
+          boolean tooManyTasks = false;
           for (QueueEvent head : heads) {
+            if (!tooManyTasks) {
+              synchronized (runningTasks) {
+                tooManyTasks = runningTasks.size() >= MAX_PARALLEL_TASKS;
+              }
+            }
+            if (tooManyTasks) {
+              // Too many tasks are running, just shove the rest into the "blocked" queue.
+              if(blockedTasks.size() < MAX_BLOCKED_TASKS)
+                blockedTasks.put(head.getId(), head);
+              continue;
+            }
+            if (runningZKTasks.contains(head.getId())) continue;
             final ZkNodeProps message = ZkNodeProps.load(head.getBytes());
             OverseerMessageHandler messageHandler = selector.selectOverseerMessageHandler(message);
-            String taskKey = messageHandler.getTaskKey(message);
             final String asyncId = message.getStr(ASYNC);
             if (hasLeftOverItems) {
               if (head.getId().equals(oldestItemInWorkQueue))
@@ -91,27 +123,32 @@
                 continue;
               }
             }
-
-            if (!checkExclusivity(messageHandler, message, head.getId())) {
+            String operation = message.getStr(Overseer.QUEUE_OPERATION);
+            OverseerMessageHandler.Lock lock = messageHandler.lockTask(message, taskBatch);
+            if (lock == null) {
               log.debug("Exclusivity check failed for [{}]", message.toString());
+              //we may end crossing the size of the MAX_BLOCKED_TASKS. They are fine
+              if (blockedTasks.size() < MAX_BLOCKED_TASKS)
+                blockedTasks.put(head.getId(), head);
               continue;
             }
-
             try {
-              markTaskAsRunning(messageHandler, head, taskKey, asyncId, message);
+              markTaskAsRunning(head, asyncId);
               log.debug("Marked task [{}] as running", head.getId());
             } catch (KeeperException.NodeExistsException e) {
+              lock.unlock();
               // This should never happen
               log.error("Tried to pick up task [{}] when it was already running!", head.getId());
+              continue;
             } catch (InterruptedException e) {
+              lock.unlock();
               log.error("Thread interrupted while trying to pick task for execution.", head.getId());
               Thread.currentThread().interrupt();
+              continue;
             }
-
-            log.info(messageHandler.getName() + ": Get the message id:" + head.getId() + " message:" + message.toString());
-            String operation = message.getStr(Overseer.QUEUE_OPERATION);
+            log.debug(messageHandler.getName() + ": Get the message id:" + head.getId() + " message:" + message.toString());
             Runner runner = new Runner(messageHandler, message,
-                operation, head);
+                operation, head, lock);
             tpe.execute(runner);
           }
 

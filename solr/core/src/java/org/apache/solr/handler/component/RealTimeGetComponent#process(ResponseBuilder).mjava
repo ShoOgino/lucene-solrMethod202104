@@ -8,8 +8,22 @@
     if (!params.getBool(COMPONENT_NAME, true)) {
       return;
     }
-
-    String val = params.get("getVersions");
+    
+    // This seems rather kludgey, may there is better way to indicate
+    // that replica can support handling version ranges
+    String val = params.get("checkCanHandleVersionRanges");
+    if(val != null) {
+      rb.rsp.add("canHandleVersionRanges", true);
+      return;
+    }
+    
+    val = params.get("getFingerprint");
+    if(val != null) {
+      processGetFingeprint(rb);
+      return;
+    }
+    
+    val = params.get("getVersions");
     if (val != null) {
       processGetVersions(rb);
       return;
@@ -40,10 +54,9 @@
       return;
     }
 
-    String id[] = params.getParams("id");
-    String ids[] = params.getParams("ids");
-
-    if (id == null && ids == null) {
+    final IdsRequsted reqIds = IdsRequsted.parseParams(req);
+    
+    if (reqIds.allIds.isEmpty()) {
       return;
     }
 
@@ -56,7 +69,7 @@
         filters = filters == null ? new ArrayList<Query>(fqs.length) : new ArrayList<>(filters);
         for (String fq : fqs) {
           if (fq != null && fq.trim().length()!=0) {
-            QParser fqp = QParser.getParser(fq, null, req);
+            QParser fqp = QParser.getParser(fq, req);
             filters.add(fqp.getQuery());
           }
         }
@@ -68,20 +81,6 @@
       throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e);
     }
 
-
-    String[] allIds = id==null ? new String[0] : id;
-
-    if (ids != null) {
-      List<String> lst = new ArrayList<>();
-      for (String s : allIds) {
-        lst.add(s);
-      }
-      for (String idList : ids) {
-        lst.addAll( StrUtils.splitSmart(idList, ",", true) );
-      }
-      allIds = lst.toArray(new String[lst.size()]);
-    }
-
     SolrCore core = req.getCore();
     SchemaField idField = core.getLatestSchema().getUniqueKeyField();
     FieldType fieldType = idField.getType();
@@ -90,17 +89,23 @@
     UpdateLog ulog = core.getUpdateHandler().getUpdateLog();
 
     RefCounted<SolrIndexSearcher> searcherHolder = null;
+    
+    // this is initialized & set on the context *after* any searcher (re-)opening
+    ResultContext resultContext = null;
+    final DocTransformer transformer = rsp.getReturnFields().getTransformer();
 
-    DocTransformer transformer = rsp.getReturnFields().getTransformer();
-    if (transformer != null) {
-      ResultContext context = new BasicResultContext(null, rsp.getReturnFields(), null, null, req);
-      transformer.setContext(context);
-    }
+    // true in any situation where we have to use a realtime searcher rather then returning docs
+    // directly from the UpdateLog
+    final boolean mustUseRealtimeSearcher =
+      // if we have filters, we need to check those against the indexed form of the doc
+      (rb.getFilters() != null)
+      || ((null != transformer) && transformer.needsSolrIndexSearcher());
+
    try {
      SolrIndexSearcher searcher = null;
 
      BytesRefBuilder idBytes = new BytesRefBuilder();
-     for (String idStr : allIds) {
+     for (String idStr : reqIds.allIds) {
        fieldType.readableToIndexed(idStr, idBytes);
        if (ulog != null) {
          Object o = ulog.lookup(idBytes.get());
@@ -112,13 +117,13 @@
            switch (oper) {
              case UpdateLog.ADD:
 
-               if (rb.getFilters() != null) {
-                 // we have filters, so we need to check those against the indexed form of the doc
+               if (mustUseRealtimeSearcher) {
                  if (searcherHolder != null) {
-                   // close handles to current searchers
+                   // close handles to current searchers & result context
                    searcher = null;
                    searcherHolder.decref();
                    searcherHolder = null;
+                   resultContext = null;
                  }
                  ulog.openRealtimeSearcher();  // force open a new realtime searcher
                  o = null;  // pretend we never found this record and fall through to use the searcher
@@ -126,7 +131,7 @@
                }
 
                SolrDocument doc = toSolrDoc((SolrInputDocument)entry.get(entry.size()-1), core.getLatestSchema());
-               if(transformer!=null) {
+               if (transformer!=null) {
                  transformer.transform(doc, -1, 0); // unknown docID
                }
               docList.add(doc);
@@ -144,6 +149,7 @@
        if (searcher == null) {
          searcherHolder = core.getRealtimeSearcher();
          searcher = searcherHolder.get();
+         // don't bother with ResultContext yet, we won't need it if doc doesn't match filters
        }
 
        int docid = -1;
@@ -154,8 +160,9 @@
          docid = segid + ctx.docBase;
 
          if (rb.getFilters() != null) {
-           for (Query q : rb.getFilters()) {
-             Scorer scorer = searcher.createWeight(q, false).scorer(ctx);
+           for (Query raw : rb.getFilters()) {
+             Query q = raw.rewrite(searcher.getIndexReader());
+             Scorer scorer = searcher.createWeight(q, false, 1f).scorer(ctx);
              if (scorer == null || segid != scorer.iterator().advance(segid)) {
                // filter doesn't match.
                docid = -1;
@@ -165,12 +172,17 @@
          }
        }
 
-
        if (docid < 0) continue;
+       
        Document luceneDocument = searcher.doc(docid, rsp.getReturnFields().getLuceneFieldNames());
        SolrDocument doc = toSolrDoc(luceneDocument,  core.getLatestSchema());
        searcher.decorateDocValueFields(doc, docid, searcher.getNonStoredDVs(true));
-       if( transformer != null ) {
+       if ( null != transformer) {
+         if (null == resultContext) {
+           // either first pass, or we've re-opened searcher - either way now we setContext
+           resultContext = new RTGResultContext(rsp.getReturnFields(), searcher, req);
+           transformer.setContext(resultContext);
+         }
          transformer.transform(doc, docid, 0);
        }
        docList.add(doc);
@@ -182,17 +194,6 @@
      }
    }
 
-
-   // if the client specified a single id=foo, then use "doc":{
-   // otherwise use a standard doclist
-
-   if (ids ==  null && allIds.length <= 1) {
-     // if the doc was not found, then use a value of null.
-     rsp.add("doc", docList.size() > 0 ? docList.get(0) : null);
-   } else {
-     docList.setNumFound(docList.size());
-     rsp.addResponse(docList);
-   }
-
+   addDocListToResponse(rb, docList);
   }
 

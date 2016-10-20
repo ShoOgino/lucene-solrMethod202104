@@ -7,7 +7,7 @@
         isLeader = amILeader();  // not a no, not a yes, try ask again
       }
 
-      log.info("Starting to work on the main queue");
+      log.debug("Starting to work on the main queue");
       try {
         ZkStateWriter zkStateWriter = null;
         ClusterState clusterState = null;
@@ -37,7 +37,7 @@
               boolean hadWorkItems = data != null;
               while (data != null)  {
                 final ZkNodeProps message = ZkNodeProps.load(data);
-                log.info("processMessage: workQueueSize: {}, message = {}", workQueue.getStats().getQueueLength(), message);
+                log.debug("processMessage: workQueueSize: {}, message = {}", workQueue.getStats().getQueueLength(), message);
                 // force flush to ZK after each message because there is no fallback if workQueue items
                 // are removed from workQueue but fail to be written to ZK
                 clusterState = processQueueItem(message, clusterState, zkStateWriter, false, null);
@@ -67,8 +67,7 @@
             head = stateUpdateQueue.peek(true);
           } catch (KeeperException e) {
             if (e.code() == KeeperException.Code.SESSIONEXPIRED) {
-              log.warn(
-                  "Solr cannot talk to ZK, exiting Overseer main queue loop", e);
+              log.warn("Solr cannot talk to ZK, exiting Overseer main queue loop", e);
               return;
             }
             log.error("Exception in Overseer main queue loop", e);
@@ -83,7 +82,7 @@
             while (head != null) {
               byte[] data = head;
               final ZkNodeProps message = ZkNodeProps.load(data);
-              log.info("processMessage: queueSize: {}, message = {} current state version: {}", stateUpdateQueue.getStats().getQueueLength(), message, clusterState.getZkClusterStateVersion());
+              log.debug("processMessage: queueSize: {}, message = {} current state version: {}", stateUpdateQueue.getStats().getQueueLength(), message, clusterState.getZkClusterStateVersion());
               // we can batch here because workQueue is our fallback in case a ZK write failed
               clusterState = processQueueItem(message, clusterState, zkStateWriter, true, new ZkStateWriter.ZkWriteCallback() {
                 @Override
@@ -113,7 +112,7 @@
             while (workQueue.poll() != null);
 
           } catch (KeeperException.BadVersionException bve) {
-            log.warn("Bad version writing to ZK using compare-and-set, will force refresh cluster state", bve);
+            log.warn("Bad version writing to ZK using compare-and-set, will force refresh cluster state: {}", bve.getMessage());
             refreshClusterState = true;
           } catch (KeeperException e) {
             if (e.code() == KeeperException.Code.SESSIONEXPIRED) {
@@ -132,13 +131,8 @@
         }
       } finally {
         log.info("Overseer Loop exiting : {}", LeaderElector.getNodeName(myId));
-        new Thread("OverseerExitThread"){
-          //do this in a separate thread because any wait is interrupted in this main thread
-          @Override
-          public void run() {
-            checkIfIamStillLeader();
-          }
-        }.start();
+        //do this in a separate thread because any wait is interrupted in this main thread
+        new Thread(this::checkIfIamStillLeader, "OverseerExitThread").start();
       }
     }
 

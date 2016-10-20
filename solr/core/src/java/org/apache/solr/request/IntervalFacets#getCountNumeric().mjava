@@ -10,7 +10,6 @@
     final Iterator<LeafReaderContext> ctxIt = leaves.iterator();
     LeafReaderContext ctx = null;
     NumericDocValues longs = null;
-    Bits docsWithField = null;
     for (DocIterator docsIt = docs.iterator(); docsIt.hasNext(); ) {
       final int doc = docsIt.nextDoc();
       if (ctx == null || doc >= ctx.docBase + ctx.reader().maxDoc()) {
@@ -26,24 +25,22 @@
             longs = DocValues.getNumeric(ctx.reader(), fieldName);
             break;
           case FLOAT:
-            final NumericDocValues floats = DocValues.getNumeric(ctx.reader(), fieldName);
             // TODO: this bit flipping should probably be moved to tie-break in the PQ comparator
-            longs = new NumericDocValues() {
+            longs = new FilterNumericDocValues(DocValues.getNumeric(ctx.reader(), fieldName)) {
               @Override
-              public long get(int docID) {
-                long bits = floats.get(docID);
+              public long longValue() throws IOException {
+                long bits = super.longValue();
                 if (bits < 0) bits ^= 0x7fffffffffffffffL;
                 return bits;
               }
             };
             break;
           case DOUBLE:
-            final NumericDocValues doubles = DocValues.getNumeric(ctx.reader(), fieldName);
             // TODO: this bit flipping should probably be moved to tie-break in the PQ comparator
-            longs = new NumericDocValues() {
+            longs = new FilterNumericDocValues(DocValues.getNumeric(ctx.reader(), fieldName)) {
               @Override
-              public long get(int docID) {
-                long bits = doubles.get(docID);
+              public long longValue() throws IOException {
+                long bits = super.longValue();
                 if (bits < 0) bits ^= 0x7fffffffffffffffL;
                 return bits;
               }
@@ -52,11 +49,13 @@
           default:
             throw new AssertionError();
         }
-        docsWithField = DocValues.getDocsWithField(ctx.reader(), schemaField.getName());
       }
-      long v = longs.get(doc - ctx.docBase);
-      if (v != 0 || docsWithField.get(doc - ctx.docBase)) {
-        accumIntervalWithValue(v);
+      int valuesDocID = longs.docID();
+      if (valuesDocID < doc - ctx.docBase) {
+        valuesDocID = longs.advance(doc - ctx.docBase);
+      }
+      if (valuesDocID == doc - ctx.docBase) {
+        accumIntervalWithValue(longs.longValue());
       }
     }
   }

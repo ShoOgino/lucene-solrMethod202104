@@ -19,22 +19,22 @@
     for (int i = 0; i < numRandomValues; i++) {
       String uniqueRandomValue;
       do {
-        // the trick is to generate values which will be ordered similarly for string, ints&longs, positive nums makes it easier 
+        // the trick is to generate values which will be ordered similarly for string, ints&longs, positive nums makes it easier
         final int nextInt = random.nextInt(Integer.MAX_VALUE);
         uniqueRandomValue = String.format(Locale.ROOT, "%08x", nextInt);
         assert nextInt == Integer.parseUnsignedInt(uniqueRandomValue,16);
       } while ("".equals(uniqueRandomValue) || trackSet.contains(uniqueRandomValue));
-     
+
       // Generate unique values and empty strings aren't allowed.
       trackSet.add(uniqueRandomValue);
-      
+
       context.randomFrom[i] = random.nextBoolean();
       context.randomUniqueValues[i] = uniqueRandomValue;
-      
+
     }
 
     List<String> randomUniqueValuesReplica = new ArrayList<>(Arrays.asList(context.randomUniqueValues));
-        
+
     RandomDoc[] docs = new RandomDoc[nDocs];
     for (int i = 0; i < nDocs; i++) {
       String id = Integer.toString(i);
@@ -57,7 +57,7 @@
       Collections.shuffle(subValues, random);
       }
       for (String linkValue : subValues) {
-        
+
         assert !docs[i].linkValues.contains(linkValue);
         docs[i].linkValues.add(linkValue);
         if (from) {
@@ -71,7 +71,7 @@
           context.fromDocuments.get(linkValue).add(docs[i]);
           context.randomValueFromDocs.get(value).add(docs[i]);
           addLinkFields(random, document,  "from", linkValue, multipleValuesPerDocument, globalOrdinalJoin);
-          
+
         } else {
           if (!context.toDocuments.containsKey(linkValue)) {
             context.toDocuments.put(linkValue, new ArrayList<>());
@@ -127,15 +127,19 @@
 
           @Override
           public void collect(int doc) throws IOException {
-            docTermOrds.setDocument(doc);
-            long ord;
-            while ((ord = docTermOrds.nextOrd()) != SortedSetDocValues.NO_MORE_ORDS) {
-              final BytesRef joinValue = docTermOrds.lookupOrd(ord);
-              JoinScore joinScore = joinValueToJoinScores.get(joinValue);
-              if (joinScore == null) {
-                joinValueToJoinScores.put(BytesRef.deepCopyOf(joinValue), joinScore = new JoinScore());
+            if (doc > docTermOrds.docID()) {
+              docTermOrds.advance(doc);
+            }
+            if (doc == docTermOrds.docID()) {
+              long ord;
+              while ((ord = docTermOrds.nextOrd()) != SortedSetDocValues.NO_MORE_ORDS) {
+                final BytesRef joinValue = docTermOrds.lookupOrd(ord);
+                JoinScore joinScore = joinValueToJoinScores.get(joinValue);
+                if (joinScore == null) {
+                  joinValueToJoinScores.put(BytesRef.deepCopyOf(joinValue), joinScore = new JoinScore());
+                }
+                joinScore.addScore(scorer.score());
               }
-              joinScore.addScore(scorer.score());
             }
           }
 
@@ -159,12 +163,17 @@
 
           private Scorer scorer;
           private BinaryDocValues terms;
-          private Bits docsWithField;
 
           @Override
           public void collect(int doc) throws IOException {
-            final BytesRef joinValue = terms.get(doc);
-            if (joinValue.length == 0 && !docsWithField.get(doc)) {
+            if (doc > terms.docID()) {
+              terms.advance(doc);
+            }
+            final BytesRef joinValue;
+            if (doc == terms.docID()) {
+              joinValue = terms.binaryValue();
+            } else {
+              // missing;
               return;
             }
 
@@ -181,7 +190,6 @@
           @Override
           protected void doSetNextReader(LeafReaderContext context) throws IOException {
             terms = DocValues.getBinary(context.reader(), fromField);
-            docsWithField = DocValues.getDocsWithField(context.reader(), fromField);
           }
 
           @Override
@@ -226,8 +234,17 @@
           private int docBase;
 
           @Override
-          public void collect(int doc) {
-            final BytesRef joinValue = terms.get(doc);
+          public void collect(int doc) throws IOException {
+            if (doc > terms.docID()) {
+              terms.advance(doc);
+            }
+            final BytesRef joinValue;
+            if (doc == terms.docID()) {
+              joinValue = terms.binaryValue();
+            } else {
+              // missing;
+              joinValue = new BytesRef(BytesRef.EMPTY_BYTES);
+            }
             JoinScore joinScore = joinValueToJoinScores.get(joinValue);
             if (joinScore == null) {
               return;

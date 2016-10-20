@@ -28,19 +28,27 @@
    *
    * <p>This requires this index not be among those to be added.
    *
+   * @return The <a href="#sequence_number">sequence number</a>
+   * for this operation
+   *
    * @throws CorruptIndexException if the index is corrupt
    * @throws IOException if there is a low-level IO error
    * @throws IllegalArgumentException if addIndexes would cause
-   *   the index to exceed {@link #MAX_DOCS}
+   *   the index to exceed {@link #MAX_DOCS}, or if the indoming
+   *   index sort does not match this index's index sort
    */
-  public void addIndexes(Directory... dirs) throws IOException {
+  public long addIndexes(Directory... dirs) throws IOException {
     ensureOpen();
 
     noDupDirs(dirs);
 
     List<Lock> locks = acquireWriteLocks(dirs);
 
+    Sort indexSort = config.getIndexSort();
+
     boolean successTop = false;
+
+    long seqNo;
 
     try {
       if (infoStream.isEnabled("IW")) {
@@ -71,6 +79,13 @@
         for (SegmentInfos sis : commits) {
           for (SegmentCommitInfo info : sis) {
             assert !infos.contains(info): "dup info dir=" + info.info.dir + " name=" + info.info.name;
+
+            Sort segmentIndexSort = info.info.getIndexSort();
+
+            if (indexSort != null && segmentIndexSort != null && indexSort.equals(segmentIndexSort) == false) {
+              // TODO: we could make this smarter, e.g. if the incoming indexSort is congruent with our sort ("starts with") then it's OK
+              throw new IllegalArgumentException("cannot change index sort from " + segmentIndexSort + " to " + indexSort);
+            }
 
             String newSegName = newSegmentName();
 
@@ -106,6 +121,8 @@
           // Now reserve the docs, just before we update SIS:
           reserveDocs(totalMaxDoc);
 
+          seqNo = docWriter.deleteQueue.getNextSequenceNumber();
+
           success = true;
         } finally {
           if (!success) {
@@ -123,6 +140,8 @@
 
     } catch (VirtualMachineError tragedy) {
       tragicEvent(tragedy, "addIndexes(Directory...)");
+      // dead code but javac disagrees:
+      seqNo = -1;
     } finally {
       if (successTop) {
         IOUtils.close(locks);
@@ -131,5 +150,7 @@
       }
     }
     maybeMerge();
+
+    return seqNo;
   }
 

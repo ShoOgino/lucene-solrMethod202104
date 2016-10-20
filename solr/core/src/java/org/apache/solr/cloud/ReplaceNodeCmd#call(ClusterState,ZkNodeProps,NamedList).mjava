@@ -1,0 +1,90 @@
+  @Override
+  public void call(ClusterState state, ZkNodeProps message, NamedList results) throws Exception {
+    ZkStateReader zkStateReader = ocmh.zkStateReader;
+    ocmh.checkRequired(message, "source", "target");
+    String source = message.getStr("source");
+    String target = message.getStr("target");
+    String async = message.getStr("async");
+    boolean parallel = message.getBool("parallel", false);
+    ClusterState clusterState = zkStateReader.getClusterState();
+
+    if (!clusterState.liveNodesContain(source)) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Source Node: " + source + " is not live");
+    }
+    if (!clusterState.liveNodesContain(target)) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Target Node: " + target + " is not live");
+    }
+    List<ZkNodeProps> sourceReplicas = getReplicasOfNode(source, clusterState);
+
+    List<ZkNodeProps> createdReplicas = new ArrayList<>();
+
+    AtomicBoolean anyOneFailed = new AtomicBoolean(false);
+    CountDownLatch countDownLatch = new CountDownLatch(sourceReplicas.size());
+
+    for (ZkNodeProps sourceReplica : sourceReplicas) {
+      NamedList nl = new NamedList();
+      log.info("Going to create replica for collection={} shard={} on node={}", sourceReplica.getStr(COLLECTION_PROP), sourceReplica.getStr(SHARD_ID_PROP), target);
+      ZkNodeProps msg = sourceReplica.plus("parallel", String.valueOf(parallel)).plus(CoreAdminParams.NODE, target);
+      if(async!=null) msg.getProperties().put(ASYNC, async);
+      final ZkNodeProps addedReplica = ocmh.addReplica(clusterState,
+          msg, nl, () -> {
+            countDownLatch.countDown();
+            if (nl.get("failure") != null) {
+              String errorString = String.format(Locale.ROOT, "Failed to create replica for collection=%s shard=%s" +
+                  " on node=%s", sourceReplica.getStr(COLLECTION_PROP), sourceReplica.getStr(SHARD_ID_PROP), target);
+              log.warn(errorString);
+              // one replica creation failed. Make the best attempt to
+              // delete all the replicas created so far in the target
+              // and exit
+              synchronized (results) {
+                results.add("failure", errorString);
+                anyOneFailed.set(true);
+              }
+            } else {
+              log.debug("Successfully created replica for collection={} shard={} on node={}",
+                  sourceReplica.getStr(COLLECTION_PROP), sourceReplica.getStr(SHARD_ID_PROP), target);
+            }
+          });
+
+      if (addedReplica != null) {
+        createdReplicas.add(addedReplica);
+      }
+    }
+
+    log.debug("Waiting for replace node action to complete");
+    countDownLatch.await(5, TimeUnit.MINUTES);
+    log.debug("Finished waiting for replace node action to complete");
+
+    if (anyOneFailed.get()) {
+      log.info("Failed to create some replicas. Cleaning up all replicas on target node");
+      CountDownLatch cleanupLatch = new CountDownLatch(createdReplicas.size());
+      for (ZkNodeProps createdReplica : createdReplicas) {
+        NamedList deleteResult = new NamedList();
+        try {
+          ocmh.deleteReplica(zkStateReader.getClusterState(), createdReplica.plus("parallel", "true"), deleteResult, () -> {
+            cleanupLatch.countDown();
+            if (deleteResult.get("failure") != null) {
+              synchronized (results) {
+                results.add("failure", "Could not cleanup, because of : " + deleteResult.get("failure"));
+              }
+            }
+          });
+        } catch (KeeperException e) {
+          cleanupLatch.countDown();
+          log.warn("Error deleting replica ", e);
+        } catch (Exception e) {
+          log.warn("Error deleting replica ", e);
+          cleanupLatch.countDown();
+          throw e;
+        }
+      }
+      cleanupLatch.await(5, TimeUnit.MINUTES);
+    }
+
+
+    // we have reached this far means all replicas could be recreated
+    //now cleanup the replicas in the source node
+    DeleteNodeCmd.cleanupReplicas(results, state, sourceReplicas, ocmh, source, async);
+    results.add("success", "REPLACENODE action completed successfully from  : " + source + " to : " + target);
+  }
+

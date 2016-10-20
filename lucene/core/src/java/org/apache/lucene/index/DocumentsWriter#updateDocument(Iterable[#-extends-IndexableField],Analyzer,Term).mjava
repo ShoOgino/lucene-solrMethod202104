@@ -1,4 +1,4 @@
-  boolean updateDocument(final Iterable<? extends IndexableField> doc, final Analyzer analyzer,
+  long updateDocument(final Iterable<? extends IndexableField> doc, final Analyzer analyzer,
       final Term delTerm) throws IOException, AbortingException {
 
     boolean hasEvents = preUpdate();
@@ -6,6 +6,7 @@
     final ThreadState perThread = flushControl.obtainAndLock();
 
     final DocumentsWriterPerThread flushingDWPT;
+    long seqNo;
     try {
       // This must happen after we've pulled the ThreadState because IW.close
       // waits for all ThreadStates to be released:
@@ -15,7 +16,7 @@
       final DocumentsWriterPerThread dwpt = perThread.dwpt;
       final int dwptNumDocs = dwpt.getNumDocsInRAM();
       try {
-        dwpt.updateDocument(doc, analyzer, delTerm); 
+        seqNo = dwpt.updateDocument(doc, analyzer, delTerm); 
       } catch (AbortingException ae) {
         flushControl.doOnAbort(perThread);
         dwpt.abort();
@@ -28,10 +29,18 @@
       }
       final boolean isUpdate = delTerm != null;
       flushingDWPT = flushControl.doAfterDocument(perThread, isUpdate);
+
+      assert seqNo > perThread.lastSeqNo: "seqNo=" + seqNo + " lastSeqNo=" + perThread.lastSeqNo;
+      perThread.lastSeqNo = seqNo;
+
     } finally {
       perThreadPool.release(perThread);
     }
 
-    return postUpdate(flushingDWPT, hasEvents);
+    if (postUpdate(flushingDWPT, hasEvents)) {
+      seqNo = -seqNo;
+    }
+    
+    return seqNo;
   }
 

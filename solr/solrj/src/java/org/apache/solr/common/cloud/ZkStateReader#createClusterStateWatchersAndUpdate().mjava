@@ -2,7 +2,7 @@
       InterruptedException {
     // We need to fetch the current cluster state and the set of live nodes
 
-    LOG.info("Updating cluster state from ZooKeeper... ");
+    LOG.debug("Updating cluster state from ZooKeeper... ");
 
     // Sanity check ZK structure.
     if (!zkClient.exists(CLUSTER_STATE, true)) {
@@ -11,13 +11,14 @@
     }
 
     // on reconnect of SolrZkClient force refresh and re-add watches.
+    loadClusterProperties();
+    refreshLiveNodes(new LiveNodeWatcher());
     refreshLegacyClusterState(new LegacyClusterStateWatcher());
     refreshStateFormat2Collections();
     refreshCollectionList(new CollectionsChildWatcher());
-    refreshLiveNodes(new LiveNodeWatcher());
 
     synchronized (ZkStateReader.this.getUpdateLock()) {
-      constructState();
+      constructState(Collections.emptySet());
 
       zkClient.exists(ALIASES,
           new Watcher() {
@@ -30,13 +31,14 @@
               }
               try {
                 synchronized (ZkStateReader.this.getUpdateLock()) {
-                  LOG.info("Updating aliases... ");
+                  LOG.debug("Updating aliases... ");
 
                   // remake watch
                   final Watcher thisWatch = this;
                   final Stat stat = new Stat();
                   final byte[] data = zkClient.getData(ALIASES, thisWatch, stat, true);
                   ZkStateReader.this.aliases = ClusterState.load(data);
+                  LOG.debug("New alias definition is: " + ZkStateReader.this.aliases.toString());
                 }
               } catch (KeeperException.ConnectionLossException | KeeperException.SessionExpiredException e) {
                 LOG.warn("ZooKeeper watch triggered, but Solr cannot talk to ZK: [{}]", e.getMessage());
@@ -57,8 +59,8 @@
     if (securityNodeListener != null) {
       addSecuritynodeWatcher(pair -> {
         ConfigData cd = new ConfigData();
-        cd.data = pair.getKey() == null || pair.getKey().length == 0 ? EMPTY_MAP : Utils.getDeepCopy((Map) fromJSON(pair.getKey()), 4, false);
-        cd.version = pair.getValue() == null ? -1 : pair.getValue().getVersion();
+        cd.data = pair.first() == null || pair.first().length == 0 ? EMPTY_MAP : Utils.getDeepCopy((Map) fromJSON(pair.first()), 4, false);
+        cd.version = pair.second() == null ? -1 : pair.second().getVersion();
         securityData = cd;
         securityNodeListener.run();
       });

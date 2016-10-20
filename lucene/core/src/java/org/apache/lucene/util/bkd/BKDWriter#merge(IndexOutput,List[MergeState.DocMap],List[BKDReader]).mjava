@@ -1,0 +1,42 @@
+  /** More efficient bulk-add for incoming {@link BKDReader}s.  This does a merge sort of the already
+   *  sorted values and currently only works when numDims==1.  This returns -1 if all documents containing
+   *  dimensional values were deleted. */
+  public long merge(IndexOutput out, List<MergeState.DocMap> docMaps, List<BKDReader> readers) throws IOException {
+    assert docMaps == null || readers.size() == docMaps.size();
+
+    BKDMergeQueue queue = new BKDMergeQueue(bytesPerDim, readers.size());
+
+    for(int i=0;i<readers.size();i++) {
+      BKDReader bkd = readers.get(i);
+      MergeState.DocMap docMap;
+      if (docMaps == null) {
+        docMap = null;
+      } else {
+        docMap = docMaps.get(i);
+      }
+      MergeReader reader = new MergeReader(bkd, docMap);
+      if (reader.next()) {
+        queue.add(reader);
+      }
+    }
+
+    OneDimensionBKDWriter oneDimWriter = new OneDimensionBKDWriter(out);
+
+    while (queue.size() != 0) {
+      MergeReader reader = queue.top();
+      // System.out.println("iter reader=" + reader);
+
+      // NOTE: doesn't work with subclasses (e.g. SimpleText!)
+      oneDimWriter.add(reader.state.scratchPackedValue, reader.docID);
+
+      if (reader.next()) {
+        queue.updateTop();
+      } else {
+        // This segment was exhausted
+        queue.pop();
+      }
+    }
+
+    return oneDimWriter.finish();
+  }
+

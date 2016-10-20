@@ -8,7 +8,7 @@
                                             IntIntHashMap boostDocs,
                                             SolrIndexSearcher searcher) throws IOException {
 
-      SortedDocValues docValues = null;
+      DocValuesProducer docValuesProducer = null;
       FunctionQuery funcQuery = null;
 
       FieldType collapseFieldType = searcher.getSchema().getField(collapseField).getType();
@@ -24,10 +24,20 @@
 
           Map<String, UninvertingReader.Type> mapping = new HashMap();
           mapping.put(collapseField, UninvertingReader.Type.SORTED);
-          UninvertingReader uninvertingReader = new UninvertingReader(new ReaderWrapper(searcher.getLeafReader(), collapseField), mapping);
-          docValues = uninvertingReader.getSortedDocValues(collapseField);
+          UninvertingReader uninvertingReader = new UninvertingReader(new ReaderWrapper(searcher.getSlowAtomicReader(), collapseField), mapping);
+          docValuesProducer = new EmptyDocValuesProducer() {
+              @Override
+              public SortedDocValues getSorted(FieldInfo ignored) throws IOException {
+                return uninvertingReader.getSortedDocValues(collapseField);
+              }
+            };
         } else {
-          docValues = DocValues.getSorted(searcher.getLeafReader(), collapseField);
+          docValuesProducer = new EmptyDocValuesProducer() {
+              @Override
+              public SortedDocValues getSorted(FieldInfo ignored) throws IOException {
+                return DocValues.getSorted(searcher.getSlowAtomicReader(), collapseField);
+              }
+            };
         }
       } else {
         if(HINT_TOP_FC.equals(hint)) {
@@ -62,7 +72,7 @@
         
         if (collapseFieldType instanceof StrField) {
 
-          return new OrdScoreCollector(maxDoc, leafCount, docValues, nullPolicy, boostDocs);
+          return new OrdScoreCollector(maxDoc, leafCount, docValuesProducer, nullPolicy, boostDocs);
 
         } else if (collapseFieldType instanceof TrieIntField ||
                    collapseFieldType instanceof TrieFloatField) {
@@ -93,7 +103,7 @@
 
           return new OrdFieldValueCollector(maxDoc,
                                             leafCount,
-                                            docValues,
+                                            docValuesProducer,
                                             nullPolicy,
                                             groupHeadSelector,
                                             sortSpec,

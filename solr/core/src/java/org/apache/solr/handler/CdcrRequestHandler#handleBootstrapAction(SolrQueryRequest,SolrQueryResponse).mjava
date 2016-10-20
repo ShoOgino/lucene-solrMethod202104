@@ -1,0 +1,48 @@
+  private void handleBootstrapAction(SolrQueryRequest req, SolrQueryResponse rsp) throws IOException, SolrServerException {
+    String collectionName = core.getCoreDescriptor().getCloudDescriptor().getCollectionName();
+    String shard = core.getCoreDescriptor().getCloudDescriptor().getShardId();
+    if (!leaderStateManager.amILeader()) {
+      log.warn("Action {} sent to non-leader replica @ {}:{}", CdcrParams.CdcrAction.BOOTSTRAP, collectionName, shard);
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Action " + CdcrParams.CdcrAction.BOOTSTRAP +
+          " sent to non-leader replica");
+    }
+
+    Runnable runnable = () -> {
+      Lock recoveryLock = req.getCore().getSolrCoreState().getRecoveryLock();
+      boolean locked = recoveryLock.tryLock();
+      try {
+        if (!locked)  {
+          handleCancelBootstrap(req, rsp);
+        } else if (leaderStateManager.amILeader())  {
+          running.set(true);
+          String masterUrl = req.getParams().get(ReplicationHandler.MASTER_URL);
+          bootstrapCallable = new BootstrapCallable(masterUrl, core);
+          bootstrapFuture = core.getCoreDescriptor().getCoreContainer().getUpdateShardHandler().getRecoveryExecutor().submit(bootstrapCallable);
+          try {
+            bootstrapFuture.get();
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Bootstrap was interrupted", e);
+          } catch (ExecutionException e) {
+            log.error("Bootstrap operation failed", e);
+          }
+        } else  {
+          log.error("Action {} sent to non-leader replica @ {}:{}. Aborting bootstrap.", CdcrParams.CdcrAction.BOOTSTRAP, collectionName, shard);
+        }
+      } finally {
+        if (locked) {
+          running.set(false);
+          recoveryLock.unlock();
+        }
+      }
+    };
+
+    try {
+      core.getCoreDescriptor().getCoreContainer().getUpdateShardHandler().getUpdateExecutor().submit(runnable);
+      rsp.add(RESPONSE_STATUS, "submitted");
+    } catch (RejectedExecutionException ree)  {
+      // no problem, we're probably shutting down
+      rsp.add(RESPONSE_STATUS, "failed");
+    }
+  }
+

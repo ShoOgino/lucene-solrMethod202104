@@ -1,4 +1,4 @@
-  private void doTestNumericsVsStoredFields(LongProducer longs) throws Exception {
+  private void doTestNumericsVsStoredFields(double density, LongSupplier longs) throws Exception {
     Directory dir = newDirectory();
     IndexWriterConfig conf = newIndexWriterConfig(new MockAnalyzer(random()));
     RandomIndexWriter writer = new RandomIndexWriter(random(), dir, conf);
@@ -16,8 +16,12 @@
     // for numbers of values <= 256, all storage layouts are tested
     assert numDocs > 256;
     for (int i = 0; i < numDocs; i++) {
+      if (random().nextDouble() > density) {
+        writer.addDocument(new Document());
+        continue;
+      }
       idField.setStringValue(Integer.toString(i));
-      long value = longs.next();
+      long value = longs.getAsLong();
       storedField.setStringValue(Long.toString(value));
       dvField.setLongValue(value);
       writer.addDocument(doc);
@@ -41,14 +45,22 @@
     
     // compare
     DirectoryReader ir = DirectoryReader.open(dir);
+    TestUtil.checkReader(ir);
     for (LeafReaderContext context : ir.leaves()) {
       LeafReader r = context.reader();
-      NumericDocValues docValues = r.getNumericDocValues("dv");
+      NumericDocValues docValues = DocValues.getNumeric(r, "dv");
+      docValues.nextDoc();
       for (int i = 0; i < r.maxDoc(); i++) {
-        long storedValue = Long.parseLong(r.document(i).get("stored"));
-        assertEquals(i, docValues.nextDoc());
-        assertEquals(storedValue, docValues.longValue());
+        String storedValue = r.document(i).get("stored");
+        if (storedValue == null) {
+          assertTrue(docValues.docID() > i);
+        } else {
+          assertEquals(i, docValues.docID());
+          assertEquals(Long.parseLong(storedValue), docValues.longValue());
+          docValues.nextDoc();
+        }
       }
+      assertEquals(DocIdSetIterator.NO_MORE_DOCS, docValues.docID());
     }
     ir.close();
     dir.close();

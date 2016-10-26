@@ -1,0 +1,60 @@
+  @Test
+  public void testBasicAuth() throws Exception {
+
+    String authcPrefix = "/admin/authentication";
+
+    HttpClient cl = null;
+    HttpSolrClient httpSolrClient = null;
+    try {
+      cl = HttpClientUtil.createClient(null);
+      String baseUrl = buildUrl(jetty.getLocalPort(), "/solr"); 
+      httpSolrClient = getHttpSolrClient(baseUrl);
+      
+      verifySecurityStatus(cl, baseUrl + authcPrefix, "/errorMessages", null, 20);
+
+      // Write security.json locally. Should cause security to be initialized
+      securityConfHandler.persistConf(new SecurityConfHandler.SecurityConfig()
+          .setData(Utils.fromJSONString(STD_CONF.replaceAll("'", "\""))));
+      securityConfHandler.securityConfEdited();
+      verifySecurityStatus(cl, baseUrl + authcPrefix, "authentication/class", "solr.BasicAuthPlugin", 20);
+
+      String command = "{\n" +
+          "'set-user': {'harry':'HarryIsCool'}\n" +
+          "}";
+
+      GenericSolrRequest genericReq = new GenericSolrRequest(SolrRequest.METHOD.POST, authcPrefix, new ModifiableSolrParams());
+      genericReq.setContentStreams(Collections.singletonList(new ContentStreamBase.ByteArrayStream(command.getBytes(UTF_8), "")));
+
+      HttpSolrClient finalHttpSolrClient = httpSolrClient;
+      HttpSolrClient.RemoteSolrException exp = expectThrows(HttpSolrClient.RemoteSolrException.class, () -> {
+        finalHttpSolrClient.request(genericReq);
+      });
+      assertEquals(401, exp.code());
+
+      command = "{\n" +
+          "'set-user': {'harry':'HarryIsUberCool'}\n" +
+          "}";
+
+      HttpPost httpPost = new HttpPost(baseUrl + authcPrefix);
+      setBasicAuthHeader(httpPost, "solr", "SolrRocks");
+      httpPost.setEntity(new ByteArrayEntity(command.getBytes(UTF_8)));
+      httpPost.addHeader("Content-Type", "application/json; charset=UTF-8");
+      verifySecurityStatus(cl, baseUrl + authcPrefix, "authentication.enabled", "true", 20);
+      HttpResponse r = cl.execute(httpPost);
+      int statusCode = r.getStatusLine().getStatusCode();
+      Utils.consumeFully(r.getEntity());
+      assertEquals("proper_cred sent, but access denied", 200, statusCode);
+
+      verifySecurityStatus(cl, baseUrl + authcPrefix, "authentication/credentials/harry", NOT_NULL_PREDICATE, 20);
+
+      // Read file from SOLR_HOME and verify that it contains our new user
+      assertTrue(new String(Utils.toJSON(securityConfHandler.getSecurityConfig(false).getData()), 
+          Charset.forName("UTF-8")).contains("harry"));
+    } finally {
+      if (cl != null) {
+        HttpClientUtil.close(cl);
+        httpSolrClient.close();
+      }
+    }
+  }
+

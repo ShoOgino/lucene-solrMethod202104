@@ -1,37 +1,34 @@
   @Test
-  @ShardsFixed(num = 2)
   public void test() throws Exception {
-    ClusterState clusterState = cloudClient.getZkStateReader().getClusterState();
 
-    Slice slice1 = clusterState.getSlice(AbstractDistribZkTestBase.DEFAULT_COLLECTION, SHARD1);
-    Slice slice2 = clusterState.getSlice(AbstractDistribZkTestBase.DEFAULT_COLLECTION, SHARD2);
+    final String collection = "deleteShard";
 
-    assertNotNull("Shard1 not found", slice1);
-    assertNotNull("Shard2 not found", slice2);
-    assertSame("Shard1 is not active", Slice.State.ACTIVE, slice1.getState());
-    assertSame("Shard2 is not active", Slice.State.ACTIVE, slice2.getState());
+    CollectionAdminRequest.createCollection(collection, "conf", 2, 1)
+        .process(cluster.getSolrClient());
 
-    try {
-      deleteShard(SHARD1);
-      fail("Deleting an active shard should not have succeeded");
-    } catch (HttpSolrClient.RemoteSolrException e) {
-      // expected
-    }
+    DocCollection state = getCollectionState(collection);
+    assertEquals(State.ACTIVE, state.getSlice("shard1").getState());
+    assertEquals(State.ACTIVE, state.getSlice("shard2").getState());
 
-    setSliceState(SHARD1, Slice.State.INACTIVE);
+    // Can't delete an ACTIVE shard
+    expectThrows(Exception.class, () -> {
+      CollectionAdminRequest.deleteShard(collection, "shard1").process(cluster.getSolrClient());
+    });
 
-    clusterState = cloudClient.getZkStateReader().getClusterState();
+    setSliceState(collection, "shard1", Slice.State.INACTIVE);
 
-    slice1 = clusterState.getSlice(AbstractDistribZkTestBase.DEFAULT_COLLECTION, SHARD1);
+    // Can delete an INATIVE shard
+    CollectionAdminRequest.deleteShard(collection, "shard1").process(cluster.getSolrClient());
+    waitForState("Expected 'shard1' to be removed", collection, (n, c) -> {
+      return c.getSlice("shard1") == null;
+    });
 
-    assertSame("Shard1 is not inactive yet.", Slice.State.INACTIVE, slice1.getState());
+    // Can delete a shard under construction
+    setSliceState(collection, "shard2", Slice.State.CONSTRUCTION);
+    CollectionAdminRequest.deleteShard(collection, "shard2").process(cluster.getSolrClient());
+    waitForState("Expected 'shard2' to be removed", collection, (n, c) -> {
+      return c.getSlice("shard2") == null;
+    });
 
-    deleteShard(SHARD1);
-
-    confirmShardDeletion(SHARD1);
-
-    setSliceState(SHARD2, Slice.State.CONSTRUCTION);
-    deleteShard(SHARD2);
-    confirmShardDeletion(SHARD2);
   }
 

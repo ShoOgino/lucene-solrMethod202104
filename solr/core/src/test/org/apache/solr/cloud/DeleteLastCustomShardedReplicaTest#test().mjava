@@ -1,30 +1,21 @@
   @Test
-  @ShardsFixed(num = 2)
   public void test() throws Exception {
-    try (CloudSolrClient client = createCloudClient(null))  {
-      int replicationFactor = 1;
-      int maxShardsPerNode = 5;
 
-      Map<String, Object> props = Utils.makeMap(
-          "router.name", ImplicitDocRouter.NAME,
-          ZkStateReader.REPLICATION_FACTOR, replicationFactor,
-          ZkStateReader.MAX_SHARDS_PER_NODE, maxShardsPerNode,
-          NUM_SLICES, 1,
-          SHARDS_PROP, "a,b");
+    final String collectionName = "customcollreplicadeletion";
 
-      Map<String,List<Integer>> collectionInfos = new HashMap<>();
+    CollectionAdminRequest.createCollectionWithImplicitRouter(collectionName, "conf", "a,b", 1)
+        .setMaxShardsPerNode(5)
+        .process(cluster.getSolrClient());
 
-      String collectionName = "customcollreplicadeletion";
+    DocCollection collectionState = getCollectionState(collectionName);
+    Replica replica = getRandomReplica(collectionState.getSlice("a"));
 
-      createCollection(collectionInfos, collectionName, props, client);
+    CollectionAdminRequest.deleteReplica(collectionName, "a", replica.getName())
+        .process(cluster.getSolrClient());
 
-      waitForRecoveriesToFinish(collectionName, false);
+    waitForState("Expected shard 'a' to have no replicas", collectionName, (n, c) -> {
+      return c.getSlice("a") == null || c.getSlice("a").getReplicas().size() == 0;
+    });
 
-      DocCollection testcoll = getCommonCloudSolrClient().getZkStateReader()
-              .getClusterState().getCollection(collectionName);
-      Replica replica = testcoll.getSlice("a").getReplicas().iterator().next();
-
-      removeAndWaitForReplicaGone(client, collectionName, replica, "a", replicationFactor-1);
-    }
   }
 

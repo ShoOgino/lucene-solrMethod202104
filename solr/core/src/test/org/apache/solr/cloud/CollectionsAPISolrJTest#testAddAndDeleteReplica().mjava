@@ -1,52 +1,35 @@
-  private void testAddAndDeleteReplica() throws Exception {
-    String collectionName = "solrj_replicatests";
-    createCollection(collectionName, cloudClient, 1, 2);
+  @Test
+  public void testAddAndDeleteReplica() throws Exception {
 
-    cloudClient.setDefaultCollection(collectionName);
+    final String collectionName = "solrj_replicatests";
+    CollectionAdminRequest.createCollection(collectionName, "conf", 1, 2)
+        .process(cluster.getSolrClient());
 
-    String newReplicaName = Assign.assignNode(cloudClient.getZkStateReader().getClusterState().getCollection(collectionName));
-    ArrayList<String> nodeList = new ArrayList<>(cloudClient.getZkStateReader().getClusterState().getLiveNodes());
+    String newReplicaName = Assign.assignNode(getCollectionState(collectionName));
+    ArrayList<String> nodeList
+        = new ArrayList<>(cluster.getSolrClient().getZkStateReader().getClusterState().getLiveNodes());
     Collections.shuffle(nodeList, random());
-    CollectionAdminRequest.AddReplica addReplica = new CollectionAdminRequest.AddReplica()
-            .setCollectionName(collectionName)
-            .setShardName("shard1")
-            .setNode(nodeList.get(0));
-    CollectionAdminResponse response = addReplica.process(cloudClient);
+    final String node = nodeList.get(0);
+
+    CollectionAdminResponse response = CollectionAdminRequest.addReplicaToShard(collectionName, "shard1")
+        .setNode(node)
+        .process(cluster.getSolrClient());
 
     assertEquals(0, response.getStatus());
     assertTrue(response.isSuccess());
 
-    TimeOut timeout = new TimeOut(3, TimeUnit.SECONDS);
-    Replica newReplica = null;
-
-    while (! timeout.hasTimedOut() && newReplica == null) {
-      Slice slice = cloudClient.getZkStateReader().getClusterState().getSlice(collectionName, "shard1");
-      newReplica = slice.getReplica(newReplicaName);
-    }
-
-    assertNotNull(newReplica);
-
-    assertEquals("Replica should be created on the right node",
-        cloudClient.getZkStateReader().getBaseUrlForNodeName(nodeList.get(0)),
-        newReplica.getStr(ZkStateReader.BASE_URL_PROP)
-    );
+    waitForState("Expected to see replica " + newReplicaName + " on node " + node, collectionName, (n, c) -> {
+      Replica r = c.getSlice("shard1").getReplica(newReplicaName);
+      return r != null && r.getNodeName().equals(node);
+    });
     
     // Test DELETEREPLICA
-    CollectionAdminRequest.DeleteReplica deleteReplicaRequest = new CollectionAdminRequest.DeleteReplica()
-            .setCollectionName(collectionName)
-            .setShardName("shard1")
-            .setReplica(newReplicaName);
-    response = deleteReplicaRequest.process(cloudClient);
-
+    response = CollectionAdminRequest.deleteReplica(collectionName, "shard1", newReplicaName)
+        .process(cluster.getSolrClient());
     assertEquals(0, response.getStatus());
 
-    timeout = new TimeOut(3, TimeUnit.SECONDS);
+    waitForState("Expected replica " + newReplicaName + " to vanish from cluster state", collectionName,
+        (n, c) -> c.getSlice("shard1").getReplica(newReplicaName) == null);
 
-    while (! timeout.hasTimedOut() && newReplica != null) {
-      Slice slice = cloudClient.getZkStateReader().getClusterState().getSlice(collectionName, "shard1");
-      newReplica = slice.getReplica(newReplicaName);
-    }
-
-    assertNull(newReplica);
   }
 

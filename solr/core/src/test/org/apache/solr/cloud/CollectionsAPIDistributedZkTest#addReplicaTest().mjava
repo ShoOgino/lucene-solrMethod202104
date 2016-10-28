@@ -1,37 +1,45 @@
-  private void addReplicaTest() throws Exception {
+  @Test
+  public void addReplicaTest() throws Exception {
     String collectionName = "addReplicaColl";
-    try (CloudSolrClient client = createCloudClient(null)) {
-      createCollection(collectionName, client, 2, 2);
-      String newReplicaName = Assign.assignNode(client.getZkStateReader().getClusterState().getCollection(collectionName));
-      ArrayList<String> nodeList = new ArrayList<>(client.getZkStateReader().getClusterState().getLiveNodes());
-      Collections.shuffle(nodeList, random());
 
-      Replica newReplica = doAddReplica(collectionName, "shard1",
-          Assign.assignNode(client.getZkStateReader().getClusterState().getCollection(collectionName)),
-          nodeList.get(0), client, null);
+    CollectionAdminRequest.createCollection(collectionName, "conf", 2, 2)
+        .setMaxShardsPerNode(4)
+        .process(cluster.getSolrClient());
 
-      log.info("newReplica {},\n{} ", newReplica, client.getZkStateReader().getBaseUrlForNodeName(nodeList.get(0)));
+    ArrayList<String> nodeList
+        = new ArrayList<>(cluster.getSolrClient().getZkStateReader().getClusterState().getLiveNodes());
+    Collections.shuffle(nodeList, random());
 
-      assertEquals("Replica should be created on the right node",
-          client.getZkStateReader().getBaseUrlForNodeName(nodeList.get(0)), newReplica.getStr(ZkStateReader.BASE_URL_PROP));
+    String newReplicaName = Assign.assignNode(getCollectionState(collectionName));
+    CollectionAdminRequest.addReplicaToShard(collectionName, "shard1")
+        .setNode(nodeList.get(0))
+        .process(cluster.getSolrClient());
 
-      Properties props = new Properties();
-      String instancePathStr = createTempDir().toString();
-      props.put(CoreAdminParams.INSTANCE_DIR, instancePathStr); //Use name via the property.instanceDir method
-      newReplica = doAddReplica(collectionName, "shard2",
-          Assign.assignNode(client.getZkStateReader().getClusterState().getCollection(collectionName)),
-          null, client, props);
-      assertNotNull(newReplica);
+    Replica newReplica = getCollectionState(collectionName).getReplica(newReplicaName);
 
-      try (HttpSolrClient coreclient = getHttpSolrClient(newReplica.getStr(ZkStateReader.BASE_URL_PROP))) {
-        CoreAdminResponse status = CoreAdminRequest.getStatus(newReplica.getStr("core"), coreclient);
-        NamedList<Object> coreStatus = status.getCoreStatus(newReplica.getStr("core"));
-        String instanceDirStr = (String) coreStatus.get("instanceDir");
-        assertEquals(Paths.get(instanceDirStr).toString(), instancePathStr);
-      }
+    assertEquals("Replica should be created on the right node",
+        cluster.getSolrClient().getZkStateReader().getBaseUrlForNodeName(nodeList.get(0)),
+        newReplica.getStr(ZkStateReader.BASE_URL_PROP));
 
-      //Test to make sure we can't create another replica with an existing core_name of that collection
-      String coreName = newReplica.getStr(CORE_NAME_PROP);
+    newReplicaName = Assign.assignNode(getCollectionState(collectionName));
+    Path instancePath = createTempDir();
+    CollectionAdminRequest.addReplicaToShard(collectionName, "shard1")
+        .withProperty(CoreAdminParams.INSTANCE_DIR, instancePath.toString())
+        .process(cluster.getSolrClient());
+
+    newReplica = getCollectionState(collectionName).getReplica(newReplicaName);
+    assertNotNull(newReplica);
+
+    try (HttpSolrClient coreclient = getHttpSolrClient(newReplica.getStr(ZkStateReader.BASE_URL_PROP))) {
+      CoreAdminResponse status = CoreAdminRequest.getStatus(newReplica.getStr("core"), coreclient);
+      NamedList<Object> coreStatus = status.getCoreStatus(newReplica.getStr("core"));
+      String instanceDirStr = (String) coreStatus.get("instanceDir");
+      assertEquals(instanceDirStr, instancePath.toString());
+    }
+
+    //Test to make sure we can't create another replica with an existing core_name of that collection
+    String coreName = newReplica.getStr(CORE_NAME_PROP);
+    SolrException e = expectThrows(SolrException.class, () -> {
       ModifiableSolrParams params = new ModifiableSolrParams();
       params.set("action", "addreplica");
       params.set("collection", collectionName);
@@ -39,23 +47,20 @@
       params.set("name", coreName);
       QueryRequest request = new QueryRequest(params);
       request.setPath("/admin/collections");
-      try {
-        client.request(request);
-        fail("AddReplica call should not have been successful");
-      } catch (SolrException e) {
-        assertTrue(e.getMessage().contains("Another replica with the same core name already exists for this collection"));
-      }
+      cluster.getSolrClient().request(request);
+    });
 
+    assertTrue(e.getMessage().contains("Another replica with the same core name already exists for this collection"));
 
-      // Check that specifying property.name works. DO NOT remove this when the "name" property is deprecated
-      // for ADDREPLICA, this is "property.name". See SOLR-7132
-      props = new Properties();
-      props.put(CoreAdminParams.NAME, "propertyDotName");
+    // Check that specifying property.name works. DO NOT remove this when the "name" property is deprecated
+    // for ADDREPLICA, this is "property.name". See SOLR-7132
+    newReplicaName = Assign.assignNode(getCollectionState(collectionName));
+    CollectionAdminRequest.addReplicaToShard(collectionName, "shard1")
+        .withProperty(CoreAdminParams.NAME, "propertyDotName")
+        .process(cluster.getSolrClient());
 
-      newReplica = doAddReplica(collectionName, "shard1",
-          Assign.assignNode(client.getZkStateReader().getClusterState().getCollection(collectionName)),
-          nodeList.get(0), client, props);
-      assertEquals("'core' should be 'propertyDotName' ", "propertyDotName", newReplica.getStr("core"));
-    }
+    newReplica = getCollectionState(collectionName).getReplica(newReplicaName);
+    assertEquals("'core' should be 'propertyDotName' ", "propertyDotName", newReplica.getStr("core"));
+
   }
 

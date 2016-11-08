@@ -1,8 +1,10 @@
-  public void write(Writer writer, SolrQueryRequest req, SolrQueryResponse res) throws IOException {
-    Exception e1 = res.getException();
-    if(e1 != null) {
-      if(!(e1 instanceof IgnoreException)) {
-        writeException(e1, writer, false);
+  public void write(OutputStream os) throws IOException {
+    respWriter = new OutputStreamWriter(os, StandardCharsets.UTF_8);
+    writer = JSONResponseWriter.getPushWriter(respWriter, req, res);
+    Exception exception = res.getException();
+    if (exception != null) {
+      if (!(exception instanceof IgnoreException)) {
+        writeException(exception, writer, false);
       }
       return;
     }
@@ -37,8 +39,6 @@
     // You'll have to uncomment the if below to hit the null pointer exception.
     // This is such an unusual case (i.e. an empty index) that catching this concdition here is probably OK.
     // This came to light in the very artifical case of indexing a single doc to Cloud.
-    int totalHits = 0;
-    FixedBitSet[] sets = null;
     if (req.getContext().get("totalHits") != null) {
       totalHits = ((Integer)req.getContext().get("totalHits")).intValue();
       sets = (FixedBitSet[]) req.getContext().get("export");
@@ -69,8 +69,6 @@
       }
     }
 
-    FieldWriter[] fieldWriters = null;
-
     try {
       fieldWriters = getFieldWriters(fields, req.getSearcher());
     } catch (Exception e) {
@@ -78,79 +76,13 @@
       return;
     }
 
-    writer.write("{\"responseHeader\": {\"status\": 0}, \"response\":{\"numFound\":"+totalHits+", \"docs\":[");
+    writer.writeMap(m -> {
+      m.put("responseHeader", singletonMap("status", 0));
+      m.put("response", (MapWriter) mw -> {
+        mw.put("numFound", totalHits);
+        mw.put("docs", (IteratorWriter) iw -> writeDocs(req, iw, sort));
+      });
+    });
 
-
-    //Write the data.
-    List<LeafReaderContext> leaves = req.getSearcher().getTopReaderContext().leaves();
-    SortDoc sortDoc = getSortDoc(req.getSearcher(), sort.getSort());
-    int count = 0;
-    int queueSize = 30000;
-    SortQueue queue = new SortQueue(queueSize, sortDoc);
-    SortDoc[] outDocs = new SortDoc[queueSize];
-
-    boolean commaNeeded = false;
-    while(count < totalHits) {
-      //long begin = System.nanoTime();
-      queue.reset();
-      SortDoc top = queue.top();
-      for(int i=0; i<leaves.size(); i++) {
-        sortDoc.setNextReader(leaves.get(i));
-        DocIdSetIterator it = new BitSetIterator(sets[i], 0); // cost is not useful here
-        int docId = -1;
-        while((docId = it.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-          sortDoc.setValues(docId);
-          if(top.lessThan(sortDoc)) {
-            top.setValues(sortDoc);
-            top = queue.updateTop();
-          }
-        }
-      }
-
-      int outDocsIndex = -1;
-
-      for(int i=0; i<queueSize; i++) {
-        SortDoc s = queue.pop();
-        if(s.docId > -1) {
-          outDocs[++outDocsIndex] = s;
-        }
-      }
-
-     //long end = System.nanoTime();
-
-      count += (outDocsIndex+1);
-
-      try {
-        for(int i=outDocsIndex; i>=0; --i) {
-          SortDoc s = outDocs[i];
-          if(commaNeeded){writer.write(',');}
-          writer.write('{');
-          writeDoc(s, leaves, fieldWriters, sets, writer);
-          writer.write('}');
-          commaNeeded = true;
-          s.reset();
-        }
-      } catch(Throwable e) {
-        Throwable ex = e;
-        e.printStackTrace();
-        while(ex != null) {
-          String m = ex.getMessage();
-          if(m != null && m.contains("Broken pipe")) {
-            throw new IgnoreException();
-          }
-          ex = ex.getCause();
-        }
-
-        if(e instanceof IOException) {
-          throw ((IOException)e);
-        } else {
-          throw new IOException(e);
-        }
-      }
-    }
-
-    //System.out.println("Sort Time 2:"+Long.toString(total/1000000));
-    writer.write("]}}");
-    writer.flush();
   }
 

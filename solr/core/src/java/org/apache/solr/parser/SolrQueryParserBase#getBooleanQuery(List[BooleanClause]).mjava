@@ -15,10 +15,76 @@
     if (clauses.size()==0) {
       return null; // all clause words were filtered away by the analyzer.
     }
-    BooleanQuery.Builder query = newBooleanQuery();
-    for(final BooleanClause clause: clauses) {
-      query.add(clause);
+
+    SchemaField sfield = null;
+    List<String> fieldValues = null;
+
+
+    boolean useTermsQuery = (flags & QParser.FLAG_FILTER)!=0 && clauses.size() > TERMS_QUERY_THRESHOLD;
+    int clausesAdded = 0;
+
+    BooleanQuery.Builder booleanBuilder = newBooleanQuery();
+    Map<SchemaField, List<String>> fmap = new HashMap<>();
+
+    for (BooleanClause clause : clauses) {
+      Query subq = clause.getQuery();
+      if (subq instanceof RawQuery) {
+        if (clause.getOccur() != BooleanClause.Occur.SHOULD) {
+          // We only collect optional terms for set queries.  Since this isn't optional,
+          // convert the raw query to a normal query and handle as usual.
+          clause = new BooleanClause( rawToNormal(subq), clause.getOccur() );
+        } else {
+          // Optional raw query.
+          RawQuery rawq = (RawQuery) subq;
+
+          // only look up fmap and type info on a field change
+          if (sfield != rawq.sfield) {
+            sfield = rawq.sfield;
+            fieldValues = fmap.get(sfield);
+            // If this field isn't indexed, or if it is indexed and we want to use TermsQuery, then collect this value.
+            // We are currently relying on things like PointField not being marked as indexed in order to bypass
+            // the "useTermQuery" check.
+            if (fieldValues == null && useTermsQuery || !sfield.indexed()) {
+              fieldValues = new ArrayList<>(2);
+              fmap.put(sfield, fieldValues);
+            }
+          }
+
+          if (fieldValues != null) {
+            fieldValues.add(rawq.externalVal);
+            continue;
+          }
+
+          clause = new BooleanClause( rawToNormal(subq), clause.getOccur() );
+        }
+      }
+
+      clausesAdded++;
+      booleanBuilder.add(clause);
     }
-    return query.build();
+
+
+    for (Map.Entry<SchemaField,List<String>> entry : fmap.entrySet()) {
+      sfield = entry.getKey();
+      fieldValues = entry.getValue();
+      FieldType ft = sfield.getType();
+
+      // TODO: pull more of this logic out to FieldType?  We would need to be able to add clauses to our existing booleanBuilder.
+      if (sfield.indexed() && fieldValues.size() < TERMS_QUERY_THRESHOLD || fieldValues.size() == 1) {
+        // use boolean query instead
+        for (String externalVal : fieldValues) {
+          Query subq = ft.getFieldQuery(this.parser, sfield, externalVal);
+          clausesAdded++;
+          booleanBuilder.add(subq, BooleanClause.Occur.SHOULD);
+        }
+      } else {
+        Query subq = ft.getSetQuery(this.parser, sfield, fieldValues);
+        if (fieldValues.size() == clauses.size()) return subq; // if this is everything, don't wrap in a boolean query
+        clausesAdded++;
+        booleanBuilder.add(subq, BooleanClause.Occur.SHOULD);
+      }
+    }
+
+    return booleanBuilder.build();
   }
 

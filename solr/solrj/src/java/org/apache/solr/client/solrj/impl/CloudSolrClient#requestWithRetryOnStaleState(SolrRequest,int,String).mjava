@@ -16,12 +16,12 @@
     List<DocCollection> requestedCollections = null;
     boolean isAdmin = ADMIN_PATHS.contains(request.getPath());
     if (collection != null &&  !isAdmin) { // don't do _stateVer_ checking for admin requests
-      Set<String> requestedCollectionNames = getCollectionNames(getZkStateReader().getClusterState(), collection);
+      Set<String> requestedCollectionNames = getCollectionNames(collection);
 
       StringBuilder stateVerParamBuilder = null;
       for (String requestedCollection : requestedCollectionNames) {
         // track the version of state we're using on the client side using the _stateVer_ param
-        DocCollection coll = getDocCollection(getZkStateReader().getClusterState(), requestedCollection,null);
+        DocCollection coll = getDocCollection(requestedCollection, null);
         int collVer = coll.getZNodeVersion();
         if (coll.getStateFormat()>1) {
           if(requestedCollections == null) requestedCollections = new ArrayList<>(requestedCollectionNames.size());
@@ -62,7 +62,7 @@
         Map invalidStates = (Map) o;
         for (Object invalidEntries : invalidStates.entrySet()) {
           Map.Entry e = (Map.Entry) invalidEntries;
-          getDocCollection(getZkStateReader().getClusterState(),(String)e.getKey(), (Integer)e.getValue());
+          getDocCollection((String) e.getKey(), (Integer) e.getValue());
         }
 
       }
@@ -95,6 +95,26 @@
               rootCause instanceof NoHttpResponseException ||
               rootCause instanceof SocketException);
 
+      if (wasCommError) {
+        // it was a communication error. it is likely that
+        // the node to which the request to be sent is down . So , expire the state
+        // so that the next attempt would fetch the fresh state
+        // just re-read state for all of them, if it has not been retired
+        // in retryExpiryTime time
+        for (DocCollection ext : requestedCollections) {
+          ExpiringCachedDocCollection cacheEntry = collectionStateCache.get(ext.getName());
+          if (cacheEntry == null) continue;
+          cacheEntry.maybeStale = true;
+        }
+        if (retryCount < MAX_STALE_RETRIES) {//if it is a communication error , we must try again
+          //may be, we have a stale version of the collection state
+          // and we could not get any information from the server
+          //it is probably not worth trying again and again because
+          // the state would not have been updated
+          return requestWithRetryOnStaleState(request, retryCount + 1, collection);
+        }
+      }
+
       boolean stateWasStale = false;
       if (retryCount < MAX_STALE_RETRIES  &&
           requestedCollections != null    &&
@@ -119,7 +139,7 @@
           !requestedCollections.isEmpty() &&
           wasCommError) {
         for (DocCollection ext : requestedCollections) {
-          DocCollection latestStateFromZk = getDocCollection(zkStateReader.getClusterState(), ext.getName(),null);
+          DocCollection latestStateFromZk = getDocCollection(ext.getName(), null);
           if (latestStateFromZk.getZNodeVersion() != ext.getZNodeVersion()) {
             // looks like we couldn't reach the server because the state was stale == retry
             stateWasStale = true;

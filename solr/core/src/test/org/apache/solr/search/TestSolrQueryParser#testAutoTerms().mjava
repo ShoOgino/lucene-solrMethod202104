@@ -1,0 +1,68 @@
+  // automatically use TermsQuery when appropriate
+  @Test
+  public void testAutoTerms() throws Exception {
+    SolrQueryRequest req = req();
+    QParser qParser;
+    Query q,qq;
+
+    // relevance query should not be a filter
+    qParser = QParser.getParser("foo_s:(a b c)", req);
+    q = qParser.getQuery();
+    assertEquals(3, ((BooleanQuery)q).clauses().size());
+
+    // small filter query should still use BooleanQuery
+    if (QueryParser.TERMS_QUERY_THRESHOLD > 3) {
+      qParser = QParser.getParser("foo_s:(a b c)", req);
+      qParser.setIsFilter(true); // this may change in the future
+      q = qParser.getQuery();
+      assertEquals(3, ((BooleanQuery) q).clauses().size());
+    }
+
+    // large relevancy query should use BooleanQuery
+    // TODO: we may decide that string fields shouldn't have relevance in the future... change to a text field w/o a stop filter if so
+    qParser = QParser.getParser("foo_s:(a b c d e f g h i j k l m n o p q r s t u v w x y z)", req);
+    q = qParser.getQuery();
+    assertEquals(26, ((BooleanQuery)q).clauses().size());
+
+    // large filter query should use TermsQuery
+    qParser = QParser.getParser("foo_s:(a b c d e f g h i j k l m n o p q r s t u v w x y z)", req);
+    qParser.setIsFilter(true); // this may change in the future
+    q = qParser.getQuery();
+    assertEquals(26, ((TermsQuery)q).getTermData().size());
+
+    // large numeric filter query should use TermsQuery (for trie fields)
+    qParser = QParser.getParser("foo_i:(1 2 3 4 5 6 7 8 9 10 20 19 18 17 16 15 14 13 12 11)", req);
+    qParser.setIsFilter(true); // this may change in the future
+    q = qParser.getQuery();
+    assertEquals(20, ((TermsQuery)q).getTermData().size());
+
+    // a filter() clause inside a relevancy query should be able to use a TermsQuery
+    qParser = QParser.getParser("foo_s:aaa filter(foo_s:(a b c d e f g h i j k l m n o p q r s t u v w x y z))", req);
+    q = qParser.getQuery();
+    assertEquals(2, ((BooleanQuery)q).clauses().size());
+    qq = ((BooleanQuery)q).clauses().get(0).getQuery();
+    if (qq instanceof TermQuery) {
+      qq = ((BooleanQuery)q).clauses().get(1).getQuery();
+    }
+
+    if (qq instanceof FilterQuery) {
+      qq = ((FilterQuery)qq).getQuery();
+    }
+
+    assertEquals(26, ((TermsQuery)qq).getTermData().size());
+
+    // test mixed boolean query, including quotes (which shouldn't matter)
+    qParser = QParser.getParser("foo_s:(a +aaa b -bbb c d e f bar_s:(qqq www) g h i j k l m n o p q r s t u v w x y z)", req);
+    qParser.setIsFilter(true); // this may change in the future
+    q = qParser.getQuery();
+    assertEquals(4, ((BooleanQuery)q).clauses().size());
+    qq = null;
+    for (BooleanClause clause : ((BooleanQuery)q).clauses()) {
+      qq = clause.getQuery();
+      if (qq instanceof TermsQuery) break;
+    }
+    assertEquals(26, ((TermsQuery)qq).getTermData().size());
+
+    req.close();
+  }
+

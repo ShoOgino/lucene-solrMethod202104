@@ -1,5 +1,4 @@
     private void writeLeafBlock() throws IOException {
-      //System.out.println("writeLeafBlock pos=" + out.getFilePointer());
       assert leafCount != 0;
       if (valueCount == 0) {
         System.arraycopy(leafValues, 0, minPackedValue, 0, packedBytesLength);
@@ -15,39 +14,37 @@
       leafBlockFPs.add(out.getFilePointer());
       checkMaxLeafNodeCount(leafBlockFPs.size());
 
-      Arrays.fill(commonPrefixLengths, bytesPerDim);
       // Find per-dim common prefix:
-      for(int dim=0;dim<numDims;dim++) {
-        int offset1 = dim * bytesPerDim;
-        int offset2 = (leafCount - 1) * packedBytesLength + offset1;
-        for(int j=0;j<commonPrefixLengths[dim];j++) {
-          if (leafValues[offset1+j] != leafValues[offset2+j]) {
-            commonPrefixLengths[dim] = j;
-            break;
-          }
+      int prefix = bytesPerDim;
+      int offset = (leafCount - 1) * packedBytesLength;
+      for(int j=0;j<bytesPerDim;j++) {
+        if (leafValues[j] != leafValues[offset+j]) {
+          prefix = j;
+          break;
         }
       }
 
-      writeLeafBlockDocs(out, leafDocs, 0, leafCount);
-      writeCommonPrefixes(out, commonPrefixLengths, leafValues);
+      commonPrefixLengths[0] = prefix;
 
+      assert scratchOut.getPosition() == 0;
+      writeLeafBlockDocs(scratchOut, leafDocs, 0, leafCount);
+      writeCommonPrefixes(scratchOut, commonPrefixLengths, leafValues);
+
+      scratchBytesRef1.length = packedBytesLength;
+      scratchBytesRef1.bytes = leafValues;
+      
       final IntFunction<BytesRef> packedValues = new IntFunction<BytesRef>() {
-        final BytesRef scratch = new BytesRef();
-
-        {
-          scratch.length = packedBytesLength;
-          scratch.bytes = leafValues;
-        }
-
         @Override
         public BytesRef apply(int i) {
-          scratch.offset = packedBytesLength * i;
-          return scratch;
+          scratchBytesRef1.offset = packedBytesLength * i;
+          return scratchBytesRef1;
         }
       };
       assert valuesInOrderAndBounds(leafCount, 0, Arrays.copyOf(leafValues, packedBytesLength),
           Arrays.copyOfRange(leafValues, (leafCount - 1) * packedBytesLength, leafCount * packedBytesLength),
           packedValues, leafDocs, 0);
-      writeLeafBlockPackedValues(out, commonPrefixLengths, leafCount, 0, packedValues);
+      writeLeafBlockPackedValues(scratchOut, commonPrefixLengths, leafCount, 0, packedValues);
+      out.writeBytes(scratchOut.getBytes(), 0, scratchOut.getPosition());
+      scratchOut.reset();
     }
 

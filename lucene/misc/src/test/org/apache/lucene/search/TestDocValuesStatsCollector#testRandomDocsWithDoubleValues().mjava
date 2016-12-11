@@ -1,0 +1,45 @@
+  public void testRandomDocsWithDoubleValues() throws IOException {
+    try (Directory dir = newDirectory();
+        IndexWriter indexWriter = new IndexWriter(dir, newIndexWriterConfig())) {
+      String field = "numeric";
+      int numDocs = TestUtil.nextInt(random(), 1, 100);
+      double[] docValues = new double[numDocs];
+      double nextVal = 1.0;
+      for (int i = 0; i < numDocs; i++) {
+        Document doc = new Document();
+        if (random().nextBoolean()) { // not all documents have a value
+          doc.add(new DoubleDocValuesField(field, nextVal));
+          doc.add(new StringField("id", "doc" + i, Store.NO));
+          docValues[i] = nextVal;
+          ++nextVal;
+        }
+        indexWriter.addDocument(doc);
+      }
+
+      // 20% of cases delete some docs
+      if (random().nextDouble() < 0.2) {
+        for (int i = 0; i < numDocs; i++) {
+          if (random().nextBoolean()) {
+            indexWriter.deleteDocuments(new Term("id", "doc" + i));
+            docValues[i] = 0;
+          }
+        }
+      }
+
+      try (DirectoryReader reader = DirectoryReader.open(indexWriter)) {
+        IndexSearcher searcher = new IndexSearcher(reader);
+        DoubleDocValuesStats stats = new DoubleDocValuesStats(field);
+        searcher.search(new MatchAllDocsQuery(), new DocValuesStatsCollector(stats));
+
+        int expCount = (int) Arrays.stream(docValues).filter(v -> v > 0).count();
+        assertEquals(expCount, stats.count());
+        assertEquals(getZeroValues(docValues).count() - reader.numDeletedDocs(), stats.missing());
+        if (stats.count() > 0) {
+          assertEquals(getPositiveValues(docValues).max().getAsDouble(), stats.max().doubleValue(), 0.00001);
+          assertEquals(getPositiveValues(docValues).min().getAsDouble(), stats.min().doubleValue(), 0.00001);
+          assertEquals(getPositiveValues(docValues).average().getAsDouble(), stats.mean(), 0.00001);
+        }
+      }
+    }
+  }
+

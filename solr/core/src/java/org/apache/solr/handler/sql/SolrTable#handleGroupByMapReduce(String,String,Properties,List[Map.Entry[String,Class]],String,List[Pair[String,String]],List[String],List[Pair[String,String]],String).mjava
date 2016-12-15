@@ -1,0 +1,87 @@
+  private TupleStream handleGroupByMapReduce(String zk,
+                                             String collection,
+                                             Properties properties,
+                                             final List<Map.Entry<String, Class>> fields,
+                                             final String query,
+                                             final List<Pair<String, String>> orders,
+                                             final List<String> _buckets,
+                                             final List<Pair<String, String>> metricPairs,
+                                             final String limit) throws IOException {
+
+    int numWorkers = Integer.parseInt(properties.getProperty("numWorkers", "1"));
+
+    Bucket[] buckets = buildBuckets(_buckets, fields);
+    Metric[] metrics = buildMetrics(metricPairs).toArray(new Metric[0]);
+
+    Set<String> fieldSet = getFieldSet(metrics, fields);
+
+    if(metrics.length == 0) {
+      throw new IOException("Group by queries must include atleast one aggregate function.");
+    }
+
+    String fl = getFields(fieldSet);
+    String sortDirection = getSortDirection(orders);
+    String sort = bucketSort(buckets, sortDirection);
+
+    ModifiableSolrParams params = new ModifiableSolrParams();
+
+    params.set(CommonParams.FL, fl);
+    params.set(CommonParams.Q, query);
+    //Always use the /export handler for Group By Queries because it requires exporting full result sets.
+    params.set(CommonParams.QT, "/export");
+
+    if(numWorkers > 1) {
+      params.set("partitionKeys", getPartitionKeys(buckets));
+    }
+
+    params.set("sort", sort);
+
+    TupleStream tupleStream = null;
+
+    CloudSolrStream cstream = new CloudSolrStream(zk, collection, params);
+    tupleStream = new RollupStream(cstream, buckets, metrics);
+
+    if(numWorkers > 1) {
+      // Do the rollups in parallel
+      // Maintain the sort of the Tuples coming from the workers.
+      StreamComparator comp = bucketSortComp(buckets, sortDirection);
+      ParallelStream parallelStream = new ParallelStream(zk, collection, tupleStream, numWorkers, comp);
+
+      StreamFactory factory = new StreamFactory()
+          .withFunctionName("search", CloudSolrStream.class)
+          .withFunctionName("parallel", ParallelStream.class)
+          .withFunctionName("rollup", RollupStream.class)
+          .withFunctionName("sum", SumMetric.class)
+          .withFunctionName("min", MinMetric.class)
+          .withFunctionName("max", MaxMetric.class)
+          .withFunctionName("avg", MeanMetric.class)
+          .withFunctionName("count", CountMetric.class);
+
+      parallelStream.setStreamFactory(factory);
+      tupleStream = parallelStream;
+    }
+
+    //TODO: This should be done on the workers, but it won't serialize because it relies on Presto classes.
+    // Once we make this a Expressionable the problem will be solved.
+
+
+    if(orders != null && orders.size() > 0) {
+      int lim = limit == null ? 100 : Integer.parseInt(limit);
+      if(!sortsEqual(buckets, sortDirection, orders)) {
+        StreamComparator comp = getComp(orders);
+        //Rank the Tuples
+        //If parallel stream is used ALL the Rolled up tuples from the workers will be ranked
+        //Providing a true Top or Bottom.
+        tupleStream = new RankStream(tupleStream, lim, comp);
+      } else {
+        // Sort is the same as the same as the underlying stream
+        // Only need to limit the result, not Rank the result
+        if(lim > -1) {
+          tupleStream = new LimitStream(tupleStream, lim);
+        }
+      }
+    }
+
+    return tupleStream;
+  }
+

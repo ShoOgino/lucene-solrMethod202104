@@ -1,0 +1,125 @@
+  /* Recursively reorders the provided reader and writes the bkd-tree on the fly. */
+  private void build(int nodeID, int leafNodeOffset,
+      MutablePointValues reader, int from, int to,
+      IndexOutput out,
+      byte[] minPackedValue, byte[] maxPackedValue,
+      byte[] splitPackedValues,
+      long[] leafBlockFPs,
+      int[] spareDocIds) throws IOException {
+
+    if (nodeID >= leafNodeOffset) {
+      // leaf node
+      final int count = to - from;
+      assert count <= maxPointsInLeafNode;
+
+      // Compute common prefixes
+      Arrays.fill(commonPrefixLengths, bytesPerDim);
+      reader.getValue(from, scratchBytesRef1);
+      for (int i = from + 1; i < to; ++i) {
+        reader.getValue(i, scratchBytesRef2);
+        for (int dim=0;dim<numDims;dim++) {
+          final int offset = dim * bytesPerDim;
+          for(int j=0;j<commonPrefixLengths[dim];j++) {
+            if (scratchBytesRef1.bytes[scratchBytesRef1.offset+offset+j] != scratchBytesRef2.bytes[scratchBytesRef2.offset+offset+j]) {
+              commonPrefixLengths[dim] = j;
+              break;
+            }
+          }
+        }
+      }
+
+      // Find the dimension that has the least number of unique bytes at commonPrefixLengths[dim]
+      FixedBitSet[] usedBytes = new FixedBitSet[numDims];
+      for (int dim = 0; dim < numDims; ++dim) {
+        if (commonPrefixLengths[dim] < bytesPerDim) {
+          usedBytes[dim] = new FixedBitSet(256);
+        }
+      }
+      for (int i = from + 1; i < to; ++i) {
+        for (int dim=0;dim<numDims;dim++) {
+          if (usedBytes[dim] != null) {
+            byte b = reader.getByteAt(i, dim * bytesPerDim + commonPrefixLengths[dim]);
+            usedBytes[dim].set(Byte.toUnsignedInt(b));
+          }
+        }
+      }
+      int sortedDim = 0;
+      int sortedDimCardinality = Integer.MAX_VALUE;
+      for (int dim = 0; dim < numDims; ++dim) {
+        if (usedBytes[dim] != null) {
+          final int cardinality = usedBytes[dim].cardinality();
+          if (cardinality < sortedDimCardinality) {
+            sortedDim = dim;
+            sortedDimCardinality = cardinality;
+          }
+        }
+      }
+
+      // sort by sortedDim
+      MutablePointsReaderUtils.sortByDim(sortedDim, bytesPerDim, commonPrefixLengths,
+                                         reader, from, to, scratchBytesRef1, scratchBytesRef2);
+
+      // Save the block file pointer:
+      leafBlockFPs[nodeID - leafNodeOffset] = out.getFilePointer();
+
+      // Write doc IDs
+      int[] docIDs = spareDocIds;
+      for (int i = from; i < to; ++i) {
+        docIDs[i - from] = reader.getDocID(i);
+      }
+      writeLeafBlockDocs(out, docIDs, 0, count);
+
+      // Write the common prefixes:
+      reader.getValue(from, scratchBytesRef1);
+      System.arraycopy(scratchBytesRef1.bytes, scratchBytesRef1.offset, scratch1, 0, packedBytesLength);
+
+      // Write the full values:
+      IntFunction<BytesRef> packedValues = new IntFunction<BytesRef>() {
+        @Override
+        public BytesRef apply(int i) {
+          reader.getValue(from + i, scratchBytesRef1);
+          return scratchBytesRef1;
+        }
+      };
+      assert valuesInOrderAndBounds(count, sortedDim, minPackedValue, maxPackedValue, packedValues,
+          docIDs, 0);
+      writeLeafBlockPackedValues(out, commonPrefixLengths, count, sortedDim, packedValues);
+
+    } else {
+      // inner node
+
+      // compute the split dimension and partition around it
+      final int splitDim = split(minPackedValue, maxPackedValue);
+      final int mid = (from + to + 1) >>> 1;
+
+      int commonPrefixLen = bytesPerDim;
+      for (int i = 0; i < bytesPerDim; ++i) {
+        if (minPackedValue[splitDim * bytesPerDim + i] != maxPackedValue[splitDim * bytesPerDim + i]) {
+          commonPrefixLen = i;
+          break;
+        }
+      }
+      MutablePointsReaderUtils.partition(maxDoc, splitDim, bytesPerDim, commonPrefixLen,
+          reader, from, to, mid, scratchBytesRef1, scratchBytesRef2);
+
+      // set the split value
+      final int address = nodeID * (1+bytesPerDim);
+      splitPackedValues[address] = (byte) splitDim;
+      reader.getValue(mid, scratchBytesRef1);
+      System.arraycopy(scratchBytesRef1.bytes, scratchBytesRef1.offset + splitDim * bytesPerDim, splitPackedValues, address + 1, bytesPerDim);
+
+      byte[] minSplitPackedValue = Arrays.copyOf(minPackedValue, packedBytesLength);
+      byte[] maxSplitPackedValue = Arrays.copyOf(maxPackedValue, packedBytesLength);
+      System.arraycopy(scratchBytesRef1.bytes, scratchBytesRef1.offset + splitDim * bytesPerDim,
+          minSplitPackedValue, splitDim * bytesPerDim, bytesPerDim);
+      System.arraycopy(scratchBytesRef1.bytes, scratchBytesRef1.offset + splitDim * bytesPerDim,
+          maxSplitPackedValue, splitDim * bytesPerDim, bytesPerDim);
+
+      // recurse
+      build(nodeID * 2, leafNodeOffset, reader, from, mid, out,
+          minPackedValue, maxSplitPackedValue, splitPackedValues, leafBlockFPs, spareDocIds);
+      build(nodeID * 2 + 1, leafNodeOffset, reader, mid, to, out,
+          minSplitPackedValue, maxPackedValue, splitPackedValues, leafBlockFPs, spareDocIds);
+    }
+  }
+

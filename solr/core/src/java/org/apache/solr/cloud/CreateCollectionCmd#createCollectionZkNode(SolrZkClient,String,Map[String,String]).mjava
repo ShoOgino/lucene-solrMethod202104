@@ -1,0 +1,73 @@
+  public static void createCollectionZkNode(SolrZkClient zkClient, String collection, Map<String,String> params) {
+    log.debug("Check for collection zkNode:" + collection);
+    String collectionPath = ZkStateReader.COLLECTIONS_ZKNODE + "/" + collection;
+
+    try {
+      if (!zkClient.exists(collectionPath, true)) {
+        log.debug("Creating collection in ZooKeeper:" + collection);
+
+        try {
+          Map<String,Object> collectionProps = new HashMap<>();
+
+          // TODO: if collection.configName isn't set, and there isn't already a conf in zk, just use that?
+          String defaultConfigName = System.getProperty(ZkController.COLLECTION_PARAM_PREFIX + ZkController.CONFIGNAME_PROP, collection);
+
+          if (params.size() > 0) {
+            collectionProps.putAll(params);
+            // if the config name wasn't passed in, use the default
+            if (!collectionProps.containsKey(ZkController.CONFIGNAME_PROP)) {
+              // users can create the collection node and conf link ahead of time, or this may return another option
+              getConfName(zkClient, collection, collectionPath, collectionProps);
+            }
+
+          } else if (System.getProperty("bootstrap_confdir") != null) {
+            // if we are bootstrapping a collection, default the config for
+            // a new collection to the collection we are bootstrapping
+            log.info("Setting config for collection:" + collection + " to " + defaultConfigName);
+
+            Properties sysProps = System.getProperties();
+            for (String sprop : System.getProperties().stringPropertyNames()) {
+              if (sprop.startsWith(ZkController.COLLECTION_PARAM_PREFIX)) {
+                collectionProps.put(sprop.substring(ZkController.COLLECTION_PARAM_PREFIX.length()), sysProps.getProperty(sprop));
+              }
+            }
+
+            // if the config name wasn't passed in, use the default
+            if (!collectionProps.containsKey(ZkController.CONFIGNAME_PROP))
+              collectionProps.put(ZkController.CONFIGNAME_PROP, defaultConfigName);
+
+          } else if (Boolean.getBoolean("bootstrap_conf")) {
+            // the conf name should should be the collection name of this core
+            collectionProps.put(ZkController.CONFIGNAME_PROP, collection);
+          } else {
+            getConfName(zkClient, collection, collectionPath, collectionProps);
+          }
+
+          collectionProps.remove(ZkStateReader.NUM_SHARDS_PROP);  // we don't put numShards in the collections properties
+
+          ZkNodeProps zkProps = new ZkNodeProps(collectionProps);
+          zkClient.makePath(collectionPath, Utils.toJSON(zkProps), CreateMode.PERSISTENT, null, true);
+
+        } catch (KeeperException e) {
+          // it's okay if the node already exists
+          if (e.code() != KeeperException.Code.NODEEXISTS) {
+            throw e;
+          }
+        }
+      } else {
+        log.debug("Collection zkNode exists");
+      }
+
+    } catch (KeeperException e) {
+      // it's okay if another beats us creating the node
+      if (e.code() == KeeperException.Code.NODEEXISTS) {
+        return;
+      }
+      throw new SolrException(ErrorCode.SERVER_ERROR, "Error creating collection node in Zookeeper", e);
+    } catch (InterruptedException e) {
+      Thread.interrupted();
+      throw new SolrException(ErrorCode.SERVER_ERROR, "Error creating collection node in Zookeeper", e);
+    }
+
+  }
+

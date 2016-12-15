@@ -1,0 +1,123 @@
+  /**
+   * lastSplitValues is per-dimension split value previously seen; we use this to prefix-code the split byte[] on each inner node
+   */
+  private int recursePackIndex(RAMOutputStream writeBuffer, long[] leafBlockFPs, byte[] splitPackedValues, long minBlockFP, List<byte[]> blocks,
+                               int nodeID, byte[] lastSplitValues, boolean[] negativeDeltas, boolean isLeft) throws IOException {
+    if (nodeID >= leafBlockFPs.length) {
+      int leafID = nodeID - leafBlockFPs.length;
+      //System.out.println("recursePack leaf nodeID=" + nodeID);
+
+      // In the unbalanced case it's possible the left most node only has one child:
+      if (leafID < leafBlockFPs.length) {
+        long delta = leafBlockFPs[leafID] - minBlockFP;
+        if (isLeft) {
+          assert delta == 0;
+          return 0;
+        } else {
+          assert nodeID == 1 || delta > 0: "nodeID=" + nodeID;
+          writeBuffer.writeVLong(delta);
+          return appendBlock(writeBuffer, blocks);
+        }
+      } else {
+        return 0;
+      }
+    } else {
+      long leftBlockFP;
+      if (isLeft == false) {
+        leftBlockFP = getLeftMostLeafBlockFP(leafBlockFPs, nodeID);
+        long delta = leftBlockFP - minBlockFP;
+        assert nodeID == 1 || delta > 0;
+        writeBuffer.writeVLong(delta);
+      } else {
+        // The left tree's left most leaf block FP is always the minimal FP:
+        leftBlockFP = minBlockFP;
+      }
+
+      int address = nodeID * (1+bytesPerDim);
+      int splitDim = splitPackedValues[address++] & 0xff;
+
+      //System.out.println("recursePack inner nodeID=" + nodeID + " splitDim=" + splitDim + " splitValue=" + new BytesRef(splitPackedValues, address, bytesPerDim));
+
+      // find common prefix with last split value in this dim:
+      int prefix = 0;
+      for(;prefix<bytesPerDim;prefix++) {
+        if (splitPackedValues[address+prefix] != lastSplitValues[splitDim * bytesPerDim + prefix]) {
+          break;
+        }
+      }
+
+      //System.out.println("writeNodeData nodeID=" + nodeID + " splitDim=" + splitDim + " numDims=" + numDims + " bytesPerDim=" + bytesPerDim + " prefix=" + prefix);
+
+      int firstDiffByteDelta;
+      if (prefix < bytesPerDim) {
+        //System.out.println("  delta byte cur=" + Integer.toHexString(splitPackedValues[address+prefix]&0xFF) + " prev=" + Integer.toHexString(lastSplitValues[splitDim * bytesPerDim + prefix]&0xFF) + " negated?=" + negativeDeltas[splitDim]);
+        firstDiffByteDelta = (splitPackedValues[address+prefix]&0xFF) - (lastSplitValues[splitDim * bytesPerDim + prefix]&0xFF);
+        if (negativeDeltas[splitDim]) {
+          firstDiffByteDelta = -firstDiffByteDelta;
+        }
+        //System.out.println("  delta=" + firstDiffByteDelta);
+        assert firstDiffByteDelta > 0;
+      } else {
+        firstDiffByteDelta = 0;
+      }
+
+      // pack the prefix, splitDim and delta first diff byte into a single vInt:
+      int code = (firstDiffByteDelta * (1+bytesPerDim) + prefix) * numDims + splitDim;
+
+      //System.out.println("  code=" + code);
+      //System.out.println("  splitValue=" + new BytesRef(splitPackedValues, address, bytesPerDim));
+
+      writeBuffer.writeVInt(code);
+
+      // write the split value, prefix coded vs. our parent's split value:
+      int suffix = bytesPerDim - prefix;
+      byte[] savSplitValue = new byte[suffix];
+      if (suffix > 1) {
+        writeBuffer.writeBytes(splitPackedValues, address+prefix+1, suffix-1);
+      }
+
+      byte[] cmp = lastSplitValues.clone();
+
+      System.arraycopy(lastSplitValues, splitDim * bytesPerDim + prefix, savSplitValue, 0, suffix);
+
+      // copy our split value into lastSplitValues for our children to prefix-code against
+      System.arraycopy(splitPackedValues, address+prefix, lastSplitValues, splitDim * bytesPerDim + prefix, suffix);
+
+      int numBytes = appendBlock(writeBuffer, blocks);
+
+      // placeholder for left-tree numBytes; we need this so that at search time if we only need to recurse into the right sub-tree we can
+      // quickly seek to its starting point
+      int idxSav = blocks.size();
+      blocks.add(null);
+
+      boolean savNegativeDelta = negativeDeltas[splitDim];
+      negativeDeltas[splitDim] = true;
+
+      int leftNumBytes = recursePackIndex(writeBuffer, leafBlockFPs, splitPackedValues, leftBlockFP, blocks, 2*nodeID, lastSplitValues, negativeDeltas, true);
+
+      if (nodeID * 2 < leafBlockFPs.length) {
+        writeBuffer.writeVInt(leftNumBytes);
+      } else {
+        assert leftNumBytes == 0: "leftNumBytes=" + leftNumBytes;
+      }
+      int numBytes2 = Math.toIntExact(writeBuffer.getFilePointer());
+      byte[] bytes2 = new byte[numBytes2];
+      writeBuffer.writeTo(bytes2, 0);
+      writeBuffer.reset();
+      // replace our placeholder:
+      blocks.set(idxSav, bytes2);
+
+      negativeDeltas[splitDim] = false;
+      int rightNumBytes = recursePackIndex(writeBuffer, leafBlockFPs, splitPackedValues, leftBlockFP, blocks, 2*nodeID+1, lastSplitValues, negativeDeltas, false);
+
+      negativeDeltas[splitDim] = savNegativeDelta;
+
+      // restore lastSplitValues to what caller originally passed us:
+      System.arraycopy(savSplitValue, 0, lastSplitValues, splitDim * bytesPerDim + prefix, suffix);
+
+      assert Arrays.equals(lastSplitValues, cmp);
+      
+      return numBytes + numBytes2 + leftNumBytes + rightNumBytes;
+    }
+  }
+

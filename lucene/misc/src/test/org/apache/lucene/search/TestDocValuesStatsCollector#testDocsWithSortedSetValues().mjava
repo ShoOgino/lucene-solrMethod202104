@@ -1,19 +1,18 @@
-  public void testDocsWithMultipleLongValues() throws IOException {
+  public void testDocsWithSortedSetValues() throws IOException {
     try (Directory dir = newDirectory();
         IndexWriter indexWriter = new IndexWriter(dir, newIndexWriterConfig())) {
-      String field = "numeric";
+      String field = "sorted";
       int numDocs = TestUtil.nextInt(random(), 1, 100);
-      long[][] docValues = new long[numDocs][];
-      long nextVal = 1;
+      BytesRef[][] docValues = new BytesRef[numDocs][];
       for (int i = 0; i < numDocs; i++) {
         Document doc = new Document();
         if (random().nextBoolean()) { // not all documents have a value
           int numValues = TestUtil.nextInt(random(), 1, 5);
-          docValues[i] = new long[numValues];
+          docValues[i] = new BytesRef[numValues];
           for (int j = 0; j < numValues; j++) {
-            doc.add(new SortedNumericDocValuesField(field, nextVal));
-            docValues[i][j] = nextVal;
-            ++nextVal;
+            BytesRef val = TestUtil.randomBinaryTerm(random());
+            doc.add(new SortedSetDocValuesField(field, val));
+            docValues[i][j] = val;
           }
           doc.add(new StringField("id", "doc" + i, Store.NO));
         }
@@ -32,21 +31,15 @@
 
       try (DirectoryReader reader = DirectoryReader.open(indexWriter)) {
         IndexSearcher searcher = new IndexSearcher(reader);
-        SortedLongDocValuesStats stats = new SortedLongDocValuesStats(field);
+        SortedSetDocValuesStats stats = new SortedSetDocValuesStats(field);
         searcher.search(new MatchAllDocsQuery(), new DocValuesStatsCollector(stats));
 
-        assertEquals(nonNull(docValues).count(), stats.count());
+        int expCount = (int) nonNull(docValues).count();
+        assertEquals(expCount, stats.count());
         assertEquals(isNull(docValues).count() - reader.numDeletedDocs(), stats.missing());
         if (stats.count() > 0) {
-          LongSummaryStatistics sumStats = filterAndFlatValues(docValues, (v) -> v != null).summaryStatistics();
-          assertEquals(sumStats.getMax(), stats.max().longValue());
-          assertEquals(sumStats.getMin(), stats.min().longValue());
-          assertEquals(sumStats.getAverage(), stats.mean(), 0.00001);
-          assertEquals(sumStats.getSum(), stats.sum().longValue());
-          assertEquals(sumStats.getCount(), stats.valuesCount());
-          double variance = computeVariance(filterAndFlatValues(docValues, (v) -> v != null), stats.mean, stats.count());
-          assertEquals(variance, stats.variance(), 0.00001);
-          assertEquals(Math.sqrt(variance), stats.stdev(), 0.00001);
+          assertEquals(nonNull(docValues).flatMap(Arrays::stream).min(BytesRef::compareTo).get(), stats.min());
+          assertEquals(nonNull(docValues).flatMap(Arrays::stream).max(BytesRef::compareTo).get(), stats.max());
         }
       }
     }

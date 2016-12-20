@@ -1,15 +1,44 @@
   @Override
   public int merge(MergeState mergeState) throws IOException {
-    if (mergeState.needsIndexSort) {
-      // TODO: can we gain back some optos even if index is sorted?  E.g. if sort results in large chunks of contiguous docs from one sub
-      // being copied over...?
-      return super.merge(mergeState);
-    }
-
     int docCount = 0;
     int numReaders = mergeState.maxDocs.length;
     
     MatchingReaders matching = new MatchingReaders(mergeState);
+    if (mergeState.needsIndexSort) {
+      /**
+       * If all readers are compressed and they have the same fieldinfos then we can merge the serialized document
+       * directly.
+       */
+      List<CompressingStoredFieldsMergeSub> subs = new ArrayList<>();
+      for(int i=0;i<mergeState.storedFieldsReaders.length;i++) {
+        if (matching.matchingReaders[i] &&
+            mergeState.storedFieldsReaders[i] instanceof CompressingStoredFieldsReader) {
+          CompressingStoredFieldsReader storedFieldsReader = (CompressingStoredFieldsReader) mergeState.storedFieldsReaders[i];
+          storedFieldsReader.checkIntegrity();
+          subs.add(new CompressingStoredFieldsMergeSub(storedFieldsReader, mergeState.docMaps[i], mergeState.maxDocs[i]));
+        } else {
+          return super.merge(mergeState);
+        }
+      }
+
+      final DocIDMerger<CompressingStoredFieldsMergeSub> docIDMerger =
+          new DocIDMerger<>(subs, true);
+      while (true) {
+        CompressingStoredFieldsMergeSub sub = docIDMerger.next();
+        if (sub == null) {
+          break;
+        }
+        assert sub.mappedDocID == docCount;
+        SerializedDocument doc = sub.reader.document(sub.docID);
+        startDocument();
+        bufferedDocs.copyBytes(doc.in, doc.length);
+        numStoredFieldsInDoc = doc.numStoredFields;
+        finishDocument();
+        ++docCount;
+      }
+      finish(mergeState.mergeFieldInfos, docCount);
+      return docCount;
+    }
     
     for (int readerIndex=0;readerIndex<numReaders;readerIndex++) {
       MergeVisitor visitor = new MergeVisitor(mergeState, readerIndex);

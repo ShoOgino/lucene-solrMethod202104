@@ -1,0 +1,31 @@
+  @Override
+  void flush(SegmentWriteState state, Sorter.DocMap sortMap) throws IOException {
+    super.flush(state, sortMap);
+    if (sortMap == null) {
+      // we're lucky the index is already sorted, just rename the temporary file and return
+      for (Map.Entry<String, String> entry : tmpDirectory.getTemporaryFiles().entrySet()) {
+        tmpDirectory.rename(entry.getValue(), entry.getKey());
+      }
+      return;
+    }
+    StoredFieldsReader reader = docWriter.codec.storedFieldsFormat()
+        .fieldsReader(tmpDirectory, state.segmentInfo, state.fieldInfos, IOContext.DEFAULT);
+    StoredFieldsReader mergeReader = reader.getMergeInstance();
+    StoredFieldsWriter sortWriter = docWriter.codec.storedFieldsFormat()
+        .fieldsWriter(state.directory, state.segmentInfo, IOContext.DEFAULT);
+    try {
+      reader.checkIntegrity();
+      CopyVisitor visitor = new CopyVisitor(sortWriter);
+      for (int docID = 0; docID < state.segmentInfo.maxDoc(); docID++) {
+        sortWriter.startDocument();
+        mergeReader.visitDocument(sortMap.newToOld(docID), visitor);
+        sortWriter.finishDocument();
+      }
+      sortWriter.finish(state.fieldInfos, state.segmentInfo.maxDoc());
+    } finally {
+      IOUtils.close(reader, sortWriter);
+      IOUtils.deleteFiles(tmpDirectory,
+          tmpDirectory.getTemporaryFiles().values());
+    }
+  }
+

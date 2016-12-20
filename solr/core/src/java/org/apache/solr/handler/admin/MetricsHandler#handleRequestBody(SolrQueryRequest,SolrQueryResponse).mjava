@@ -1,0 +1,31 @@
+  @Override
+  public void handleRequestBody(SolrQueryRequest req, SolrQueryResponse rsp) throws Exception {
+    if (container == null) {
+      throw new SolrException(SolrException.ErrorCode.INVALID_STATE, "Core container instance not initialized");
+    }
+
+    List<MetricType> metricTypes = parseMetricTypes(req);
+    List<MetricFilter> metricFilters = metricTypes.stream().map(MetricType::asMetricFilter).collect(Collectors.toList());
+    List<Group> requestedGroups = parseGroups(req);
+
+    NamedList response = new NamedList();
+    for (Group group : requestedGroups) {
+      String registryName = SolrMetricManager.getRegistryName(group);
+      if (group == Group.core) {
+        // this requires special handling because of the way we create registry name for a core (deeply nested)
+        container.getAllCoreNames().forEach(s -> {
+          String coreRegistryName;
+          try (SolrCore core = container.getCore(s)) {
+            coreRegistryName = core.getCoreMetricManager().getRegistryName();
+          }
+          MetricRegistry registry = metricManager.registry(coreRegistryName);
+          response.add(coreRegistryName, MetricUtils.toNamedList(registry, metricFilters));
+        });
+      } else {
+        MetricRegistry registry = metricManager.registry(registryName);
+        response.add(registryName, MetricUtils.toNamedList(registry, metricFilters));
+      }
+    }
+    rsp.getValues().add("metrics", response);
+  }
+

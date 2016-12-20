@@ -77,12 +77,14 @@
         // first: increment count to signal other threads that we are
         //        opening a new searcher.
         onDeckSearchers++;
+        newSearcherCounter.inc();
         if (onDeckSearchers < 1) {
           // should never happen... just a sanity check
           log.error(logid + "ERROR!!! onDeckSearchers is " + onDeckSearchers);
           onDeckSearchers = 1;  // reset
         } else if (onDeckSearchers > maxWarmingSearchers) {
           onDeckSearchers--;
+          newSearcherMaxReachedCounter.inc();
           try {
             searcherLock.wait();
           } catch (InterruptedException e) {
@@ -104,6 +106,7 @@
     boolean success = false;
 
     openSearcherLock.lock();
+    Timer.Context timerContext = newSearcherTimer.time();
     try {
       searchHolder = openNewSearcher(updateHandlerReopens, false);
        // the searchHolder will be incremented once already (and it will eventually be assigned to _searcher when registered)
@@ -146,6 +149,7 @@
         // should this go before the other event handlers or after?
         if (currSearcher != null) {
           future = searcherExecutor.submit(() -> {
+            Timer.Context warmupContext = newSearcherWarmupTimer.time();
             try {
               newSearcher.warm(currSearcher);
             } catch (Throwable e) {
@@ -153,6 +157,8 @@
               if (e instanceof Error) {
                 throw (Error) e;
               }
+            } finally {
+              warmupContext.close();
             }
             return null;
           });
@@ -233,7 +239,10 @@
       throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, e);
     } finally {
 
+      timerContext.close();
+
       if (!success) {
+        newSearcherOtherErrorsCounter.inc();;
         synchronized (searcherLock) {
           onDeckSearchers--;
 

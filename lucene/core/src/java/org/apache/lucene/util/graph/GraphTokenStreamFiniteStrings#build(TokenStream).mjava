@@ -1,0 +1,46 @@
+  private void build(final TokenStream in) throws IOException {
+    if (det != null) {
+      throw new IllegalStateException("Automation already built");
+    }
+
+    final TermToBytesRefAttribute termBytesAtt = in.addAttribute(TermToBytesRefAttribute.class);
+    final PositionIncrementAttribute posIncAtt = in.addAttribute(PositionIncrementAttribute.class);
+    final PositionLengthAttribute posLengthAtt = in.addAttribute(PositionLengthAttribute.class);
+
+    in.reset();
+
+    int pos = -1;
+    int prevIncr = 1;
+    int state = -1;
+    while (in.incrementToken()) {
+      int currentIncr = posIncAtt.getPositionIncrement();
+      if (pos == -1 && currentIncr < 1) {
+        throw new IllegalStateException("Malformed TokenStream, start token can't have increment less than 1");
+      }
+
+      // always use inc 1 while building, but save original increment
+      int incr = Math.min(1, currentIncr);
+      if (incr > 0) {
+        pos += incr;
+      }
+
+      int endPos = pos + posLengthAtt.getPositionLength();
+      while (state < endPos) {
+        state = createState();
+      }
+
+      BytesRef term = termBytesAtt.getBytesRef();
+      int id = getTermID(currentIncr, prevIncr, term);
+      addTransition(pos, endPos, currentIncr, id);
+
+      // only save last increment on non-zero increment in case we have multiple stacked tokens
+      if (currentIncr > 0) {
+        prevIncr = currentIncr;
+      }
+    }
+
+    in.end();
+    setAccept(state, true);
+    finish();
+  }
+

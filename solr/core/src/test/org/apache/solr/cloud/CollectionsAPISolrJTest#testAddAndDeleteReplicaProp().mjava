@@ -1,51 +1,25 @@
-  private void testAddAndDeleteReplicaProp() throws InterruptedException, IOException, SolrServerException {
-    Replica replica = cloudClient.getZkStateReader().getLeaderRetry(DEFAULT_COLLECTION, SHARD1);
-    CollectionAdminResponse response = new CollectionAdminRequest.AddReplicaProp()
-            .setCollectionName(DEFAULT_COLLECTION)
-            .setShardName(SHARD1)
-            .setReplica(replica.getName())
-            .setPropertyName("preferredleader")
-            .setPropertyValue("true").process(cloudClient);
+  @Test
+  public void testAddAndDeleteReplicaProp() throws InterruptedException, IOException, SolrServerException {
+
+    final String collection = "replicaProperties";
+    CollectionAdminRequest.createCollection(collection, "conf", 2, 2)
+        .process(cluster.getSolrClient());
+
+    final Replica replica = getCollectionState(collection).getLeader("shard1");
+    CollectionAdminResponse response
+        = CollectionAdminRequest.addReplicaProperty(collection, "shard1", replica.getName(), "preferredleader", "true")
+        .process(cluster.getSolrClient());
     assertEquals(0, response.getStatus());
 
-    TimeOut timeout = new TimeOut(20, TimeUnit.SECONDS);
-    String propertyValue = null;
-    
-    String replicaName = replica.getName();
-    while (! timeout.hasTimedOut()) {
-      ClusterState clusterState = cloudClient.getZkStateReader().getClusterState();
-      replica = clusterState.getReplica(DEFAULT_COLLECTION, replicaName);
-      propertyValue = replica.getStr("property.preferredleader"); 
-      if(StringUtils.equals("true", propertyValue))
-        break;
-      Thread.sleep(50);
-    }
-    
-    assertEquals("Replica property was not updated, Latest value: " +
-        cloudClient.getZkStateReader().getClusterState().getReplica(DEFAULT_COLLECTION, replicaName),
-        "true",
-        propertyValue);
+    waitForState("Expecting property 'preferredleader' to appear on replica " + replica.getName(), collection,
+        (n, c) -> "true".equals(c.getReplica(replica.getName()).getStr("property.preferredleader")));
 
-    response = new CollectionAdminRequest.DeleteReplicaProp()
-            .setCollectionName(DEFAULT_COLLECTION)
-            .setShardName(SHARD1)
-            .setReplica(replicaName)
-            .setPropertyName("property.preferredleader").process(cloudClient);
+    response = CollectionAdminRequest.deleteReplicaProperty(collection, "shard1", replica.getName(), "property.preferredleader")
+        .process(cluster.getSolrClient());
     assertEquals(0, response.getStatus());
 
-    timeout = new TimeOut(20, TimeUnit.SECONDS);
-    boolean updated = false;
-
-    while (! timeout.hasTimedOut()) {
-      ClusterState clusterState = cloudClient.getZkStateReader().getClusterState();
-      replica = clusterState.getReplica(DEFAULT_COLLECTION, replicaName);
-      updated = replica.getStr("property.preferredleader") == null;
-      if(updated)
-        break;
-      Thread.sleep(50);
-    }
-
-    assertTrue("Replica property was not removed", updated);
+    waitForState("Expecting property 'preferredleader' to be removed from replica " + replica.getName(), collection,
+        (n, c) -> c.getReplica(replica.getName()).getStr("property.preferredleader") == null);
     
   }
 

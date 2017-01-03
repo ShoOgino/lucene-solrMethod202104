@@ -46,10 +46,10 @@
             @Override
             public int size() {
               return len;
-              }
-              
-            };         
-          }
+            }
+            
+          };
+        }
         totalSize += accumulator.accumulateArray(ob, shallowSize, values, stack);
       } else {
         /*
@@ -61,13 +61,36 @@
           if (cachedInfo == null) {
             classCache.put(obClazz, cachedInfo = createCacheEntry(obClazz));
           }
-
-          Map<Field, Object> fieldValues = new HashMap<>();
-          for (Field f : cachedInfo.referenceFields) {
-            fieldValues.put(f, f.get(ob));
+          
+          boolean needsReflection = true;
+          if (Constants.JRE_IS_MINIMUM_JAVA9 && obClazz.getName().startsWith("java.")) {
+            // Java 9: Best guess for some known types, as we cannot precisely look into runtime classes:
+            final ToLongFunction<Object> func = SIMPLE_TYPES.get(obClazz);
+            if (func != null) { // some simple type like String where the size is easy to get from public properties
+              totalSize += accumulator.accumulateObject(ob, cachedInfo.alignedShallowInstanceSize + func.applyAsLong(ob), 
+                  Collections.emptyMap(), stack);
+              needsReflection = false;
+            } else if (ob instanceof Iterable) {
+              final List<Object> values = StreamSupport.stream(((Iterable<?>) ob).spliterator(), false)
+                  .collect(Collectors.toList());
+              totalSize += accumulator.accumulateArray(ob, cachedInfo.alignedShallowInstanceSize + RamUsageEstimator.NUM_BYTES_ARRAY_HEADER, values, stack);
+              needsReflection = false;
+            }  else if (ob instanceof Map) {
+              final List<Object> values = ((Map<?,?>) ob).entrySet().stream()
+                  .flatMap(e -> Stream.of(e.getKey(), e.getValue()))
+                  .collect(Collectors.toList());
+              totalSize += accumulator.accumulateArray(ob, cachedInfo.alignedShallowInstanceSize + RamUsageEstimator.NUM_BYTES_ARRAY_HEADER, values, stack);
+              totalSize += RamUsageEstimator.NUM_BYTES_ARRAY_HEADER;
+              needsReflection = false;
+            }
           }
-
-          totalSize += accumulator.accumulateObject(ob, cachedInfo.alignedShallowInstanceSize, fieldValues, stack);
+          if (needsReflection) {
+            final Map<Field, Object> fieldValues = new HashMap<>();
+            for (Field f : cachedInfo.referenceFields) {
+              fieldValues.put(f, f.get(ob));
+            }
+            totalSize += accumulator.accumulateObject(ob, cachedInfo.alignedShallowInstanceSize, fieldValues, stack);
+          }
         } catch (IllegalAccessException e) {
           // this should never happen as we enabled setAccessible().
           throw new RuntimeException("Reflective field access failed?", e);

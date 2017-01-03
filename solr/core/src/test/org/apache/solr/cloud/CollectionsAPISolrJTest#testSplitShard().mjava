@@ -1,17 +1,13 @@
-  protected void testSplitShard() throws Exception {
-    String collectionName = "solrj_test_splitshard";
-    cloudClient.setDefaultCollection(collectionName);
-    
-    CollectionAdminRequest.Create createCollectionRequest = new CollectionAdminRequest.Create()
-            .setConfigName("conf1")
-            .setNumShards(2)
-            .setCollectionName(collectionName);
-    createCollectionRequest.process(cloudClient);
-    
-    CollectionAdminRequest.SplitShard splitShardRequest = new CollectionAdminRequest.SplitShard()
-            .setCollectionName(collectionName)
-            .setShardName("shard1");
-    CollectionAdminResponse response = splitShardRequest.process(cloudClient);
+  @Test
+  public void testSplitShard() throws Exception {
+
+    final String collectionName = "solrj_test_splitshard";
+    CollectionAdminRequest.createCollection(collectionName, "conf", 2, 1)
+        .process(cluster.getSolrClient());
+
+    CollectionAdminResponse response = CollectionAdminRequest.splitShard(collectionName)
+        .setShardName("shard1")
+        .process(cluster.getSolrClient());
 
     assertEquals(0, response.getStatus());
     assertTrue(response.isSuccess());
@@ -19,24 +15,25 @@
     assertEquals(0, (int) coresStatus.get(collectionName + "_shard1_0_replica1").get("status"));
     assertEquals(0, (int) coresStatus.get(collectionName + "_shard1_1_replica1").get("status"));
 
-    waitForRecoveriesToFinish(collectionName, false);
-    waitForThingsToLevelOut(10);
+    waitForState("Expected all shards to be active and parent shard to be removed", collectionName, (n, c) -> {
+      if (c.getSlice("shard1").getState() == Slice.State.ACTIVE)
+        return false;
+      for (Replica r : c.getReplicas()) {
+        if (r.isActive(n) == false)
+          return false;
+      }
+      return true;
+    });
     
     // Test splitting using split.key
-    splitShardRequest = new CollectionAdminRequest.SplitShard()
-            .setCollectionName(collectionName)
-            .setSplitKey("b!");
-    response = splitShardRequest.process(cloudClient);
+    response = CollectionAdminRequest.splitShard(collectionName)
+        .setSplitKey("b!")
+        .process(cluster.getSolrClient());
 
     assertEquals(0, response.getStatus());
     assertTrue(response.isSuccess());
 
-    waitForRecoveriesToFinish(collectionName, false);
-    waitForThingsToLevelOut(10);
-    
-    ClusterState clusterState = cloudClient.getZkStateReader().getClusterState();
-    Collection<Slice> slices = clusterState.getActiveSlices(collectionName);
-    assertEquals("ClusterState: "+ clusterState.getActiveSlices(collectionName), 5, slices.size());  
+    waitForState("Expected 5 slices to be active", collectionName, (n, c) -> c.getActiveSlices().size() == 5);
     
   }
 

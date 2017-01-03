@@ -1,0 +1,51 @@
+  @Test
+  public void testIndexMetrics() throws Exception {
+    SolrQueryRequest req = lrf.makeRequest();
+    UpdateHandler uh = req.getCore().getUpdateHandler();
+    AddUpdateCommand add = new AddUpdateCommand(req);
+    for (int i = 0; i < 1000; i++) {
+      add.clear();
+      add.solrDoc = new SolrInputDocument();
+      add.solrDoc.addField("id", "" + i);
+      add.solrDoc.addField("foo_s", "foo-" + i);
+      uh.addDoc(add);
+    }
+    uh.commit(new CommitUpdateCommand(req, false));
+    MetricRegistry registry = h.getCoreContainer().getMetricManager().registry(h.getCore().getCoreMetricManager().getRegistryName());
+    assertNotNull(registry);
+    // make sure all merges are finished
+    h.reload();
+
+    Map<String, Metric> metrics = registry.getMetrics();
+
+    assertTrue(metrics.entrySet().stream().filter(e -> e.getKey().startsWith("INDEX")).count() >= 12);
+    // this is variable, depending on the codec and the number of created files
+    assertTrue(metrics.entrySet().stream().filter(e -> e.getKey().startsWith("DIRECTORY")).count() > 50);
+
+    // check basic index meters
+    Timer timer = (Timer)metrics.get("INDEX.merge.minor");
+    assertEquals("minorMerge: " + timer.getCount(), 4, timer.getCount());
+    timer = (Timer)metrics.get("INDEX.merge.major");
+    assertEquals("majorMerge: " + timer.getCount(), 0, timer.getCount());
+    Meter meter = (Meter)metrics.get("INDEX.merge.major.docs");
+    assertEquals("majorMergeDocs: " + meter.getCount(), 0, meter.getCount());
+    meter = (Meter)metrics.get("INDEX.flush");
+    assertEquals("flush: " + meter.getCount(), 19, meter.getCount());
+
+    // check basic directory meters
+    meter = (Meter)metrics.get("DIRECTORY.total.reads");
+    assertTrue("totalReads", meter.getCount() > 0);
+    meter = (Meter)metrics.get("DIRECTORY.total.writes");
+    assertTrue("totalWrites", meter.getCount() > 0);
+    Histogram histogram = (Histogram)metrics.get("DIRECTORY.total.readSizes");
+    assertTrue("readSizes", histogram.getCount() > 0);
+    histogram = (Histogram)metrics.get("DIRECTORY.total.writeSizes");
+    assertTrue("writeSizes", histogram.getCount() > 0);
+    // check detailed meters
+    meter = (Meter)metrics.get("DIRECTORY.segments.writes");
+    assertTrue("segmentsWrites", meter.getCount() > 0);
+    histogram = (Histogram)metrics.get("DIRECTORY.segments.writeSizes");
+    assertTrue("segmentsWriteSizes", histogram.getCount() > 0);
+
+  }
+

@@ -1,0 +1,46 @@
+  // we override this method to collect metrics for merges.
+  @Override
+  public void merge(MergePolicy.OneMerge merge) throws IOException {
+    long deletedDocs = 0;
+    long totalNumDocs = merge.totalNumDocs();
+    for (SegmentCommitInfo info : merge.segments) {
+      totalNumDocs -= info.getDelCount();
+      deletedDocs += info.getDelCount();
+    }
+    boolean major = totalNumDocs > majorMergeDocs;
+    int segmentsCount = merge.segments.size();
+    Timer.Context context;
+    if (major) {
+      runningMajorMerges.incrementAndGet();
+      runningMajorMergesDocs.addAndGet(totalNumDocs);
+      runningMajorMergesSegments.addAndGet(segmentsCount);
+      if (mergeDetails) {
+        majorMergedDocs.mark(totalNumDocs);
+        majorDeletedDocs.mark(deletedDocs);
+      }
+      context = majorMerge.time();
+    } else {
+      runningMinorMerges.incrementAndGet();
+      runningMinorMergesDocs.addAndGet(totalNumDocs);
+      runningMinorMergesSegments.addAndGet(segmentsCount);
+      context = minorMerge.time();
+    }
+    try {
+      super.merge(merge);
+    } catch (Throwable t) {
+      mergeErrors.inc();
+      throw t;
+    } finally {
+      context.stop();
+      if (major) {
+        runningMajorMerges.decrementAndGet();
+        runningMajorMergesDocs.addAndGet(-totalNumDocs);
+        runningMajorMergesSegments.addAndGet(-segmentsCount);
+      } else {
+        runningMinorMerges.decrementAndGet();
+        runningMinorMergesDocs.addAndGet(-totalNumDocs);
+        runningMinorMergesSegments.addAndGet(-segmentsCount);
+      }
+    }
+  }
+

@@ -24,15 +24,20 @@
       clearIndex();
       assertU(commit());
 
+      Map<String, Metric> metrics = getMetrics();
+
       assertEquals(UpdateLog.State.ACTIVE, ulog.getState());
       ulog.bufferUpdates();
       assertEquals(UpdateLog.State.BUFFERING, ulog.getState());
+
       Future<UpdateLog.RecoveryInfo> rinfoFuture = ulog.applyBufferedUpdates();
       assertTrue(rinfoFuture == null);
       assertEquals(UpdateLog.State.ACTIVE, ulog.getState());
 
       ulog.bufferUpdates();
       assertEquals(UpdateLog.State.BUFFERING, ulog.getState());
+      Gauge<Integer> state = (Gauge<Integer>)metrics.get("TLOG.state");
+      assertEquals(UpdateLog.State.BUFFERING.ordinal(), state.getValue().intValue());
 
       // simulate updates from a leader
       updateJ(jsonAdd(sdoc("id","B1", "_version_","1010")), params(DISTRIB_UPDATE_PARAM,FROM_LEADER));
@@ -64,6 +69,8 @@
           ,"=={'doc':null}"
       );
 
+      Gauge<Integer> bufferedOps = (Gauge<Integer>)metrics.get("TLOG.buffered.ops");
+      assertEquals(6, bufferedOps.getValue().intValue());
 
       rinfoFuture = ulog.applyBufferedUpdates();
       assertTrue(rinfoFuture != null);
@@ -75,6 +82,8 @@
       UpdateLog.RecoveryInfo rinfo = rinfoFuture.get();
       assertEquals(UpdateLog.State.ACTIVE, ulog.getState());
 
+      Meter applyingBuffered = (Meter)metrics.get("TLOG.applying_buffered.ops");
+      assertEquals(6L, applyingBuffered.getCount());
 
       assertJQ(req("qt","/get", "getVersions","6")
           ,"=={'versions':[-2010,1030,1020,-1017,1015,1010]}"
@@ -141,6 +150,8 @@
       assertEquals(1, recInfo.deleteByQuery);
 
       assertEquals(UpdateLog.State.ACTIVE, ulog.getState()); // leave each test method in a good state
+
+      assertEquals(0, bufferedOps.getValue().intValue());
     } finally {
       DirectUpdateHandler2.commitOnClose = true;
       UpdateLog.testing_logReplayHook = null;

@@ -1,49 +1,13 @@
   @SuppressWarnings({"unchecked", "rawtypes"})
   protected TopGroups groupByFieldOrFunction(IndexSearcher searcher, Query query, int groupOffset, int groupLimit) throws IOException {
     int topN = groupOffset + groupLimit;
-    final AbstractFirstPassGroupingCollector firstPassCollector;
-    final AbstractAllGroupsCollector allGroupsCollector;
-    final AbstractAllGroupHeadsCollector allGroupHeadsCollector;
-    if (groupFunction != null) {
-      firstPassCollector = new FunctionFirstPassGroupingCollector(groupFunction, valueSourceContext, groupSort, topN);
-      if (allGroups) {
-        allGroupsCollector = new FunctionAllGroupsCollector(groupFunction, valueSourceContext);
-      } else {
-        allGroupsCollector = null;
-      }
-      if (allGroupHeads) {
-        allGroupHeadsCollector = new FunctionAllGroupHeadsCollector(groupFunction, valueSourceContext, sortWithinGroup);
-      } else {
-        allGroupHeadsCollector = null;
-      }
-    } else {
-      firstPassCollector = new TermFirstPassGroupingCollector(groupField, groupSort, topN);
-      if (allGroups) {
-        allGroupsCollector = new TermAllGroupsCollector(groupField, initialSize);
-      } else {
-        allGroupsCollector = null;
-      }
-      if (allGroupHeads) {
-        allGroupHeadsCollector = TermAllGroupHeadsCollector.create(groupField, sortWithinGroup, initialSize);
-      } else {
-        allGroupHeadsCollector = null;
-      }
-    }
 
-    final Collector firstRound;
-    if (allGroupHeads || allGroups) {
-      List<Collector> collectors = new ArrayList<>();
-      collectors.add(firstPassCollector);
-      if (allGroups) {
-        collectors.add(allGroupsCollector);
-      }
-      if (allGroupHeads) {
-        collectors.add(allGroupHeadsCollector);
-      }
-      firstRound = MultiCollector.wrap(collectors.toArray(new Collector[collectors.size()]));
-    } else {
-      firstRound = firstPassCollector;
-    }
+    final FirstPassGroupingCollector firstPassCollector = grouper.getFirstPassCollector(groupSort, topN);
+    final AllGroupsCollector allGroupsCollector = allGroups ? grouper.getAllGroupsCollector() : null;
+    final AllGroupHeadsCollector allGroupHeadsCollector
+        = allGroupHeads ? grouper.getGroupHeadsCollector(sortWithinGroup) : null;
+
+    final Collector firstRound = MultiCollector.wrap(firstPassCollector, allGroupsCollector, allGroupHeadsCollector);
 
     CachingCollector cachedCollector = null;
     if (maxCacheRAMMB != null || maxDocsToCache != null) {
@@ -57,16 +21,9 @@
       searcher.search(query, firstRound);
     }
 
-    if (allGroups) {
-      matchingGroups = allGroupsCollector.getGroups();
-    } else {
-      matchingGroups = Collections.emptyList();
-    }
-    if (allGroupHeads) {
-      matchingGroupHeads = allGroupHeadsCollector.retrieveGroupHeads(searcher.getIndexReader().maxDoc());
-    } else {
-      matchingGroupHeads = new Bits.MatchNoBits(searcher.getIndexReader().maxDoc());
-    }
+    matchingGroups = allGroups ? allGroupsCollector.getGroups() : Collections.emptyList();
+    matchingGroupHeads = allGroupHeads ? allGroupHeadsCollector.retrieveGroupHeads(searcher.getIndexReader().maxDoc())
+        : new Bits.MatchNoBits(searcher.getIndexReader().maxDoc());
 
     Collection<SearchGroup> topSearchGroups = firstPassCollector.getTopGroups(groupOffset, fillSortFields);
     if (topSearchGroups == null) {
@@ -74,12 +31,9 @@
     }
 
     int topNInsideGroup = groupDocsOffset + groupDocsLimit;
-    AbstractSecondPassGroupingCollector secondPassCollector;
-    if (groupFunction != null) {
-      secondPassCollector = new FunctionSecondPassGroupingCollector((Collection) topSearchGroups, groupSort, sortWithinGroup, topNInsideGroup, includeScores, includeMaxScore, fillSortFields, groupFunction, valueSourceContext);
-    } else {
-      secondPassCollector = new TermSecondPassGroupingCollector(groupField, (Collection) topSearchGroups, groupSort, sortWithinGroup, topNInsideGroup, includeScores, includeMaxScore, fillSortFields);
-    }
+    SecondPassGroupingCollector secondPassCollector
+        = grouper.getSecondPassCollector(topSearchGroups, groupSort, sortWithinGroup, topNInsideGroup,
+                                         includeScores, includeMaxScore, fillSortFields);
 
     if (cachedCollector != null && cachedCollector.isCached()) {
       cachedCollector.replay(secondPassCollector);

@@ -1,0 +1,46 @@
+  @Override
+  public Scorer get(boolean randomAccess) throws IOException {
+    // three cases: conjunction, disjunction, or mix
+
+    // pure conjunction
+    if (subs.get(Occur.SHOULD).isEmpty()) {
+      return excl(req(subs.get(Occur.FILTER), subs.get(Occur.MUST), randomAccess), subs.get(Occur.MUST_NOT));
+    }
+
+    // pure disjunction
+    if (subs.get(Occur.FILTER).isEmpty() && subs.get(Occur.MUST).isEmpty()) {
+      return excl(opt(subs.get(Occur.SHOULD), minShouldMatch, needsScores, randomAccess), subs.get(Occur.MUST_NOT));
+    }
+
+    // conjunction-disjunction mix:
+    // we create the required and optional pieces, and then
+    // combine the two: if minNrShouldMatch > 0, then it's a conjunction: because the
+    // optional side must match. otherwise it's required + optional
+
+    if (minShouldMatch > 0) {
+      boolean reqRandomAccess = true;
+      boolean msmRandomAccess = true;
+      if (randomAccess == false) {
+        // We need to figure out whether the MUST/FILTER or the SHOULD clauses would lead the iteration
+        final long reqCost = Stream.concat(
+            subs.get(Occur.MUST).stream(),
+            subs.get(Occur.FILTER).stream())
+            .mapToLong(ScorerSupplier::cost)
+            .min().getAsLong();
+        final long msmCost = MinShouldMatchSumScorer.cost(
+            subs.get(Occur.SHOULD).stream().mapToLong(ScorerSupplier::cost),
+            subs.get(Occur.SHOULD).size(), minShouldMatch);
+        reqRandomAccess = reqCost > msmCost;
+        msmRandomAccess = msmCost > reqCost;
+      }
+      Scorer req = excl(req(subs.get(Occur.FILTER), subs.get(Occur.MUST), reqRandomAccess), subs.get(Occur.MUST_NOT));
+      Scorer opt = opt(subs.get(Occur.SHOULD), minShouldMatch, needsScores, msmRandomAccess);
+      return new ConjunctionScorer(weight, Arrays.asList(req, opt), Arrays.asList(req, opt));
+    } else {
+      assert needsScores;
+      return new ReqOptSumScorer(
+          excl(req(subs.get(Occur.FILTER), subs.get(Occur.MUST), randomAccess), subs.get(Occur.MUST_NOT)),
+          opt(subs.get(Occur.SHOULD), minShouldMatch, needsScores, true));
+    }
+  }
+

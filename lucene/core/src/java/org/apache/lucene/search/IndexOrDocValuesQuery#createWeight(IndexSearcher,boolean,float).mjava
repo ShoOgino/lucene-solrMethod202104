@@ -1,0 +1,54 @@
+  @Override
+  public Weight createWeight(IndexSearcher searcher, boolean needsScores, float boost) throws IOException {
+    final Weight indexWeight = indexQuery.createWeight(searcher, needsScores, boost);
+    final Weight dvWeight = dvQuery.createWeight(searcher, needsScores, boost);
+    return new Weight(this) {
+      @Override
+      public void extractTerms(Set<Term> terms) {
+        indexWeight.extractTerms(terms);
+      }
+
+      @Override
+      public Explanation explain(LeafReaderContext context, int doc) throws IOException {
+        // We need to check a single doc, so the dv query should perform better
+        return dvWeight.explain(context, doc);
+      }
+
+      @Override
+      public BulkScorer bulkScorer(LeafReaderContext context) throws IOException {
+        // Bulk scorers need to consume the entire set of docs, so using an
+        // index structure should perform better
+        return indexWeight.bulkScorer(context);
+      }
+
+      @Override
+      public ScorerSupplier scorerSupplier(LeafReaderContext context) throws IOException {
+        final ScorerSupplier indexScorerSupplier = indexWeight.scorerSupplier(context);
+        final ScorerSupplier dvScorerSupplier = dvWeight.scorerSupplier(context);
+        if (indexScorerSupplier == null || dvScorerSupplier == null) {
+          return null;
+        }
+        return new ScorerSupplier() {
+          @Override
+          public Scorer get(boolean randomAccess) throws IOException {
+            return (randomAccess ? dvScorerSupplier : indexScorerSupplier).get(randomAccess);
+          }
+
+          @Override
+          public long cost() {
+            return Math.min(indexScorerSupplier.cost(), dvScorerSupplier.cost());
+          }
+        };
+      }
+
+      @Override
+      public Scorer scorer(LeafReaderContext context) throws IOException {
+        ScorerSupplier scorerSupplier = scorerSupplier(context);
+        if (scorerSupplier == null) {
+          return null;
+        }
+        return scorerSupplier.get(false);
+      }
+    };
+  }
+

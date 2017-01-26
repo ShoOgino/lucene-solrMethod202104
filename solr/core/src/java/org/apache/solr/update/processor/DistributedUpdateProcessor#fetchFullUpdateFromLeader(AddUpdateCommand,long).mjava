@@ -1,0 +1,63 @@
+  /**
+   * This method is used when an update on which a particular in-place update has been lost for some reason. This method
+   * sends a request to the shard leader to fetch the latest full document as seen on the leader.
+   * @return AddUpdateCommand containing latest full doc at shard leader for the given id, or null if not found.
+   */
+  private UpdateCommand fetchFullUpdateFromLeader(AddUpdateCommand inplaceAdd, long versionOnUpdate) throws IOException {
+    String id = inplaceAdd.getPrintableId();
+    UpdateShardHandler updateShardHandler = inplaceAdd.getReq().getCore().getCoreDescriptor().getCoreContainer().getUpdateShardHandler();
+    ModifiableSolrParams params = new ModifiableSolrParams();
+    params.set("distrib", false);
+    params.set("getInputDocument", id);
+    params.set("onlyIfActive", true);
+    SolrRequest<SimpleSolrResponse> ur = new GenericSolrRequest(METHOD.GET, "/get", params);
+
+    String leaderUrl = req.getParams().get(DISTRIB_FROM);
+    
+    if (leaderUrl == null) {
+      // An update we're dependent upon didn't arrive! This is unexpected. Perhaps likely our leader is
+      // down or partitioned from us for some reason. Lets force refresh cluster state, and request the
+      // leader for the update.
+      if (zkController == null) { // we should be in cloud mode, but wtf? could be a unit test
+        throw new SolrException(ErrorCode.SERVER_ERROR, "Can't find document with id=" + id + ", but fetching from leader "
+            + "failed since we're not in cloud mode.");
+      }
+      Replica leader;
+      try {
+        leader = zkController.getZkStateReader().getLeaderRetry(cloudDesc.getCollectionName(), cloudDesc.getShardId());
+      } catch (InterruptedException e) {
+        throw new SolrException(ErrorCode.SERVER_ERROR, "Exception during fetching from leader.", e);
+      }
+      leaderUrl = leader.getCoreUrl();
+    }
+    
+    HttpSolrClient hsc = new HttpSolrClient.Builder(leaderUrl).
+        withHttpClient(updateShardHandler.getHttpClient()).build();
+    NamedList rsp = null;
+    try {
+      rsp = hsc.request(ur);
+    } catch (SolrServerException e) {
+      throw new SolrException(ErrorCode.SERVER_ERROR, "Error during fetching [" + id +
+          "] from leader (" + leaderUrl + "): ", e);
+    } finally {
+      hsc.close();
+    }
+    Object inputDocObj = rsp.get("inputDocument");
+    Long version = (Long)rsp.get("version");
+    SolrInputDocument leaderDoc = (SolrInputDocument) inputDocObj;
+
+    if (leaderDoc == null) {
+      // this doc was not found (deleted) on the leader. Lets delete it here as well.
+      DeleteUpdateCommand del = new DeleteUpdateCommand(inplaceAdd.getReq());
+      del.setIndexedId(inplaceAdd.getIndexedId());
+      del.setId(inplaceAdd.getIndexedId().utf8ToString());
+      del.setVersion((version == null || version == 0)? -versionOnUpdate: version);
+      return del;
+    }
+
+    AddUpdateCommand cmd = new AddUpdateCommand(req);
+    cmd.solrDoc = leaderDoc;
+    cmd.setVersion((long)leaderDoc.getFieldValue(VERSION_FIELD));
+    return cmd;
+  }
+

@@ -1,0 +1,40 @@
+  /***
+   * Given a partial document obtained from the transaction log (e.g. as a result of RTG), resolve to a full document
+   * by populating all the partial updates that were applied on top of that last full document update.
+   * 
+   * @param onlyTheseFields When a non-null set of field names is passed in, the resolve process only attempts to populate
+   *        the given fields in this set. When this set is null, it resolves all fields.
+   * @return Returns the merged document, i.e. the resolved full document, or null if the document was not found (deleted
+   *          after the resolving began)
+   */
+  private static SolrDocument resolveFullDocument(SolrCore core, BytesRef idBytes,
+                                           ReturnFields returnFields, SolrInputDocument partialDoc, List logEntry, Set<String> onlyTheseFields) throws IOException {
+    if (idBytes == null || logEntry.size() != 5) {
+      throw new SolrException(ErrorCode.INVALID_STATE, "Either Id field not present in partial document or log entry doesn't have previous version.");
+    }
+    long prevPointer = (long) logEntry.get(UpdateLog.PREV_POINTER_IDX);
+    long prevVersion = (long) logEntry.get(UpdateLog.PREV_VERSION_IDX);
+
+    // get the last full document from ulog
+    UpdateLog ulog = core.getUpdateHandler().getUpdateLog();
+    long lastPrevPointer = ulog.applyPartialUpdates(idBytes, prevPointer, prevVersion, onlyTheseFields, partialDoc);
+
+    if (lastPrevPointer == -1) { // full document was not found in tlog, but exists in index
+      SolrDocument mergedDoc = mergePartialDocWithFullDocFromIndex(core, idBytes, returnFields, onlyTheseFields, partialDoc);
+      return mergedDoc;
+    } else if (lastPrevPointer > 0) {
+      // We were supposed to have found the last full doc also in the tlogs, but the prevPointer links led to nowhere
+      // We should reopen a new RT searcher and get the doc. This should be a rare occurrence
+      Term idTerm = new Term(core.getLatestSchema().getUniqueKeyField().getName(), idBytes);
+      SolrDocument mergedDoc = reopenRealtimeSearcherAndGet(core, idTerm, returnFields);
+      if (mergedDoc == null) {
+        return null; // the document may have been deleted as the resolving was going on.
+      }
+      return mergedDoc;
+    } else { // i.e. lastPrevPointer==0
+      assert lastPrevPointer == 0;
+      // We have successfully resolved the document based off the tlogs
+      return toSolrDoc(partialDoc, core.getLatestSchema());
+    }
+  }
+

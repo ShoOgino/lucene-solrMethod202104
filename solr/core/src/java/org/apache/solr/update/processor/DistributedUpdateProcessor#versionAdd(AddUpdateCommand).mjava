@@ -49,9 +49,21 @@
 
     VersionBucket bucket = vinfo.bucket(bucketHash);
 
+    long dependentVersionFound = -1; // Last found version for a dependent update; applicable only for in-place updates; useful for logging later
+    // if this is an inplace update, check and wait if we should be waiting for a dependent update, before 
+    // entering the synchronized block
+    if (!leaderLogic && cmd.isInPlaceUpdate()) {
+      dependentVersionFound = waitForDependentUpdates(cmd, versionOnUpdate, isReplayOrPeersync, bucket);
+      if (dependentVersionFound == -1) {
+        // it means in leader, the document has been deleted by now. drop this update
+        return true;
+      }
+    }
+
     vinfo.lockForUpdate();
     try {
       synchronized (bucket) {
+        bucket.notifyAll(); //just in case anyone is waiting let them know that we have a new update
         // we obtain the version when synchronized and then do the add so we can ensure that
         // if version1 < version2 then version1 is actually added before version2.
 
@@ -116,23 +128,69 @@
               return true;
             }
 
-            // if we aren't the leader, then we need to check that updates were not re-ordered
-            if (bucketVersion != 0 && bucketVersion < versionOnUpdate) {
-              // we're OK... this update has a version higher than anything we've seen
-              // in this bucket so far, so we know that no reordering has yet occurred.
-              bucket.updateHighest(versionOnUpdate);
-            } else {
-              // there have been updates higher than the current update.  we need to check
-              // the specific version for this id.
+            if (cmd.isInPlaceUpdate()) {
+              long prev = cmd.prevVersion;
               Long lastVersion = vinfo.lookupVersion(cmd.getIndexedId());
-              if (lastVersion != null && Math.abs(lastVersion) >= versionOnUpdate) {
-                // This update is a repeat, or was reordered.  We need to drop this update.
-                log.debug("Dropping add update due to version {}", idBytes.utf8ToString());
-                return true;
-              }
+              if (lastVersion == null || Math.abs(lastVersion) < prev) {
+                // this was checked for (in waitForDependentUpdates()) before entering the synchronized block.
+                // So we shouldn't be here, unless what must've happened is:
+                // by the time synchronization block was entered, the prev update was deleted by DBQ. Since
+                // now that update is not in index, the vinfo.lookupVersion() is possibly giving us a version 
+                // from the deleted list (which might be older than the prev update!) 
+                UpdateCommand fetchedFromLeader = fetchFullUpdateFromLeader(cmd, versionOnUpdate);
 
-              // also need to re-apply newer deleteByQuery commands
-              checkDeleteByQueries = true;
+                if (fetchedFromLeader instanceof DeleteUpdateCommand) {
+                  log.info("In-place update of {} failed to find valid lastVersion to apply to, and the document"
+                      + " was deleted at the leader subsequently.", idBytes.utf8ToString());
+                  versionDelete((DeleteUpdateCommand)fetchedFromLeader);
+                  return true;
+                } else {
+                  assert fetchedFromLeader instanceof AddUpdateCommand;
+                  // Newer document was fetched from the leader. Apply that document instead of this current in-place update.
+                  log.info("In-place update of {} failed to find valid lastVersion to apply to, forced to fetch full doc from leader: {}",
+                      idBytes.utf8ToString(), (fetchedFromLeader == null? null: ((AddUpdateCommand)fetchedFromLeader).solrDoc));
+
+                  // Make this update to become a non-inplace update containing the full document obtained from the leader
+                  cmd.solrDoc = ((AddUpdateCommand)fetchedFromLeader).solrDoc;
+                  cmd.prevVersion = -1;
+                  cmd.setVersion((long)cmd.solrDoc.getFieldValue(VERSION_FIELD));
+                  assert cmd.isInPlaceUpdate() == false;
+                }
+              } else {
+                if (lastVersion != null && Math.abs(lastVersion) > prev) {
+                  // this means we got a newer full doc update and in that case it makes no sense to apply the older
+                  // inplace update. Drop this update
+                  log.info("Update was applied on version: " + prev + ", but last version I have is: " + lastVersion
+                      + ". Dropping current update.");
+                  return true;
+                } else {
+                  // We're good, we should apply this update. First, update the bucket's highest.
+                  if (bucketVersion != 0 && bucketVersion < versionOnUpdate) {
+                    bucket.updateHighest(versionOnUpdate);
+                  }
+                }
+              }
+            }
+
+            if (!cmd.isInPlaceUpdate()) {
+              // if we aren't the leader, then we need to check that updates were not re-ordered
+              if (bucketVersion != 0 && bucketVersion < versionOnUpdate) {
+                // we're OK... this update has a version higher than anything we've seen
+                // in this bucket so far, so we know that no reordering has yet occurred.
+                bucket.updateHighest(versionOnUpdate);
+              } else {
+                // there have been updates higher than the current update.  we need to check
+                // the specific version for this id.
+                Long lastVersion = vinfo.lookupVersion(cmd.getIndexedId());
+                if (lastVersion != null && Math.abs(lastVersion) >= versionOnUpdate) {
+                  // This update is a repeat, or was reordered.  We need to drop this update.
+                  log.debug("Dropping add update due to version {}", idBytes.utf8ToString());
+                  return true;
+                }
+
+                // also need to re-apply newer deleteByQuery commands
+                checkDeleteByQueries = true;
+              }
             }
           }
         }

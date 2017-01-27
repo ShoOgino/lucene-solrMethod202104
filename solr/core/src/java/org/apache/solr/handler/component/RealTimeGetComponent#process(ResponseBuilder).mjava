@@ -53,6 +53,12 @@
       processGetUpdates(rb);
       return;
     }
+    
+    val = params.get("getInputDocument");
+    if (val != null) {
+      processGetInputDocument(rb);
+      return;
+    }
 
     final IdsRequsted reqIds = IdsRequsted.parseParams(req);
     
@@ -81,14 +87,14 @@
       throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e);
     }
 
-    SolrCore core = req.getCore();
+    final SolrCore core = req.getCore();
     SchemaField idField = core.getLatestSchema().getUniqueKeyField();
     FieldType fieldType = idField.getType();
 
     SolrDocumentList docList = new SolrDocumentList();
     UpdateLog ulog = core.getUpdateHandler().getUpdateLog();
 
-    RefCounted<SolrIndexSearcher> searcherHolder = null;
+    SearcherInfo searcherInfo =  new SearcherInfo(core);
     
     // this is initialized & set on the context *after* any searcher (re-)opening
     ResultContext resultContext = null;
@@ -102,7 +108,7 @@
       || ((null != transformer) && transformer.needsSolrIndexSearcher());
 
    try {
-     SolrIndexSearcher searcher = null;
+
 
      BytesRefBuilder idBytes = new BytesRefBuilder();
      for (String idStr : reqIds.allIds) {
@@ -113,24 +119,34 @@
            // should currently be a List<Oper,Ver,Doc/Id>
            List entry = (List)o;
            assert entry.size() >= 3;
-           int oper = (Integer)entry.get(0) & UpdateLog.OPERATION_MASK;
+           int oper = (Integer)entry.get(UpdateLog.FLAGS_IDX) & UpdateLog.OPERATION_MASK;
            switch (oper) {
+             case UpdateLog.UPDATE_INPLACE: // fall through to ADD
              case UpdateLog.ADD:
 
                if (mustUseRealtimeSearcher) {
-                 if (searcherHolder != null) {
-                   // close handles to current searchers & result context
-                   searcher = null;
-                   searcherHolder.decref();
-                   searcherHolder = null;
-                   resultContext = null;
-                 }
+                 // close handles to current searchers & result context
+                 searcherInfo.clear();
+                 resultContext = null;
                  ulog.openRealtimeSearcher();  // force open a new realtime searcher
                  o = null;  // pretend we never found this record and fall through to use the searcher
                  break;
                }
 
-               SolrDocument doc = toSolrDoc((SolrInputDocument)entry.get(entry.size()-1), core.getLatestSchema());
+               SolrDocument doc;
+               if (oper == UpdateLog.ADD) {
+                 doc = toSolrDoc((SolrInputDocument)entry.get(entry.size()-1), core.getLatestSchema());
+               } else if (oper == UpdateLog.UPDATE_INPLACE) {
+                 assert entry.size() == 5;
+                 // For in-place update case, we have obtained the partial document till now. We need to
+                 // resolve it to a full document to be returned to the user.
+                 doc = resolveFullDocument(core, idBytes.get(), rsp.getReturnFields(), (SolrInputDocument)entry.get(entry.size()-1), entry, null);
+                 if (doc == null) {
+                   break; // document has been deleted as the resolve was going on
+                 }
+               } else {
+                 throw new SolrException(ErrorCode.INVALID_STATE, "Expected ADD or UPDATE_INPLACE. Got: " + oper);
+               }
                if (transformer!=null) {
                  transformer.transform(doc, -1, 0); // unknown docID
                }
@@ -146,23 +162,20 @@
        }
 
        // didn't find it in the update log, so it should be in the newest searcher opened
-       if (searcher == null) {
-         searcherHolder = core.getRealtimeSearcher();
-         searcher = searcherHolder.get();
-         // don't bother with ResultContext yet, we won't need it if doc doesn't match filters
-       }
+       searcherInfo.init();
+       // don't bother with ResultContext yet, we won't need it if doc doesn't match filters
 
        int docid = -1;
-       long segAndId = searcher.lookupId(idBytes.get());
+       long segAndId = searcherInfo.getSearcher().lookupId(idBytes.get());
        if (segAndId >= 0) {
          int segid = (int) segAndId;
-         LeafReaderContext ctx = searcher.getTopReaderContext().leaves().get((int) (segAndId >> 32));
+         LeafReaderContext ctx = searcherInfo.getSearcher().getTopReaderContext().leaves().get((int) (segAndId >> 32));
          docid = segid + ctx.docBase;
 
          if (rb.getFilters() != null) {
            for (Query raw : rb.getFilters()) {
-             Query q = raw.rewrite(searcher.getIndexReader());
-             Scorer scorer = searcher.createWeight(q, false, 1f).scorer(ctx);
+             Query q = raw.rewrite(searcherInfo.getSearcher().getIndexReader());
+             Scorer scorer = searcherInfo.getSearcher().createWeight(q, false, 1f).scorer(ctx);
              if (scorer == null || segid != scorer.iterator().advance(segid)) {
                // filter doesn't match.
                docid = -1;
@@ -174,13 +187,13 @@
 
        if (docid < 0) continue;
        
-       Document luceneDocument = searcher.doc(docid, rsp.getReturnFields().getLuceneFieldNames());
+       Document luceneDocument = searcherInfo.getSearcher().doc(docid, rsp.getReturnFields().getLuceneFieldNames());
        SolrDocument doc = toSolrDoc(luceneDocument,  core.getLatestSchema());
-       searcher.decorateDocValueFields(doc, docid, searcher.getNonStoredDVs(true));
+       searcherInfo.getSearcher().decorateDocValueFields(doc, docid, searcherInfo.getSearcher().getNonStoredDVs(true));
        if ( null != transformer) {
          if (null == resultContext) {
            // either first pass, or we've re-opened searcher - either way now we setContext
-           resultContext = new RTGResultContext(rsp.getReturnFields(), searcher, req);
+           resultContext = new RTGResultContext(rsp.getReturnFields(), searcherInfo.getSearcher(), req);
            transformer.setContext(resultContext);
          }
          transformer.transform(doc, docid, 0);
@@ -189,9 +202,7 @@
      }
 
    } finally {
-     if (searcherHolder != null) {
-       searcherHolder.decref();
-     }
+     searcherInfo.clear();
    }
 
    addDocListToResponse(rb, docList);

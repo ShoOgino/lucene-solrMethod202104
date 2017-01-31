@@ -1,0 +1,27 @@
+  void invokeAction(SolrQueryRequest req, SolrQueryResponse rsp, CoreContainer cores, CollectionAction action, CollectionOperation operation) throws Exception {
+    if (!coreContainer.isZooKeeperAware()) {
+      throw new SolrException(BAD_REQUEST,
+          "Invalid request. collections can be accessed only in SolrCloud mode");
+    }
+    SolrResponse response = null;
+    Map<String, Object> props = operation.execute(req, rsp, this);
+    String asyncId = req.getParams().get(ASYNC);
+    if (props != null) {
+      if (asyncId != null) {
+        props.put(ASYNC, asyncId);
+      }
+      props.put(QUEUE_OPERATION, operation.action.toLower());
+      ZkNodeProps zkProps = new ZkNodeProps(props);
+      if (operation.sendToOCPQueue) {
+        response = handleResponse(operation.action.toLower(), zkProps, rsp, operation.timeOut);
+      }
+      else Overseer.getStateUpdateQueue(coreContainer.getZkController().getZkClient()).offer(Utils.toJSON(props));
+      final String collectionName = zkProps.getStr(NAME);
+      if (action.equals(CollectionAction.CREATE) && asyncId == null) {
+        if (rsp.getException() == null) {
+          waitForActiveCollection(collectionName, zkProps, cores, response);
+        }
+      }
+    }
+  }
+

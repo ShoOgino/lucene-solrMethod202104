@@ -18,8 +18,7 @@
 
     IndexReader r = w.getReader();
     w.close();
-    IndexSearcher s = new ToParentBlockJoinIndexSearcher(r);
-    //IndexSearcher s = newSearcher(r, false);
+    IndexSearcher s = newSearcher(r, false);
     //IndexSearcher s = new IndexSearcher(r);
 
     // Create a filter that defines "parent" documents in the index - in this case resumes
@@ -43,23 +42,21 @@
     fullQuery.add(new BooleanClause(parentQuery, Occur.SHOULD));
     fullQuery.add(new BooleanClause(childJoinQuery, Occur.SHOULD));
 
-    ToParentBlockJoinCollector c = new ToParentBlockJoinCollector(Sort.RELEVANCE, 1, true, true);
-    s.search(fullQuery.build(), c);
-    TopGroups<Integer> results = c.getTopGroups(childJoinQuery, null, 0, 10, 0, true);
-    assertEquals(1, results.totalGroupedHitCount);
-    assertEquals(1, results.groups.length);
+    final TopDocs topDocs = s.search(fullQuery.build(), 2);
+    assertEquals(2, topDocs.totalHits);
+    assertEquals(asSet("Lisa", "Frank"),
+        asSet(s.doc(topDocs.scoreDocs[0].doc).get("name"), s.doc(topDocs.scoreDocs[1].doc).get("name")));
 
-    final GroupDocs<Integer> group = results.groups[0];
-    assertEquals(1, group.totalHits);
-    assertFalse(Float.isNaN(group.score));
+    ParentChildrenBlockJoinQuery childrenQuery =
+        new ParentChildrenBlockJoinQuery(parentsFilter, childQuery.build(), topDocs.scoreDocs[0].doc);
+    TopDocs matchingChildren = s.search(childrenQuery, 1);
+    assertEquals(1, matchingChildren.totalHits);
+    assertEquals("java", s.doc(matchingChildren.scoreDocs[0].doc).get("skill"));
 
-    Document childDoc = s.doc(group.scoreDocs[0].doc);
-    //System.out.println("  doc=" + group.scoreDocs[0].doc);
-    assertEquals("java", childDoc.get("skill"));
-    assertNotNull(group.groupValue);
-    Document parentDoc = s.doc(group.groupValue);
-    assertEquals("Lisa", parentDoc.get("name"));
-    
+    childrenQuery = new ParentChildrenBlockJoinQuery(parentsFilter, childQuery.build(), topDocs.scoreDocs[1].doc);
+    matchingChildren = s.search(childrenQuery, 1);
+    assertEquals(1, matchingChildren.totalHits);
+    assertEquals("java", s.doc(matchingChildren.scoreDocs[0].doc).get("skill"));
     
     r.close();
     dir.close();

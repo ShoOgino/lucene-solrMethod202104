@@ -9,56 +9,17 @@
    *  @lucene.internal */
   public static DistancePredicate createDistancePredicate(double lat, double lon, double radiusMeters) {
     final Rectangle boundingBox = Rectangle.fromPointDistance(lat, lon, radiusMeters);
-    final int minLat = encodeLatitudeCeil(boundingBox.minLat);
-    final int maxLat = encodeLatitude(boundingBox.maxLat);
-    final int minLon = encodeLongitudeCeil(boundingBox.minLon);
-    final int maxLon = encodeLongitude(boundingBox.maxLon);
-
-    final int latShift, lonShift;
-    final int latBase, lonBase;
-    final int maxLatDelta, maxLonDelta;
-    {
-      long minLat2 = (long) minLat - Integer.MIN_VALUE;
-      long maxLat2 = (long) maxLat - Integer.MIN_VALUE;
-      latShift = computeShift(minLat2, maxLat2);
-      latBase = (int) (minLat2 >>> latShift);
-      maxLatDelta = (int) (maxLat2 >>> latShift) - latBase + 1;
-      assert maxLatDelta > 0;
-    }
-    {
-      long minLon2 = (long) minLon - Integer.MIN_VALUE;
-      long maxLon2 = (long) maxLon - Integer.MIN_VALUE;
-      if (boundingBox.crossesDateline()) {
-        maxLon2 += 1L << 32; // wrap
-      }
-      lonShift = computeShift(minLon2, maxLon2);
-      lonBase = (int) (minLon2 >>> lonShift);
-      maxLonDelta = (int) (maxLon2 >>> lonShift) - lonBase + 1;
-      assert maxLonDelta > 0;
-    }
-
     final double axisLat = Rectangle.axisLat(lat, radiusMeters);
     final double distanceSortKey = GeoUtils.distanceQuerySortKey(radiusMeters);
-    final byte[] relations = new byte[maxLatDelta * maxLonDelta];
-    for (int i = 0; i < maxLatDelta; ++i) {
-      for (int j = 0; j < maxLonDelta; ++j) {
-        final int boxMinLat = ((latBase + i) << latShift) + Integer.MIN_VALUE;
-        final int boxMinLon = ((lonBase + j) << lonShift) + Integer.MIN_VALUE;
-        final int boxMaxLat = boxMinLat + (1 << latShift) - 1;
-        final int boxMaxLon = boxMinLon + (1 << lonShift) - 1;
-
-        relations[i * maxLonDelta + j] = (byte) GeoUtils.relate(
-            decodeLatitude(boxMinLat), decodeLatitude(boxMaxLat),
-            decodeLongitude(boxMinLon), decodeLongitude(boxMaxLon),
-            lat, lon, distanceSortKey, axisLat).ordinal();
-      }
-    }
+    final Function<Rectangle, Relation> boxToRelation = box -> GeoUtils.relate(
+        box.minLat, box.maxLat, box.minLon, box.maxLon, lat, lon, distanceSortKey, axisLat);
+    final Grid subBoxes = createSubBoxes(boundingBox, boxToRelation);
 
     return new DistancePredicate(
-        latShift, lonShift,
-        latBase, lonBase,
-        maxLatDelta, maxLonDelta,
-        relations,
+        subBoxes.latShift, subBoxes.lonShift,
+        subBoxes.latBase, subBoxes.lonBase,
+        subBoxes.maxLatDelta, subBoxes.maxLonDelta,
+        subBoxes.relations,
         lat, lon, distanceSortKey);
   }
 

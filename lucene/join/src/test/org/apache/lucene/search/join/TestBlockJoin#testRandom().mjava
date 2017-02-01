@@ -6,6 +6,7 @@
     final Directory dir = newDirectory();
     final Directory joinDir = newDirectory();
 
+    final int maxNumChildrenPerParent = 20;
     final int numParentDocs = TestUtil.nextInt(random(), 100 * RANDOM_MULTIPLIER, 300 * RANDOM_MULTIPLIER);
     //final int numParentDocs = 30;
 
@@ -63,7 +64,7 @@
         System.out.println("  " + sb.toString());
       }
 
-      final int numChildDocs = TestUtil.nextInt(random(), 1, 20);
+      final int numChildDocs = TestUtil.nextInt(random(), 1, maxNumChildrenPerParent);
       for(int childDocID=0;childDocID<numChildDocs;childDocID++) {
         // Denormalize: copy all parent fields into child doc:
         Document childDoc = TestUtil.cloneDocument(parentDoc);
@@ -146,7 +147,7 @@
 
     final IndexSearcher s = newSearcher(r, false);
 
-    final IndexSearcher joinS = new IndexSearcher(joinR);
+    final IndexSearcher joinS = newSearcher(joinR);
 
     final BitSetProducer parentsFilter = new QueryBitSetProducer(new TermQuery(new Term("isParent", "x")));
     CheckJoinIndex.check(joinS.getIndexReader(), parentsFilter);
@@ -158,7 +159,7 @@
         System.out.println("TEST: iter=" + (1+iter) + " of " + iters);
       }
 
-      final Query childQuery;
+      Query childQuery;
       if (random().nextInt(3) == 2) {
         final int childFieldID = random().nextInt(childFields.length);
         childQuery = new TermQuery(new Term("child" + childFieldID,
@@ -192,6 +193,9 @@
         bq.add(new TermQuery(new Term("child" + childFieldID, childFields[childFieldID][random().nextInt(childFields[childFieldID].length)])),
                random().nextBoolean() ? BooleanClause.Occur.MUST : BooleanClause.Occur.MUST_NOT);
         childQuery = bq.build();
+      }
+      if (random().nextBoolean()) {
+        childQuery = new RandomApproximationQuery(childQuery, random());
       }
 
 
@@ -274,55 +278,35 @@
         }
       }
 
-      final boolean trackScores;
-      final boolean trackMaxScore;
-      if (agg == ScoreMode.None) {
-        trackScores = false;
-        trackMaxScore = false;
-      } else {
-        trackScores = random().nextBoolean();
-        trackMaxScore = random().nextBoolean();
+      TopDocs joinedResults = joinS.search(parentJoinQuery, numParentDocs);
+      SortedMap<Integer, TopDocs> joinResults = new TreeMap<>();
+      for (ScoreDoc parentHit : joinedResults.scoreDocs) {
+        ParentChildrenBlockJoinQuery childrenQuery =
+            new ParentChildrenBlockJoinQuery(parentsFilter, childQuery, parentHit.doc);
+        TopDocs childTopDocs = joinS.search(childrenQuery, maxNumChildrenPerParent, childSort);
+        final Document parentDoc = joinS.doc(parentHit.doc);
+        joinResults.put(Integer.valueOf(parentDoc.get("parentID")), childTopDocs);
       }
-      final ToParentBlockJoinCollector c = new ToParentBlockJoinCollector(parentSort, 10, trackScores, trackMaxScore);
-
-      joinS.search(parentJoinQuery, c);
 
       final int hitsPerGroup = TestUtil.nextInt(random(), 1, 20);
       //final int hitsPerGroup = 100;
-      final TopGroups<Integer> joinResults = c.getTopGroups(childJoinQuery, childSort, 0, hitsPerGroup, 0, true);
 
       if (VERBOSE) {
-        System.out.println("\nTEST: block join index gets " + (joinResults == null ? 0 : joinResults.groups.length) + " groups; hitsPerGroup=" + hitsPerGroup);
+        System.out.println("\nTEST: block join index gets " + (joinResults == null ? 0 : joinResults.size()) + " groups; hitsPerGroup=" + hitsPerGroup);
         if (joinResults != null) {
-          final GroupDocs<Integer>[] groups = joinResults.groups;
-          for(int groupIDX=0;groupIDX<groups.length;groupIDX++) {
-            final GroupDocs<Integer> group = groups[groupIDX];
-            if (group.groupSortValues != null) {
-              System.out.print("  ");
-              for(Object o : group.groupSortValues) {
-                if (o instanceof BytesRef) {
-                  System.out.print(((BytesRef) o).utf8ToString() + " ");
-                } else {
-                  System.out.print(o + " ");
-                }
-              }
-              System.out.println();
-            }
-
-            assertNotNull(group.groupValue);
-            final Document parentDoc = joinS.doc(group.groupValue);
-            System.out.println("  group parentID=" + parentDoc.get("parentID") + " (docID=" + group.groupValue + ")");
-            for(int hitIDX=0;hitIDX<group.scoreDocs.length;hitIDX++) {
-              final Document doc = joinS.doc(group.scoreDocs[hitIDX].doc);
-              //System.out.println("    score=" + group.scoreDocs[hitIDX].score + " childID=" + doc.get("childID") + " (docID=" + group.scoreDocs[hitIDX].doc + ")");
-              System.out.println("    childID=" + doc.get("childID") + " child0=" + doc.get("child0") + " (docID=" + group.scoreDocs[hitIDX].doc + ")");
+          for (Map.Entry<Integer, TopDocs> entry : joinResults.entrySet()) {
+            System.out.println("  group parentID=" + entry.getKey() + " (docID=" + entry.getKey() + ")");
+            for(ScoreDoc childHit : entry.getValue().scoreDocs) {
+              final Document doc = joinS.doc(childHit.doc);
+//              System.out.println("    score=" + childHit.score + " childID=" + doc.get("childID") + " (docID=" + childHit.doc + ")");
+              System.out.println("    childID=" + doc.get("childID") + " child0=" + doc.get("child0") + " (docID=" + childHit.doc + ")");
             }
           }
         }
       }
 
       if (results.totalHits == 0) {
-        assertNull(joinResults);
+        assertEquals(0, joinResults.size());
       } else {
         compareHits(r, joinR, results, joinResults);
         TopDocs b = joinS.search(childJoinQuery, 10);

@@ -1,0 +1,54 @@
+  /**
+   * Creates a boolean query from a graph token stream. The articulation points of the graph are visited in order and the queries
+   * created at each point are merged in the returned boolean query.
+   */
+  protected Query analyzeGraphBoolean(String field, TokenStream source, BooleanClause.Occur operator) throws IOException {
+    source.reset();
+    GraphTokenStreamFiniteStrings graph = new GraphTokenStreamFiniteStrings(source);
+    BooleanQuery.Builder builder = new BooleanQuery.Builder();
+    int[] articulationPoints = graph.articulationPoints();
+    int lastState = 0;
+    for (int i = 0; i <= articulationPoints.length; i++) {
+      int start = lastState;
+      int end = -1;
+      if (i < articulationPoints.length) {
+        end = articulationPoints[i];
+      }
+      lastState = end;
+      final Query queryPos;
+      if (graph.hasSidePath(start)) {
+        List<Query> queries = new ArrayList<> ();
+        Iterator<TokenStream> it = graph.getFiniteStrings(start, end);
+        while (it.hasNext()) {
+          TokenStream ts = it.next();
+          // This is a synonym path so all terms are mandatory (MUST).
+          Query q = createFieldQuery(ts, BooleanClause.Occur.MUST, field, getAutoGenerateMultiTermSynonymsPhraseQuery(), 0);
+          if (q != null) {
+            queries.add(q);
+          }
+        }
+        if (queries.size() > 0) {
+          queryPos = newGraphSynonymQuery(queries.toArray(new Query[queries.size()]));
+        } else {
+          queryPos = null;
+        }
+      } else {
+        Term[] terms = graph.getTerms(field, start);
+        assert terms.length > 0;
+        if (terms.length == 1) {
+          queryPos = newTermQuery(terms[0]);
+        } else {
+          queryPos = newSynonymQuery(terms);
+        }
+      }
+      if (queryPos != null) {
+        builder.add(queryPos, operator);
+      }
+    }
+    BooleanQuery bq =  builder.build();
+    if (bq.clauses().size() == 1) {
+      return bq.clauses().get(0).getQuery();
+    }
+    return bq;
+  }
+

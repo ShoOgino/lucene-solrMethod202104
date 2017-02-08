@@ -6,7 +6,8 @@
                                              final List<Pair<String, String>> orders,
                                              final List<String> _buckets,
                                              final List<Pair<String, String>> metricPairs,
-                                             final String limit) throws IOException {
+                                             final String limit,
+                                             final String havingPredicate) throws IOException {
 
     int numWorkers = Integer.parseInt(properties.getProperty("numWorkers", "1"));
 
@@ -41,21 +42,36 @@
     CloudSolrStream cstream = new CloudSolrStream(zk, collection, params);
     tupleStream = new RollupStream(cstream, buckets, metrics);
 
+    StreamFactory factory = new StreamFactory()
+        .withFunctionName("search", CloudSolrStream.class)
+        .withFunctionName("parallel", ParallelStream.class)
+        .withFunctionName("rollup", RollupStream.class)
+        .withFunctionName("sum", SumMetric.class)
+        .withFunctionName("min", MinMetric.class)
+        .withFunctionName("max", MaxMetric.class)
+        .withFunctionName("avg", MeanMetric.class)
+        .withFunctionName("count", CountMetric.class)
+        .withFunctionName("and", AndOperation.class)
+        .withFunctionName("or", OrOperation.class)
+        .withFunctionName("not", NotOperation.class)
+        .withFunctionName("eq", EqualsOperation.class)
+        .withFunctionName("gt", GreaterThanOperation.class)
+        .withFunctionName("lt", LessThanOperation.class)
+        .withFunctionName("lteq", LessThanEqualToOperation.class)
+        .withFunctionName("having", HavingStream.class)
+        .withFunctionName("gteq", GreaterThanEqualToOperation.class);
+
+    if(havingPredicate != null) {
+      BooleanOperation booleanOperation = (BooleanOperation)factory.constructOperation(StreamExpressionParser.parse(havingPredicate));
+      tupleStream = new HavingStream(tupleStream, booleanOperation);
+    }
+
     if(numWorkers > 1) {
       // Do the rollups in parallel
       // Maintain the sort of the Tuples coming from the workers.
       StreamComparator comp = bucketSortComp(buckets, sortDirection);
       ParallelStream parallelStream = new ParallelStream(zk, collection, tupleStream, numWorkers, comp);
 
-      StreamFactory factory = new StreamFactory()
-          .withFunctionName("search", CloudSolrStream.class)
-          .withFunctionName("parallel", ParallelStream.class)
-          .withFunctionName("rollup", RollupStream.class)
-          .withFunctionName("sum", SumMetric.class)
-          .withFunctionName("min", MinMetric.class)
-          .withFunctionName("max", MaxMetric.class)
-          .withFunctionName("avg", MeanMetric.class)
-          .withFunctionName("count", CountMetric.class);
 
       parallelStream.setStreamFactory(factory);
       tupleStream = parallelStream;

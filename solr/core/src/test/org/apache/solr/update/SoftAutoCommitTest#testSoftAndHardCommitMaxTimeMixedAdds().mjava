@@ -1,16 +1,20 @@
   public void testSoftAndHardCommitMaxTimeMixedAdds() throws Exception {
-
     final int softCommitWaitMillis = 500;
     final int hardCommitWaitMillis = 1200;
 
     CommitTracker hardTracker = updater.commitTracker;
     CommitTracker softTracker = updater.softCommitTracker;
     
+    int startingHardCommits = hardTracker.getCommitCount();
+    int startingSoftCommits = softTracker.getCommitCount();
+    
     softTracker.setTimeUpperBound(softCommitWaitMillis);
     softTracker.setDocsUpperBound(-1);
     hardTracker.setTimeUpperBound(hardCommitWaitMillis);
     hardTracker.setDocsUpperBound(-1);
-    
+    // simplify whats going on by only having soft auto commits trigger new searchers
+    hardTracker.setOpenSearcher(false);
+
     // Add a single document
     long add529 = System.nanoTime();
     assertU(adoc("id", "529", "subject", "the doc we care about in this test"));
@@ -18,21 +22,24 @@
     monitor.assertSaneOffers();
 
     // Wait for the soft commit with some fudge
-    Long soft529 = monitor.soft.poll(softCommitWaitMillis * 3, MILLISECONDS);
+    Long soft529 = monitor.soft.poll(softCommitWaitMillis * 500, MILLISECONDS);
     assertNotNull("soft529 wasn't fast enough", soft529);
     monitor.assertSaneOffers();
 
+    
+    // wait for the hard commit
+    Long hard529 = monitor.hard.poll(hardCommitWaitMillis * 5, MILLISECONDS);
+    assertNotNull("hard529 wasn't fast enough", hard529);
+    
     // check for the searcher, should have happened right after soft commit
-    Long searcher529 = monitor.searcher.poll(softCommitWaitMillis * 3, MILLISECONDS);
+    Long searcher529 = monitor.searcher.poll(5000, MILLISECONDS);
     assertNotNull("searcher529 wasn't fast enough", searcher529);
     monitor.assertSaneOffers();
 
     // toss in another doc, shouldn't affect first hard commit time we poll
     assertU(adoc("id", "530", "subject", "just for noise/activity"));
 
-    // wait for the hard commit
-    Long hard529 = monitor.hard.poll(hardCommitWaitMillis * 5, MILLISECONDS);
-    assertNotNull("hard529 wasn't fast enough", hard529);
+
     monitor.assertSaneOffers();
 
     final long soft529Ms = TimeUnit.MILLISECONDS.convert(soft529 - add529, TimeUnit.NANOSECONDS);
@@ -59,17 +66,17 @@
     monitor.assertSaneOffers();
 
     // there may have been (or will be) a second hard commit for 530
-    Long hard530 = monitor.hard.poll(hardCommitWaitMillis, MILLISECONDS);
+    Long hard530 = monitor.hard.poll(hardCommitWaitMillis * 5, MILLISECONDS);
     assertEquals("Tracker reports too many hard commits",
                  (null == hard530 ? 1 : 2),
-                 hardTracker.getCommitCount());
+                 hardTracker.getCommitCount() - startingHardCommits);
 
     // there may have been a second soft commit for 530, 
     // but if so it must have already happend
     Long soft530 = monitor.soft.poll(0, MILLISECONDS);
     if (null != soft530) {
       assertEquals("Tracker reports too many soft commits",
-                   2, softTracker.getCommitCount());
+                   2, softTracker.getCommitCount() - startingSoftCommits);
       if (null != hard530) {
         assertTrue("soft530 after hard530: " +
                    soft530 + " !<= " + hard530,
@@ -81,7 +88,7 @@
       }
     } else {
       assertEquals("Tracker reports too many soft commits",
-                   1, softTracker.getCommitCount());
+                   1, softTracker.getCommitCount() - startingSoftCommits);
     }
       
     if (null != soft530 || null != hard530) {
@@ -89,15 +96,18 @@
                     monitor.searcher.poll(0, MILLISECONDS));
     }
 
-    monitor.assertSaneOffers();
+    // clear commits
+    monitor.hard.clear();
+    monitor.soft.clear();
 
-    // wait a bit, w/o other action we definitely shouldn't see any 
+    // wait a bit, w/o other action we shouldn't see any 
     // new hard/soft commits 
     assertNull("Got a hard commit we weren't expecting",
-               monitor.hard.poll(2, SECONDS));
+               monitor.hard.poll(1000, MILLISECONDS));
     assertNull("Got a soft commit we weren't expecting",
                monitor.soft.poll(0, MILLISECONDS));
 
     monitor.assertSaneOffers();
+    monitor.searcher.clear();
   }
 

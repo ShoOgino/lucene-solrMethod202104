@@ -31,28 +31,53 @@
 //      assertEquals(0, databaseMetaData.getDriverMajorVersion());
 //      assertEquals(0, databaseMetaData.getDriverMinorVersion());
 
+
+      List<String> tableSchemas = new ArrayList<>(Arrays.asList(zkHost, "metadata"));
+      try(ResultSet rs = databaseMetaData.getSchemas()) {
+        assertTrue(rs.next());
+        assertTrue(tableSchemas.contains(rs.getString("tableSchem")));
+        tableSchemas.remove(rs.getString("tableSchem"));
+        assertNull(rs.getString("tableCat"));
+        assertTrue(rs.next());
+        assertTrue(tableSchemas.contains(rs.getString("tableSchem")));
+        tableSchemas.remove(rs.getString("tableSchem"));
+        assertNull(rs.getString("tableCat"));
+        assertFalse(rs.next());
+        assertTrue(tableSchemas.isEmpty());
+      }
+
       try(ResultSet rs = databaseMetaData.getCatalogs()) {
         assertTrue(rs.next());
-        assertEquals(zkHost, rs.getString("TABLE_CAT"));
+        assertNull(rs.getString("tableCat"));
         assertFalse(rs.next());
       }
 
-      List<String> collections = new ArrayList<>();
-      collections.addAll(cluster.getSolrClient().getZkStateReader().getClusterState().getCollectionsMap().keySet());
-      Collections.sort(collections);
+      CloudSolrClient solrClient = cluster.getSolrClient();
+      solrClient.connect();
+      ZkStateReader zkStateReader = solrClient.getZkStateReader();
 
-      try(ResultSet rs = databaseMetaData.getSchemas()) {
-        assertFalse(rs.next());
+      SortedSet<String> tables = new TreeSet<>();
+
+      Set<String> collectionsSet = zkStateReader.getClusterState().getCollectionsMap().keySet();
+      tables.addAll(collectionsSet);
+
+      Aliases aliases = zkStateReader.getAliases();
+      if(aliases != null) {
+        Map<String, String> collectionAliasMap = aliases.getCollectionAliasMap();
+        if(collectionAliasMap != null) {
+          Set<String> aliasesSet = collectionAliasMap.keySet();
+          tables.addAll(aliasesSet);
+        }
       }
 
-      try(ResultSet rs = databaseMetaData.getTables(zkHost, null, "%", null)) {
-        for(String acollection : collections) {
+      try(ResultSet rs = databaseMetaData.getTables(null, zkHost, "%", null)) {
+        for(String table : tables) {
           assertTrue(rs.next());
-          assertEquals(zkHost, rs.getString("TABLE_CAT"));
-          assertNull(rs.getString("TABLE_SCHEM"));
-          assertEquals(acollection, rs.getString("TABLE_NAME"));
-          assertEquals("TABLE", rs.getString("TABLE_TYPE"));
-          assertNull(rs.getString("REMARKS"));
+          assertNull(rs.getString("tableCat"));
+          assertEquals(zkHost, rs.getString("tableSchem"));
+          assertEquals(table, rs.getString("tableName"));
+          assertEquals("TABLE", rs.getString("tableType"));
+          assertNull(rs.getString("remarks"));
         }
         assertFalse(rs.next());
       }

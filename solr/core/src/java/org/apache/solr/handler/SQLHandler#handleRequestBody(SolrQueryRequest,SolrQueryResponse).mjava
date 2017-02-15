@@ -1,17 +1,13 @@
   public void handleRequestBody(SolrQueryRequest req, SolrQueryResponse rsp) throws Exception {
-    SolrParams params = req.getParams();
-    params = adjustParams(params);
-    req.setParams(params);
+    ModifiableSolrParams params = new ModifiableSolrParams(req.getParams());
     String sql = params.get("stmt");
-    int numWorkers = params.getInt("numWorkers", 1);
-    String workerCollection = params.get("workerCollection", defaultWorkerCollection);
-    String workerZkhost = params.get("workerZkhost", defaultZkhost);
-    String mode = params.get("aggregationMode", "map_reduce");
-    StreamContext context = new StreamContext();
+    // Set defaults for parameters
+    params.set("numWorkers", params.getInt("numWorkers", 1));
+    params.set("workerCollection", params.get("workerCollection", defaultWorkerCollection));
+    params.set("workerZkhost", params.get("workerZkhost", defaultZkhost));
+    params.set("aggregationMode", params.get("aggregationMode", "facet"));
 
-    // JDBC driver requires metadata from the SQLHandler. Default to false since this adds a new Metadata stream.
-    boolean includeMetadata = params.getBool("includeMetadata", false);
-
+    TupleStream tupleStream = null;
     try {
 
       if(!isCloud) {
@@ -22,19 +18,34 @@
         throw new Exception("stmt parameter cannot be null");
       }
 
-      context.setSolrClientCache(StreamHandler.clientCache);
+      String url = CalciteSolrDriver.CONNECT_STRING_PREFIX;
 
-      TupleStream tupleStream = SQLTupleStreamParser.parse(sql,
-                                                           numWorkers,
-                                                           workerCollection,
-                                                           workerZkhost,
-                                                           AggregationMode.getMode(mode),
-                                                           includeMetadata,
-                                                           context);
+      Properties properties = new Properties();
+      // Add all query parameters
+      Iterator<String> parameterNamesIterator = params.getParameterNamesIterator();
+      while(parameterNamesIterator.hasNext()) {
+        String param = parameterNamesIterator.next();
+        properties.setProperty(param, params.get(param));
+      }
 
-      rsp.add("result-set", new StreamHandler.TimerStream(new ExceptionStream(tupleStream)));
+      // Set these last to ensure that they are set properly
+      properties.setProperty("lex", Lex.MYSQL.toString());
+      properties.setProperty("zk", defaultZkhost);
+
+      String driverClass = CalciteSolrDriver.class.getCanonicalName();
+
+      // JDBC driver requires metadata from the SQLHandler. Default to false since this adds a new Metadata stream.
+      boolean includeMetadata = params.getBool("includeMetadata", false);
+      tupleStream = new SqlHandlerStream(url, sql, null, properties, driverClass, includeMetadata);
+
+      tupleStream = new StreamHandler.TimerStream(new ExceptionStream(tupleStream));
+
+      rsp.add("result-set", tupleStream);
     } catch(Exception e) {
       //Catch the SQL parsing and query transformation exceptions.
+      if(tupleStream != null) {
+        tupleStream.close();
+      }
       SolrException.log(logger, e);
       rsp.add("result-set", new StreamHandler.DummyErrorStream(e));
     }

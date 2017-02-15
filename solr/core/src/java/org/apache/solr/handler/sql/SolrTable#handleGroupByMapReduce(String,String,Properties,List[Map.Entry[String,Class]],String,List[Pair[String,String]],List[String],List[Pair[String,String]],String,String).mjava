@@ -1,0 +1,111 @@
+  private TupleStream handleGroupByMapReduce(String zk,
+                                             String collection,
+                                             Properties properties,
+                                             final List<Map.Entry<String, Class>> fields,
+                                             final String query,
+                                             final List<Pair<String, String>> orders,
+                                             final List<String> _buckets,
+                                             final List<Pair<String, String>> metricPairs,
+                                             final String limit,
+                                             final String havingPredicate) throws IOException {
+
+    int numWorkers = Integer.parseInt(properties.getProperty("numWorkers", "1"));
+
+    Bucket[] buckets = buildBuckets(_buckets, fields);
+    Metric[] metrics = buildMetrics(metricPairs, false).toArray(new Metric[0]);
+
+    if(metrics.length == 0) {
+      return handleSelectDistinctMapReduce(zk, collection, properties, fields, query, orders, buckets, limit);
+    }
+
+    Set<String> fieldSet = getFieldSet(metrics, fields);
+
+    if(metrics.length == 0) {
+      throw new IOException("Group by queries must include atleast one aggregate function.");
+    }
+
+    String fl = getFields(fieldSet);
+    String sortDirection = getSortDirection(orders);
+    String sort = bucketSort(buckets, sortDirection);
+
+    ModifiableSolrParams params = new ModifiableSolrParams();
+
+    params.set(CommonParams.FL, fl);
+    params.set(CommonParams.Q, query);
+    //Always use the /export handler for Group By Queries because it requires exporting full result sets.
+    params.set(CommonParams.QT, "/export");
+
+    if(numWorkers > 1) {
+      params.set("partitionKeys", getPartitionKeys(buckets));
+    }
+
+    params.set("sort", sort);
+
+    TupleStream tupleStream = null;
+
+    CloudSolrStream cstream = new CloudSolrStream(zk, collection, params);
+    tupleStream = new RollupStream(cstream, buckets, metrics);
+
+    StreamFactory factory = new StreamFactory()
+        .withFunctionName("search", CloudSolrStream.class)
+        .withFunctionName("parallel", ParallelStream.class)
+        .withFunctionName("rollup", RollupStream.class)
+        .withFunctionName("sum", SumMetric.class)
+        .withFunctionName("min", MinMetric.class)
+        .withFunctionName("max", MaxMetric.class)
+        .withFunctionName("avg", MeanMetric.class)
+        .withFunctionName("count", CountMetric.class)
+        .withFunctionName("and", AndOperation.class)
+        .withFunctionName("or", OrOperation.class)
+        .withFunctionName("not", NotOperation.class)
+        .withFunctionName("eq", EqualsOperation.class)
+        .withFunctionName("gt", GreaterThanOperation.class)
+        .withFunctionName("lt", LessThanOperation.class)
+        .withFunctionName("lteq", LessThanEqualToOperation.class)
+        .withFunctionName("having", HavingStream.class)
+        .withFunctionName("gteq", GreaterThanEqualToOperation.class);
+
+    if(havingPredicate != null) {
+      BooleanOperation booleanOperation = (BooleanOperation)factory.constructOperation(StreamExpressionParser.parse(havingPredicate));
+      tupleStream = new HavingStream(tupleStream, booleanOperation);
+    }
+
+    if(numWorkers > 1) {
+      // Do the rollups in parallel
+      // Maintain the sort of the Tuples coming from the workers.
+      StreamComparator comp = bucketSortComp(buckets, sortDirection);
+      ParallelStream parallelStream = new ParallelStream(zk, collection, tupleStream, numWorkers, comp);
+
+
+      parallelStream.setStreamFactory(factory);
+      tupleStream = parallelStream;
+    }
+
+    //TODO: Currently we are not pushing down the having clause.
+    //      We need to push down the having clause to ensure that LIMIT does not cut off records prior to the having filter.
+
+    if(orders != null && orders.size() > 0) {
+      if(!sortsEqual(buckets, sortDirection, orders)) {
+        int lim = (limit == null) ? 100 : Integer.parseInt(limit);
+        StreamComparator comp = getComp(orders);
+        //Rank the Tuples
+        //If parallel stream is used ALL the Rolled up tuples from the workers will be ranked
+        //Providing a true Top or Bottom.
+        tupleStream = new RankStream(tupleStream, lim, comp);
+      } else {
+        // Sort is the same as the same as the underlying stream
+        // Only need to limit the result, not Rank the result
+        if(limit != null) {
+          tupleStream = new LimitStream(tupleStream, Integer.parseInt(limit));
+        }
+      }
+    } else {
+      //No order by, check for limit
+      if(limit != null) {
+        tupleStream = new LimitStream(tupleStream, Integer.parseInt(limit));
+      }
+    }
+
+    return tupleStream;
+  }
+

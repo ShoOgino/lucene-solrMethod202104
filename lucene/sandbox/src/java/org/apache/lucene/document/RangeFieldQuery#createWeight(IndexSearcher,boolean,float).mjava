@@ -1,7 +1,7 @@
   @Override
   public final Weight createWeight(IndexSearcher searcher, boolean needsScores, float boost) throws IOException {
     return new ConstantScoreWeight(this, boost) {
-      final RangeFieldComparator comparator = new RangeFieldComparator();
+      final RangeFieldComparator target = new RangeFieldComparator();
       private DocIdSet buildMatchingDocIdSet(LeafReader reader, PointValues values) throws IOException {
         DocIdSetBuilder result = new DocIdSetBuilder(reader.maxDoc(), values, field);
         values.intersect(
@@ -17,14 +17,7 @@
               }
               @Override
               public void visit(int docID, byte[] leaf) throws IOException {
-                // add the document iff:
-                if (Arrays.equals(ranges, leaf)
-                    // target is within cell and queryType is INTERSECTS or CONTAINS:
-                    || (comparator.isWithin(leaf) && queryType != QueryType.WITHIN)
-                    // target contains cell and queryType is INTERSECTS or WITHIN:
-                    || (comparator.contains(leaf) && queryType != QueryType.CONTAINS)
-                    // target is not disjoint (crosses) and queryType is INTERSECTS
-                    || (comparator.isDisjoint(leaf) == false && queryType == QueryType.INTERSECTS)) {
+                if (target.matches(leaf)) {
                   adder.add(docID);
                 }
               }
@@ -32,14 +25,15 @@
               public Relation compare(byte[] minPackedValue, byte[] maxPackedValue) {
                 byte[] node = getInternalRange(minPackedValue, maxPackedValue);
                 // compute range relation for BKD traversal
-                if (comparator.isDisjoint(node)) {
+                if (target.intersects(node) == false) {
                   return Relation.CELL_OUTSIDE_QUERY;
-                } else if (comparator.isWithin(node)) {
+                } else if (target.within(node)) {
                   // target within cell; continue traversing:
                   return Relation.CELL_CROSSES_QUERY;
-                } else if (comparator.contains(node)) {
-                  // target contains cell; add iff queryType is not a CONTAINS query:
-                  return (queryType == QueryType.CONTAINS) ? Relation.CELL_OUTSIDE_QUERY : Relation.CELL_INSIDE_QUERY;
+                } else if (target.contains(node)) {
+                  // target contains cell; add iff queryType is not a CONTAINS or CROSSES query:
+                  return (queryType == QueryType.CONTAINS || queryType == QueryType.CROSSES) ?
+                      Relation.CELL_OUTSIDE_QUERY : Relation.CELL_INSIDE_QUERY;
                 }
                 // target intersects cell; continue traversing:
                 return Relation.CELL_CROSSES_QUERY;
@@ -68,7 +62,7 @@
           byte[] range = getInternalRange(values.getMinPackedValue(), values.getMaxPackedValue());
           // if the internal node is not equal and not contained by the query, all docs do not match
           if ((!Arrays.equals(ranges, range)
-              && (comparator.contains(range) && queryType != QueryType.CONTAINS)) == false) {
+              && (target.contains(range) && queryType != QueryType.CONTAINS)) == false) {
             allDocsMatch = false;
           }
         } else {

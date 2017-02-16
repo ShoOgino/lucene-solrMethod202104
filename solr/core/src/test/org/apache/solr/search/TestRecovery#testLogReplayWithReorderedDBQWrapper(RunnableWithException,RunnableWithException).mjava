@@ -1,0 +1,54 @@
+  private void testLogReplayWithReorderedDBQWrapper(RunnableWithException act, RunnableWithException assrt) throws Exception {
+
+    try {
+
+      DirectUpdateHandler2.commitOnClose = false;
+      final Semaphore logReplay = new Semaphore(0);
+      final Semaphore logReplayFinish = new Semaphore(0);
+
+      UpdateLog.testing_logReplayHook = () -> {
+        try {
+          assertTrue(logReplay.tryAcquire(timeout, TimeUnit.SECONDS));
+        } catch (Exception e) {
+          throw new RuntimeException(e);
+        }
+      };
+
+      UpdateLog.testing_logReplayFinishHook = () -> logReplayFinish.release();
+
+
+      clearIndex();
+      assertU(commit());
+
+      // Adding some documents
+      act.run();
+
+
+      assertJQ(req("q", "*:*"), "/response/numFound==0");
+
+      h.close();
+      createCore();
+      // Solr should kick this off now
+      // h.getCore().getUpdateHandler().getUpdateLog().recoverFromLog();
+
+      // verify that previous close didn't do a commit
+      // recovery should be blocked by our hook
+      assertJQ(req("q", "*:*"), "/response/numFound==0");
+
+      // unblock recovery
+      logReplay.release(1000);
+
+      // wait until recovery has finished
+      assertTrue(logReplayFinish.tryAcquire(timeout, TimeUnit.SECONDS));
+
+      // Asserting
+      assrt.run();
+
+    } finally {
+      DirectUpdateHandler2.commitOnClose = true;
+      UpdateLog.testing_logReplayHook = null;
+      UpdateLog.testing_logReplayFinishHook = null;
+    }
+
+  }
+

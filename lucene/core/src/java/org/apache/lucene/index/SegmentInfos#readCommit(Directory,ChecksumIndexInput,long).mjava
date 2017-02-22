@@ -12,18 +12,37 @@
     input.readBytes(id, 0, id.length);
     CodecUtil.checkIndexHeaderSuffix(input, Long.toString(generation, Character.MAX_RADIX));
 
-    SegmentInfos infos = new SegmentInfos();
+    Version luceneVersion = Version.fromBits(input.readVInt(), input.readVInt(), input.readVInt());
+    if (luceneVersion.onOrAfter(Version.LUCENE_6_0_0) == false) {
+      // TODO: should we check indexCreatedVersion instead?
+      throw new IndexFormatTooOldException(input, "this index is too old (version: " + luceneVersion + ")");
+    }
+
+    Version indexCreatedVersion;
+    if (format >= VERSION_70) {
+      byte b = input.readByte();
+      switch (b) {
+        case 0:
+          // version is not known: pre-7.0 index that has been modified since the 7.0 upgrade
+          indexCreatedVersion = null;
+          break;
+        case 1:
+          // version is known: index has been created on or after 7.0
+          indexCreatedVersion = Version.fromBits(input.readVInt(), input.readVInt(), input.readVInt());
+          break;
+        default:
+          throw new CorruptIndexException("Illegal byte value for a boolean: " + b + ", expected 0 or 1", input);
+      }
+    } else {
+      // pre-7.0 index that has not been modified since the 7.0 upgrade
+      indexCreatedVersion = null;
+    }
+
+    SegmentInfos infos = new SegmentInfos(indexCreatedVersion);
     infos.id = id;
     infos.generation = generation;
     infos.lastGeneration = generation;
-    if (format >= VERSION_53) {
-      infos.luceneVersion = Version.fromBits(input.readVInt(), input.readVInt(), input.readVInt());
-      if (infos.luceneVersion.onOrAfter(Version.LUCENE_6_0_0) == false) {
-        throw new IndexFormatTooOldException(input, "this index is too old (version: " + infos.luceneVersion + ")");
-      }
-    } else {
-      throw new IndexFormatTooOldException(input, "this index segments file is too old (segment infos format: " + format + ")");
-    }
+    infos.luceneVersion = luceneVersion;
 
     infos.version = input.readLong();
     //System.out.println("READ sis version=" + infos.version);

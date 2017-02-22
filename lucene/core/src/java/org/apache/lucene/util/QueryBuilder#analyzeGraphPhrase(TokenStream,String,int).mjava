@@ -1,0 +1,63 @@
+  /**
+   * Creates a span near (phrase) query from a graph token stream. The articulation points of the graph are visited in
+   * order and the queries created at each point are merged in the returned near query.
+   */
+  protected SpanQuery analyzeGraphPhrase(TokenStream source, String field, int phraseSlop)
+      throws IOException {
+    source.reset();
+    GraphTokenStreamFiniteStrings graph = new GraphTokenStreamFiniteStrings(source);
+    List<SpanQuery> clauses = new ArrayList<>();
+    int[] articulationPoints = graph.articulationPoints();
+    int lastState = 0;
+    for (int i = 0; i <= articulationPoints.length; i++) {
+      int start = lastState;
+      int end = -1;
+      if (i < articulationPoints.length) {
+        end = articulationPoints[i];
+      }
+      lastState = end;
+      final SpanQuery queryPos;
+      if (graph.hasSidePath(start)) {
+        List<SpanQuery> queries = new ArrayList<>();
+        Iterator<TokenStream> it = graph.getFiniteStrings(start, end);
+        while (it.hasNext()) {
+          TokenStream ts = it.next();
+          SpanQuery q = createSpanQuery(ts, field);
+          if (q != null) {
+            queries.add(q);
+          }
+        }
+        if (queries.size() > 0) {
+          queryPos = new SpanOrQuery(queries.toArray(new SpanQuery[0]));
+        } else {
+          queryPos = null;
+        }
+      } else {
+        Term[] terms = graph.getTerms(field, start);
+        assert terms.length > 0;
+        if (terms.length == 1) {
+          queryPos = new SpanTermQuery(terms[0]);
+        } else {
+          SpanTermQuery[] orClauses = new SpanTermQuery[terms.length];
+          for (int idx = 0; idx < terms.length; idx++) {
+            orClauses[idx] = new SpanTermQuery(terms[idx]);
+          }
+
+          queryPos = new SpanOrQuery(orClauses);
+        }
+      }
+
+      if (queryPos != null) {
+        clauses.add(queryPos);
+      }
+    }
+
+    if (clauses.isEmpty()) {
+      return null;
+    } else if (clauses.size() == 1) {
+      return clauses.get(0);
+    } else {
+      return new SpanNearQuery(clauses.toArray(new SpanQuery[0]), phraseSlop, true);
+    }
+  }
+

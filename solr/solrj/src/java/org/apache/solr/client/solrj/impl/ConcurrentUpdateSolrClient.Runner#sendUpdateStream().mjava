@@ -3,14 +3,24 @@
     // Exits on exception, interruption, or an empty queue to pull from.
     //
     void sendUpdateStream() throws Exception {
+    
       while (!queue.isEmpty()) {
         HttpPost method = null;
         HttpResponse response = null;
-
+        
         InputStream rspBody = null;
         try {
-          final Update update = 
-              queue.poll(pollQueueTime, TimeUnit.MILLISECONDS);
+          Update update;
+          notifyQueueAndRunnersIfEmptyQueue();
+          try {
+            inPoll = true;
+            update = queue.poll(pollQueueTime, TimeUnit.MILLISECONDS);
+          } catch (InterruptedException e) {
+            if (log.isDebugEnabled()) pollInterrupts.incrementAndGet();
+            continue;
+          } finally {
+            inPoll = false;
+          }
           if (update == null)
             break;
 
@@ -20,61 +30,73 @@
           final ModifiableSolrParams origParams = new ModifiableSolrParams(update.getRequest().getParams());
 
           EntityTemplate template = new EntityTemplate(new ContentProducer() {
-
+            
             @Override
             public void writeTo(OutputStream out) throws IOException {
-              try {
-                if (isXml) {
-                  out.write("<stream>".getBytes(StandardCharsets.UTF_8)); // can be anything
-                }
-                Update upd = update;
-                while (upd != null) {
-                  UpdateRequest req = upd.getRequest();
-                  SolrParams currentParams = new ModifiableSolrParams(req.getParams());
-                  if (!origParams.toNamedList().equals(currentParams.toNamedList())) {
-                    queue.add(upd); // params are different, push back to queue
-                    break;
-                  }
 
-                  client.requestWriter.write(req, out);
-                  if (isXml) {
-                    // check for commit or optimize
-                    SolrParams params = req.getParams();
-                    if (params != null) {
-                      String fmt = null;
-                      if (params.getBool(UpdateParams.OPTIMIZE, false)) {
-                        fmt = "<optimize waitSearcher=\"%s\" />";
-                      } else if (params.getBool(UpdateParams.COMMIT, false)) {
-                        fmt = "<commit waitSearcher=\"%s\" />";
-                      }
-                      if (fmt != null) {
-                        byte[] content = String.format(Locale.ROOT,
-                            fmt,
-                            params.getBool(UpdateParams.WAIT_SEARCHER, false)
-                                + "").getBytes(StandardCharsets.UTF_8);
-                        out.write(content);
-                      }
+              if (isXml) {
+                out.write("<stream>".getBytes(StandardCharsets.UTF_8)); // can be anything
+              }
+              Update upd = update;
+              while (upd != null) {
+                UpdateRequest req = upd.getRequest();
+                SolrParams currentParams = new ModifiableSolrParams(req.getParams());
+                if (!origParams.toNamedList().equals(currentParams.toNamedList())) {
+                  queue.add(upd); // params are different, push back to queue
+                  break;
+                }
+
+                client.requestWriter.write(req, out);
+                if (isXml) {
+                  // check for commit or optimize
+                  SolrParams params = req.getParams();
+                  if (params != null) {
+                    String fmt = null;
+                    if (params.getBool(UpdateParams.OPTIMIZE, false)) {
+                      fmt = "<optimize waitSearcher=\"%s\" />";
+                    } else if (params.getBool(UpdateParams.COMMIT, false)) {
+                      fmt = "<commit waitSearcher=\"%s\" />";
+                    }
+                    if (fmt != null) {
+                      byte[] content = String.format(Locale.ROOT,
+                          fmt, params.getBool(UpdateParams.WAIT_SEARCHER, false)
+                              + "")
+                          .getBytes(StandardCharsets.UTF_8);
+                      out.write(content);
                     }
                   }
-                  out.flush();
+                }
+                out.flush();
 
-                  if (pollQueueTime > 0 && threadCount == 1 && req.isLastDocInBatch()) {
-                    // no need to wait to see another doc in the queue if we've hit the last doc in a batch
-                    upd = queue.poll(0, TimeUnit.MILLISECONDS);
-                  } else {
-                    upd = queue.poll(pollQueueTime, TimeUnit.MILLISECONDS);
+                notifyQueueAndRunnersIfEmptyQueue();
+                inPoll = true;
+                try {
+                  while (true) {
+                    try {
+                      upd = queue.poll(pollQueueTime, TimeUnit.MILLISECONDS);
+                      break;
+                    } catch (InterruptedException e) {
+                      if (log.isDebugEnabled()) pollInterrupts.incrementAndGet();
+                      if (!queue.isEmpty()) {
+                        continue;
+                      }
+                      if (log.isDebugEnabled()) pollExits.incrementAndGet();
+                      upd = null;
+                      break;
+                    } finally {
+                      inPoll = false;
+                    }
                   }
-
+                }finally {
+                  inPoll = false;
                 }
-
-                if (isXml) {
-                  out.write("</stream>".getBytes(StandardCharsets.UTF_8));
-                }
-
-              } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                log.warn("", e);
               }
+
+              if (isXml) {
+                out.write("</stream>".getBytes(StandardCharsets.UTF_8));
+              }
+            
+            
             }
           });
 
@@ -104,10 +126,13 @@
           method.setEntity(template);
           method.addHeader("User-Agent", HttpSolrClient.AGENT);
           method.addHeader("Content-Type", contentType);
-
+          
+       
           response = client.getHttpClient()
               .execute(method, HttpClientUtil.createNewHttpClientRequestContext());
+          
           rspBody = response.getEntity().getContent();
+            
           int statusCode = response.getStatusLine().getStatusCode();
           if (statusCode != HttpStatus.SC_OK) {
             StringBuilder msg = new StringBuilder();
@@ -150,6 +175,7 @@
           } else {
             onSuccess(response);
           }
+          
         } finally {
           try {
             if (response != null) {
@@ -158,6 +184,7 @@
           } catch (Exception e) {
             log.error("Error consuming and closing http response stream.", e);
           }
+          notifyQueueAndRunnersIfEmptyQueue();
         }
       }
     }

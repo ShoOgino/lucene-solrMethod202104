@@ -1,0 +1,96 @@
+    @Override
+    public void finish() throws IOException {
+      List<String> outTerms = new ArrayList();
+      List<Integer> outFreq = new ArrayList();
+      List<Integer> outQueryFreq = new ArrayList();
+      List<Double> scores = new ArrayList();
+
+      NamedList<Integer> allFreq = new NamedList();
+      NamedList<Integer> allQueryFreq = new NamedList();
+
+      rb.rsp.add("numDocs", numDocs);
+      rb.rsp.add("resultCount", count);
+      rb.rsp.add("sterms", outTerms);
+      rb.rsp.add("scores", scores);
+      rb.rsp.add("docFreq", outFreq);
+      rb.rsp.add("queryDocFreq", outQueryFreq);
+
+      //TODO: Use a priority queue
+      TreeSet<TermWithScore> topTerms = new TreeSet<>();
+
+      Terms terms = MultiFields.getFields(searcher.getIndexReader()).terms(field);
+      TermsEnum termsEnum = terms.iterator();
+      BytesRef term;
+      PostingsEnum postingsEnum = null;
+
+      while ((term = termsEnum.next()) != null) {
+        int docFreq = termsEnum.docFreq();
+        
+        if(minDocs < 1.0) {
+          if((float)docFreq/numDocs < minDocs) {
+            continue;
+          }
+        } else if(docFreq < minDocs) {
+          continue;
+        }
+
+        if(maxDocs < 1.0) {
+          if((float)docFreq/numDocs > maxDocs) {
+            continue;
+          }
+        } else if(docFreq > maxDocs) {
+          continue;
+        }
+
+        if(term.length < minTermLength) {
+          continue;
+        }
+
+        int tf = 0;
+        postingsEnum = termsEnum.postings(postingsEnum);
+
+        POSTINGS:
+        while (postingsEnum.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
+          int docId = postingsEnum.docID();
+
+          if(docId > highestCollected) {
+            break POSTINGS;
+          }
+
+          if (docs.get(docId)) {
+            ++tf;
+          }
+        }
+
+        if(tf == 0) {
+          continue;
+        }
+
+        float score = (float)Math.log(tf) * (float) (Math.log(((float)(numDocs + 1)) / (docFreq + 1)) + 1.0);
+
+        String t = term.utf8ToString();
+        allFreq.add(t, docFreq);
+        allQueryFreq.add(t, tf);
+
+        if (topTerms.size() < numTerms) {
+          topTerms.add(new TermWithScore(term.utf8ToString(), score));
+        } else  {
+          if (topTerms.first().score < score) {
+            topTerms.pollFirst();
+            topTerms.add(new TermWithScore(term.utf8ToString(), score));
+          }
+        }
+      }
+
+      for (TermWithScore topTerm : topTerms) {
+        outTerms.add(topTerm.term);
+        scores.add(topTerm.score);
+        outFreq.add(allFreq.get(topTerm.term));
+        outQueryFreq.add(allQueryFreq.get(topTerm.term));
+      }
+
+      if (this.delegate instanceof DelegatingCollector) {
+        ((DelegatingCollector) this.delegate).finish();
+      }
+    }
+

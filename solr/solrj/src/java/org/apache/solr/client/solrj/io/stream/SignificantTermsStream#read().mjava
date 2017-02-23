@@ -1,0 +1,63 @@
+  public Tuple read() throws IOException {
+    try {
+      if (tupleIterator == null) {
+        Map<String, int[]> mergeFreqs = new HashMap<>();
+        long numDocs = 0;
+        long resultCount = 0;
+        for (Future<NamedList> getTopTermsCall : callShards(getShardUrls())) {
+          NamedList resp = getTopTermsCall.get();
+
+          List<String> terms = (List<String>)resp.get("sterms");
+          List<Integer> docFreqs = (List<Integer>)resp.get("docFreq");
+          List<Integer> queryDocFreqs = (List<Integer>)resp.get("queryDocFreq");
+          numDocs += (Integer)resp.get("numDocs");
+          resultCount += (Integer)resp.get("resultCount");
+
+          for (int i = 0; i < terms.size(); i++) {
+            String term = terms.get(i);
+            int docFreq = docFreqs.get(i);
+            int queryDocFreq = queryDocFreqs.get(i);
+            if(!mergeFreqs.containsKey(term)) {
+              mergeFreqs.put(term, new int[2]);
+            }
+
+            int[] freqs = mergeFreqs.get(term);
+            freqs[0] += docFreq;
+            freqs[1] += queryDocFreq;
+          }
+        }
+
+        List<Map> maps = new ArrayList();
+
+        for(String term : mergeFreqs.keySet() ) {
+          int[] freqs = mergeFreqs.get(term);
+          Map map = new HashMap();
+          map.put("term", term);
+          map.put("background", freqs[0]);
+          map.put("foreground", freqs[1]);
+
+          float score = (float)Math.log(freqs[1]) * (float) (Math.log(((float)(numDocs + 1)) / (freqs[0] + 1)) + 1.0);
+
+          map.put("score", score);
+          maps.add(map);
+        }
+
+        Collections.sort(maps, new ScoreComp());
+        List<Tuple> tuples = new ArrayList();
+        for (Map map : maps) {
+          if (tuples.size() == numTerms) break;
+          tuples.add(new Tuple(map));
+        }
+
+        Map map = new HashMap();
+        map.put("EOF", true);
+        tuples.add(new Tuple(map));
+        tupleIterator = tuples.iterator();
+      }
+
+      return tupleIterator.next();
+    } catch(Exception e) {
+      throw new IOException(e);
+    }
+  }
+

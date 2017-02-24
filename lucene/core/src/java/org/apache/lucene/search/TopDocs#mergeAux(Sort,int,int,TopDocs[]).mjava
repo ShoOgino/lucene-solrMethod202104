@@ -11,14 +11,26 @@
     int totalHitCount = 0;
     int availHitCount = 0;
     float maxScore = Float.MIN_VALUE;
+    Boolean setShardIndex = null;
     for(int shardIDX=0;shardIDX<shardHits.length;shardIDX++) {
       final TopDocs shard = shardHits[shardIDX];
       // totalHits can be non-zero even if no hits were
       // collected, when searchAfter was used:
       totalHitCount += shard.totalHits;
       if (shard.scoreDocs != null && shard.scoreDocs.length > 0) {
+        if (shard.scoreDocs[0].shardIndex == -1) {
+          if (setShardIndex != null && setShardIndex == false) {
+            throw new IllegalStateException("scoreDocs at index " + shardIDX + " has undefined shard indices but previous scoreDocs were predefined");
+          }
+          setShardIndex = true;
+        } else {
+          if (setShardIndex != null && setShardIndex) {
+            throw new IllegalStateException("scoreDocs at index " + shardIDX + " has predefined shard indices but previous scoreDocs were undefined");
+          }
+          setShardIndex = false;
+        }
         availHitCount += shard.scoreDocs.length;
-        queue.add(new ShardRef(shardIDX));
+        queue.add(new ShardRef(shardIDX, setShardIndex == false));
         maxScore = Math.max(maxScore, shard.getMaxScore());
         //System.out.println("  maxScore now " + maxScore + " vs " + shard.getMaxScore());
       }
@@ -40,7 +52,13 @@
         assert queue.size() > 0;
         ShardRef ref = queue.top();
         final ScoreDoc hit = shardHits[ref.shardIndex].scoreDocs[ref.hitIndex++];
-        hit.shardIndex = ref.shardIndex;
+        if (setShardIndex) {
+          // unless this index is already initialized potentially due to multiple merge phases, or explicitly by the user
+          // we set the shard index to the index of the TopDocs array this hit is coming from.
+          // this allows multiple merge phases if needed but requires extra accounting on the users end.
+          // at the same time this is fully backwards compatible since the value was initialize to -1 from the beginning
+          hit.shardIndex = ref.shardIndex;
+        }
         if (hitUpto >= start) {
           hits[hitUpto - start] = hit;
         }

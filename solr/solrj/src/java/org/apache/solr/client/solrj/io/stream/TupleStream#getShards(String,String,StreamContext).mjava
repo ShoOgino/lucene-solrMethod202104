@@ -1,0 +1,40 @@
+  public static List<String> getShards(String zkHost,
+                                       String collection,
+                                       StreamContext streamContext)
+      throws IOException {
+    Map<String, List<String>> shardsMap = null;
+    List<String> shards = new ArrayList();
+
+    if(streamContext != null) {
+      shardsMap = (Map<String, List<String>>)streamContext.get("shards");
+    }
+
+    if(shardsMap != null) {
+      //Manual Sharding
+      shards = shardsMap.get(collection);
+    } else {
+      //SolrCloud Sharding
+      CloudSolrClient cloudSolrClient = streamContext.getSolrClientCache().getCloudSolrClient(zkHost);
+      ZkStateReader zkStateReader = cloudSolrClient.getZkStateReader();
+      ClusterState clusterState = zkStateReader.getClusterState();
+      Collection<Slice> slices = getSlices(collection, zkStateReader, true);
+      Set<String> liveNodes = clusterState.getLiveNodes();
+      for(Slice slice : slices) {
+        Collection<Replica> replicas = slice.getReplicas();
+        List<Replica> shuffler = new ArrayList<>();
+        for(Replica replica : replicas) {
+          if(replica.getState() == Replica.State.ACTIVE && liveNodes.contains(replica.getNodeName()))
+            shuffler.add(replica);
+        }
+
+        Collections.shuffle(shuffler, new Random());
+        Replica rep = shuffler.get(0);
+        ZkCoreNodeProps zkProps = new ZkCoreNodeProps(rep);
+        String url = zkProps.getCoreUrl();
+        shards.add(url);
+      }
+    }
+
+    return shards;
+  }
+

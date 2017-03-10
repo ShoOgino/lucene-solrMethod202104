@@ -1,10 +1,16 @@
-  /** Returns NO if no pause happened, STOPPED if pause because rate was 0.0 (merge is stopped), PAUSED if paused with a normal rate limit. */
-  private synchronized PauseResult maybePause(long bytes, long curNS) throws MergePolicy.MergeAbortedException {
-
+  /** 
+   * Returns the number of nanoseconds spent in a paused state or <code>-1</code>
+   * if no pause was applied. If the thread needs pausing, this method delegates 
+   * to the linked {@link OneMergeProgress}. 
+   */
+  private long maybePause(long bytes, long curNS) throws MergePolicy.MergeAbortedException {
     // Now is a good time to abort the merge:
-    checkAbort();
+    if (mergeProgress.isAborted()) {
+      throw new MergePolicy.MergeAbortedException("Merge aborted.");
+    }
 
-    double secondsToPause = (bytes/1024./1024.) / mbPerSec;
+    double rate = mbPerSec; // read from volatile rate once.
+    double secondsToPause = (bytes/1024./1024.) / rate;
 
     // Time we should sleep until; this is purely instantaneous
     // rate (just adds seconds onto the last time we had paused to);
@@ -13,35 +19,29 @@
 
     long curPauseNS = targetNS - curNS;
 
-    // NOTE: except maybe on real-time JVMs, minimum realistic
-    // wait/sleep time is 1 msec; if you pass just 1 nsec the impl
-    // rounds up to 1 msec, so we don't bother unless it's > 2 msec:
-
-    if (curPauseNS <= 2000000) {
-      return PauseResult.NO;
+    // We don't bother with thread pausing if the pause is smaller than 2 msec.
+    if (curPauseNS <= MIN_PAUSE_NS) {
+      // Set to curNS, not targetNS, to enforce the instant rate, not
+      // the "averaged over all history" rate:
+      lastNS = curNS;
+      return -1;
     }
 
-    // Defensive: sleep for at most 250 msec; the loop above will call us again if we should keep sleeping:
-    if (curPauseNS > 250L*1000000) {
-      curPauseNS = 250L*1000000;
+    // Defensive: don't sleep for too long; the loop above will call us again if
+    // we should keep sleeping and the rate may be adjusted in between.
+    if (curPauseNS > MAX_PAUSE_NS) {
+      curPauseNS = MAX_PAUSE_NS;
     }
 
-    int sleepMS = (int) (curPauseNS / 1000000);
-    int sleepNS = (int) (curPauseNS % 1000000);
-
-    double rate = mbPerSec;
-
+    long start = System.nanoTime();
     try {
-      // CMS can wake us up here if it changes our target rate:
-      wait(sleepMS, sleepNS);
+      mergeProgress.pauseNanos(
+          curPauseNS, 
+          rate == 0.0 ? PauseReason.STOPPED : PauseReason.PAUSED,
+          () -> rate == mbPerSec);
     } catch (InterruptedException ie) {
       throw new ThreadInterruptedException(ie);
     }
-
-    if (rate == 0.0) {
-      return PauseResult.STOPPED;
-    } else {
-      return PauseResult.PAUSED;
-    }
+    return System.nanoTime() - start;
   }
 

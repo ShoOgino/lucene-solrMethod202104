@@ -17,14 +17,21 @@
     }
 
     SchemaField sfield = null;
-    List<String> fieldValues = null;
+    List<RawQuery> fieldValues = null;
 
-
-    boolean useTermsQuery = (flags & QParser.FLAG_FILTER)!=0 && clauses.size() > TERMS_QUERY_THRESHOLD;
-    int clausesAdded = 0;
+    boolean onlyRawQueries = true;
+    int allRawQueriesTermCount = 0;
+    for (BooleanClause clause : clauses) {
+      if (clause.getQuery() instanceof RawQuery) {
+        allRawQueriesTermCount += ((RawQuery)clause.getQuery()).getTermCount();
+      } else {
+        onlyRawQueries = false;
+      }
+    }
+    boolean useTermsQuery = (flags & QParser.FLAG_FILTER)!=0 && allRawQueriesTermCount > TERMS_QUERY_THRESHOLD;
 
     BooleanQuery.Builder booleanBuilder = newBooleanQuery();
-    Map<SchemaField, List<String>> fmap = new HashMap<>();
+    Map<SchemaField, List<RawQuery>> fmap = new HashMap<>();
 
     for (BooleanClause clause : clauses) {
       Query subq = clause.getQuery();
@@ -44,14 +51,14 @@
             // If this field isn't indexed, or if it is indexed and we want to use TermsQuery, then collect this value.
             // We are currently relying on things like PointField not being marked as indexed in order to bypass
             // the "useTermQuery" check.
-            if (fieldValues == null && useTermsQuery || !sfield.indexed()) {
+            if ((fieldValues == null && useTermsQuery) || !sfield.indexed()) {
               fieldValues = new ArrayList<>(2);
               fmap.put(sfield, fieldValues);
             }
           }
 
           if (fieldValues != null) {
-            fieldValues.add(rawq.externalVal);
+            fieldValues.add(rawq);
             continue;
           }
 
@@ -59,32 +66,49 @@
         }
       }
 
-      clausesAdded++;
       booleanBuilder.add(clause);
     }
 
 
-    for (Map.Entry<SchemaField,List<String>> entry : fmap.entrySet()) {
+    for (Map.Entry<SchemaField,List<RawQuery>> entry : fmap.entrySet()) {
       sfield = entry.getKey();
       fieldValues = entry.getValue();
       FieldType ft = sfield.getType();
 
       // TODO: pull more of this logic out to FieldType?  We would need to be able to add clauses to our existing booleanBuilder.
-      if (sfield.indexed() && fieldValues.size() < TERMS_QUERY_THRESHOLD || fieldValues.size() == 1) {
+      int termCount = fieldValues.stream().mapToInt(RawQuery::getTermCount).sum();
+      if ((sfield.indexed() && termCount < TERMS_QUERY_THRESHOLD) || termCount == 1) {
         // use boolean query instead
-        for (String externalVal : fieldValues) {
-          Query subq = ft.getFieldQuery(this.parser, sfield, externalVal);
-          clausesAdded++;
-          booleanBuilder.add(subq, BooleanClause.Occur.SHOULD);
+        for (RawQuery rawq : fieldValues) {
+          Query subq;
+          if (ft.isTokenized() && sfield.indexed()) {
+            boolean fieldAutoGenPhraseQueries = ft instanceof TextField && ((TextField)ft).getAutoGeneratePhraseQueries();
+            subq = newFieldQuery(getAnalyzer(), sfield.getName(), rawq.getJoinedExternalVal(),
+                false, fieldAutoGenPhraseQueries);
+            booleanBuilder.add(subq, BooleanClause.Occur.SHOULD);
+          } else {
+            for (String externalVal : rawq.getExternalVals()) {
+              subq = ft.getFieldQuery(this.parser, sfield, externalVal);
+              booleanBuilder.add(subq, BooleanClause.Occur.SHOULD);
+            }
+          }
         }
       } else {
-        Query subq = ft.getSetQuery(this.parser, sfield, fieldValues);
-        if (fieldValues.size() == clauses.size()) return subq; // if this is everything, don't wrap in a boolean query
-        clausesAdded++;
+        List<String> externalVals
+            = fieldValues.stream().flatMap(rawq -> rawq.getExternalVals().stream()).collect(Collectors.toList());
+        Query subq = ft.getSetQuery(this.parser, sfield, externalVals);
+        if (onlyRawQueries && termCount == allRawQueriesTermCount) return subq; // if this is everything, don't wrap in a boolean query
         booleanBuilder.add(subq, BooleanClause.Occur.SHOULD);
       }
     }
 
-    return booleanBuilder.build();
+    BooleanQuery bq = booleanBuilder.build();
+    if (bq.clauses().size() == 1) { // Unwrap single SHOULD query
+      BooleanClause clause = bq.clauses().iterator().next();
+      if (clause.getOccur() == BooleanClause.Occur.SHOULD) {
+        return clause.getQuery();
+      }
+    }
+    return bq;
   }
 

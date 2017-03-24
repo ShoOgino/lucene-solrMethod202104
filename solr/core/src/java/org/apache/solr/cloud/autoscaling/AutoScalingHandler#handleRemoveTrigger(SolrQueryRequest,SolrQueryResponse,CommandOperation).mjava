@@ -1,5 +1,6 @@
   private void handleRemoveTrigger(SolrQueryRequest req, SolrQueryResponse rsp, CommandOperation op) throws KeeperException, InterruptedException {
     String triggerName = op.getStr("name");
+    boolean removeListeners = op.getBoolean("removeListeners", false);
 
     if (triggerName == null || triggerName.trim().length() == 0) {
       throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "The trigger name cannot be null or empty");
@@ -9,6 +10,26 @@
     if (triggers == null || !triggers.containsKey(triggerName)) {
       throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "No trigger exists with name: " + triggerName);
     }
+
+    Map<String, Map<String, Object>> listeners = (Map<String, Map<String, Object>>) autoScalingConf.get("listeners");
+    Set<String> activeListeners = new HashSet<>();
+    if (listeners != null) {
+      for (Map.Entry<String, Map<String, Object>> entry : listeners.entrySet()) {
+        Map<String, Object> listenerProps = entry.getValue();
+        if (triggerName.equals(listenerProps.get("trigger")) && !removeListeners) {
+          activeListeners.add(entry.getKey());
+        }
+      }
+    }
+    if (removeListeners) {
+      for (String activeListener : activeListeners) {
+        zkSetListener(container.getZkController().getZkStateReader(), activeListener, null);
+      }
+    } else if (!activeListeners.isEmpty()) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+          "No listeners should exist for trigger: " + triggerName + ". Found listeners: " + activeListeners);
+    }
+
     zkSetTrigger(container.getZkController().getZkStateReader(), triggerName, null);
     rsp.getValues().add("result", "success");
   }

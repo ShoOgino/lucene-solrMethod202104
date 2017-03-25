@@ -33,7 +33,9 @@
     this.queryResultWindowSize = solrConfig.queryResultWindowSize;
     this.queryResultMaxDocsCached = solrConfig.queryResultMaxDocsCached;
     this.useFilterForSortedQuery = solrConfig.useFilterForSortedQuery;
-    this.enableLazyFieldLoading = solrConfig.enableLazyFieldLoading;
+
+    this.fieldInfos = leafReader.getFieldInfos();
+    this.docFetcher = new SolrDocumentFetcher(this, solrConfig, enableCache);
 
     this.cachingEnabled = enableCache;
     if (cachingEnabled) {
@@ -46,7 +48,7 @@
       queryResultCache = solrConfig.queryResultCacheConfig == null ? null
           : solrConfig.queryResultCacheConfig.newInstance();
       if (queryResultCache != null) clist.add(queryResultCache);
-      documentCache = solrConfig.documentCacheConfig == null ? null : solrConfig.documentCacheConfig.newInstance();
+      SolrCache<Integer, Document> documentCache = docFetcher.getDocumentCache();
       if (documentCache != null) clist.add(documentCache);
 
       if (solrConfig.userCacheConfigs.isEmpty()) {
@@ -66,41 +68,10 @@
     } else {
       this.filterCache = null;
       this.queryResultCache = null;
-      this.documentCache = null;
       this.fieldValueCache = null;
       this.cacheMap = NO_GENERIC_CACHES;
       this.cacheList = NO_CACHES;
     }
-
-    final Set<String> nonStoredDVsUsedAsStored = new HashSet<>();
-    final Set<String> allNonStoredDVs = new HashSet<>();
-    final Set<String> nonStoredDVsWithoutCopyTargets = new HashSet<>();
-    final Set<String> storedLargeFields = new HashSet<>();
-
-    this.fieldInfos = leafReader.getFieldInfos();
-    for (FieldInfo fieldInfo : fieldInfos) { // can find materialized dynamic fields, unlike using the Solr IndexSchema.
-      final SchemaField schemaField = schema.getFieldOrNull(fieldInfo.name);
-      if (schemaField == null) {
-        continue;
-      }
-      if (!schemaField.stored() && schemaField.hasDocValues()) {
-        if (schemaField.useDocValuesAsStored()) {
-          nonStoredDVsUsedAsStored.add(fieldInfo.name);
-        }
-        allNonStoredDVs.add(fieldInfo.name);
-        if (!schema.isCopyFieldTarget(schemaField)) {
-          nonStoredDVsWithoutCopyTargets.add(fieldInfo.name);
-        }
-      }
-      if (schemaField.stored() && schemaField.isLarge()) {
-        storedLargeFields.add(schemaField.getName());
-      }
-    }
-
-    this.nonStoredDVsUsedAsStored = Collections.unmodifiableSet(nonStoredDVsUsedAsStored);
-    this.allNonStoredDVs = Collections.unmodifiableSet(allNonStoredDVs);
-    this.nonStoredDVsWithoutCopyTargets = Collections.unmodifiableSet(nonStoredDVsWithoutCopyTargets);
-    this.largeFields = Collections.unmodifiableSet(storedLargeFields);
 
     // We already have our own filter cache
     setQueryCache(null);

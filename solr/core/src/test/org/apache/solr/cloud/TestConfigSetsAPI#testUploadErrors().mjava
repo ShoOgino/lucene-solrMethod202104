@@ -1,0 +1,43 @@
+  @Test
+  public void testUploadErrors() throws Exception {
+    final SolrClient solrClient = new HttpSolrClient(
+        solrCluster.getJettySolrRunners().get(0).getBaseUrl().toString());
+
+    ByteBuffer emptyData = ByteBuffer.allocate(0);
+
+    // Checking error when no configuration name is specified in request
+    Map map = postDataAndGetResponse(solrCluster.getSolrClient(),
+        solrCluster.getJettySolrRunners().get(0).getBaseUrl().toString()
+        + "/admin/configs?action=UPLOAD&wt=json", emptyData, null, null);
+    assertNotNull(map);
+    long statusCode = (long) getObjectByPath(map, false,
+        Arrays.asList("responseHeader", "status"));
+    assertEquals(400l, statusCode);
+
+    SolrZkClient zkClient = new SolrZkClient(solrCluster.getZkServer().getZkAddress(),
+        AbstractZkTestCase.TIMEOUT, 45000, null);
+
+    // Create dummy config files in zookeeper
+    zkClient.makePath("/configs/myconf", true);
+    zkClient.create("/configs/myconf/firstDummyFile",
+        "first dummy content".getBytes(StandardCharsets.UTF_8), CreateMode.PERSISTENT, true);
+    zkClient.create("/configs/myconf/anotherDummyFile",
+        "second dummy content".getBytes(StandardCharsets.UTF_8), CreateMode.PERSISTENT, true);
+
+    // Checking error when configuration name specified already exists
+    map = postDataAndGetResponse(solrCluster.getSolrClient(),
+        solrCluster.getJettySolrRunners().get(0).getBaseUrl().toString()
+        + "/admin/configs?action=UPLOAD&wt=json&name=myconf", emptyData, null, null);
+    assertNotNull(map);
+    statusCode = (long) getObjectByPath(map, false,
+        Arrays.asList("responseHeader", "status"));
+    assertEquals(400l, statusCode);
+    assertTrue("Expected file doesnt exist in zk. It's possibly overwritten",
+        zkClient.exists("/configs/myconf/firstDummyFile", true));
+    assertTrue("Expected file doesnt exist in zk. It's possibly overwritten",
+        zkClient.exists("/configs/myconf/anotherDummyFile", true));
+
+    zkClient.close();
+    solrClient.close();
+  }
+

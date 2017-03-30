@@ -27,33 +27,36 @@
         throw new SolrServerException("Local path " + Paths.get(src).toAbsolutePath() + " is a directory and recurse is false");
       }
     }
-    if (srcIsZk == false && dstIsZk == false) {
-      throw new SolrServerException("At least one of the source and dest parameters must be prefixed with 'zk:' ");
-    }
+
     if (dstIsZk && dst.length() == 0) {
       dst = "/"; // for consistency, one can copy from zk: and send to zk:/
     }
-    dst = normalizeDest(src, dst);
+    dst = normalizeDest(src, dst, srcIsZk, dstIsZk);
 
+    // ZK -> ZK copy.
     if (srcIsZk && dstIsZk) {
       traverseZkTree(zkClient, src, VISIT_ORDER.VISIT_PRE, new ZkCopier(zkClient, src, dst));
       return;
     }
+
+    //local -> ZK copy
     if (dstIsZk) {
       uploadToZK(zkClient, Paths.get(src), dst, null);
       return;
     }
 
-    // Copying individual files from ZK requires special handling since downloadFromZK assumes it's a directory.
+    // Copying individual files from ZK requires special handling since downloadFromZK assumes the node has children.
     // This is kind of a weak test for the notion of "directory" on Zookeeper.
+    // ZK -> local copy where ZK is a parent node
     if (zkClient.getChildren(src, null, true).size() > 0) {
       downloadFromZK(zkClient, src, Paths.get(dst));
       return;
     }
 
+    // Single file ZK -> local copy where ZK is a leaf node
     if (Files.isDirectory(Paths.get(dst))) {
-      if (dst.endsWith("/") == false) dst += "/";
-      dst = normalizeDest(src, dst);
+      if (dst.endsWith(File.separator) == false) dst += File.separator;
+      dst = normalizeDest(src, dst, srcIsZk, dstIsZk);
     }
     byte[] data = zkClient.getData(src, null, null, true);
     Path filename = Paths.get(dst);

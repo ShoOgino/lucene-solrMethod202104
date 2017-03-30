@@ -4,26 +4,30 @@
         System.out.println("\nTEST: old index " + name);
       }
       Directory oldDir = oldIndexDirs.get(name);
-      Version indexCreatedVersion = SegmentInfos.readLatestCommit(oldDir).getIndexCreatedVersion();
+      SegmentInfos infos = SegmentInfos.readLatestCommit(oldDir);
 
       Directory targetDir = newDirectory();
-      // Simulate writing into an index that was created on the same version
-      new SegmentInfos(indexCreatedVersion).commit(targetDir);
+      if (infos.getCommitLuceneVersion().major != Version.LATEST.major) {
+        // both indexes are not compatible
+        Directory targetDir2 = newDirectory();
+        IndexWriter w = new IndexWriter(targetDir2, newIndexWriterConfig(new MockAnalyzer(random())));
+        IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> w.addIndexes(oldDir));
+        assertTrue(e.getMessage(), e.getMessage().startsWith("Cannot use addIndexes(Directory) with indexes that have been created by a different Lucene version."));
+        w.close();
+        targetDir2.close();
+
+        // for the next test, we simulate writing to an index that was created on the same major version
+        new SegmentInfos(infos.getIndexCreatedVersionMajor()).commit(targetDir);
+      }
+
       IndexWriter w = new IndexWriter(targetDir, newIndexWriterConfig(new MockAnalyzer(random())));
       w.addIndexes(oldDir);
       w.close();
       targetDir.close();
 
-      // Now check that we forbid calling addIndexes with a different version
-      targetDir = newDirectory();
-      IndexWriter oldWriter = new IndexWriter(targetDir, newIndexWriterConfig(new MockAnalyzer(random())));
-      IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> oldWriter.addIndexes(oldDir));
-      assertTrue(e.getMessage(), e.getMessage().startsWith("Cannot use addIndexes(Directory) with indexes that have been created by a different Lucene version."));
-
       if (VERBOSE) {
         System.out.println("\nTEST: done adding indices; now close");
       }
-      oldWriter.close();
       
       targetDir.close();
     }

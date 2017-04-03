@@ -1,52 +1,9 @@
     @Override
     public Scorer scorer(LeafReaderContext context) throws IOException {
-      if (used.compareAndSet(false, true)) {
-        policy.onUse(getQuery());
-      }
-
-      // TODO: should it be pluggable, eg. for queries that run on doc values?
-      final IndexReader.CacheHelper cacheHelper = context.reader().getCoreCacheHelper();
-      if (cacheHelper == null) {
-        // this segment is not suitable for caching
-        return in.scorer(context);
-      }
-
-      // Short-circuit: Check whether this segment is eligible for caching
-      // before we take a lock because of #get
-      if (shouldCache(context) == false) {
-        return in.scorer(context);
-      }
-
-      // If the lock is already busy, prefer using the uncached version than waiting
-      if (lock.tryLock() == false) {
-        return in.scorer(context);
-      }
-
-      DocIdSet docIdSet;
-      try {
-        docIdSet = get(in.getQuery(), context, cacheHelper);
-      } finally {
-        lock.unlock();
-      }
-
-      if (docIdSet == null) {
-        if (policy.shouldCache(in.getQuery())) {
-          docIdSet = cache(context);
-          putIfAbsent(in.getQuery(), context, docIdSet, cacheHelper);
-        } else {
-          return in.scorer(context);
-        }
-      }
-
-      assert docIdSet != null;
-      if (docIdSet == DocIdSet.EMPTY) {
+      ScorerSupplier scorerSupplier = scorerSupplier(context);
+      if (scorerSupplier == null) {
         return null;
       }
-      final DocIdSetIterator disi = docIdSet.iterator();
-      if (disi == null) {
-        return null;
-      }
-
-      return new ConstantScoreScorer(this, 0f, disi);
+      return scorerSupplier.get(false);
     }
 

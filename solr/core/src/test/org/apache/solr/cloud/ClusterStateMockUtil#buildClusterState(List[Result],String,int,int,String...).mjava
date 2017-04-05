@@ -1,24 +1,24 @@
   /**
    * This method lets you construct a complex ClusterState object by using simple strings of letters.
-   * 
-   * c = collection, s = slice, r = replica, \d = node number (r2 means the replica is on node 2), 
+   *
+   * c = collection, s = slice, r = replica, \d = node number (r2 means the replica is on node 2),
    * state = [A,R,D,F], * = replica to replace, binds to the left.
-   * 
+   *
    * For example:
    * csrr2rD*sr2csr
-   * 
+   *
    * Creates:
-   * 
+   *
    * 'csrr2rD*'
    * A collection, a shard, a replica on node 1 (the default) that is active (the default), a replica on node 2, and a replica on node 1
    * that has a state of down and is the replica we will be looking to put somewhere else (the *).
-   * 
+   *
    * 'sr2'
    * Then, another shard that has a replica on node 2.
-   * 
+   *
    * 'csr'
    * Then, another collection that has a shard with a single active replica on node 1.
-   * 
+   *
    * Result:
    *        {
    *         "collection2":{
@@ -55,12 +55,12 @@
    *                   "state":"active",
    *                   "node_name":"baseUrl2_",
    *                   "base_url":"http://baseUrl2"}}}}}}
-   * 
+   *
    */
   @SuppressWarnings("resource")
-  private Result buildClusterState(String clusterDescription, int replicationFactor, int maxShardsPerNode, String ... liveNodes) {
-    Result result = new Result();
-    
+  protected static ClusterStateMockUtil.Result buildClusterState(List<Result> results, String clusterDescription, int replicationFactor, int maxShardsPerNode, String ... liveNodes) {
+    ClusterStateMockUtil.Result result = new ClusterStateMockUtil.Result();
+
     Map<String,Slice> slices = null;
     Map<String,Replica> replicas = null;
     Map<String,Object> collectionProps = new HashMap<>();
@@ -70,7 +70,7 @@
     DocCollection docCollection = null;
     Slice slice = null;
     int replicaCount = 1;
-    
+
     Matcher m = BLUEPRINT.matcher(clusterDescription);
     while (m.find()) {
       Replica replica;
@@ -90,11 +90,11 @@
           String node;
 
           node = m.group(2);
-          
+
           if (node == null || node.trim().length() == 0) {
             node = "1";
           }
-          
+
           Replica.State state = Replica.State.ACTIVE;
           String stateCode = m.group(3);
 
@@ -117,55 +117,54 @@
                     "Unexpected state for replica: " + stateCode);
             }
           }
-          
+
           String nodeName = "baseUrl" + node + "_";
           String replicaName = "replica" + replicaCount++;
-          
+
           if ("*".equals(m.group(4))) {
             replicaName += " (bad)";
           }
-          
+
           replicaPropMap.put(ZkStateReader.NODE_NAME_PROP, nodeName);
           replicaPropMap.put(ZkStateReader.BASE_URL_PROP, "http://baseUrl" + node);
           replicaPropMap.put(ZkStateReader.STATE_PROP, state.toString());
-          
+
           replica = new Replica(replicaName, replicaPropMap);
-          
+
           if ("*".equals(m.group(4))) {
-            result.badReplica = new DownReplica();
+            result.badReplica = new OverseerAutoReplicaFailoverThread.DownReplica();
             result.badReplica.replica = replica;
             result.badReplica.slice = slice;
             result.badReplica.collection = docCollection;
           }
-          
+
           replicas.put(replica.getName(), replica);
           break;
         default:
           break;
       }
     }
-  
-    // trunk briefly had clusterstate taking a zkreader :( this was required to work around that - leaving
-    // until that issue is resolved.
-    MockZkStateReader reader = new MockZkStateReader(null, collectionStates.keySet());
+
     ClusterState clusterState = new ClusterState(1, new HashSet<>(Arrays.asList(liveNodes)), collectionStates);
-    reader = new MockZkStateReader(clusterState, collectionStates.keySet());
-    
+    MockZkStateReader reader = new MockZkStateReader(clusterState, collectionStates.keySet());
+
     String json;
     try {
       json = new String(Utils.toJSON(clusterState), "UTF-8");
     } catch (UnsupportedEncodingException e) {
       throw new RuntimeException("Unexpected");
     }
-    System.err.println("build:" + buildNumber++);
     System.err.println(json);
-    
+
+    // todo remove the limitation of always having a bad replica
     assert result.badReplica != null : "Is there no bad replica?";
     assert result.badReplica.slice != null : "Is there no bad replica?";
-    
+
     result.reader = reader;
-    
-    results.add(result);
+
+    if (results != null) {
+      results.add(result);
+    }
 
     return result;
   }

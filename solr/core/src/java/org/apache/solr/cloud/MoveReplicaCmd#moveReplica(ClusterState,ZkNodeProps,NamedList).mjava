@@ -1,0 +1,54 @@
+  private void moveReplica(ClusterState clusterState, ZkNodeProps message, NamedList results) throws Exception {
+    log.info("moveReplica() : {}", Utils.toJSONString(message));
+    ocmh.checkRequired(message, COLLECTION_PROP, "targetNode");
+    String collection = message.getStr(COLLECTION_PROP);
+    String targetNode = message.getStr("targetNode");
+
+    String async = message.getStr(ASYNC);
+
+    DocCollection coll = clusterState.getCollection(collection);
+    if (coll == null) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Collection: " + collection + " does not exist");
+    }
+    Replica replica = null;
+    if (message.containsKey(REPLICA_PROP)) {
+      String replicaName = message.getStr(REPLICA_PROP);
+      replica = coll.getReplica(replicaName);
+      if (replica == null) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+            "Collection: " + collection + " replica: " + replicaName + " does not exist");
+      }
+    } else {
+      ocmh.checkRequired(message, SHARD_ID_PROP, "fromNode");
+      String fromNode = message.getStr("fromNode");
+      String shardId = message.getStr(SHARD_ID_PROP);
+      Slice slice = clusterState.getCollection(collection).getSlice(shardId);
+      List<Replica> sliceReplicas = new ArrayList<>(slice.getReplicas());
+      Collections.shuffle(sliceReplicas, RANDOM);
+      for (Replica r : slice.getReplicas()) {
+        if (r.getNodeName().equals(fromNode)) {
+          replica = r;
+        }
+      }
+      if (replica == null) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+            "Collection: " + collection + " node: " + fromNode + " do not have any replica belong to shard: " + shardId);
+      }
+    }
+
+    log.info("Replica will be moved {}", replica);
+    Slice slice = null;
+    for (Slice s : coll.getSlices()) {
+      if (s.getReplicas().contains(replica)) {
+        slice = s;
+      }
+    }
+    assert slice != null;
+    Object dataDir = replica.get("dataDir");
+    if (dataDir != null && dataDir.toString().startsWith("hdfs:/")) {
+      moveHdfsReplica(clusterState, results, dataDir.toString(), targetNode, async, coll, replica, slice);
+    } else {
+      moveNormalReplica(clusterState, results, targetNode, async, coll, replica, slice);
+    }
+  }
+

@@ -1,0 +1,55 @@
+  @Test
+  public void test() throws Exception {
+    cluster.waitForAllNodes(5000);
+    String coll = "movereplicatest_coll";
+    log.info("total_jettys: " + cluster.getJettySolrRunners().size());
+
+    CloudSolrClient cloudClient = cluster.getSolrClient();
+
+    CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(coll, "conf1", 2, 2);
+    create.setMaxShardsPerNode(2);
+    cloudClient.request(create);
+
+    Replica replica = getRandomReplica(coll, cloudClient);
+    Set<String> liveNodes = cloudClient.getZkStateReader().getClusterState().getLiveNodes();
+    ArrayList<String> l = new ArrayList<>(liveNodes);
+    Collections.shuffle(l, random());
+    String targetNode = null;
+    for (String node : liveNodes) {
+      if (!replica.getNodeName().equals(node)) {
+        targetNode = node;
+        break;
+      }
+    }
+    assertNotNull(targetNode);
+    String shardId = null;
+    for (Slice slice : cloudClient.getZkStateReader().getClusterState().getCollection(coll).getSlices()) {
+      if (slice.getReplicas().contains(replica)) {
+        shardId = slice.getName();
+      }
+    }
+
+    CollectionAdminRequest.MoveReplica moveReplica = new CollectionAdminRequest.MoveReplica(coll, replica.getName(), targetNode);
+    moveReplica.processAsync("000", cloudClient);
+    CollectionAdminRequest.RequestStatus requestStatus = CollectionAdminRequest.requestStatus("000");
+    // wait for async request success
+    boolean success = false;
+    for (int i = 0; i < 200; i++) {
+      CollectionAdminRequest.RequestStatusResponse rsp = requestStatus.process(cloudClient);
+      if (rsp.getRequestStatus() == RequestStatusState.COMPLETED) {
+        success = true;
+        break;
+      }
+      assertFalse(rsp.getRequestStatus() == RequestStatusState.FAILED);
+      Thread.sleep(50);
+    }
+    assertTrue(success);
+    checkNumOfCores(cloudClient, replica.getNodeName(), 0);
+    checkNumOfCores(cloudClient, targetNode, 2);
+
+    moveReplica = new CollectionAdminRequest.MoveReplica(coll, shardId, targetNode, replica.getNodeName());
+    moveReplica.process(cloudClient);
+    checkNumOfCores(cloudClient, replica.getNodeName(), 1);
+    checkNumOfCores(cloudClient, targetNode, 1);
+  }
+

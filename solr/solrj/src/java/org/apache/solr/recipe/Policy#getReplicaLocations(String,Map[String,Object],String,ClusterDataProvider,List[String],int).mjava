@@ -1,0 +1,29 @@
+  public static Map<String, List<String>> getReplicaLocations(String collName, Map<String, Object> autoScalingJson,
+                                                              String policyName, ClusterDataProvider cdp,
+                                                              List<String> shardNames,
+                                                              int repFactor) {
+    Map<String, List<String>> positionMapping = new HashMap<>();
+    for (String shardName : shardNames) positionMapping.put(shardName, new ArrayList<>(repFactor));
+    Map policyJson = (Map) Utils.getObjectByPath(autoScalingJson, false, asList("policies", policyName));
+    if (policyJson == null) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "no such policy exists " + policyName);
+    }
+    Map defaultPolicy = (Map) Utils.getObjectByPath(autoScalingJson, false, asList("policies", "default"));
+
+    Policy policy = new Policy(Policy.mergePolicies(collName, policyJson, defaultPolicy));
+    Policy.Session session = policy.createSession(cdp);
+    for (String shardName : shardNames) {
+      for (int i = 0; i < repFactor; i++) {
+        Policy.Suggester suggester = session.getSuggester(ADDREPLICA, collName, shardName);
+        Map op = suggester.getOperation();
+        if (op == null) {
+          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "No node can satisfy the rules");
+        }
+        session = suggester.getSession();
+        positionMapping.get(shardName).add((String) op.get(CoreAdminParams.NODE));
+      }
+    }
+
+    return positionMapping;
+  }
+

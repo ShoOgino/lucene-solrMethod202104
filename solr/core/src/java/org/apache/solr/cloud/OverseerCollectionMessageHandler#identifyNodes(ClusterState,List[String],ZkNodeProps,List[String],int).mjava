@@ -2,9 +2,10 @@
                                       List<String> nodeList,
                                       ZkNodeProps message,
                                       List<String> shardNames,
-                                      int repFactor) throws IOException {
+                                      int repFactor) throws IOException, KeeperException, InterruptedException {
     List<Map> rulesMap = (List) message.get("rule");
-    if (rulesMap == null) {
+    String policyName = message.getStr("policy");
+    if (rulesMap == null && policyName == null) {
       int i = 0;
       Map<Position, String> result = new HashMap<>();
       for (String aShard : shardNames) {
@@ -16,20 +17,41 @@
       return result;
     }
 
-    List<Rule> rules = new ArrayList<>();
-    for (Object map : rulesMap) rules.add(new Rule((Map) map));
+    if (policyName != null) {
+      String collName = message.getStr(CommonParams.NAME, "coll_" + System.nanoTime());
+      try(CloudSolrClient csc = new CloudSolrClient.Builder()
+          .withClusterStateProvider(new ZkClientClusterStateProvider(zkStateReader))
+          .build()) {
+        ClientDataProvider clientDataProvider = new ClientDataProvider(csc);
+        Map<String, List<String>> locations = Policy.getReplicaLocations(collName,
+            zkStateReader.getZkClient().getJson(SOLR_AUTOSCALING_CONF_PATH, true),
+            policyName, clientDataProvider, shardNames, repFactor);
+        Map<Position, String> result = new HashMap<>();
+        for (Map.Entry<String, List<String>> e : locations.entrySet()) {
+          List<String> value = e.getValue();
+          for ( int i = 0; i < value.size(); i++) {
+            result.put(new Position(e.getKey(),i), value.get(i));
+          }
+        }
+        return result;
+      }
 
-    Map<String, Integer> sharVsReplicaCount = new HashMap<>();
+    } else {
+      List<Rule> rules = new ArrayList<>();
+      for (Object map : rulesMap) rules.add(new Rule((Map) map));
 
-    for (String shard : shardNames) sharVsReplicaCount.put(shard, repFactor);
-    ReplicaAssigner replicaAssigner = new ReplicaAssigner(rules,
-        sharVsReplicaCount,
-        (List<Map>) message.get(SNITCH),
-        new HashMap<>(),//this is a new collection. So, there are no nodes in any shard
-        nodeList,
-        overseer.getZkController().getCoreContainer(),
-        clusterState);
+      Map<String, Integer> sharVsReplicaCount = new HashMap<>();
 
-    return replicaAssigner.getNodeMappings();
+      for (String shard : shardNames) sharVsReplicaCount.put(shard, repFactor);
+      ReplicaAssigner replicaAssigner = new ReplicaAssigner(rules,
+          sharVsReplicaCount,
+          (List<Map>) message.get(SNITCH),
+          new HashMap<>(),//this is a new collection. So, there are no nodes in any shard
+          nodeList,
+          overseer.getZkController().getCoreContainer(),
+          clusterState);
+
+      return replicaAssigner.getNodeMappings();
+    }
   }
 

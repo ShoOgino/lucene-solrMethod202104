@@ -1,12 +1,17 @@
   /** Merge the most recent {@code maxTempFile} partitions into a new partition. */
-  void mergePartitions(Directory trackingDir, List<String> segments) throws IOException {
+  void mergePartitions(Directory trackingDir, List<PartitionAndCount> segments) throws IOException {
     long start = System.currentTimeMillis();
 
-    List<String> segmentsToMerge;
+    List<PartitionAndCount> segmentsToMerge;
     if (segments.size() > maxTempFiles) {
       segmentsToMerge = segments.subList(segments.size() - maxTempFiles, segments.size());
     } else {
       segmentsToMerge = segments;
+    }
+
+    long totalCount = 0;
+    for (PartitionAndCount segment : segmentsToMerge) {
+      totalCount += segment.count;
     }
 
     PriorityQueue<FileAndTop> queue = new PriorityQueue<FileAndTop>(segmentsToMerge.size()) {
@@ -20,13 +25,13 @@
 
     String newSegmentName = null;
 
-    try (ByteSequencesWriter writer = getWriter(trackingDir.createTempOutput(tempFileNamePrefix, "sort", IOContext.DEFAULT))) {
+    try (ByteSequencesWriter writer = getWriter(trackingDir.createTempOutput(tempFileNamePrefix, "sort", IOContext.DEFAULT), totalCount)) {
 
       newSegmentName = writer.out.getName();
       
       // Open streams and read the top for each file
       for (int i = 0; i < segmentsToMerge.size(); i++) {
-        streams[i] = getReader(dir.openChecksumInput(segmentsToMerge.get(i), IOContext.READONCE), segmentsToMerge.get(i));
+        streams[i] = getReader(dir.openChecksumInput(segmentsToMerge.get(i).fileName, IOContext.READONCE), segmentsToMerge.get(i).fileName);
         BytesRef item = null;
         try {
           item = streams[i].next();
@@ -69,10 +74,10 @@
       IOUtils.close(streams);
     }
 
-    IOUtils.deleteFiles(trackingDir, segmentsToMerge);
+    IOUtils.deleteFiles(trackingDir, segmentsToMerge.stream().map(segment -> segment.fileName).collect(Collectors.toList()));
 
     segmentsToMerge.clear();
-    segments.add(newSegmentName);
+    segments.add(new PartitionAndCount(totalCount, newSegmentName));
 
     sortInfo.tempMergeFiles++;
   }

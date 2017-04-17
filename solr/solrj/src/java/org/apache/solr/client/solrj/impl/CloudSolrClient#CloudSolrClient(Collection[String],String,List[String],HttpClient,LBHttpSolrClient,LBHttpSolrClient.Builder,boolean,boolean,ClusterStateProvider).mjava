@@ -9,9 +9,14 @@
    *          each host in the zookeeper ensemble. Note that with certain
    *          Collection types like HashSet, the order of hosts in the final
    *          connect string may not be in the same order you added them.
+   *          Provide only one of solrUrls or zkHosts.
    * @param chroot
    *          A chroot value for zookeeper, starting with a forward slash. If no
    *          chroot is required, use null.
+   * @param solrUrls
+   *          A list of Solr URLs to configure the underlying {@link HttpClusterStateProvider}, which will
+   *          use of the these URLs to fetch the list of live nodes for this Solr cluster. Provide only
+   *          one of solrUrls or zkHosts.
    * @param httpClient
    *          the {@link HttpClient} instance to be used for all requests. The provided httpClient should use a
    *          multi-threaded connection manager.  If null, a default HttpClient will be used.
@@ -26,6 +31,7 @@
    */
   private CloudSolrClient(Collection<String> zkHosts,
                           String chroot,
+                          List<String> solrUrls,
                           HttpClient httpClient,
                           LBHttpSolrClient lbSolrClient,
                           LBHttpSolrClient.Builder lbHttpSolrClientBuilder,
@@ -35,7 +41,21 @@
 
   ) {
     if (stateProvider == null) {
-      this.stateProvider = new ZkClientClusterStateProvider(zkHosts, chroot);
+      if (zkHosts != null && solrUrls != null) {
+        throw new IllegalArgumentException("Both zkHost(s) & solrUrl(s) have been specified. Only specify one.");
+      }
+      if (zkHosts != null) {
+        this.stateProvider = new ZkClientClusterStateProvider(zkHosts, chroot);
+      } else if (solrUrls != null && !solrUrls.isEmpty()) {
+        try {
+          this.stateProvider = new HttpClusterStateProvider(solrUrls, httpClient);
+        } catch (Exception e) {
+          throw new RuntimeException("Couldn't initialize a HttpClusterStateProvider (is/are the "
+              + "Solr server(s), "  + solrUrls + ", down?)", e);
+        }
+      } else {
+        throw new IllegalArgumentException("Both zkHosts and solrUrl cannot be null.");
+      }
     } else {
       this.stateProvider = stateProvider;
     }

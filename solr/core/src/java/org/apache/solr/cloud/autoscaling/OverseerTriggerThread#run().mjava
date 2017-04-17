@@ -1,0 +1,44 @@
+  @Override
+  public void run() {
+    int lastZnodeVersion = znodeVersion;
+    SolrZkClient zkClient = zkStateReader.getZkClient();
+    createWatcher(zkClient);
+
+    while (true) {
+      Map<String, AutoScaling.Trigger> copy = null;
+      try {
+        updateLock.lockInterruptibly();
+        if (znodeVersion == lastZnodeVersion) {
+          updated.await();
+
+          // are we closed?
+          if (isClosed) break;
+
+          // spurious wakeup?
+          if (znodeVersion == lastZnodeVersion) continue;
+          lastZnodeVersion = znodeVersion;
+        }
+        copy = new HashMap<>(activeTriggers);
+      } catch (InterruptedException e) {
+        // Restore the interrupted status
+        Thread.currentThread().interrupt();
+        log.warn("Interrupted", e);
+        break;
+      } finally {
+        updateLock.unlock();
+      }
+
+      Set<String> managedTriggerNames = scheduledTriggers.getScheduledTriggerNames();
+      // remove the triggers which are no longer active
+      for (String managedTriggerName : managedTriggerNames) {
+        if (!copy.containsKey(managedTriggerName)) {
+          scheduledTriggers.remove(managedTriggerName);
+        }
+      }
+      // add new triggers and/or replace and close the replaced triggers
+      for (Map.Entry<String, AutoScaling.Trigger> entry : copy.entrySet()) {
+        scheduledTriggers.add(entry.getValue());
+      }
+    }
+  }
+

@@ -1,0 +1,51 @@
+  @Override
+  public Object evaluate(Tuple tuple) throws IOException {
+
+    Instant instant = null;
+    TemporalAccessor date = null;
+
+    //First evaluate the parameter
+    StreamEvaluator streamEvaluator = subEvaluators.get(0);
+    Object tupleValue = streamEvaluator.evaluate(tuple);
+
+    if (tupleValue == null) return null;
+
+    if(field == null) {
+      field = streamEvaluator.toExpression(constructingFactory).toString();
+    }
+
+    Map tupleContext = streamContext.getTupleContext();
+    date = (LocalDateTime)tupleContext.get(field); // Check to see if the date has already been created for this field
+
+    if(date == null) {
+      if (tupleValue instanceof String) {
+        instant = getInstant((String) tupleValue);
+      } else if (tupleValue instanceof Long) {
+        instant = Instant.ofEpochMilli((Long) tupleValue);
+      } else if (tupleValue instanceof Instant) {
+        instant = (Instant) tupleValue;
+      } else if (tupleValue instanceof Date) {
+        instant = ((Date) tupleValue).toInstant();
+      } else if (tupleValue instanceof TemporalAccessor) {
+        date = ((TemporalAccessor) tupleValue);
+        tupleContext.put(field, date); // Cache the date in the TupleContext
+      }
+    }
+
+    if (instant != null) {
+      if (TemporalEvaluatorEpoch.FUNCTION_NAME.equals(getFunction())) return instant.toEpochMilli();
+      date = LocalDateTime.ofInstant(instant, ZoneOffset.UTC);
+      tupleContext.put(field, date); // Cache the date in the TupleContext
+    }
+
+    if (date != null) {
+      try {
+        return evaluateDate(date);
+      } catch (UnsupportedTemporalTypeException utte) {
+        throw new IOException(String.format(Locale.ROOT, "It is not possible to call '%s' function on %s", getFunction(), date.getClass().getName()));
+      }
+    }
+
+    throw new IOException(String.format(Locale.ROOT, "Invalid parameter %s - The parameter must be a string formatted ISO_INSTANT or of type Long,Instant,Date,LocalDateTime or TemporalAccessor.", String.valueOf(tupleValue)));
+  }
+

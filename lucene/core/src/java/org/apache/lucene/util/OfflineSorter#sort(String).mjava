@@ -6,17 +6,22 @@
     sortInfo = new SortInfo();
     sortInfo.totalTime = System.currentTimeMillis();
 
-    List<String> segments = new ArrayList<>();
+    List<PartitionAndCount> segments = new ArrayList<>();
     int[] levelCounts = new int[1];
 
     // So we can remove any partially written temp files on exception:
     TrackingDirectoryWrapper trackingDir = new TrackingDirectoryWrapper(dir);
 
     boolean success = false;
+    boolean[] isExhausted = new boolean[1];
     try (ByteSequencesReader is = getReader(dir.openChecksumInput(inputFileName, IOContext.READONCE), inputFileName)) {
-      int lineCount;
-      while ((lineCount = readPartition(is)) > 0) {
-        segments.add(sortPartition(trackingDir));
+      while (isExhausted[0] == false) {
+        int lineCount = readPartition(is, isExhausted);
+        if (lineCount == 0) {
+          assert isExhausted[0];
+          break;
+        }
+        segments.add(sortPartition(trackingDir, lineCount));
         sortInfo.tempMergeFiles++;
         sortInfo.lineCount += lineCount;
         levelCounts[0]++;
@@ -50,7 +55,7 @@
           result = out.getName();
         }
       } else {
-        result = segments.get(0);
+        result = segments.get(0).fileName;
       }
 
       // We should be explicitly removing all intermediate files ourselves unless there is an exception:

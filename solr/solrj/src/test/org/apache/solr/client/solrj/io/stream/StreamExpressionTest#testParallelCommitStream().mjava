@@ -16,6 +16,9 @@
     StreamExpression expression;
     TupleStream stream;
     Tuple t;
+    StreamContext streamContext = new StreamContext();
+    SolrClientCache solrClientCache = new SolrClientCache();
+    streamContext.setSolrClientCache(solrClientCache);
     
     String zkHost = cluster.getZkServer().getZkAddress();
     StreamFactory factory = new StreamFactory()
@@ -26,66 +29,72 @@
       .withFunctionName("commit", CommitStream.class)
       .withFunctionName("parallel", ParallelStream.class);
 
-    //Copy all docs to destinationCollection
-    String updateExpression = "commit(parallelDestinationCollection, batchSize=0, zkHost=\"" + cluster.getZkServer().getZkAddress() + "\", update(parallelDestinationCollection, batchSize=2, search(collection1, q=*:*, fl=\"id,a_s,a_i,a_f,s_multi,i_multi\", sort=\"a_f asc, a_i asc\", partitionKeys=\"a_f\")))";
-    TupleStream parallelUpdateStream = factory.constructStream("parallel(collection1, " + updateExpression + ", workers=\"2\", zkHost=\""+zkHost+"\", sort=\"batchNumber asc\")");
-    List<Tuple> tuples = getTuples(parallelUpdateStream);
-    
-    //Ensure that all UpdateStream tuples indicate the correct number of copied/indexed docs
-    long count = 0;
+    try {
+      //Copy all docs to destinationCollection
+      String updateExpression = "commit(parallelDestinationCollection, batchSize=0, zkHost=\"" + cluster.getZkServer().getZkAddress() + "\", update(parallelDestinationCollection, batchSize=2, search(collection1, q=*:*, fl=\"id,a_s,a_i,a_f,s_multi,i_multi\", sort=\"a_f asc, a_i asc\", partitionKeys=\"a_f\")))";
+      TupleStream parallelUpdateStream = factory.constructStream("parallel(collection1, " + updateExpression + ", workers=\"2\", zkHost=\"" + zkHost + "\", sort=\"batchNumber asc\")");
+      parallelUpdateStream.setStreamContext(streamContext);
+      List<Tuple> tuples = getTuples(parallelUpdateStream);
 
-    for(Tuple tuple : tuples) {
-      count+=tuple.getLong("batchIndexed");
+      //Ensure that all UpdateStream tuples indicate the correct number of copied/indexed docs
+      long count = 0;
+
+      for (Tuple tuple : tuples) {
+        count += tuple.getLong("batchIndexed");
+      }
+
+      assert (count == 5);
+
+
+      //Ensure that destinationCollection actually has the new docs.
+      expression = StreamExpressionParser.parse("search(parallelDestinationCollection, q=*:*, fl=\"id,a_s,a_i,a_f,s_multi,i_multi\", sort=\"a_i asc\")");
+      stream = new CloudSolrStream(expression, factory);
+      stream.setStreamContext(streamContext);
+      tuples = getTuples(stream);
+      assertEquals(5, tuples.size());
+
+      Tuple tuple = tuples.get(0);
+      assert (tuple.getLong("id") == 0);
+      assert (tuple.get("a_s").equals("hello0"));
+      assert (tuple.getLong("a_i") == 0);
+      assert (tuple.getDouble("a_f") == 0.0);
+      assertList(tuple.getStrings("s_multi"), "aaaa", "bbbb");
+      assertList(tuple.getLongs("i_multi"), Long.parseLong("4"), Long.parseLong("7"));
+
+      tuple = tuples.get(1);
+      assert (tuple.getLong("id") == 1);
+      assert (tuple.get("a_s").equals("hello1"));
+      assert (tuple.getLong("a_i") == 1);
+      assert (tuple.getDouble("a_f") == 1.0);
+      assertList(tuple.getStrings("s_multi"), "aaaa4", "bbbb4");
+      assertList(tuple.getLongs("i_multi"), Long.parseLong("44444"), Long.parseLong("77777"));
+
+      tuple = tuples.get(2);
+      assert (tuple.getLong("id") == 2);
+      assert (tuple.get("a_s").equals("hello2"));
+      assert (tuple.getLong("a_i") == 2);
+      assert (tuple.getDouble("a_f") == 0.0);
+      assertList(tuple.getStrings("s_multi"), "aaaa1", "bbbb1");
+      assertList(tuple.getLongs("i_multi"), Long.parseLong("44"), Long.parseLong("77"));
+
+      tuple = tuples.get(3);
+      assert (tuple.getLong("id") == 3);
+      assert (tuple.get("a_s").equals("hello3"));
+      assert (tuple.getLong("a_i") == 3);
+      assert (tuple.getDouble("a_f") == 3.0);
+      assertList(tuple.getStrings("s_multi"), "aaaa2", "bbbb2");
+      assertList(tuple.getLongs("i_multi"), Long.parseLong("444"), Long.parseLong("777"));
+
+      tuple = tuples.get(4);
+      assert (tuple.getLong("id") == 4);
+      assert (tuple.get("a_s").equals("hello4"));
+      assert (tuple.getLong("a_i") == 4);
+      assert (tuple.getDouble("a_f") == 4.0);
+      assertList(tuple.getStrings("s_multi"), "aaaa3", "bbbb3");
+      assertList(tuple.getLongs("i_multi"), Long.parseLong("4444"), Long.parseLong("7777"));
+    } finally {
+      CollectionAdminRequest.deleteCollection("parallelDestinationCollection").process(cluster.getSolrClient());
+      solrClientCache.close();
     }
-
-    assert(count == 5);
-
-    //Ensure that destinationCollection actually has the new docs.
-    expression = StreamExpressionParser.parse("search(parallelDestinationCollection, q=*:*, fl=\"id,a_s,a_i,a_f,s_multi,i_multi\", sort=\"a_i asc\")");
-    stream = new CloudSolrStream(expression, factory);
-    tuples = getTuples(stream);
-    assertEquals(5, tuples.size());
-
-    Tuple tuple = tuples.get(0);
-    assert(tuple.getLong("id") == 0);
-    assert(tuple.get("a_s").equals("hello0"));
-    assert(tuple.getLong("a_i") == 0);
-    assert(tuple.getDouble("a_f") == 0.0);
-    assertList(tuple.getStrings("s_multi"), "aaaa", "bbbb");
-    assertList(tuple.getLongs("i_multi"), Long.parseLong("4"), Long.parseLong("7"));
-
-    tuple = tuples.get(1);
-    assert(tuple.getLong("id") == 1);
-    assert(tuple.get("a_s").equals("hello1"));
-    assert(tuple.getLong("a_i") == 1);
-    assert(tuple.getDouble("a_f") == 1.0);
-    assertList(tuple.getStrings("s_multi"), "aaaa4", "bbbb4");
-    assertList(tuple.getLongs("i_multi"), Long.parseLong("44444"), Long.parseLong("77777"));
-
-    tuple = tuples.get(2);
-    assert(tuple.getLong("id") == 2);
-    assert(tuple.get("a_s").equals("hello2"));
-    assert(tuple.getLong("a_i") == 2);
-    assert(tuple.getDouble("a_f") == 0.0);
-    assertList(tuple.getStrings("s_multi"), "aaaa1", "bbbb1");
-    assertList(tuple.getLongs("i_multi"), Long.parseLong("44"), Long.parseLong("77"));
-
-    tuple = tuples.get(3);
-    assert(tuple.getLong("id") == 3);
-    assert(tuple.get("a_s").equals("hello3"));
-    assert(tuple.getLong("a_i") == 3);
-    assert(tuple.getDouble("a_f") == 3.0);
-    assertList(tuple.getStrings("s_multi"), "aaaa2", "bbbb2");
-    assertList(tuple.getLongs("i_multi"), Long.parseLong("444"), Long.parseLong("777"));
-
-    tuple = tuples.get(4);
-    assert(tuple.getLong("id") == 4);
-    assert(tuple.get("a_s").equals("hello4"));
-    assert(tuple.getLong("a_i") == 4);
-    assert(tuple.getDouble("a_f") == 4.0);
-    assertList(tuple.getStrings("s_multi"), "aaaa3", "bbbb3");
-    assertList(tuple.getLongs("i_multi"), Long.parseLong("4444"), Long.parseLong("7777"));
-
-    CollectionAdminRequest.deleteCollection("parallelDestinationCollection").process(cluster.getSolrClient());
   }
 

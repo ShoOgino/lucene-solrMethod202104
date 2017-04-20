@@ -21,10 +21,11 @@
     boolean isNonRetryable = req.request instanceof IsUpdateRequest || ADMIN_PATHS.contains(req.request.getPath());
     List<ServerWrapper> skipped = null;
 
+    boolean timeAllowedExceeded = false;
     long timeAllowedNano = getTimeAllowedInNanos(req.getRequest());
     long timeOutTime = System.nanoTime() + timeAllowedNano;
     for (String serverStr : req.getServers()) {
-      if(isTimeExceeded(timeAllowedNano, timeOutTime)) {
+      if (timeAllowedExceeded = isTimeExceeded(timeAllowedNano, timeOutTime)) {
         break;
       }
       
@@ -61,22 +62,33 @@
     // try the servers we previously skipped
     if (skipped != null) {
       for (ServerWrapper wrapper : skipped) {
-        if(isTimeExceeded(timeAllowedNano, timeOutTime)) {
+        if (timeAllowedExceeded = isTimeExceeded(timeAllowedNano, timeOutTime)) {
           break;
         }
 
-        ex = doRequest(wrapper.client, req, rsp, isNonRetryable, true, wrapper.getKey());
-        if (ex == null) {
-          return rsp; // SUCCESS
+        try {
+          MDC.put("LBHttpSolrClient.url", wrapper.client.getBaseURL());
+          ex = doRequest(wrapper.client, req, rsp, isNonRetryable, true, wrapper.getKey());
+          if (ex == null) {
+            return rsp; // SUCCESS
+          }
+        } finally {
+          MDC.remove("LBHttpSolrClient.url");
         }
       }
     }
 
 
-    if (ex == null) {
-      throw new SolrServerException("No live SolrServers available to handle this request");
+    final String solrServerExceptionMessage;
+    if (timeAllowedExceeded) {
+      solrServerExceptionMessage = "Time allowed to handle this request exceeded";
     } else {
-      throw new SolrServerException("No live SolrServers available to handle this request:" + zombieServers.keySet(), ex);
+      solrServerExceptionMessage = "No live SolrServers available to handle this request";
+    }
+    if (ex == null) {
+      throw new SolrServerException(solrServerExceptionMessage);
+    } else {
+      throw new SolrServerException(solrServerExceptionMessage+":" + zombieServers.keySet(), ex);
     }
 
   }

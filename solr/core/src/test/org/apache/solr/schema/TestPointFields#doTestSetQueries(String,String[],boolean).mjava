@@ -3,7 +3,8 @@
       assertU(adoc("id", String.valueOf(i), fieldName, values[i]));
     }
     assertU(commit());
-    assertTrue(h.getCore().getLatestSchema().getField(fieldName).getType() instanceof PointField);
+    SchemaField sf = h.getCore().getLatestSchema().getField(fieldName); 
+    assertTrue(sf.getType() instanceof PointField);
     
     for (int i = 0; i < values.length; i++) {
       assertQ(req("q", "{!term f='" + fieldName + "'}" + values[i], "fl", "id," + fieldName), 
@@ -15,6 +16,27 @@
           "//*[@numFound='2']");
     }
     
+    assertTrue(values.length > SolrQueryParser.TERMS_QUERY_THRESHOLD);
+    int numTerms = SolrQueryParser.TERMS_QUERY_THRESHOLD + 1;
+    StringBuilder builder = new StringBuilder(fieldName + ":(");
+    for (int i = 0; i < numTerms; i++) {
+      if (sf.getType().getNumberType() == NumberType.DATE) {
+        builder.append(String.valueOf(values[i]).replace(":", "\\:") + ' ');
+      } else {
+        builder.append(String.valueOf(values[i]).replace("-", "\\-") + ' ');
+      }
+    }
+    builder.append(')');
+    if (sf.indexed()) { // SolrQueryParser should also be generating a PointInSetQuery if indexed
+      assertQ(req(CommonParams.DEBUG, CommonParams.QUERY, "q", "*:*", "fq", builder.toString(), "fl", "id," + fieldName), 
+          "//*[@numFound='" + numTerms + "']",
+          "//*[@name='parsed_filter_queries']/str[.='(" + getSetQueryToString(fieldName, values, numTerms) + ")']");
+    } else {
+      // Won't use PointInSetQuery if the fiels is not indexed, but should match the same docs
+      assertQ(req(CommonParams.DEBUG, CommonParams.QUERY, "q", "*:*", "fq", builder.toString(), "fl", "id," + fieldName), 
+          "//*[@numFound='" + numTerms + "']");
+    }
+
     if (multiValued) {
       clearIndex();
       assertU(commit());

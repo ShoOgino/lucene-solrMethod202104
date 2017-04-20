@@ -1,17 +1,26 @@
   @Test
-  public void testNodeAddedTrigger() throws Exception {
+  public void testNodeLostTrigger() throws Exception {
     CloudSolrClient solrClient = cluster.getSolrClient();
     // todo nocommit -- add testing for the v2 path
     // String path = random().nextBoolean() ? "/admin/autoscaling" : "/v2/cluster/autoscaling";
     String path = "/admin/autoscaling";
     String setTriggerCommand = "{" +
         "'set-trigger' : {" +
-        "'name' : 'node_added_trigger'," +
-        "'event' : 'nodeAdded'," +
+        "'name' : 'node_lost_trigger'," +
+        "'event' : 'nodeLost'," +
         "'waitFor' : '" + waitForSeconds + "s'," +
         "'enabled' : 'true'," +
         "'actions' : [{'name':'test','class':'" + TestTriggerAction.class.getName() + "'}]" +
         "}}";
+    NamedList<Object> overSeerStatus = cluster.getSolrClient().request(CollectionAdminRequest.getOverseerStatus());
+    String overseerLeader = (String) overSeerStatus.get("leader");
+    int nonOverseerLeaderIndex = 0;
+    for (int i = 0; i < cluster.getJettySolrRunners().size(); i++) {
+      JettySolrRunner jetty = cluster.getJettySolrRunner(i);
+      if (!jetty.getNodeName().equals(overseerLeader)) {
+        nonOverseerLeaderIndex = i;
+      }
+    }
     SolrRequest req = new AutoScalingHandlerTest.AutoScalingRequest(SolrRequest.METHOD.POST, path, setTriggerCommand);
     NamedList<Object> response = solrClient.request(req);
     assertEquals(response.get("result").toString(), "success");
@@ -20,13 +29,14 @@
       fail("The TriggerAction should have been created by now");
     }
 
-    JettySolrRunner newNode = cluster.startJettySolrRunner();
+    String lostNodeName = cluster.getJettySolrRunner(nonOverseerLeaderIndex).getNodeName();
+    cluster.stopJettySolrRunner(nonOverseerLeaderIndex);
     boolean await = triggerFiredLatch.await(20, TimeUnit.SECONDS);
     assertTrue("The trigger did not fire at all", await);
     assertTrue(triggerFired.get());
-    NodeAddedTrigger.NodeAddedEvent nodeAddedEvent = (NodeAddedTrigger.NodeAddedEvent) eventRef.get();
-    assertNotNull(nodeAddedEvent);
-    assertEquals("The node added trigger was fired but for a different node",
-        newNode.getNodeName(), nodeAddedEvent.getNodeName());
+    NodeLostTrigger.NodeLostEvent nodeLostEvent = (NodeLostTrigger.NodeLostEvent) eventRef.get();
+    assertNotNull(nodeLostEvent);
+    assertEquals("The node lost trigger was fired but for a different node",
+        lostNodeName, nodeLostEvent.getNodeName());
   }
 

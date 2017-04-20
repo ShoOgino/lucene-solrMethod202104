@@ -1,0 +1,49 @@
+  @Override
+  public void run() {
+    try {
+      synchronized (this) {
+        if (isClosed) {
+          log.warn("NodeLostTrigger ran but was already closed");
+          throw new RuntimeException("Trigger has been closed");
+        }
+      }
+      log.debug("Running NodeLostTrigger");
+
+      ZkStateReader reader = container.getZkController().getZkStateReader();
+      Set<String> newLiveNodes = reader.getClusterState().getLiveNodes();
+      log.info("Found livenodes: " + newLiveNodes);
+
+      // have any nodes that we were tracking been added to the cluster?
+      // if so, remove them from the tracking map
+      Set<String> trackingKeySet = nodeNameVsTimeRemoved.keySet();
+      trackingKeySet.removeAll(newLiveNodes);
+
+      // have any nodes been removed?
+      Set<String> copyOfLastLiveNodes = new HashSet<>(lastLiveNodes);
+      copyOfLastLiveNodes.removeAll(newLiveNodes);
+      copyOfLastLiveNodes.forEach(n -> {
+        log.info("Tracking lost node: {}", n);
+        nodeNameVsTimeRemoved.put(n, System.nanoTime());
+      });
+
+      // has enough time expired to trigger events for a node?
+      for (Map.Entry<String, Long> entry : nodeNameVsTimeRemoved.entrySet()) {
+        String nodeName = entry.getKey();
+        Long timeRemoved = entry.getValue();
+        if (TimeUnit.SECONDS.convert(System.nanoTime() - timeRemoved, TimeUnit.NANOSECONDS) >= getWaitForSecond()) {
+          // fire!
+          AutoScaling.TriggerListener<NodeLostEvent> listener = listenerRef.get();
+          if (listener != null) {
+            log.info("NodeLostTrigger firing registered listener");
+            listener.triggerFired(new NodeLostEvent(this, timeRemoved, nodeName));
+          }
+          trackingKeySet.remove(nodeName);
+        }
+      }
+
+      lastLiveNodes = newLiveNodes;
+    } catch (RuntimeException e) {
+      log.error("Unexpected exception in NodeLostTrigger", e);
+    }
+  }
+

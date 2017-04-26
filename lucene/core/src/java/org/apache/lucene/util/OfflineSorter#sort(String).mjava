@@ -4,26 +4,28 @@
   public String sort(String inputFileName) throws IOException {
     
     sortInfo = new SortInfo();
-    sortInfo.totalTime = System.currentTimeMillis();
+    long startMS = System.currentTimeMillis();
 
-    List<PartitionAndCount> segments = new ArrayList<>();
+    List<Future<Partition>> segments = new ArrayList<>();
     int[] levelCounts = new int[1];
 
     // So we can remove any partially written temp files on exception:
     TrackingDirectoryWrapper trackingDir = new TrackingDirectoryWrapper(dir);
 
     boolean success = false;
-    boolean[] isExhausted = new boolean[1];
     try (ByteSequencesReader is = getReader(dir.openChecksumInput(inputFileName, IOContext.READONCE), inputFileName)) {
-      while (isExhausted[0] == false) {
-        int lineCount = readPartition(is, isExhausted);
-        if (lineCount == 0) {
-          assert isExhausted[0];
+      while (true) {
+        Partition part = readPartition(is);
+        if (part.count == 0) {
+          assert part.exhausted;
           break;
         }
-        segments.add(sortPartition(trackingDir, lineCount));
+
+        Callable<Partition> job = new SortPartitionTask(trackingDir, part);
+
+        segments.add(exec.submit(job));
         sortInfo.tempMergeFiles++;
-        sortInfo.lineCount += lineCount;
+        sortInfo.lineCount += part.count;
         levelCounts[0]++;
 
         // Handle intermediate merges; we need a while loop to "cascade" the merge when necessary:
@@ -36,6 +38,10 @@
           levelCounts[mergeLevel+1]++;
           levelCounts[mergeLevel] = 0;
           mergeLevel++;
+        }
+
+        if (part.exhausted) {
+          break;
         }
       }
       
@@ -55,13 +61,22 @@
           result = out.getName();
         }
       } else {
-        result = segments.get(0).fileName;
+        try {
+          result = segments.get(0).get().fileName;
+        } catch (InterruptedException ie) {
+          throw new ThreadInterruptedException(ie);
+        } catch (ExecutionException ee) {
+          IOUtils.reThrow(ee.getCause());
+
+          // dead code but javac disagrees:
+          result = null;
+        }
       }
 
       // We should be explicitly removing all intermediate files ourselves unless there is an exception:
       assert trackingDir.getCreatedFiles().size() == 1 && trackingDir.getCreatedFiles().contains(result);
 
-      sortInfo.totalTime = System.currentTimeMillis() - sortInfo.totalTime; 
+      sortInfo.totalTimeMS = System.currentTimeMillis() - startMS;
 
       CodecUtil.checkFooter(is.in);
 
@@ -69,6 +84,8 @@
 
       return result;
 
+    } catch (InterruptedException ie) {
+      throw new ThreadInterruptedException(ie);
     } finally {
       if (success == false) {
         IOUtils.deleteFilesIgnoringExceptions(trackingDir, trackingDir.getCreatedFiles());

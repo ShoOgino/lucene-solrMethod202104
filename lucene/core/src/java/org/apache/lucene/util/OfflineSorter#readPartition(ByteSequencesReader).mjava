@@ -1,7 +1,15 @@
   /** Read in a single partition of data, setting isExhausted[0] to true if there are no more items. */
-  int readPartition(ByteSequencesReader reader, boolean[] isExhausted) throws IOException {
+  Partition readPartition(ByteSequencesReader reader) throws IOException, InterruptedException {
+    if (partitionsInRAM != null) {
+      partitionsInRAM.acquire();
+    }
     long start = System.currentTimeMillis();
+    SortableBytesRefArray buffer;
+    boolean exhausted = false;
+    int count;
     if (valueLength != -1) {
+      // fixed length case
+      buffer = new FixedLengthBytesRefArray(valueLength);
       int limit = ramBufferSize.bytes / valueLength;
       for(int i=0;i<limit;i++) {
         BytesRef item = null;
@@ -11,12 +19,14 @@
           verifyChecksum(t, reader);
         }
         if (item == null) {
-          isExhausted[0] = true;
+          exhausted = true;
           break;
         }
         buffer.append(item);
       }
     } else {
+      Counter bufferBytesUsed = Counter.newCounter();
+      buffer = new BytesRefArray(bufferBytesUsed);
       while (true) {
         BytesRef item = null;
         try {
@@ -25,7 +35,7 @@
           verifyChecksum(t, reader);
         }
         if (item == null) {
-          isExhausted[0] = true;
+          exhausted = true;
           break;
         }
         buffer.append(item);
@@ -36,7 +46,8 @@
         }
       }
     }
-    sortInfo.readTime += System.currentTimeMillis() - start;
-    return buffer.size();
+    sortInfo.readTimeMS += System.currentTimeMillis() - start;
+
+    return new Partition(buffer, exhausted);
   }
 

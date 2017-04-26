@@ -3,51 +3,58 @@
     if (partitionsInRAM != null) {
       partitionsInRAM.acquire();
     }
-    long start = System.currentTimeMillis();
-    SortableBytesRefArray buffer;
-    boolean exhausted = false;
-    int count;
-    if (valueLength != -1) {
-      // fixed length case
-      buffer = new FixedLengthBytesRefArray(valueLength);
-      int limit = ramBufferSize.bytes / valueLength;
-      for(int i=0;i<limit;i++) {
-        BytesRef item = null;
-        try {
-          item = reader.next();
-        } catch (Throwable t) {
-          verifyChecksum(t, reader);
+    boolean success = false;
+    try {
+      long start = System.currentTimeMillis();
+      SortableBytesRefArray buffer;
+      boolean exhausted = false;
+      int count;
+      if (valueLength != -1) {
+        // fixed length case
+        buffer = new FixedLengthBytesRefArray(valueLength);
+        int limit = ramBufferSize.bytes / valueLength;
+        for(int i=0;i<limit;i++) {
+          BytesRef item = null;
+          try {
+            item = reader.next();
+          } catch (Throwable t) {
+            verifyChecksum(t, reader);
+          }
+          if (item == null) {
+            exhausted = true;
+            break;
+          }
+          buffer.append(item);
         }
-        if (item == null) {
-          exhausted = true;
-          break;
+      } else {
+        Counter bufferBytesUsed = Counter.newCounter();
+        buffer = new BytesRefArray(bufferBytesUsed);
+        while (true) {
+          BytesRef item = null;
+          try {
+            item = reader.next();
+          } catch (Throwable t) {
+            verifyChecksum(t, reader);
+          }
+          if (item == null) {
+            exhausted = true;
+            break;
+          }
+          buffer.append(item);
+          // Account for the created objects.
+          // (buffer slots do not account to buffer size.) 
+          if (bufferBytesUsed.get() > ramBufferSize.bytes) {
+            break;
+          }
         }
-        buffer.append(item);
       }
-    } else {
-      Counter bufferBytesUsed = Counter.newCounter();
-      buffer = new BytesRefArray(bufferBytesUsed);
-      while (true) {
-        BytesRef item = null;
-        try {
-          item = reader.next();
-        } catch (Throwable t) {
-          verifyChecksum(t, reader);
-        }
-        if (item == null) {
-          exhausted = true;
-          break;
-        }
-        buffer.append(item);
-        // Account for the created objects.
-        // (buffer slots do not account to buffer size.) 
-        if (bufferBytesUsed.get() > ramBufferSize.bytes) {
-          break;
-        }
+      sortInfo.readTimeMS += System.currentTimeMillis() - start;
+      success = true;
+      return new Partition(buffer, exhausted);
+    } finally {
+      if (success == false && partitionsInRAM != null) {
+        partitionsInRAM.release();
       }
     }
-    sortInfo.readTimeMS += System.currentTimeMillis() - start;
-
-    return new Partition(buffer, exhausted);
   }
 

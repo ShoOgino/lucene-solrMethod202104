@@ -1,46 +1,54 @@
   public Tuple read() throws IOException {
 
     if(finished) {
-      Map m = new HashMap();
+      Map<String,Object> m = new HashMap<>();
       m.put("EOF", true);
       return new Tuple(m);
     } else {
       finished = true;
-      Map<String, Object> map = new HashMap();
-      Set<Map.Entry<String, Object>> entries = tupleParams.entrySet();
-
-      for (Map.Entry<String, Object> entry : entries) {
-        String name = entry.getKey();
-        Object o = entry.getValue();
-        if (o instanceof TupleStream) {
-          List<Tuple> tuples = new ArrayList();
-          TupleStream tStream = (TupleStream) o;
-          tStream.setStreamContext(streamContext);
-          try {
-            tStream.open();
-            TUPLES:
-            while (true) {
-              Tuple tuple = tStream.read();
-              if (tuple.EOF) {
-                break TUPLES;
-              } else {
-                tuples.add(tuple);
-              }
-            }
-            map.put(name, tuples);
-          } finally {
-            tStream.close();
-          }
-        } else if ((o instanceof StreamEvaluator))  {
-          Tuple eTuple = new Tuple(streamContext.getLets());
-          StreamEvaluator evaluator = (StreamEvaluator) o;
-          Object eo = evaluator.evaluate(eTuple);
-          map.put(name, eo);
-        } else {
-          map.put(name, streamContext.getLets().get(o.toString()));
+      Map<String, Object> values = new HashMap<>();
+      
+      // add all string based params
+      // these could come from the context, or they will just be treated as straight strings
+      for(Entry<String,String> param : stringParams.entrySet()){
+        if(streamContext.getLets().containsKey(param.getValue())){
+          values.put(param.getKey(), streamContext.getLets().get(param.getValue()));
+        }
+        else{
+          values.put(param.getKey(), param.getValue());
         }
       }
-      return new Tuple(map);
+      
+      // add all evaluators
+      for(Entry<String,StreamEvaluator> param : evaluatorParams.entrySet()){
+        values.put(param.getKey(), param.getValue().evaluateOverContext());
+      }
+      
+      // Add all streams
+      for(Entry<String,TupleStream> param : streamParams.entrySet()){
+        
+        try{
+          List<Tuple> streamTuples = new ArrayList<Tuple>();
+          
+          // open the stream, closed in finally block
+          param.getValue().open();
+          
+          // read all values from stream (memory expensive)
+          Tuple streamTuple = param.getValue().read();
+          while(!streamTuple.EOF){
+            streamTuples.add(streamTuple);
+            streamTuple = param.getValue().read();
+          }
+          
+          values.put(param.getKey(), streamTuples);
+        }
+        finally{
+          // safely close the stream
+          param.getValue().close();
+        }        
+      }
+
+      return new Tuple(values);
     }
   }
 

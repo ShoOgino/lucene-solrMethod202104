@@ -1,23 +1,36 @@
   public void open() throws IOException {
-    if(cache != null) {
-      cloudSolrClient = cache.getCloudSolrClient(zkHost);
-    } else {
-      cloudSolrClient = new Builder()
-          .withZkHost(zkHost)
-          .build();
-    }
-
     ModifiableSolrParams paramsLoc = new ModifiableSolrParams(this.params);
     addStats(paramsLoc, metrics);
     paramsLoc.set("stats", "true");
     paramsLoc.set("rows", "0");
 
-    QueryRequest request = new QueryRequest(paramsLoc);
-    try {
-      NamedList response = cloudSolrClient.request(request, collection);
-      this.tuple = getTuple(response);
-    } catch (Exception e) {
-      throw new IOException(e);
+    Map<String, List<String>> shardsMap = (Map<String, List<String>>)streamContext.get("shards");
+    if(shardsMap == null) {
+      QueryRequest request = new QueryRequest(paramsLoc);
+      CloudSolrClient cloudSolrClient = cache.getCloudSolrClient(zkHost);
+      try {
+        NamedList response = cloudSolrClient.request(request, collection);
+        this.tuple = getTuple(response);
+      } catch (Exception e) {
+        throw new IOException(e);
+      }
+    } else {
+      List<String> shards = shardsMap.get(collection);
+      HttpSolrClient client = cache.getHttpSolrClient(shards.get(0));
+
+      if(shards.size() > 1) {
+        String shardsParam = getShardString(shards);
+        paramsLoc.add("shards", shardsParam);
+        paramsLoc.add("distrib", "true");
+      }
+
+      QueryRequest request = new QueryRequest(paramsLoc);
+      try {
+        NamedList response = client.request(request);
+        this.tuple = getTuple(response);
+      } catch (Exception e) {
+        throw new IOException(e);
+      }
     }
   }
 

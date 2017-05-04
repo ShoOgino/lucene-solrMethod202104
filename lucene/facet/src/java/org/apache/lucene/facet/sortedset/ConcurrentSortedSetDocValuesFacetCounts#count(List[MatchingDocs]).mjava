@@ -1,6 +1,5 @@
   /** Does all the "real work" of tallying up the counts. */
-  private final void count(List<MatchingDocs> matchingDocs) throws IOException {
-    //System.out.println("ssdv count");
+  private final void count(List<MatchingDocs> matchingDocs) throws IOException, InterruptedException {
 
     MultiDocValues.OrdinalMap ordinalMap;
 
@@ -14,9 +13,9 @@
     }
     
     IndexReader reader = state.getReader();
+    List<Future<Void>> results = new ArrayList<>();
 
-    for(MatchingDocs hits : matchingDocs) {
-
+    for (MatchingDocs hits : matchingDocs) {
       // LUCENE-5090: make sure the provided reader context "matches"
       // the top-level reader passed to the
       // SortedSetDocValuesReaderState, else cryptic
@@ -24,8 +23,18 @@
       if (ReaderUtil.getTopLevelContext(hits.context).reader() != reader) {
         throw new IllegalStateException("the SortedSetDocValuesReaderState provided to this class does not match the reader being searched; you must create a new SortedSetDocValuesReaderState every time you open a new IndexReader");
       }
+      
+      results.add(exec.submit(new CountOneSegment(hits.context.reader(), hits, ordinalMap, hits.context.ord)));
+    }
 
-      countOneSegment(ordinalMap, hits.context.reader(), hits.context.ord, hits);
+    for (Future<Void> result : results) {
+      try {
+        result.get();
+      } catch (ExecutionException ee) {
+        // Theoretically cause can be null; guard against that.
+        Throwable cause = ee.getCause();
+        throw IOUtils.rethrowAlways(cause != null ? cause : ee);
+      }
     }
   }
 

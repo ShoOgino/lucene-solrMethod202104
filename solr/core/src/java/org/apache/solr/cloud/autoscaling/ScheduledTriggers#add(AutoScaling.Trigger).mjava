@@ -25,22 +25,35 @@
       AutoScaling.Trigger source = event.getSource();
       if (source.isClosed()) {
         log.warn("Ignoring autoscaling event because the source trigger: " + source + " has already been closed");
-        return;
+        // we do not want to lose this event just because the trigger were closed, perhaps a replacement will need it
+        return false;
       }
-      List<TriggerAction> actions = source.getActions();
-      if (actions != null) {
-        actionExecutor.submit(() -> {
-          for (TriggerAction action : actions) {
-            try {
-              action.process(event);
-            } catch (Exception e) {
-              log.error("Error executing action: " + action.getName() + " for trigger event: " + event, e);
-              throw e;
+      if (hasPendingActions.compareAndSet(false, true)) {
+        List<TriggerAction> actions = source.getActions();
+        if (actions != null) {
+          actionExecutor.submit(() -> {
+            assert hasPendingActions.get();
+            // let the action executor thread wait instead of the trigger thread so we use the throttle here
+            actionThrottle.minimumWaitBetweenActions();
+            actionThrottle.markAttemptingAction();
+            for (TriggerAction action : actions) {
+              try {
+                action.process(event);
+              } catch (Exception e) {
+                log.error("Error executing action: " + action.getName() + " for trigger event: " + event, e);
+                throw e;
+              } finally {
+                hasPendingActions.set(false);
+              }
             }
-          }
-        });
+          });
+        }
+        return true;
+      } else {
+        // there is an action in the queue and we don't want to enqueue another until it is complete
+        return false;
       }
     });
-    scheduledTrigger.scheduledFuture = scheduledThreadPoolExecutor.scheduleWithFixedDelay(newTrigger, 0, SCHEDULED_TRIGGER_DELAY_SECONDS, TimeUnit.SECONDS);
+    scheduledTrigger.scheduledFuture = scheduledThreadPoolExecutor.scheduleWithFixedDelay(scheduledTrigger, 0, DEFAULT_SCHEDULED_TRIGGER_DELAY_SECONDS, TimeUnit.SECONDS);
   }
 

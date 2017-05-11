@@ -1,0 +1,30 @@
+    @Override
+    public void process(AutoScaling.TriggerEvent event) {
+      boolean locked = lock.tryLock();
+      if (!locked)  {
+        log.info("We should never have a tryLock fail because actions are never supposed to be executed concurrently");
+        return;
+      }
+      try {
+        if (lastActionExecutedAt.get() != 0)  {
+          log.info("last action at " + lastActionExecutedAt.get() + " nano time = " + System.nanoTime());
+          if (System.nanoTime() - lastActionExecutedAt.get() < TimeUnit.NANOSECONDS.convert(ScheduledTriggers.DEFAULT_MIN_MS_BETWEEN_ACTIONS - DELTA_MS, TimeUnit.MILLISECONDS)) {
+            log.info("action executed again before minimum wait time from {}", event.getSource().getName());
+            fail("TriggerListener was fired before the throttling period");
+          }
+        }
+        if (onlyOnce.compareAndSet(false, true)) {
+          log.info("action executed from {}", event.getSource().getName());
+          lastActionExecutedAt.set(System.nanoTime());
+          triggerFiredLatch.countDown();
+        } else  {
+          log.info("action executed more than once from {}", event.getSource().getName());
+          fail("Trigger should not have fired more than once!");
+        }
+      } finally {
+        if (locked) {
+          lock.unlock();
+        }
+      }
+    }
+

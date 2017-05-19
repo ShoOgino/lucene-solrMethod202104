@@ -1,8 +1,21 @@
   @Override
   public void run() {
     int lastZnodeVersion = znodeVersion;
-    SolrZkClient zkClient = zkStateReader.getZkClient();
-    createWatcher(zkClient);
+
+    try {
+      refreshAutoScalingConf(new AutoScalingWatcher());
+    } catch (KeeperException.ConnectionLossException | KeeperException.SessionExpiredException e) {
+      log.warn("ZooKeeper watch triggered for autoscaling conf, but Solr cannot talk to ZK: [{}]", e.getMessage());
+    } catch (KeeperException e) {
+      log.error("A ZK error has occurred", e);
+      throw new ZooKeeperException(SolrException.ErrorCode.SERVER_ERROR, "A ZK error has occurred", e);
+    } catch (InterruptedException e) {
+      // Restore the interrupted status
+      Thread.currentThread().interrupt();
+      log.warn("Interrupted", e);
+    } catch (Exception e)  {
+      log.error("Unexpected exception", e);
+    }
 
     while (true) {
       Map<String, AutoScaling.Trigger> copy = null;
@@ -10,18 +23,31 @@
         // this can throw InterruptedException and we don't want to unlock if it did, so we keep this outside
         // of the try/finally block
         updateLock.lockInterruptibly();
+
+        // must check for close here before we await on the condition otherwise we can only be woken up on interruption
+        if (isClosed) {
+          log.warn("OverseerTriggerThread has been closed, exiting.");
+          break;
+        }
+
+        log.debug("Current znodeVersion {}, lastZnodeVersion {}", znodeVersion, lastZnodeVersion);
+
         try {
           if (znodeVersion == lastZnodeVersion) {
             updated.await();
 
             // are we closed?
-            if (isClosed) break;
+            if (isClosed) {
+              log.warn("OverseerTriggerThread woken up but we are closed, exiting.");
+              break;
+            }
 
             // spurious wakeup?
             if (znodeVersion == lastZnodeVersion) continue;
-            lastZnodeVersion = znodeVersion;
           }
           copy = new HashMap<>(activeTriggers);
+          lastZnodeVersion = znodeVersion;
+          log.debug("Processed trigger updates upto znodeVersion {}", znodeVersion);
         } catch (InterruptedException e) {
           // Restore the interrupted status
           Thread.currentThread().interrupt();

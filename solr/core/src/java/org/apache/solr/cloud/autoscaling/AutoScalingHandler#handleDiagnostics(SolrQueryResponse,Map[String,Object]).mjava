@@ -1,0 +1,34 @@
+  private void handleDiagnostics(SolrQueryResponse rsp, Map<String, Object> autoScalingConf) throws IOException {
+    Policy policy = new Policy(autoScalingConf);
+    try (CloudSolrClient build = new CloudSolrClient.Builder()
+        .withHttpClient(container.getUpdateShardHandler().getHttpClient())
+        .withZkHost(container.getZkController().getZkServerAddress()).build()) {
+      Policy.Session session = policy.createSession(new SolrClientDataProvider(build));
+      List<Row> sorted = session.getSorted();
+      List<Clause.Violation> violations = session.getViolations();
+
+      List<Preference> clusterPreferences = policy.getClusterPreferences();
+
+      List<Map<String, Object>> sortedNodes = new ArrayList<>(sorted.size());
+      for (Row row : sorted) {
+        Map<String, Object> map = Utils.makeMap("node", row.node);
+        for (Cell cell : row.cells) {
+          for (Preference clusterPreference : clusterPreferences) {
+            Policy.SortParam name = clusterPreference.name;
+            if (cell.name.equalsIgnoreCase(name.name()))  {
+              map.put(name.name(), cell.val);
+              break;
+            }
+          }
+        }
+        sortedNodes.add(map);
+      }
+
+      Map<String, Object> map = new HashMap<>(2);
+      map.put("sortedNodes", sortedNodes);
+
+      map.put("violations", violations);
+      rsp.getValues().add("diagnostics", map);
+    }
+  }
+

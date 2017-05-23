@@ -10,14 +10,19 @@
       zkCheck();
       
       nodes = getCollectionUrls(req, req.getCore().getCoreDescriptor()
-          .getCloudDescriptor().getCollectionName());
-      if (isLeader && nodes.size() == 1) {
+          .getCloudDescriptor().getCollectionName(), EnumSet.of(Replica.Type.TLOG,Replica.Type.NRT));
+      if (nodes == null) {
+        // This could happen if there are only pull replicas
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, 
+            "Unable to distribute commit operation. No replicas available of types " + Replica.Type.TLOG + " or " + Replica.Type.NRT);
+      }
+      if (isLeader && nodes.size() == 1 && replicaType != Replica.Type.PULL) {
         singleLeader = true;
       }
     }
     
     if (!zkEnabled || req.getParams().getBool(COMMIT_END_POINT, false) || singleLeader) {
-      if (onlyLeaderIndexes) {
+      if (replicaType == Replica.Type.TLOG) {
         try {
           Replica leaderReplica = zkController.getZkStateReader().getLeaderRetry(
               collection, cloudDesc.getShardId());
@@ -30,12 +35,19 @@
             doLocalCommit(cmd);
           } else {
             assert TestInjection.waitForInSyncWithLeader(req.getCore(),
-                zkController, collection, cloudDesc.getShardId());
+                zkController, collection, cloudDesc.getShardId()): "Core " + req.getCore() + " not in sync with leader";
           }
         } catch (InterruptedException e) {
           throw new SolrException(ErrorCode.SERVICE_UNAVAILABLE, "Exception finding leader for shard " + cloudDesc.getShardId(), e);
         }
+      } else if (replicaType == Replica.Type.PULL) {
+        log.warn("Commit not supported on replicas of type " + Replica.Type.PULL);
       } else {
+        // NRT replicas will always commit
+        if (vinfo != null) {
+          long commitVersion = vinfo.getNewClock();
+          cmd.setVersion(commitVersion);
+        }
         doLocalCommit(cmd);
       }
     } else {

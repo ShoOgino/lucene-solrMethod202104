@@ -4,17 +4,22 @@
     StringBuilder sb = new StringBuilder();
 
     if ("2".equals(getStateFormat())) {
-      log.info("Creating collection1 with stateFormat=2");
+      log.info("Creating " + DEFAULT_COLLECTION + " with stateFormat=2");
       SolrZkClient zkClient = new SolrZkClient(zkServer.getZkAddress(),
           AbstractZkTestCase.TIMEOUT, AbstractZkTestCase.TIMEOUT);
       Overseer.getStateUpdateQueue(zkClient).offer(
           Utils.toJSON(Utils.makeMap(Overseer.QUEUE_OPERATION,
-              CollectionParams.CollectionAction.CREATE.toLower(), "name",
-              DEFAULT_COLLECTION, "numShards", String.valueOf(sliceCount),
+              CollectionParams.CollectionAction.CREATE.toLower(), 
+              "name", DEFAULT_COLLECTION, 
+              "numShards", String.valueOf(sliceCount),
               DocCollection.STATE_FORMAT, getStateFormat(),
-              ZkStateReader.REALTIME_REPLICAS, getRealtimeReplicas())));
+              ZkStateReader.NRT_REPLICAS, useTlogReplicas()?"0":"1",
+              ZkStateReader.TLOG_REPLICAS, useTlogReplicas()?"1":"0",
+              ZkStateReader.PULL_REPLICAS, String.valueOf(getPullReplicaCount()))));
       zkClient.close();
     }
+    
+    int numPullReplicas = getPullReplicaCount() * sliceCount;
 
     for (int i = 1; i <= numJettys; i++) {
       if (sb.length() > 0) sb.append(',');
@@ -24,9 +29,22 @@
 
       jettyDir.mkdirs();
       setupJettySolrHome(jettyDir);
-      log.info("create jetty {} in directory {}", i, jettyDir);
-      JettySolrRunner j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
-          + cnt) : null, null, "solrconfig.xml", null);
+      JettySolrRunner j;
+      
+      if (numPullReplicas > 0) {
+        numPullReplicas--;
+        log.info("create jetty {} in directory {} of type {}", i, jettyDir, Replica.Type.PULL);
+        j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
+            + cnt) : null, null, "solrconfig.xml", null, Replica.Type.PULL);
+      } else if (useTlogReplicas()) {
+        log.info("create jetty {} in directory {} of type {}", i, jettyDir, Replica.Type.TLOG);
+        j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
+            + cnt) : null, null, "solrconfig.xml", null, Replica.Type.TLOG);
+      } else {
+        log.info("create jetty {} in directory {} of type {}", i, jettyDir, Replica.Type.NRT);
+        j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
+            + cnt) : null, null, "solrconfig.xml", null, null);
+      }
       jettys.add(j);
       SolrClient client = createNewSolrClient(j.getLocalPort());
       clients.add(client);
@@ -35,17 +53,18 @@
     this.jettys.addAll(jettys);
     this.clients.addAll(clients);
 
-    int numShards = getTotalReplicas(DEFAULT_COLLECTION);
+    int numReplicas = getTotalReplicas(DEFAULT_COLLECTION);
+    int expectedNumReplicas = numJettys;
 
     // now wait until we see that the number of shards in the cluster state
     // matches what we expect
     int retries = 0;
-    while (numShards != getShardCount()) {
-      numShards = getTotalReplicas(DEFAULT_COLLECTION);
-      if (numShards == getShardCount()) break;
+    while (numReplicas != expectedNumReplicas) {
+      numReplicas = getTotalReplicas(DEFAULT_COLLECTION);
+      if (numReplicas == expectedNumReplicas) break;
       if (retries++ == 60) {
         printLayoutOnTearDown = true;
-        fail("Shards in the state does not match what we set:" + numShards + " vs " + getShardCount());
+        fail("Number of replicas in the state does not match what we set:" + numReplicas + " vs " + expectedNumReplicas);
       }
       Thread.sleep(500);
     }
@@ -56,7 +75,7 @@
       zkStateReader.getLeaderRetry(DEFAULT_COLLECTION, "shard" + i, 10000);
     }
 
-    if (numShards > 0) {
+    if (numReplicas > 0) {
       updateMappingsFromZk(this.jettys, this.clients);
     }
 

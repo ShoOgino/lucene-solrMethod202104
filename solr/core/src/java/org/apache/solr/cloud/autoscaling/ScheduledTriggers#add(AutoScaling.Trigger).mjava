@@ -10,7 +10,7 @@
     if (isClosed) {
       throw new AlreadyClosedException("ScheduledTriggers has been closed and cannot be used anymore");
     }
-    ScheduledTrigger scheduledTrigger = new ScheduledTrigger(newTrigger);
+    ScheduledTrigger scheduledTrigger = new ScheduledTrigger(newTrigger, zkClient, queueStats);
     ScheduledTrigger old = scheduledTriggers.putIfAbsent(newTrigger.getName(), scheduledTrigger);
     if (old != null) {
       if (old.trigger.equals(newTrigger)) {
@@ -19,20 +19,34 @@
       }
       IOUtils.closeQuietly(old);
       newTrigger.restoreState(old.trigger);
+      scheduledTrigger.setReplay(false);
       scheduledTriggers.replace(newTrigger.getName(), scheduledTrigger);
     }
     newTrigger.setListener(event -> {
-      AutoScaling.Trigger source = event.getSource();
+      ScheduledTrigger scheduledSource = scheduledTriggers.get(event.getSource());
+      if (scheduledSource == null) {
+        log.warn("Ignoring autoscaling event " + event + " because the source trigger: " + event.getSource() + " doesn't exist.");
+        return false;
+      }
+      boolean replaying = event.getProperty(TriggerEvent.REPLAYING) != null ? (Boolean)event.getProperty(TriggerEvent.REPLAYING) : false;
+      AutoScaling.Trigger source = scheduledSource.trigger;
       if (source.isClosed()) {
-        log.warn("Ignoring autoscaling event because the source trigger: " + source + " has already been closed");
-        // we do not want to lose this event just because the trigger were closed, perhaps a replacement will need it
+        log.warn("Ignoring autoscaling event " + event + " because the source trigger: " + source + " has already been closed");
+        // we do not want to lose this event just because the trigger was closed, perhaps a replacement will need it
         return false;
       }
       if (hasPendingActions.compareAndSet(false, true)) {
+        final boolean enqueued;
+        if (replaying) {
+          enqueued = false;
+        } else {
+          enqueued = scheduledTrigger.enqueue(event);
+        }
         List<TriggerAction> actions = source.getActions();
         if (actions != null) {
           actionExecutor.submit(() -> {
             assert hasPendingActions.get();
+            log.debug("-- processing actions for " + event);
             try {
               // let the action executor thread wait instead of the trigger thread so we use the throttle here
               actionThrottle.minimumWaitBetweenActions();
@@ -45,10 +59,23 @@
                   throw e;
                 }
               }
+              if (enqueued) {
+                TriggerEvent ev = scheduledTrigger.dequeue();
+                assert ev.getId().equals(event.getId());
+              }
             } finally {
               hasPendingActions.set(false);
             }
           });
+        } else {
+          if (enqueued) {
+            TriggerEvent ev = scheduledTrigger.dequeue();
+            if (!ev.getId().equals(event.getId())) {
+              throw new RuntimeException("Wrong event dequeued, queue of " + scheduledTrigger.trigger.getName()
+              + " is broken! Expected event=" + event + " but got " + ev);
+            }
+          }
+          hasPendingActions.set(false);
         }
         return true;
       } else {

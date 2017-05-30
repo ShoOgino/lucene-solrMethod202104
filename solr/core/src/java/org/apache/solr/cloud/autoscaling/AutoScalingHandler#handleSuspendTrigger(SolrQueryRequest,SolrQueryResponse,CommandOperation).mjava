@@ -1,11 +1,11 @@
   private void handleSuspendTrigger(SolrQueryRequest req, SolrQueryResponse rsp, CommandOperation op) throws KeeperException, InterruptedException {
-    String triggerName = op.getStr("name");
+    String triggerName = op.getStr(NAME);
 
     if (triggerName == null || triggerName.trim().length() == 0) {
       throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "The trigger name cannot be null or empty");
     }
 
-    String timeout = op.getStr("timeout", null);
+    String timeout = op.getStr(TIMEOUT, null);
     Date resumeTime = null;
     if (timeout != null) {
       try {
@@ -19,19 +19,34 @@
 
     Map<String, Object> autoScalingConf = zkReadAutoScalingConf(container.getZkController().getZkStateReader());
     Map<String, Object> triggers = (Map<String, Object>) autoScalingConf.get("triggers");
-    if (triggers == null || (!triggers.containsKey(triggerName)) && !"#EACH".equals(triggerName)) {
-      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "No trigger exists with name: " + triggerName);
-    }
-    for (Map.Entry<String, Object> entry : triggers.entrySet()) {
-      if ("#EACH".equals(triggerName) || triggerName.equals(entry.getKey())) {
-        Map<String, Object> triggerProps = (Map<String, Object>) entry.getValue();
-        triggerProps.put("enabled", false);
-        if (resumeTime != null) {
-          triggerProps.put("resumeAt", resumeTime.getTime());
+    Set<String> changed = new HashSet<>();
+
+    if (triggers == null) {
+      if (Policy.EACH.equals(triggerName)) {
+      // no harm no foul
+      } else {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "No trigger exists with name: " + triggerName);
+      }
+    } else {
+      if (!Policy.EACH.equals(triggerName) && !triggers.containsKey(triggerName)) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "No trigger exists with name: " + triggerName);
+      }
+      for (Map.Entry<String, Object> entry : triggers.entrySet()) {
+        if (Policy.EACH.equals(triggerName) || triggerName.equals(entry.getKey())) {
+          Map<String, Object> triggerProps = (Map<String, Object>) entry.getValue();
+          Boolean enabled = (Boolean)triggerProps.get(ENABLED);
+          if (enabled == null || enabled) {
+            triggerProps.put(ENABLED, false);
+            if (resumeTime != null) {
+              triggerProps.put(RESUME_AT, resumeTime.getTime());
+            }
+            zkSetTrigger(container.getZkController().getZkStateReader(), entry.getKey(), triggerProps);
+            changed.add(entry.getKey());
+          }
         }
-        zkSetTrigger(container.getZkController().getZkStateReader(), entry.getKey(), triggerProps);
       }
     }
+    rsp.getValues().add("changed", changed);
     rsp.getValues().add("result", "success");
   }
 

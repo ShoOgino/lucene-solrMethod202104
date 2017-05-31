@@ -1,35 +1,20 @@
   private void testDeduplicationOfSubmittedTasks() throws IOException, SolrServerException {
     try (SolrClient client = createNewSolrClient("", getBaseUrl((HttpSolrClient) clients.get(0)))) {
-      new Create()
-              .setCollectionName("ocptest_shardsplit2")
-              .setNumShards(4)
-              .setConfigName("conf1")
-              .setAsyncId("3000")
-              .process(client);
+      CollectionAdminRequest.createCollection("ocptest_shardsplit2","conf1",4,1).processAsync("3000",client);
   
-      SplitShard splitShardRequest = new SplitShard()
-              .setCollectionName("ocptest_shardsplit2")
-              .setShardName(SHARD1)
-              .setAsyncId("3001");
-      splitShardRequest.process(client);
-  
-      splitShardRequest = new SplitShard()
-              .setCollectionName("ocptest_shardsplit2")
-              .setShardName(SHARD2)
-              .setAsyncId("3002");
-      splitShardRequest.process(client);
+      SplitShard splitShardRequest = CollectionAdminRequest.splitShard("ocptest_shardsplit2").setShardName(SHARD1);
+      splitShardRequest.processAsync("3001",client);
+      
+      splitShardRequest = CollectionAdminRequest.splitShard("ocptest_shardsplit2").setShardName(SHARD2);
+      splitShardRequest.processAsync("3002",client);
   
       // Now submit another task with the same id. At this time, hopefully the previous 3002 should still be in the queue.
-      splitShardRequest = new SplitShard()
-              .setCollectionName("ocptest_shardsplit2")
-              .setShardName(SHARD1)
-              .setAsyncId("3002");
-      CollectionAdminResponse response = splitShardRequest.process(client);
-  
-      NamedList r = response.getResponse();
-      assertEquals("Duplicate request was supposed to exist but wasn't found. De-duplication of submitted task failed.",
-          "Task with the same requestid already exists.", r.get("error"));
-  
+      expectThrows(SolrServerException.class, () -> {
+          CollectionAdminRequest.splitShard("ocptest_shardsplit2").setShardName(SHARD1).processAsync("3002",client);
+          // more helpful assertion failure
+          fail("Duplicate request was supposed to exist but wasn't found. De-duplication of submitted task failed.");
+        });
+      
       for (int i = 3001; i <= 3002; i++) {
         final RequestStatusState state = getRequestStateAfterCompletion(i + "", REQUEST_STATUS_TIMEOUT, client);
         assertSame("Task " + i + " did not complete, final state: " + state, RequestStatusState.COMPLETED, state);

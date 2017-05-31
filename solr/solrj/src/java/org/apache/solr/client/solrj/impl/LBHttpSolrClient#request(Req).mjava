@@ -21,6 +21,9 @@
     boolean isNonRetryable = req.request instanceof IsUpdateRequest || ADMIN_PATHS.contains(req.request.getPath());
     List<ServerWrapper> skipped = null;
 
+    final Integer numServersToTry = req.getNumServersToTry();
+    int numServersTried = 0;
+
     boolean timeAllowedExceeded = false;
     long timeAllowedNano = getTimeAllowedInNanos(req.getRequest());
     long timeOutTime = System.nanoTime() + timeAllowedNano;
@@ -48,8 +51,14 @@
       }
       try {
         MDC.put("LBHttpSolrClient.url", serverStr);
+
+        if (numServersToTry != null && numServersTried > numServersToTry.intValue()) {
+          break;
+        }
+
         HttpSolrClient client = makeSolrClient(serverStr);
 
+        ++numServersTried;
         ex = doRequest(client, req, rsp, isNonRetryable, false, null);
         if (ex == null) {
           return rsp; // SUCCESS
@@ -66,8 +75,13 @@
           break;
         }
 
+        if (numServersToTry != null && numServersTried > numServersToTry.intValue()) {
+          break;
+        }
+
         try {
           MDC.put("LBHttpSolrClient.url", wrapper.client.getBaseURL());
+          ++numServersTried;
           ex = doRequest(wrapper.client, req, rsp, isNonRetryable, true, wrapper.getKey());
           if (ex == null) {
             return rsp; // SUCCESS
@@ -83,7 +97,13 @@
     if (timeAllowedExceeded) {
       solrServerExceptionMessage = "Time allowed to handle this request exceeded";
     } else {
-      solrServerExceptionMessage = "No live SolrServers available to handle this request";
+      if (numServersToTry != null && numServersTried > numServersToTry.intValue()) {
+        solrServerExceptionMessage = "No live SolrServers available to handle this request:"
+            + " numServersTried="+numServersTried
+            + " numServersToTry="+numServersToTry.intValue();
+      } else {
+        solrServerExceptionMessage = "No live SolrServers available to handle this request";
+      }
     }
     if (ex == null) {
       throw new SolrServerException(solrServerExceptionMessage);

@@ -1,0 +1,56 @@
+    @Override
+    protected void getRemoteInfo(String solrNode, Set<String> requestedTags, SnitchContext ctx) {
+      ClientSnitchCtx snitchContext = (ClientSnitchCtx) ctx;
+      readSysProps(solrNode, requestedTags, snitchContext);
+      Set<String> groups = new HashSet<>();
+      List<String> prefixes = new ArrayList<>();
+      if (requestedTags.contains(DISK)) {
+        groups.add("solr.node");
+        prefixes.add("CONTAINER.fs.usableSpace");
+      }
+      if (requestedTags.contains(CORES)) {
+        groups.add("solr.core");
+        prefixes.add("CORE.coreName");
+      }
+      if (requestedTags.contains(SYSLOADAVG)) {
+        groups.add("solr.jvm");
+        prefixes.add("os.systemLoadAverage");
+      }
+      if (requestedTags.contains(HEAPUSAGE)) {
+        groups.add("solr.jvm");
+        prefixes.add("memory.heap.usage");
+      }
+      if (groups.isEmpty() || prefixes.isEmpty()) return;
+
+      ModifiableSolrParams params = new ModifiableSolrParams();
+      params.add("group", StrUtils.join(groups, ','));
+      params.add("prefix", StrUtils.join(prefixes, ','));
+
+      try {
+        SimpleSolrResponse rsp = snitchContext.invoke(solrNode, CommonParams.METRICS_PATH, params);
+        Map m = rsp.nl.asMap(4);
+        if (requestedTags.contains(DISK)) {
+          Number n = (Number) Utils.getObjectByPath(m, true, "metrics/solr.node/CONTAINER.fs.usableSpace");
+          if (n != null) ctx.getTags().put(DISK, n.doubleValue() / 1024.0d / 1024.0d / 1024.0d);
+        }
+        if (requestedTags.contains(CORES)) {
+          int count = 0;
+          Map cores = (Map) m.get("metrics");
+          for (Object o : cores.keySet()) {
+            if (o.toString().startsWith("solr.core.")) count++;
+          }
+          ctx.getTags().put(CORES, count);
+        }
+        if (requestedTags.contains(SYSLOADAVG)) {
+          Number n = (Number) Utils.getObjectByPath(m, true, "metrics/solr.jvm/os.systemLoadAverage");
+          if (n != null) ctx.getTags().put(SYSLOADAVG, n.doubleValue() * 100.0d);
+        }
+        if (requestedTags.contains(HEAPUSAGE)) {
+          Number n = (Number) Utils.getObjectByPath(m, true, "metrics/solr.jvm/memory.heap.usage");
+          if (n != null) ctx.getTags().put(HEAPUSAGE, n.doubleValue() * 100.0d);
+        }
+      } catch (Exception e) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "", e);
+      }
+    }
+

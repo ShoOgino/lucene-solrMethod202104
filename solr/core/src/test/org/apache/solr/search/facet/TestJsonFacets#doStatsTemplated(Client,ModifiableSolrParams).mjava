@@ -4,6 +4,26 @@
     if (p.get("num_is") == null) p.add("num_is","num_is");
     if (p.get("num_fs") == null) p.add("num_fs","num_fs");
 
+    String terms = p.get("terms");
+    if (terms == null) terms="";
+    int limit=0;
+    switch (random().nextInt(4)) {
+      case 0: limit=-1;
+      case 1: limit=1000000;
+      case 2: // fallthrough
+      case 3: // fallthrough
+    }
+    if (limit != 0) {
+      terms=terms+"limit:"+limit+",";
+    }
+    String terms_method = p.get("terms_method");
+    if (terms_method != null) {
+      terms=terms+terms_method;
+    }
+    p.set("terms", terms);
+    // "${terms}" should be put at the beginning of generic terms facets.
+    // It may specify "method=..." or "limit:-1", so should not be used if the facet explicitly specifies.
+
     MacroExpander m = new MacroExpander( p.getMap() );
 
     String cat_s = m.expand("${cat_s}");
@@ -147,7 +167,8 @@
                 " , f3:{${terms} type:terms, field:'${cat_s}', sort:'x desc', facet:{x:'unique(${where_s})'}  } " +
                 " , f4:{${terms} type:terms, field:'${cat_s}', sort:'x desc', facet:{x:'hll(${where_s})'}  } " +
                 " , f5:{${terms} type:terms, field:'${cat_s}', sort:'x desc', facet:{x:'variance(${num_d})'}  } " +
-                "}"
+                " , f6:{type:terms, field:${num_d}, limit:1, sort:'x desc', facet:{x:'hll(${num_i})'}  } " +  // facet on a field that will cause hashing and exercise hll.resize on numeric field
+            "}"
         )
         , "facets=={ 'count':6, " +
             "  f1:{  'buckets':[{ val:'A', count:2, x:2.0 },  { val:'B', count:3, x:-9.0}]}" +
@@ -155,6 +176,7 @@
             ", f3:{  'buckets':[{ val:'A', count:2, x:2 },    { val:'B', count:3, x:2 }]} " +
             ", f4:{  'buckets':[{ val:'A', count:2, x:2 },    { val:'B', count:3, x:2 }]} " +
             ", f5:{  'buckets':[{ val:'B', count:3, x:74.6666666666666 },    { val:'A', count:2, x:1.0 }]} " +
+            ", f6:{  buckets:[{ val:-9.0, count:1, x:1 }]} " +
             "}"
     );
 
@@ -373,7 +395,7 @@
 
     // test numBuckets
     client.testJQ(params(p, "q", "*:*", "rows", "0", "facet", "true"
-            , "json.facet", "{f1:{terms:{${terms} field:${cat_s}, numBuckets:true, limit:1}}}" // TODO: limit:0 produced an error
+            , "json.facet", "{f1:{terms:{${terms_method} field:${cat_s}, numBuckets:true, limit:1}}}" // TODO: limit:0 produced an error
         )
         , "facets=={ 'count':6, " +
             "'f1':{ numBuckets:2, buckets:[{val:B, count:3}]} } "
@@ -387,12 +409,12 @@
             "'f1':{ numBuckets:1, buckets:[{val:B, count:3}]} } "
     );
 
-    // mincount should lower numBuckets
+    // mincount should not lower numBuckets (since SOLR-10552)
     client.testJQ(params(p, "q", "*:*", "rows", "0", "facet", "true"
             , "json.facet", "{f1:{terms:{${terms} field:${cat_s}, numBuckets:true, mincount:3}}}"
         )
         , "facets=={ 'count':6, " +
-            "'f1':{ numBuckets:1, buckets:[{val:B, count:3}]} } "
+            "'f1':{ numBuckets:2, buckets:[{val:B, count:3}]} } "
     );
 
     // basic range facet
@@ -559,10 +581,10 @@
     // also test limit:0
     client.testJQ(params(p, "q", "*:*"
             , "json.facet", "{" +
-                " f0:{${terms} type:terms, field:${multi_ss}, allBuckets:true, limit:0} " +
-                ",f1:{${terms} type:terms, field:${multi_ss}, allBuckets:true, limit:0, offset:1} " +  // offset with 0 limit
-                ",f2:{${terms} type:terms, field:${multi_ss}, allBuckets:true, limit:0, facet:{x:'sum(${num_d})'}, sort:'x desc' } " +
-                ",f3:{${terms} type:terms, field:${multi_ss}, allBuckets:true, limit:0, missing:true, facet:{x:'sum(${num_d})', y:'avg(${num_d})'}, sort:'x desc' } " +
+                " f0:{${terms_method} type:terms, field:${multi_ss}, allBuckets:true, limit:0} " +
+                ",f1:{${terms_method} type:terms, field:${multi_ss}, allBuckets:true, limit:0, offset:1} " +  // offset with 0 limit
+                ",f2:{${terms_method} type:terms, field:${multi_ss}, allBuckets:true, limit:0, facet:{x:'sum(${num_d})'}, sort:'x desc' } " +
+                ",f3:{${terms_method} type:terms, field:${multi_ss}, allBuckets:true, limit:0, missing:true, facet:{x:'sum(${num_d})', y:'avg(${num_d})'}, sort:'x desc' } " +
                 "}"
         )
         , "facets=={ 'count':6, " +
@@ -577,9 +599,9 @@
     // also test limit:0
     client.testJQ(params(p, "q", "*:*"
             , "json.facet", "{" +
-                " f0:{${terms} type:terms, field:${num_i}, allBuckets:true, limit:0} " +
-                ",f1:{${terms} type:terms, field:${num_i}, allBuckets:true, limit:0, offset:1} " +  // offset with 0 limit
-                ",f2:{${terms} type:terms, field:${num_i}, allBuckets:true, limit:0, facet:{x:'sum(${num_d})'}, sort:'x desc' } " +
+                " f0:{${terms_method} type:terms, field:${num_i}, allBuckets:true, limit:0} " +
+                ",f1:{${terms_method} type:terms, field:${num_i}, allBuckets:true, limit:0, offset:1} " +  // offset with 0 limit
+                ",f2:{${terms_method} type:terms, field:${num_i}, allBuckets:true, limit:0, facet:{x:'sum(${num_d})'}, sort:'x desc' } " +
                 "}"
         )
         , "facets=={ 'count':6, " +
@@ -753,7 +775,7 @@
                 ",f3:{${terms}  type:field, field:${num_i}, sort:'index asc' }" +
                 ",f4:{${terms}  type:field, field:${num_i}, sort:'index desc' }" +
                 ",f5:{${terms}  type:field, field:${num_i}, sort:'index desc', limit:1, missing:true, allBuckets:true, numBuckets:true }" +
-                ",f6:{${terms}  type:field, field:${num_i}, sort:'index desc', mincount:2, numBuckets:true }" +   // mincount should lower numbuckets
+                ",f6:{${terms}  type:field, field:${num_i}, sort:'index desc', mincount:2, numBuckets:true }" +   // mincount should not lower numbuckets (since SOLR-10552)
                 ",f7:{${terms}  type:field, field:${num_i}, sort:'index desc', offset:2, numBuckets:true }" +     // test offset
                 ",f8:{${terms}  type:field, field:${num_i}, sort:'index desc', offset:100, numBuckets:true }" +   // test high offset
                 ",f9:{${terms}  type:field, field:${num_i}, sort:'x desc', facet:{x:'avg(${num_d})'}, missing:true, allBuckets:true, numBuckets:true }" +            // test stats
@@ -767,7 +789,7 @@
             ",f3:{ buckets:[{val:-5,count:2},{val:2,count:1},{val:3,count:1},{val:7,count:1} ] } " +
             ",f4:{ buckets:[{val:7,count:1},{val:3,count:1},{val:2,count:1},{val:-5,count:2} ] } " +
             ",f5:{ buckets:[{val:7,count:1}]   , numBuckets:4, allBuckets:{count:5}, missing:{count:1}  } " +
-            ",f6:{ buckets:[{val:-5,count:2}]  , numBuckets:1  } " +
+            ",f6:{ buckets:[{val:-5,count:2}]  , numBuckets:4  } " +
             ",f7:{ buckets:[{val:2,count:1},{val:-5,count:2}] , numBuckets:4 } " +
             ",f8:{ buckets:[] , numBuckets:4 } " +
             ",f9:{ buckets:[{val:7,count:1,x:11.0},{val:2,count:1,x:4.0},{val:3,count:1,x:2.0},{val:-5,count:2,x:-7.0} ],  numBuckets:4, allBuckets:{count:5,x:0.6},missing:{count:1,x:0.0} } " +  // TODO: should missing exclude "x" because no values were collected?
@@ -872,6 +894,138 @@
             ",r:{buckets:[ {val:-5.0,count:1}, {val:0.0,count:1}, {val:5.0,count:0} ] }" +
             "}"
     );
+
+
+    // test acc reuse (i.e. reset() method).  This is normally used for stats that are not calculated in the first phase,
+    // currently non-sorting stats.
+    client.testJQ(params(p, "q", "*:*"
+        , "json.facet", "{f1:{type:terms, field:'${cat_s}', facet:{h:'hll(${where_s})' , u:'unique(${where_s})', mind:'min(${num_d})', maxd:'max(${num_d})', sumd:'sum(${num_d})', avgd:'avg(${num_d})', variance:'variance(${num_d})', stddev:'stddev(${num_d})'         }   }}"
+        )
+        , "facets=={ 'count':6, " +
+            "'f1':{  buckets:[{val:B, count:3, h:2, u:2, mind:-9.0, maxd:11.0, sumd:-3.0, avgd:-1.0, variance:74.66666666666667, stddev:8.640987597877148}," +
+            "                 {val:A, count:2, h:2, u:2, mind:2.0, maxd:4.0, sumd:6.0, avgd:3.0, variance:1.0, stddev:1.0}] } } "
+
+    );
+
+
+    // test min/max of string field
+    if (where_s.equals("where_s") || where_s.equals("where_sd")) {  // supports only single valued currently...
+      client.testJQ(params(p, "q", "*:* -(+${cat_s}:A +${where_s}:NJ)"  // make NY the only value in bucket A
+          , "json.facet", "{" +
+              "  f1:{type:terms, field:'${cat_s}', facet:{min:'min(${where_s})', max:'max(${where_s})'}   }" +
+              ", f2:{type:terms, field:'${cat_s}', facet:{min:'min(${where_s})', max:'max(${where_s})'} , sort:'min desc'}" +
+              ", f3:{type:terms, field:'${cat_s}', facet:{min:'min(${where_s})', max:'max(${where_s})'} , sort:'min asc'}" +
+              ", f4:{type:terms, field:'${cat_s}', facet:{min:'min(${super_s})', max:'max(${super_s})'} , sort:'max asc'}" +
+              ", f5:{type:terms, field:'${cat_s}', facet:{min:'min(${super_s})', max:'max(${super_s})'} , sort:'max desc'}" +
+              "}"
+          )
+          , "facets=={ count:5, " +
+              " f1:{ buckets:[{val:B, count:3, min:NJ, max:NY}, {val:A, count:1, min:NY, max:NY}]}" +
+              ",f2:{ buckets:[{val:A, count:1, min:NY, max:NY}, {val:B, count:3, min:NJ, max:NY}]}" +
+              ",f3:{ buckets:[{val:B, count:3, min:NJ, max:NY}, {val:A, count:1, min:NY, max:NY}]}" +
+              ",f4:{ buckets:[{val:B, count:3, min:batman, max:superman}, {val:A, count:1, min:zodiac, max:zodiac}]}" +
+              ",f5:{ buckets:[{val:A, count:1, min:zodiac, max:zodiac}, {val:B, count:3, min:batman, max:superman}]}" +
+              " } "
+      );
+
+
+    }
+
+
+    ////////////////////////////////////////////////////////////////
+    // test which phase stats are calculated in
+    ////////////////////////////////////////////////////////////////
+    if (client.local()) {
+      long creates, resets;
+      // NOTE: these test the current implementation and may need to be adjusted to match future optimizations (such as calculating N buckets in parallel in the second phase)
+
+      creates = DebugAgg.Acc.creates.get();
+      resets = DebugAgg.Acc.resets.get();
+      client.testJQ(params(p, "q", "*:*"
+          , "json.facet", "{f1:{terms:{${terms_method} field:${super_s}, limit:1, facet:{x:'debug()'}   }}}"  // x should be deferred to 2nd phase
+          )
+          , "facets=={ 'count':6, " +
+              "f1:{  buckets:[{ val:batman, count:1, x:1}]} } "
+      );
+
+      assertEquals(1, DebugAgg.Acc.creates.get() - creates);
+      assertTrue( DebugAgg.Acc.resets.get() - resets <= 1);
+      assertTrue( DebugAgg.Acc.last.numSlots <= 2 ); // probably "1", but may be special slot for something.  As long as it's not cardinality of the field
+
+
+      creates = DebugAgg.Acc.creates.get();
+      resets = DebugAgg.Acc.resets.get();
+      client.testJQ(params(p, "q", "*:*"
+          , "json.facet", "{f1:{terms:{${terms_method} field:${super_s}, limit:1, facet:{ x:'debug()'} , sort:'x asc'  }}}"  // sorting by x... must be done all at once in first phase
+          )
+          , "facets=={ 'count':6, " +
+              "f1:{  buckets:[{ val:batman, count:1, x:1}]}" +
+              " } "
+      );
+
+      assertEquals(1, DebugAgg.Acc.creates.get() - creates);
+      assertTrue( DebugAgg.Acc.resets.get() - resets == 0);
+      assertTrue( DebugAgg.Acc.last.numSlots >= 5 ); // all slots should be done in a single shot. there may be more than 5 due to special slots or hashing.
+
+
+      // When limit:-1, we should do most stats in first phase (SOLR-10634)
+      creates = DebugAgg.Acc.creates.get();
+      resets = DebugAgg.Acc.resets.get();
+      client.testJQ(params(p, "q", "*:*"
+          , "json.facet", "{f1:{terms:{${terms_method} field:${super_s}, limit:-1, facet:{x:'debug()'}  }}}"
+          )
+          , "facets=="
+      );
+
+      assertEquals(1, DebugAgg.Acc.creates.get() - creates);
+      assertTrue( DebugAgg.Acc.resets.get() - resets == 0);
+      assertTrue( DebugAgg.Acc.last.numSlots >= 5 ); // all slots should be done in a single shot. there may be more than 5 due to special slots or hashing.
+
+      // Now for a numeric field
+      // When limit:-1, we should do most stats in first phase (SOLR-10634)
+      creates = DebugAgg.Acc.creates.get();
+      resets = DebugAgg.Acc.resets.get();
+      client.testJQ(params(p, "q", "*:*"
+          , "json.facet", "{f1:{terms:{${terms_method} field:${num_d}, limit:-1, facet:{x:'debug()'}  }}}"
+          )
+          , "facets=="
+      );
+
+      assertEquals(1, DebugAgg.Acc.creates.get() - creates);
+      assertTrue( DebugAgg.Acc.resets.get() - resets == 0);
+      assertTrue( DebugAgg.Acc.last.numSlots >= 5 ); // all slots should be done in a single shot. there may be more than 5 due to special slots or hashing.
+
+
+      // But if we need to calculate domains anyway, it probably makes sense to calculate most stats in the 2nd phase (along with sub-facets)
+      creates = DebugAgg.Acc.creates.get();
+      resets = DebugAgg.Acc.resets.get();
+      client.testJQ(params(p, "q", "*:*"
+          , "json.facet", "{f1:{terms:{${terms_method} field:${super_s}, limit:-1, facet:{ x:'debug()' , y:{terms:${where_s}}   }  }}}"
+          )
+          , "facets=="
+      );
+
+      assertEquals(1, DebugAgg.Acc.creates.get() - creates);
+      assertTrue( DebugAgg.Acc.resets.get() - resets >=4);
+      assertTrue( DebugAgg.Acc.last.numSlots <= 2 ); // probably 1, but could be higher
+
+      // Now with a numeric field
+      // But if we need to calculate domains anyway, it probably makes sense to calculate most stats in the 2nd phase (along with sub-facets)
+      creates = DebugAgg.Acc.creates.get();
+      resets = DebugAgg.Acc.resets.get();
+      client.testJQ(params(p, "q", "*:*"
+          , "json.facet", "{f1:{terms:{${terms_method} field:${num_d}, limit:-1, facet:{ x:'debug()' , y:{terms:${where_s}}   }  }}}"
+          )
+          , "facets=="
+      );
+
+      assertEquals(1, DebugAgg.Acc.creates.get() - creates);
+      assertTrue( DebugAgg.Acc.resets.get() - resets >=4);
+      assertTrue( DebugAgg.Acc.last.numSlots <= 2 ); // probably 1, but could be higher
+    }
+    //////////////////////////////////////////////////////////////// end phase testing
+
+
 
   }
 

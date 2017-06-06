@@ -1,0 +1,66 @@
+  @BeforeClass
+  public static void setupCluster() throws Exception {
+    for (int i=0; i<10+random().nextInt(20); i++) {
+      vals.add(""+Integer.toString(random().nextInt(1000000), Character.MAX_RADIX));
+    }
+    
+    final Path configDir = Paths.get(TEST_HOME(), "collection1", "conf");
+
+    String configName = "solrCloudCollectionConfig";
+    int nodeCount = 5;
+    configureCluster(nodeCount)
+       .addConfig(configName, configDir)
+       .configure();
+    
+    int shards = 2;
+    int replicas = 2 ;
+    CollectionAdminRequest.createCollection("collection1", configName, shards, replicas)
+        .withProperty("config", "solrconfig-minimal.xml")
+        .withProperty("schema", "schema.xml")
+        .process(cluster.getSolrClient());
+
+    client = cluster.getSolrClient();
+    client.setDefaultCollection("collection1");
+    
+    ZkStateReader zkStateReader = client.getZkStateReader();
+    AbstractDistribZkTestBase.waitForRecoveriesToFinish("collection1", zkStateReader, true, true, 30);
+    
+    {
+      List<SolrInputDocument> docs = new ArrayList<>();
+      int parentsNum = 10+random().nextInt(20);
+      for (int i=0; i<parentsNum || (matchingParent==null ||matchingChild==null); i++) {
+        final String parentTieVal = "" + random().nextInt(5);
+        final String parentId = ""+random().nextInt();
+        final SolrInputDocument parent = new SolrInputDocument("id", parentId,
+            "type_s", "parent",
+            "parentTie_s1", parentTieVal,
+            "parent_id_s1", parentId
+            );
+        final List<String> parentFilter = addValsField(parent, "parentFilter_s");
+        final int kids = usually() ? atLeast(20) : 0;
+        for(int c = 0; c< kids; c++){
+          SolrInputDocument child = new SolrInputDocument("id", ""+random().nextInt(),
+              "type_s", "child",
+              "parentTie_s1", parentTieVal,
+              "val_s1", Integer.toString(random().nextInt(1000), Character.MAX_RADIX)+"" ,
+              "parent_id_s1", parentId);
+          child.addField("parentFilter_s", parentFilter);
+          final List<String> chVals = addValsField(child, "childFilter_s");
+          parent.addChildDocument(child );
+
+          // let's pickup at least matching child
+          final boolean canPickMatchingChild = !chVals.isEmpty() && !parentFilter.isEmpty();
+          final boolean haveNtPickedMatchingChild = matchingParent==null ||matchingChild==null;
+          if (canPickMatchingChild && haveNtPickedMatchingChild && usually()) {
+            matchingParent = (String) parentFilter.iterator().next();
+            matchingChild = (String) chVals.iterator().next();
+          }
+        }
+        maxDocs+=parent.getChildDocumentCount()+1;
+        docs.add(parent);
+      }
+      client.add(docs);
+      client.commit();
+    }
+  }
+

@@ -19,6 +19,9 @@
         "-value", maxTime.toString(),
         "-solrUrl", solrUrl
     };
+
+    Map<String, Long> startTimes = getSoftAutocommitInterval(testCollectionName);
+
     SolrCLI.ConfigTool tool = new SolrCLI.ConfigTool();
     CommandLine cli = SolrCLI.processCommandLineArgs(SolrCLI.joinCommonAndToolOptions(tool.getOptions()), args);
     log.info("Sending set-property '" + prop + "'=" + maxTime + " to SolrCLI.ConfigTool.");
@@ -28,5 +31,35 @@
     maxTimeFromConfig = SolrCLI.atPath("/config/updateHandler/autoSoftCommit/maxTime", configJson);
     assertNotNull(maxTimeFromConfig);
     assertEquals(maxTime, maxTimeFromConfig);
+
+    // Just check that we can access paths with slashes in them both through an intermediate method and explicitly
+    // using atPath.
+    assertEquals("Should have been able to get a value from the /query request handler",
+        "explicit", SolrCLI.asString("/config/requestHandler/\\/query/defaults/echoParams", configJson));
+
+    assertEquals("Should have been able to get a value from the /query request handler",
+        "explicit", SolrCLI.atPath("/config/requestHandler/\\/query/defaults/echoParams", configJson));
+
+    log.info("live_nodes_count :  " + cloudClient.getZkStateReader().getClusterState().getLiveNodes());
+
+    // Since it takes some time for this command to complete we need to make sure all the reloads for
+    // all the cores have been done.
+    boolean allGood = false;
+    Map<String, Long> curSoftCommitInterval = null;
+    for (int idx = 0; idx < 600 && allGood == false; ++idx) {
+      curSoftCommitInterval = getSoftAutocommitInterval(testCollectionName);
+      if (curSoftCommitInterval.size() > 0 && curSoftCommitInterval.size() == startTimes.size()) { // no point in even trying if they're not the same size!
+        allGood = true;
+        for (Map.Entry<String, Long> currEntry : curSoftCommitInterval.entrySet()) {
+          if (currEntry.getValue().equals(maxTime) == false) {
+            allGood = false;
+          }
+        }
+      }
+      if (allGood == false) {
+        Thread.sleep(100);
+      }
+    }
+    assertTrue("All cores should have been reloaded within 60 seconds!!!", allGood);
   }
 

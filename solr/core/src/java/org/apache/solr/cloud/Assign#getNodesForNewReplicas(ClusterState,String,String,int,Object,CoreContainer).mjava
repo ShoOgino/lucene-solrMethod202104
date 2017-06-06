@@ -4,7 +4,7 @@
   // could be created on live nodes given maxShardsPerNode, Replication factor (if from createShard) etc.
   public static List<ReplicaCount> getNodesForNewReplicas(ClusterState clusterState, String collectionName,
                                                           String shard, int numberOfNodes,
-                                                          Object createNodeSet, CoreContainer cc) {
+                                                          Object createNodeSet, CoreContainer cc) throws KeeperException, InterruptedException {
     DocCollection coll = clusterState.getCollection(collectionName);
     Integer maxShardsPerNode = coll.getInt(MAX_SHARDS_PER_NODE, 1);
     List<String> createNodeList = null;
@@ -33,8 +33,23 @@
     }
 
     List l = (List) coll.get(DocCollection.RULE);
+    Map<ReplicaAssigner.Position, String> positions = null;
     if (l != null) {
-      return getNodesViaRules(clusterState, shard, numberOfNodes, cc, coll, createNodeList, l);
+      positions = getNodesViaRules(clusterState, shard, numberOfNodes, cc, coll, createNodeList, l);
+    }
+    String policyName = coll.getStr(POLICY);
+    Map autoScalingJson = Utils.getJson(cc.getZkController().getZkClient(), SOLR_AUTOSCALING_CONF_PATH, true);
+    if (policyName != null || autoScalingJson.get(Policy.CLUSTER_POLICY) != null) {
+      positions= Assign.getPositionsUsingPolicy(collectionName, Collections.singletonList(shard), numberOfNodes,
+          policyName, cc.getZkController().getZkStateReader(), createNodeList);
+    }
+
+    if(positions != null){
+      List<ReplicaCount> repCounts = new ArrayList<>();
+      for (String s : positions.values()) {
+        repCounts.add(new ReplicaCount(s));
+      }
+      return repCounts;
     }
 
     ArrayList<ReplicaCount> sortedNodeList = new ArrayList<>(nodeNameVsShardCount.values());

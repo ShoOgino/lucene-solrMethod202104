@@ -1,0 +1,69 @@
+  public void testMultipleThreads() throws Exception {
+    clearIndex();
+    String[] strings = new String[5];
+    for (int i=0; i<5; i++) {
+      strings[i] = generateRandomString();
+    }
+
+    List<Thread> threads = new ArrayList<>(100);
+    int finalCount = 0; //int_i
+
+    for (int i = 0; i < 100; i++) {
+      int index = random().nextInt(5);
+      Thread t = new Thread() {
+        @Override
+        public void run() {
+          AddUpdateCommand cmd = new AddUpdateCommand(new LocalSolrQueryRequest(h.getCore(),
+              new ModifiableSolrParams()
+                  .add("processor", "Atomic")
+                  .add("Atomic.cat", "add")
+                  .add("Atomic.int_i", "inc")
+                  .add("commit","true")
+
+          ));
+
+          cmd.solrDoc = new SolrInputDocument();
+          cmd.solrDoc.addField("id", 10); //hardcoded id=2
+          cmd.solrDoc.addField("cat", strings[index]);
+          cmd.solrDoc.addField("int_i", index);
+
+          try {
+            AtomicUpdateProcessorFactory factory = new AtomicUpdateProcessorFactory();
+            factory.inform(h.getCore());
+            factory.getInstance(cmd.getReq(), new SolrQueryResponse(),
+                new DistributedUpdateProcessor(cmd.getReq(), new SolrQueryResponse(),
+                    new RunUpdateProcessor(cmd.getReq(), null))).processAdd(cmd);
+          } catch (IOException e) {
+          }
+        }
+      };
+      t.run();
+      threads.add(t);
+      finalCount += index; //int_i
+    }
+
+    for (Thread thread: threads) {
+      thread.join();
+    }
+
+    assertU(commit());
+
+    assertQ("Check the total number of docs",
+        req("q", "id:10"), "//result[@numFound=1]");
+
+
+    StringJoiner queryString = new StringJoiner(" ");
+    for(String string: strings) {
+      queryString.add(string);
+    }
+
+    assertQ("Check the total number of docs",
+        req("q", "cat:" + queryString.toString())
+        , "//result[@numFound=1]");
+
+    assertQ("Check the total number of docs",
+        req("q", "int_i:" + finalCount)
+        , "//result[@numFound=1]");
+
+  }
+

@@ -1,0 +1,91 @@
+  public TimeSeriesStream(StreamExpression expression, StreamFactory factory) throws IOException{
+    // grab all parameters out
+    String collectionName = factory.getValueOperand(expression, 0);
+    List<StreamExpressionNamedParameter> namedParams = factory.getNamedOperands(expression);
+    StreamExpressionNamedParameter startExpression = factory.getNamedOperand(expression, "start");
+    StreamExpressionNamedParameter endExpression = factory.getNamedOperand(expression, "end");
+    StreamExpressionNamedParameter fieldExpression = factory.getNamedOperand(expression, "field");
+    StreamExpressionNamedParameter gapExpression = factory.getNamedOperand(expression, "gap");
+    StreamExpressionNamedParameter formatExpression = factory.getNamedOperand(expression, "format");
+    StreamExpressionNamedParameter qExpression = factory.getNamedOperand(expression, "q");
+
+    StreamExpressionNamedParameter zkHostExpression = factory.getNamedOperand(expression, "zkHost");
+    List<StreamExpression> metricExpressions = factory.getExpressionOperandsRepresentingTypes(expression, Expressible.class, Metric.class);
+
+
+    if(qExpression == null) {
+      throw new IOException("The timeseries expression requires the q parameter");
+    }
+
+    String start = null;
+    if(startExpression != null) {
+      start = ((StreamExpressionValue)startExpression.getParameter()).getValue();
+    }
+
+    String end = null;
+    if(endExpression != null) {
+      end = ((StreamExpressionValue)endExpression.getParameter()).getValue();
+    }
+
+    String gap = null;
+    if(gapExpression != null) {
+      gap = ((StreamExpressionValue)gapExpression.getParameter()).getValue();
+    }
+
+    String field = null;
+    if(fieldExpression != null) {
+      field = ((StreamExpressionValue)fieldExpression.getParameter()).getValue();
+    }
+
+    String format = null;
+    if(formatExpression != null) {
+      format = ((StreamExpressionValue)formatExpression.getParameter()).getValue();
+    }
+
+    // Collection Name
+    if(null == collectionName){
+      throw new IOException(String.format(Locale.ROOT,"invalid expression %s - collectionName expected as first operand",expression));
+    }
+
+    // Named parameters - passed directly to solr as solrparams
+    if(0 == namedParams.size()){
+      throw new IOException(String.format(Locale.ROOT,"invalid expression %s - at least one named parameter expected. eg. 'q=*:*'",expression));
+    }
+
+    // Construct the metrics
+    Metric[] metrics = new Metric[metricExpressions.size()];
+    for(int idx = 0; idx < metricExpressions.size(); ++idx){
+      metrics[idx] = factory.constructMetric(metricExpressions.get(idx));
+    }
+
+    if(0 == metrics.length){
+      throw new IOException(String.format(Locale.ROOT,"invalid expression %s - at least one metric expected.",expression,collectionName));
+    }
+
+    // pull out known named params
+    ModifiableSolrParams params = new ModifiableSolrParams();
+    for(StreamExpressionNamedParameter namedParam : namedParams){
+      if(!namedParam.getName().equals("zkHost") && !namedParam.getName().equals("start") && !namedParam.getName().equals("end") && !namedParam.getName().equals("gap")){
+        params.add(namedParam.getName(), namedParam.getParameter().toString().trim());
+      }
+    }
+
+    // zkHost, optional - if not provided then will look into factory list to get
+    String zkHost = null;
+    if(null == zkHostExpression){
+      zkHost = factory.getCollectionZkHost(collectionName);
+      if(zkHost == null) {
+        zkHost = factory.getDefaultZkHost();
+      }
+    }
+    else if(zkHostExpression.getParameter() instanceof StreamExpressionValue){
+      zkHost = ((StreamExpressionValue)zkHostExpression.getParameter()).getValue();
+    }
+    if(null == zkHost){
+      throw new IOException(String.format(Locale.ROOT,"invalid expression %s - zkHost not found for collection '%s'",expression,collectionName));
+    }
+
+    // We've got all the required items
+    init(collectionName, params, field, metrics, start, end, gap, format, zkHost);
+  }
+

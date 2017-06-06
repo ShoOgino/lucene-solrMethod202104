@@ -1,0 +1,55 @@
+  /**
+   * Returns the FunctionValues used by the function query.
+   */
+  @Override
+  public FunctionValues getValues(Map context, LeafReaderContext readerContext) throws IOException {
+    LeafReader reader = readerContext.reader();
+
+    final NumericDocValues ptX = DocValues.getNumeric(reader, strategy.getFieldNameX());
+    final NumericDocValues ptY = DocValues.getNumeric(reader, strategy.getFieldNameY());
+
+    return new FunctionValues() {
+
+      private int lastDocID = -1;
+
+      private final Point from = DistanceValueSource.this.from;
+      private final DistanceCalculator calculator = strategy.getSpatialContext().getDistCalc();
+      private final double nullValue =
+          (strategy.getSpatialContext().isGeo() ? 180 * multiplier : Double.MAX_VALUE);
+
+      private double getDocValue(NumericDocValues values, int doc) throws IOException {
+        int curDocID = values.docID();
+        if (doc > curDocID) {
+          curDocID = values.advance(doc);
+        }
+        if (doc == curDocID) {
+          return Double.longBitsToDouble(values.longValue());
+        } else {
+          return 0.0;
+        }
+      }
+
+      @Override
+      public float floatVal(int doc) throws IOException {
+        return (float) doubleVal(doc);
+      }
+
+      @Override
+      public double doubleVal(int doc) throws IOException {
+        // make sure it has minX and area
+        double x = getDocValue(ptX, doc);
+        if (ptX.docID() == doc) {
+          double y = getDocValue(ptY, doc);
+          assert ptY.docID() == doc;
+          return calculator.distance(from, x, y) * multiplier;
+        }
+        return nullValue;
+      }
+
+      @Override
+      public String toString(int doc) throws IOException {
+        return description() + "=" + floatVal(doc);
+      }
+    };
+  }
+

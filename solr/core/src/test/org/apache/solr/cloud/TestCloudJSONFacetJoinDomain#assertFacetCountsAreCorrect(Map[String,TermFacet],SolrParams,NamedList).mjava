@@ -1,0 +1,39 @@
+  /** 
+   * Recursive Helper method that walks the actual facet response, comparing the counts to the expected output 
+   * based on the equivilent filters generated from the original TermFacet.
+   */
+  private void assertFacetCountsAreCorrect(Map<String,TermFacet> expected,
+                                           SolrParams baseParams,
+                                           NamedList actualFacetResponse) throws SolrServerException, IOException {
+
+    for (Map.Entry<String,TermFacet> entry : expected.entrySet()) {
+      final String facetKey = entry.getKey();
+      final TermFacet facet = entry.getValue();
+      final NamedList results = (NamedList) actualFacetResponse.get(facetKey);
+      assertNotNull(facetKey + " key missing from: " + actualFacetResponse, results);
+      final List<NamedList> buckets = (List<NamedList>) results.get("buckets");
+      assertNotNull(facetKey + " has null buckets: " + actualFacetResponse, buckets);
+      for (NamedList bucket : buckets) {
+        final long count = ((Number) bucket.get("count")).longValue();
+        final String fieldVal = bucket.get("val").toString(); // int or stringified int
+
+        // change our query to filter on the fieldVal, and wrap in the facet domain (if any)
+        final SolrParams verifyParams = facet.applyValueConstraintAndDomain(baseParams, facetKey, fieldVal);
+
+        // check the count for this bucket
+        assertEquals(facetKey + ": " + verifyParams,
+                     count, getRandClient(random()).query(verifyParams).getResults().getNumFound());
+
+        // recursively check subFacets
+        if (! facet.subFacets.isEmpty()) {
+          assertFacetCountsAreCorrect(facet.subFacets,
+                                      verifyParams, bucket);
+        }
+      }
+    }
+    assertTrue("facets have unexpeted keys left over: " + actualFacetResponse,
+               // should alwasy be a count, maybe a 'val' if we're a subfacet
+               (actualFacetResponse.size() == expected.size() + 1) ||
+               (actualFacetResponse.size() == expected.size() + 2));
+  }
+

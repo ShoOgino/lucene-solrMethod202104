@@ -1,0 +1,164 @@
+  public synchronized boolean writeFieldUpdates(Directory dir, long maxDelGen, InfoStream infoStream) throws IOException {
+
+    long startTimeNS = System.nanoTime();
+    
+    assert Thread.holdsLock(writer);
+
+    final Map<Integer,Set<String>> newDVFiles = new HashMap<>();
+    Set<String> fieldInfosFiles = null;
+    FieldInfos fieldInfos = null;
+
+    boolean any = false;
+    int count = 0;
+    for (List<DocValuesFieldUpdates> updates : pendingDVUpdates.values()) {
+      // Sort by increasing delGen:
+      Collections.sort(updates, (a, b) -> Long.compare(a.delGen, b.delGen));
+      count += updates.size();
+      for (DocValuesFieldUpdates update : updates) {
+        if (update.delGen <= maxDelGen && update.any()) {
+          any = true;
+          break;
+        }
+      }
+    }
+
+    if (any == false) {
+      // no updates
+      return false;
+    }
+
+    // Do this so we can delete any created files on
+    // exception; this saves all codecs from having to do it:
+    TrackingDirectoryWrapper trackingDir = new TrackingDirectoryWrapper(dir);
+    
+    boolean success = false;
+    try {
+      final Codec codec = info.info.getCodec();
+
+      // reader could be null e.g. for a just merged segment (from
+      // IndexWriter.commitMergedDeletes).
+      final SegmentReader reader;
+      if (this.reader == null) {
+        reader = new SegmentReader(info, writer.segmentInfos.getIndexCreatedVersionMajor(), IOContext.READONCE);
+      } else {
+        reader = this.reader;
+      }
+      
+      try {
+        // clone FieldInfos so that we can update their dvGen separately from
+        // the reader's infos and write them to a new fieldInfos_gen file
+        FieldInfos.Builder builder = new FieldInfos.Builder(writer.globalFieldNumberMap);
+        // cannot use builder.add(reader.getFieldInfos()) because it does not
+        // clone FI.attributes as well FI.dvGen
+        for (FieldInfo fi : reader.getFieldInfos()) {
+          FieldInfo clone = builder.add(fi);
+          // copy the stuff FieldInfos.Builder doesn't copy
+          for (Entry<String,String> e : fi.attributes().entrySet()) {
+            clone.putAttribute(e.getKey(), e.getValue());
+          }
+          clone.setDocValuesGen(fi.getDocValuesGen());
+        }
+
+        // create new fields with the right DV type
+        for (List<DocValuesFieldUpdates> updates : pendingDVUpdates.values()) {
+          DocValuesFieldUpdates update = updates.get(0);
+          FieldInfo fieldInfo = builder.getOrAdd(update.field);
+          fieldInfo.setDocValuesType(update.type);
+        }
+        
+        fieldInfos = builder.finish();
+        final DocValuesFormat docValuesFormat = codec.docValuesFormat();
+        
+        handleNumericDVUpdates(fieldInfos, trackingDir, docValuesFormat, reader, newDVFiles, maxDelGen, infoStream);
+        handleBinaryDVUpdates(fieldInfos, trackingDir, docValuesFormat, reader, newDVFiles, maxDelGen, infoStream);
+
+        fieldInfosFiles = writeFieldInfosGen(fieldInfos, trackingDir, docValuesFormat, codec.fieldInfosFormat());
+      } finally {
+        if (reader != this.reader) {
+          reader.close();
+        }
+      }
+    
+      success = true;
+    } finally {
+      if (success == false) {
+        // Advance only the nextWriteFieldInfosGen and nextWriteDocValuesGen, so
+        // that a 2nd attempt to write will write to a new file
+        info.advanceNextWriteFieldInfosGen();
+        info.advanceNextWriteDocValuesGen();
+        
+        // Delete any partially created file(s):
+        for (String fileName : trackingDir.getCreatedFiles()) {
+          IOUtils.deleteFilesIgnoringExceptions(dir, fileName);
+        }
+      }
+    }
+
+    // Prune the now-written DV updates:
+    long bytesFreed = 0;
+    Iterator<Map.Entry<String,List<DocValuesFieldUpdates>>> it = pendingDVUpdates.entrySet().iterator();
+    while (it.hasNext()) {
+      Map.Entry<String,List<DocValuesFieldUpdates>> ent = it.next();
+      int upto = 0;
+      List<DocValuesFieldUpdates> updates = ent.getValue();
+      for (DocValuesFieldUpdates update : updates) {
+        if (update.delGen > maxDelGen) {
+          // not yet applied
+          updates.set(upto, update);
+          upto++;
+        } else {
+          bytesFreed += update.ramBytesUsed();
+        }
+      }
+      if (upto == 0) {
+        it.remove();
+      } else {
+        updates.subList(upto, updates.size()).clear();
+      }
+    }
+
+    long bytes = ramBytesUsed.addAndGet(-bytesFreed);
+    assert bytes >= 0;
+
+    // if there is a reader open, reopen it to reflect the updates
+    if (reader != null) {
+      SegmentReader newReader = new SegmentReader(info, reader, liveDocs, info.info.maxDoc() - info.getDelCount() - pendingDeleteCount);
+      boolean success2 = false;
+      try {
+        reader.decRef();
+        reader = newReader;
+        success2 = true;
+      } finally {
+        if (success2 == false) {
+          newReader.decRef();
+        }
+      }
+    }
+
+    // writing field updates succeeded
+    assert fieldInfosFiles != null;
+    info.setFieldInfosFiles(fieldInfosFiles);
+    
+    // update the doc-values updates files. the files map each field to its set
+    // of files, hence we copy from the existing map all fields w/ updates that
+    // were not updated in this session, and add new mappings for fields that
+    // were updated now.
+    assert newDVFiles.isEmpty() == false;
+    for (Entry<Integer,Set<String>> e : info.getDocValuesUpdatesFiles().entrySet()) {
+      if (newDVFiles.containsKey(e.getKey()) == false) {
+        newDVFiles.put(e.getKey(), e.getValue());
+      }
+    }
+    info.setDocValuesUpdatesFiles(newDVFiles);
+
+    // wrote new files, should checkpoint()
+    writer.checkpointNoSIS();
+
+    if (infoStream.isEnabled("BD")) {
+      infoStream.message("BD", String.format(Locale.ROOT, "done write field updates for seg=%s; took %.3fs; new files: %s",
+                                             info, (System.nanoTime() - startTimeNS)/1000000000.0, newDVFiles));
+    }
+
+    return true;
+  }
+

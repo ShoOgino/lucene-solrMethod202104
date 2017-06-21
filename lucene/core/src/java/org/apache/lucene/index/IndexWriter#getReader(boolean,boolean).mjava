@@ -95,21 +95,36 @@
           } else {
             anyChanges = false;
           }
-          if (!anyChanges) {
+          if (anyChanges == false) {
             // prevent double increment since docWriter#doFlush increments the flushcount
             // if we flushed anything.
             flushCount.incrementAndGet();
           }
-          // Prevent segmentInfos from changing while opening the
-          // reader; in theory we could instead do similar retry logic,
-          // just like we do when loading segments_N
+
+          processEvents(false, true);
+
+          if (applyAllDeletes) {
+            applyAllDeletesAndUpdates();
+          }
+
           synchronized(this) {
-            anyChanges |= maybeApplyDeletes(applyAllDeletes);
+
+            // NOTE: we cannot carry doc values updates in memory yet, so we always must write them through to disk and re-open each
+            // SegmentReader:
+
+            // TODO: we could instead just clone SIS and pull/incref readers in sync'd block, and then do this w/o IW's lock?
+            // Must do this sync'd on IW to prevent a merge from completing at the last second and failing to write its DV updates:
+            readerPool.writeAllDocValuesUpdates();
+
             if (writeAllDeletes) {
               // Must move the deletes to disk:
               readerPool.commit(segmentInfos);
             }
 
+            // Prevent segmentInfos from changing while opening the
+            // reader; in theory we could instead do similar retry logic,
+            // just like we do when loading segments_N
+            
             r = StandardDirectoryReader.open(this, segmentInfos, applyAllDeletes, writeAllDeletes);
             if (infoStream.isEnabled("IW")) {
               infoStream.message("IW", "return reader version=" + r.getVersion() + " reader=" + r);
@@ -129,6 +144,7 @@
           }
         }
       }
+      anyChanges |= maybeMerge.getAndSet(false);
       if (anyChanges) {
         maybeMerge(config.getMergePolicy(), MergeTrigger.FULL_FLUSH, UNBOUNDED_MAX_MERGE_SEGMENTS);
       }

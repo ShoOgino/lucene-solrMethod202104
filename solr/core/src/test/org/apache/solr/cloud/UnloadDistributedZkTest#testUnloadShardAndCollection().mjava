@@ -7,37 +7,28 @@
     final String coreName1 = collection+"_1";
     final String coreName2 = collection+"_2";
 
-    // create one leader and one replica
-    Create createCmd = new Create();
-    createCmd.setCoreName(coreName1);
-    createCmd.setCollection(collection);
-    String coreDataDir = createTempDir().toFile().getAbsolutePath();
-    createCmd.setDataDir(getDataDir(coreDataDir));
-    createCmd.setNumShards(numShards);
-    
-    SolrClient client = clients.get(0);
-    String url1 = getBaseUrl(client);
+    assertEquals(0, CollectionAdminRequest.createCollection(collection, numShards, 1)
+        .setCreateNodeSet("")
+        .process(cloudClient).getStatus());
+    assertTrue(CollectionAdminRequest.addReplicaToShard(collection, "shard1")
+        .setCoreName(coreName1)
+        .setNode(jettys.get(0).getNodeName())
+        .process(cloudClient).isSuccess());
 
-    try (HttpSolrClient adminClient = getHttpSolrClient(url1)) {
-      adminClient.setConnectionTimeout(15000);
-      adminClient.setSoTimeout(60000);
-      adminClient.request(createCmd);
+    assertTrue(CollectionAdminRequest.addReplicaToShard(collection, "shard2")
+        .setCoreName(coreName2)
+        .setNode(jettys.get(0).getNodeName())
+        .process(cloudClient).isSuccess());
 
-      createCmd = new Create();
-      createCmd.setCoreName(coreName2);
-      createCmd.setCollection(collection);
-      coreDataDir = createTempDir().toFile().getAbsolutePath();
-      createCmd.setDataDir(getDataDir(coreDataDir));
 
-      adminClient.request(createCmd);
+    // does not mean they are active and up yet :*
+    waitForRecoveriesToFinish(collection, false);
 
-      // does not mean they are active and up yet :*
-      waitForRecoveriesToFinish(collection, false);
+    final boolean unloadInOrder = random().nextBoolean();
+    final String unloadCmdCoreName1 = (unloadInOrder ? coreName1 : coreName2);
+    final String unloadCmdCoreName2 = (unloadInOrder ? coreName2 : coreName1);
 
-      final boolean unloadInOrder = random().nextBoolean();
-      final String unloadCmdCoreName1 = (unloadInOrder ? coreName1 : coreName2);
-      final String unloadCmdCoreName2 = (unloadInOrder ? coreName2 : coreName1);
-
+    try (HttpSolrClient adminClient = getHttpSolrClient(buildUrl(jettys.get(0).getLocalPort()))) {
       // now unload one of the two
       Unload unloadCmd = new Unload(false);
       unloadCmd.setCoreName(unloadCmdCoreName1);

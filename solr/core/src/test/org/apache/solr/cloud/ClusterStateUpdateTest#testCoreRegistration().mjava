@@ -1,23 +1,12 @@
   @Test
   public void testCoreRegistration() throws Exception {
     System.setProperty("solrcloud.update.delay", "1");
-    
-   
-    Map<String,Object> props2 = new HashMap<>();
-    props2.put("configName", "conf1");
-    ZkNodeProps zkProps2 = new ZkNodeProps(props2);
-    
-    SolrZkClient zkClient = new SolrZkClient(zkServer.getZkAddress(),
-        AbstractZkTestCase.TIMEOUT);
-    zkClient.makePath(ZkStateReader.COLLECTIONS_ZKNODE + "/testcore",
-        Utils.toJSON(zkProps2), CreateMode.PERSISTENT, true);
-    zkClient.makePath(ZkStateReader.COLLECTIONS_ZKNODE + "/testcore/shards",
-        CreateMode.PERSISTENT, true);
-    zkClient.close();
 
-    container1.create("testcore", ImmutableMap.of("dataDir", dataDir4.getAbsolutePath()));
-    
-    ZkController zkController2 = container2.getZkController();
+    assertEquals(0, CollectionAdminRequest.createCollection("testcore", 1,1)
+        .setCreateNodeSet(cluster.getJettySolrRunner(0).getNodeName())
+        .process(cluster.getSolrClient()).getStatus());
+
+    ZkController zkController2 = cluster.getJettySolrRunner(1).getCoreContainer().getZkController();
 
     String host = zkController2.getHostName();
     
@@ -46,19 +35,22 @@
 
     assertEquals(1, shards.size());
 
-    Replica zkProps = shards.get(host + ":1661_solr_testcore");
+    // assert this is core of container1
+    Replica zkProps = shards.get("core_node1");
 
     assertNotNull(zkProps);
 
-    assertEquals(host + ":1661_solr", zkProps.getStr(ZkStateReader.NODE_NAME_PROP));
+    assertEquals(host + ":" +cluster.getJettySolrRunner(0).getLocalPort()+"_solr", zkProps.getStr(ZkStateReader.NODE_NAME_PROP));
 
-    assertEquals("http://" + host + ":1661/solr", zkProps.getStr(ZkStateReader.BASE_URL_PROP));
+    assertEquals("http://" + host + ":"+cluster.getJettySolrRunner(0).getLocalPort()+"/solr", zkProps.getStr(ZkStateReader.BASE_URL_PROP));
 
+    // assert there are 3 live nodes
     Set<String> liveNodes = clusterState2.getLiveNodes();
     assertNotNull(liveNodes);
     assertEquals(3, liveNodes.size());
 
-    container3.shutdown();
+    // shut down node 2
+    cluster.stopJettySolrRunner(2);
 
     // slight pause (15s timeout) for watch to trigger
     for(int i = 0; i < (5 * 15); i++) {
@@ -70,29 +62,20 @@
 
     assertEquals(2, zkController2.getClusterState().getLiveNodes().size());
 
-    // quickly kill / start client
-
-    container2.getZkController().getZkClient().getSolrZooKeeper().getConnection()
-        .disconnect();
-    container2.shutdown();
-
-    System.setProperty("hostPort", "1662");
-    System.setProperty("solr.data.dir", ClusterStateUpdateTest.this.dataDir2.getAbsolutePath());
-    container2 = new CoreContainer(solrHomeDirectory.getAbsolutePath());
-    container2.load();
-    System.clearProperty("hostPort");
+    cluster.getJettySolrRunner(1).stop();
+    cluster.getJettySolrRunner(1).start();
     
     // pause for watch to trigger
     for(int i = 0; i < 200; i++) {
-      if (container1.getZkController().getClusterState().liveNodesContain(
-          container2.getZkController().getNodeName())) {
+      if (cluster.getJettySolrRunner(0).getCoreContainer().getZkController().getClusterState().liveNodesContain(
+          cluster.getJettySolrRunner(1).getCoreContainer().getZkController().getNodeName())) {
         break;
       }
       Thread.sleep(100);
     }
 
-    assertTrue(container1.getZkController().getClusterState().liveNodesContain(
-        container2.getZkController().getNodeName()));
+    assertTrue(cluster.getJettySolrRunner(0).getCoreContainer().getZkController().getClusterState().liveNodesContain(
+        cluster.getJettySolrRunner(1).getCoreContainer().getZkController().getNodeName()));
 
     // core.close();  // don't close - this core is managed by container1 now
   }

@@ -3,24 +3,13 @@
     List<SolrClient> clients = new ArrayList<>();
     StringBuilder sb = new StringBuilder();
 
-    if ("2".equals(getStateFormat())) {
-      log.info("Creating " + DEFAULT_COLLECTION + " with stateFormat=2");
-      SolrZkClient zkClient = new SolrZkClient(zkServer.getZkAddress(),
-          AbstractZkTestCase.TIMEOUT, AbstractZkTestCase.TIMEOUT);
-      Overseer.getStateUpdateQueue(zkClient).offer(
-          Utils.toJSON(Utils.makeMap(Overseer.QUEUE_OPERATION,
-              CollectionParams.CollectionAction.CREATE.toLower(), 
-              "name", DEFAULT_COLLECTION, 
-              "numShards", String.valueOf(sliceCount),
-              DocCollection.STATE_FORMAT, getStateFormat(),
-              ZkStateReader.NRT_REPLICAS, useTlogReplicas()?"0":"1",
-              ZkStateReader.TLOG_REPLICAS, useTlogReplicas()?"1":"0",
-              ZkStateReader.PULL_REPLICAS, String.valueOf(getPullReplicaCount()))));
-      zkClient.close();
-    }
+    assertEquals(0, CollectionAdminRequest
+        .createCollection(DEFAULT_COLLECTION, sliceCount, 1)
+        .setStateFormat(Integer.parseInt(getStateFormat()))
+        .setCreateNodeSet("")
+        .process(cloudClient).getStatus());
     
-    int numPullReplicas = getPullReplicaCount() * sliceCount;
-
+    int numOtherReplicas = numJettys - getPullReplicaCount() * sliceCount;
     for (int i = 1; i <= numJettys; i++) {
       if (sb.length() > 0) sb.append(',');
       int cnt = this.jettyIntCntr.incrementAndGet();
@@ -30,20 +19,37 @@
       jettyDir.mkdirs();
       setupJettySolrHome(jettyDir);
       JettySolrRunner j;
-      
-      if (numPullReplicas > 0) {
-        numPullReplicas--;
+
+      if (numOtherReplicas > 0) {
+        numOtherReplicas--;
+        if (useTlogReplicas()) {
+          log.info("create jetty {} in directory {} of type {}", i, jettyDir, Replica.Type.TLOG);
+          j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
+              + cnt) : null, null, "solrconfig.xml", null, Replica.Type.TLOG);
+          assertTrue(CollectionAdminRequest
+              .addReplicaToShard(DEFAULT_COLLECTION, "shard"+((i%sliceCount)+1))
+              .setNode(j.getNodeName())
+              .setType(Replica.Type.TLOG)
+              .process(cloudClient).isSuccess());
+        } else {
+          log.info("create jetty {} in directory {} of type {}", i, jettyDir, Replica.Type.NRT);
+          j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
+              + cnt) : null, null, "solrconfig.xml", null, null);
+          assertTrue(CollectionAdminRequest
+              .addReplicaToShard(DEFAULT_COLLECTION, "shard"+((i%sliceCount)+1))
+              .setNode(j.getNodeName())
+              .setType(Replica.Type.NRT)
+              .process(cloudClient).isSuccess());
+        }
+      } else {
         log.info("create jetty {} in directory {} of type {}", i, jettyDir, Replica.Type.PULL);
         j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
             + cnt) : null, null, "solrconfig.xml", null, Replica.Type.PULL);
-      } else if (useTlogReplicas()) {
-        log.info("create jetty {} in directory {} of type {}", i, jettyDir, Replica.Type.TLOG);
-        j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
-            + cnt) : null, null, "solrconfig.xml", null, Replica.Type.TLOG);
-      } else {
-        log.info("create jetty {} in directory {} of type {}", i, jettyDir, Replica.Type.NRT);
-        j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
-            + cnt) : null, null, "solrconfig.xml", null, null);
+        assertTrue(CollectionAdminRequest
+            .addReplicaToShard(DEFAULT_COLLECTION, "shard"+((i%sliceCount)+1))
+            .setNode(j.getNodeName())
+            .setType(Replica.Type.PULL)
+            .process(cloudClient).isSuccess());
       }
       jettys.add(j);
       SolrClient client = createNewSolrClient(j.getLocalPort());

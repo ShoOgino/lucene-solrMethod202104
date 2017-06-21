@@ -1,54 +1,33 @@
   @Override
   public final Weight createWeight(IndexSearcher searcher, boolean needsScores, float boost) throws IOException {
     return new ConstantScoreWeight(this, boost) {
-      final RangeFieldComparator target = new RangeFieldComparator();
 
-      private DocIdSet buildMatchingDocIdSet(LeafReader reader, PointValues values) throws IOException {
-        DocIdSetBuilder result = new DocIdSetBuilder(reader.maxDoc(), values, field);
-        values.intersect(
-            new IntersectVisitor() {
-              DocIdSetBuilder.BulkAdder adder;
-              @Override
-              public void grow(int count) {
-                adder = result.grow(count);
-              }
-              @Override
-              public void visit(int docID) throws IOException {
-                adder.add(docID);
-              }
-              @Override
-              public void visit(int docID, byte[] leaf) throws IOException {
-                if (target.matches(leaf)) {
-                  adder.add(docID);
-                }
-              }
-              @Override
-              public Relation compare(byte[] minPackedValue, byte[] maxPackedValue) {
-                return compareRange(minPackedValue, maxPackedValue);
-              }
-            });
-        return result.build();
-      }
-
-      private Relation compareRange(byte[] minPackedValue, byte[] maxPackedValue) {
-        byte[] node = getInternalRange(minPackedValue, maxPackedValue);
-        // compute range relation for BKD traversal
-        if (target.intersects(node) == false) {
-          return Relation.CELL_OUTSIDE_QUERY;
-        } else if (target.within(node)) {
-          // target within cell; continue traversing:
-          return Relation.CELL_CROSSES_QUERY;
-        } else if (target.contains(node)) {
-          // target contains cell; add iff queryType is not a CONTAINS or CROSSES query:
-          return (queryType == QueryType.CONTAINS || queryType == QueryType.CROSSES) ?
-              Relation.CELL_OUTSIDE_QUERY : Relation.CELL_INSIDE_QUERY;
-        }
-        // target intersects cell; continue traversing:
-        return Relation.CELL_CROSSES_QUERY;
+      private IntersectVisitor getIntersectVisitor(DocIdSetBuilder result) {
+        return new IntersectVisitor() {
+          DocIdSetBuilder.BulkAdder adder;
+          @Override
+          public void grow(int count) {
+            adder = result.grow(count);
+          }
+          @Override
+          public void visit(int docID) throws IOException {
+            adder.add(docID);
+          }
+          @Override
+          public void visit(int docID, byte[] leaf) throws IOException {
+            if (queryType.matches(ranges, leaf, numDims, bytesPerDim)) {
+              adder.add(docID);
+            }
+          }
+          @Override
+          public Relation compare(byte[] minPackedValue, byte[] maxPackedValue) {
+            return queryType.compare(ranges, minPackedValue, maxPackedValue, numDims, bytesPerDim);
+          }
+        };
       }
 
       @Override
-      public Scorer scorer(LeafReaderContext context) throws IOException {
+      public ScorerSupplier scorerSupplier(LeafReaderContext context) throws IOException {
         LeafReader reader = context.reader();
         PointValues values = reader.getPointValues(field);
         if (values == null) {
@@ -63,23 +42,57 @@
         checkFieldInfo(fieldInfo);
         boolean allDocsMatch = false;
         if (values.getDocCount() == reader.maxDoc()
-            && compareRange(values.getMinPackedValue(), values.getMaxPackedValue()) == Relation.CELL_INSIDE_QUERY) {
+            && queryType.compare(ranges, values.getMinPackedValue(), values.getMaxPackedValue(), numDims, bytesPerDim) == Relation.CELL_INSIDE_QUERY) {
           allDocsMatch = true;
         }
 
-        DocIdSetIterator iterator = allDocsMatch == true ?
-            DocIdSetIterator.all(reader.maxDoc()) : buildMatchingDocIdSet(reader, values).iterator();
-        return new ConstantScoreScorer(this, score(), iterator);
+        final Weight weight = this;
+        if (allDocsMatch) {
+          return new ScorerSupplier() {
+            @Override
+            public Scorer get(boolean randomAccess) {
+              return new ConstantScoreScorer(weight, score(), DocIdSetIterator.all(reader.maxDoc()));
+            }
+
+            @Override
+            public long cost() {
+              return reader.maxDoc();
+            }
+          };
+        } else {
+          return new ScorerSupplier() {
+
+            final DocIdSetBuilder result = new DocIdSetBuilder(reader.maxDoc(), values, field);
+            final IntersectVisitor visitor = getIntersectVisitor(result);
+            long cost = -1;
+
+            @Override
+            public Scorer get(boolean randomAccess) throws IOException {
+              values.intersect(visitor);
+              DocIdSetIterator iterator = result.build().iterator();
+              return new ConstantScoreScorer(weight, score(), iterator);
+            }
+
+            @Override
+            public long cost() {
+              if (cost == -1) {
+                // Computing the cost may be expensive, so only do it if necessary
+                cost = values.estimatePointCount(visitor);
+                assert cost >= 0;
+              }
+              return cost;
+            }
+          };
+        }
       }
 
-      /** get an encoded byte representation of the internal node; this is
-       *  the lower half of the min array and the upper half of the max array */
-      private byte[] getInternalRange(byte[] min, byte[] max) {
-        byte[] range = new byte[min.length];
-        final int dimSize = numDims * bytesPerDim;
-        System.arraycopy(min, 0, range, 0, dimSize);
-        System.arraycopy(max, dimSize, range, dimSize, dimSize);
-        return range;
+      @Override
+      public Scorer scorer(LeafReaderContext context) throws IOException {
+        ScorerSupplier scorerSupplier = scorerSupplier(context);
+        if (scorerSupplier == null) {
+          return null;
+        }
+        return scorerSupplier.get(false);
       }
     };
   }

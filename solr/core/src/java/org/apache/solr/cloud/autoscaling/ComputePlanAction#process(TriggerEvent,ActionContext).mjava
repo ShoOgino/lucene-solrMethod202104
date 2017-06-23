@@ -1,0 +1,45 @@
+  @Override
+  public void process(TriggerEvent event, ActionContext context) {
+    log.debug("-- processing event: {} with context properties: {}", event, context.getProperties());
+    CoreContainer container = context.getCoreContainer();
+    try {
+      try (CloudSolrClient cloudSolrClient = new CloudSolrClient.Builder()
+          .withZkHost(container.getZkController().getZkServerAddress())
+          .withHttpClient(container.getUpdateShardHandler().getHttpClient())
+          .build()) {
+        ZkStateReader zkStateReader = cloudSolrClient.getZkStateReader();
+        Map<String, Object> autoScalingConf = Utils.getJson(zkStateReader.getZkClient(), ZkStateReader.SOLR_AUTOSCALING_CONF_PATH, true);
+        if (autoScalingConf.isEmpty()) {
+          log.error("Action: " + getName() + " executed but no policy is configured");
+          return;
+        }
+        AutoScalingConfig config = new AutoScalingConfig(autoScalingConf);
+        Policy policy = config.getPolicy();
+        Policy.Session session = policy.createSession(new SolrClientDataProvider(cloudSolrClient));
+        Policy.Suggester suggester = getSuggester(session, event);
+        while (true) {
+          SolrRequest operation = suggester.getOperation();
+          if (operation == null) break;
+          log.info("Computed Plan: {}", operation);
+          Map<String, Object> props = context.getProperties();
+          props.compute("operations", (k, v) -> {
+            List<SolrRequest> operations = (List<SolrRequest>) v;
+            if (operations == null) operations = new ArrayList<>();
+            operations.add(operation);
+            return operations;
+          });
+          session = suggester.getSession();
+          suggester = getSuggester(session, event);
+        }
+      }
+    } catch (KeeperException e) {
+      log.error("ZooKeeperException while processing event: " + event, e);
+    } catch (InterruptedException e) {
+      log.error("Interrupted while processing event: " + event, e);
+    } catch (IOException e) {
+      log.error("IOException while processing event: " + event, e);
+    } catch (Exception e) {
+      log.error("Unexpected exception while processing event: " + event, e);
+    }
+  }
+

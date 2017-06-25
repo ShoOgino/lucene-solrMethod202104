@@ -30,67 +30,17 @@
         // commit merged deletes
         final ReadersAndUpdates rld = readerPool.get(info, true);
 
-        // Carefully pull the most recent live docs and reader
-        SegmentReader reader;
-        final Bits liveDocs;
-        final int delCount;
+        SegmentReader reader = rld.getReaderForMerge(context);
+        int delCount = reader.numDeletedDocs();
 
-        synchronized (this) {
-          // Must sync to ensure BufferedDeletesStream cannot change liveDocs,
-          // pendingDeleteCount and field updates while we pull a copy:
-          reader = rld.getReaderForMerge(context);
-          liveDocs = rld.getReadOnlyLiveDocs();
-          delCount = rld.getPendingDeleteCount() + info.getDelCount();
-
-          assert reader != null;
-          assert rld.verifyDocCounts();
-
-          if (infoStream.isEnabled("IW")) {
-            if (rld.getPendingDeleteCount() != 0) {
-              infoStream.message("IW", "seg=" + segString(info) + " delCount=" + info.getDelCount() + " pendingDelCount=" + rld.getPendingDeleteCount());
-            } else if (info.getDelCount() != 0) {
-              infoStream.message("IW", "seg=" + segString(info) + " delCount=" + info.getDelCount());
-            } else {
-              infoStream.message("IW", "seg=" + segString(info) + " no deletes");
-            }
-          }
-        }
-
-        // Deletes might have happened after we pulled the merge reader and
-        // before we got a read-only copy of the segment's actual live docs
-        // (taking pending deletes into account). In that case we need to
-        // make a new reader with updated live docs and del count.
-        if (reader.numDeletedDocs() != delCount) {
-          // fix the reader's live docs and del count
-          assert delCount > reader.numDeletedDocs(); // beware of zombies
-
-          SegmentReader newReader;
-
-          synchronized (this) {
-            // We must also sync on IW here, because another thread could be writing
-            // new DV updates / remove old gen field infos files causing FNFE:
-            newReader = new SegmentReader(info, reader, liveDocs, info.info.maxDoc() - delCount);
-          }
-
-          boolean released = false;
-          try {
-            rld.release(reader);
-            released = true;
-          } finally {
-            if (!released) {
-              newReader.decRef();
-            }
-          }
-
-          reader = newReader;
+        if (infoStream.isEnabled("IW")) {
+          infoStream.message("IW", "seg=" + segString(info) + " reader=" + reader);
         }
 
         merge.readers.add(reader);
         assert delCount <= info.info.maxDoc(): "delCount=" + delCount + " info.maxDoc=" + info.info.maxDoc() + " rld.pendingDeleteCount=" + rld.getPendingDeleteCount() + " info.getDelCount()=" + info.getDelCount();
         segUpto++;
       }
-
-//      System.out.println("[" + Thread.currentThread().getName() + "] IW.mergeMiddle: merging " + merge.getMergeReaders());
 
       // Let the merge wrap readers
       List<CodecReader> mergeReaders = new ArrayList<>();
@@ -163,7 +113,6 @@
       // Very important to do this before opening the reader
       // because codec must know if prox was written for
       // this segment:
-      //System.out.println("merger set hasProx=" + merger.hasProx() + " seg=" + merge.info.name);
       boolean useCompoundFile;
       synchronized (this) { // Guard segmentInfos
         useCompoundFile = mergePolicy.useCompoundFile(segmentInfos, merge.info, this);

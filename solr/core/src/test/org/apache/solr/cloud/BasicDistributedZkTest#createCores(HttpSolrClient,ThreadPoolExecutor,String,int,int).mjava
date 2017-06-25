@@ -1,18 +1,28 @@
   protected void createCores(final HttpSolrClient client,
       ThreadPoolExecutor executor, final String collection, final int numShards, int cnt) {
+    try {
+      assertEquals(0, CollectionAdminRequest.createCollection(collection, numShards, 1)
+          .setCreateNodeSet("")
+          .process(client).getStatus());
+    } catch (SolrServerException | IOException e) {
+      throw new RuntimeException(e);
+    }
+    String nodeName = null;
+    for (JettySolrRunner jetty : jettys) {
+      if (client.getBaseURL().contains(":"+jetty.getLocalPort())) {
+        nodeName = jetty.getNodeName();
+        break;
+      }
+    }
+    assertNotNull(nodeName);
     for (int i = 0; i < cnt; i++) {
       final int freezeI = i;
+      final String freezeNodename = nodeName;
       executor.execute(() -> {
-        Create createCmd = new Create();
-        createCmd.setCoreName(collection + freezeI);
-        createCmd.setCollection(collection);
-
-        createCmd.setNumShards(numShards);
         try {
-          String core3dataDir = createTempDir(collection).toFile().getAbsolutePath();
-          createCmd.setDataDir(getDataDir(core3dataDir));
-
-          client.request(createCmd);
+          assertTrue(CollectionAdminRequest.addReplicaToShard(collection, "shard"+((freezeI%numShards)+1))
+              .setCoreName(collection + freezeI)
+              .setNode(freezeNodename).process(client).isSuccess());
         } catch (SolrServerException | IOException e) {
           throw new RuntimeException(e);
         }

@@ -1,0 +1,30 @@
+  private void finishApply(IndexWriter writer, BufferedUpdatesStream.SegmentState[] segStates,
+                           boolean success, Set<String> delFiles) throws IOException {
+    synchronized (writer) {
+
+      BufferedUpdatesStream.ApplyDeletesResult result;
+      try {
+        result = writer.bufferedUpdatesStream.closeSegmentStates(writer.readerPool, segStates, success);
+      } finally {
+        // Matches the incRef we did above, but we must do the decRef after closing segment states else
+        // IFD can't delete still-open files
+        writer.deleter.decRef(delFiles);
+      }
+
+      if (result.anyDeletes) {
+        writer.maybeMerge.set(true);
+        writer.checkpoint();
+      }
+
+      if (writer.keepFullyDeletedSegments == false && result.allDeleted != null) {
+        if (infoStream.isEnabled("IW")) {
+          infoStream.message("IW", "drop 100% deleted segments: " + writer.segString(result.allDeleted));
+        }
+        for (SegmentCommitInfo info : result.allDeleted) {
+          writer.dropDeletedSegment(info);
+        }
+        writer.checkpoint();
+      }
+    }
+  }
+

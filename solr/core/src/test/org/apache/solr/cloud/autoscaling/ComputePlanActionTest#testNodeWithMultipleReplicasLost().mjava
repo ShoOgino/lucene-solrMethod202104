@@ -1,0 +1,72 @@
+  public void testNodeWithMultipleReplicasLost() throws Exception {
+    // start 3 more nodes
+    cluster.startJettySolrRunner();
+    cluster.startJettySolrRunner();
+    cluster.startJettySolrRunner();
+
+    cluster.waitForAllNodes(30);
+
+    CloudSolrClient solrClient = cluster.getSolrClient();
+    String setTriggerCommand = "{" +
+        "'set-trigger' : {" +
+        "'name' : 'node_lost_trigger'," +
+        "'event' : 'nodeLost'," +
+        "'waitFor' : '1s'," +
+        "'enabled' : true," +
+        "'actions' : [{'name':'compute_plan', 'class' : 'solr.ComputePlanAction'}," +
+        "{'name':'test','class':'" + ComputePlanActionTest.AssertingTriggerAction.class.getName() + "'}]" +
+        "}}";
+    SolrRequest req = new AutoScalingHandlerTest.AutoScalingRequest(SolrRequest.METHOD.POST, path, setTriggerCommand);
+    NamedList<Object> response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection("testNodeWithMultipleReplicasLost",
+        "conf",2, 3);
+    create.setMaxShardsPerNode(2);
+    create.process(solrClient);
+
+    waitForState("Timed out waiting for replicas of new collection to be active",
+        "testNodeWithMultipleReplicasLost", clusterShape(2, 3));
+
+    ClusterState clusterState = cluster.getSolrClient().getZkStateReader().getClusterState();
+    DocCollection docCollection = clusterState.getCollection("testNodeWithMultipleReplicasLost");
+
+    // lets find a node with at least 2 replicas
+    String stoppedNodeName = null;
+    List<Replica> replicasToBeMoved = null;
+    for (int i = 0; i < cluster.getJettySolrRunners().size(); i++) {
+      JettySolrRunner jettySolrRunner = cluster.getJettySolrRunners().get(i);
+      List<Replica> replicas = docCollection.getReplicas(jettySolrRunner.getNodeName());
+      if (replicas != null && replicas.size() == 2) {
+        stoppedNodeName = jettySolrRunner.getNodeName();
+        replicasToBeMoved = replicas;
+        cluster.stopJettySolrRunner(i);
+        break;
+      }
+    }
+    assertNotNull(stoppedNodeName);
+    cluster.waitForAllNodes(30);
+
+    assertTrue("Trigger was not fired even after 5 seconds", triggerFiredLatch.await(5, TimeUnit.SECONDS));
+    assertTrue(fired.get());
+
+    TriggerEvent triggerEvent = eventRef.get();
+    assertNotNull(triggerEvent);
+    assertEquals(AutoScaling.EventType.NODELOST, triggerEvent.getEventType());
+    assertEquals(stoppedNodeName, triggerEvent.getProperty(TriggerEvent.NODE_NAME));
+
+    Map context = actionContextPropsRef.get();
+    assertNotNull(context);
+    List<SolrRequest> operations = (List<SolrRequest>) context.get("operations");
+    assertNotNull("The operations computed by ComputePlanAction should not be null", operations);
+    operations.forEach(solrRequest -> log.info(solrRequest.getParams().toString()));
+    assertEquals("ComputePlanAction should have computed exactly 2 operation", 2, operations.size());
+
+    for (SolrRequest solrRequest : operations) {
+      SolrParams params = solrRequest.getParams();
+      assertEquals("Expected MOVEREPLICA action after adding node", MOVEREPLICA, CollectionParams.CollectionAction.get(params.get("action")));
+      String moved = params.get("replica");
+      assertTrue(replicasToBeMoved.stream().anyMatch(replica -> replica.getName().equals(moved)));
+    }
+  }
+

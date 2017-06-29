@@ -10,14 +10,14 @@
     // Apply delete-by-docID now (delete-byDocID only
     // happens when an exception is hit processing that
     // doc, eg if analyzer has some problem w/ the text):
-    if (pendingUpdates.docIDs.size() > 0) {
+    if (pendingUpdates.deleteDocIDs.size() > 0) {
       flushState.liveDocs = codec.liveDocsFormat().newLiveDocs(numDocsInRAM);
-      for(int delDocID : pendingUpdates.docIDs) {
+      for(int delDocID : pendingUpdates.deleteDocIDs) {
         flushState.liveDocs.clear(delDocID);
       }
-      flushState.delCountOnFlush = pendingUpdates.docIDs.size();
-      pendingUpdates.bytesUsed.addAndGet(-pendingUpdates.docIDs.size() * BufferedUpdates.BYTES_PER_DEL_DOCID);
-      pendingUpdates.docIDs.clear();
+      flushState.delCountOnFlush = pendingUpdates.deleteDocIDs.size();
+      pendingUpdates.bytesUsed.addAndGet(-pendingUpdates.deleteDocIDs.size() * BufferedUpdates.BYTES_PER_DEL_DOCID);
+      pendingUpdates.deleteDocIDs.clear();
     }
 
     if (aborted) {
@@ -35,7 +35,8 @@
     final Sorter.DocMap sortMap;
     try {
       sortMap = consumer.flush(flushState);
-      pendingUpdates.terms.clear();
+      // We clear this here because we already resolved them (private to this segment) when writing postings:
+      pendingUpdates.clearDeleteTerms();
       segmentInfo.setFiles(new HashSet<>(directory.getCreatedFiles()));
 
       final SegmentCommitInfo segmentInfoPerCommit = new SegmentCommitInfo(segmentInfo, 0, -1L, -1L, -1L);
@@ -52,7 +53,7 @@
       }
 
       final BufferedUpdates segmentDeletes;
-      if (pendingUpdates.queries.isEmpty() && pendingUpdates.numericUpdates.isEmpty() && pendingUpdates.binaryUpdates.isEmpty()) {
+      if (pendingUpdates.deleteQueries.isEmpty() && pendingUpdates.numericUpdates.isEmpty() && pendingUpdates.binaryUpdates.isEmpty()) {
         pendingUpdates.clear();
         segmentDeletes = null;
       } else {
@@ -69,13 +70,14 @@
 
       assert segmentInfo != null;
 
-      FlushedSegment fs = new FlushedSegment(segmentInfoPerCommit, flushState.fieldInfos,
-                                             segmentDeletes, flushState.liveDocs, flushState.delCountOnFlush);
+      FlushedSegment fs = new FlushedSegment(infoStream, segmentInfoPerCommit, flushState.fieldInfos,
+                                             segmentDeletes, flushState.liveDocs, flushState.delCountOnFlush,
+                                             sortMap);
       sealFlushedSegment(fs, sortMap);
       if (infoStream.isEnabled("DWPT")) {
         infoStream.message("DWPT", "flush time " + ((System.nanoTime() - t0)/1000000.0) + " msec");
       }
-
+      
       return fs;
     } catch (Throwable th) {
       abort();

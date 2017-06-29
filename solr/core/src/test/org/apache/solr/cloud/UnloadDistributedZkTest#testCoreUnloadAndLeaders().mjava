@@ -2,42 +2,26 @@
    * @throws Exception on any problem
    */
   private void testCoreUnloadAndLeaders() throws Exception {
-    File tmpDir = createTempDir().toFile();
+    JettySolrRunner jetty1 = jettys.get(0);
 
-    String core1DataDir = tmpDir.getAbsolutePath() + File.separator + System.nanoTime() + "unloadcollection1" + "_1n";
-
-    // create a new collection collection
-    SolrClient client = clients.get(0);
-    String url1 = getBaseUrl(client);
-    try (HttpSolrClient adminClient = getHttpSolrClient(url1)) {
-      adminClient.setConnectionTimeout(15000);
-      adminClient.setSoTimeout(60000);
-
-      Create createCmd = new Create();
-      createCmd.setCoreName("unloadcollection1");
-      createCmd.setCollection("unloadcollection");
-      createCmd.setNumShards(1);
-      createCmd.setDataDir(getDataDir(core1DataDir));
-      adminClient.request(createCmd);
-    }
+    assertEquals(0, CollectionAdminRequest
+        .createCollection("unloadcollection", "conf1", 1,1)
+        .setCreateNodeSet(jetty1.getNodeName())
+        .process(cloudClient).getStatus());
     ZkStateReader zkStateReader = getCommonCloudSolrClient().getZkStateReader();
     
     zkStateReader.forceUpdateCollection("unloadcollection");
 
     int slices = zkStateReader.getClusterState().getCollection("unloadcollection").getSlices().size();
     assertEquals(1, slices);
-    
-    client = clients.get(1);
-    String url2 = getBaseUrl(client);
-    try (HttpSolrClient adminClient = getHttpSolrClient(url2)) {
+    SolrCore solrCore = getFirstCore("unloadcollection", jetty1);
+    String core1DataDir = solrCore.getDataDir();
 
-      Create createCmd = new Create();
-      createCmd.setCoreName("unloadcollection2");
-      createCmd.setCollection("unloadcollection");
-      String core2dataDir = tmpDir.getAbsolutePath() + File.separator + System.nanoTime() + "unloadcollection1" + "_2n";
-      createCmd.setDataDir(getDataDir(core2dataDir));
-      adminClient.request(createCmd);
-    }
+    assertTrue(CollectionAdminRequest
+        .addReplicaToShard("unloadcollection", "shard1")
+        .setCoreName("unloadcollection_shard1_replica2")
+        .setNode(jettys.get(1).getNodeName())
+        .process(cloudClient).isSuccess());
     zkStateReader.forceUpdateCollection("unloadcollection");
     slices = zkStateReader.getClusterState().getCollection("unloadcollection").getSlices().size();
     assertEquals(1, slices);
@@ -64,24 +48,18 @@
       }
     }
 
-    // create another replica for our collection
-    client = clients.get(2);
-    String url3 = getBaseUrl(client);
-    try (HttpSolrClient adminClient = getHttpSolrClient(url3)) {
-      Create createCmd = new Create();
-      createCmd.setCoreName("unloadcollection3");
-      createCmd.setCollection("unloadcollection");
-      String core3dataDir = tmpDir.getAbsolutePath() + File.separator + System.nanoTime() + "unloadcollection" + "_3n";
-      createCmd.setDataDir(getDataDir(core3dataDir));
-      adminClient.request(createCmd);
-    }
-    
+    assertTrue(CollectionAdminRequest
+        .addReplicaToShard("unloadcollection", "shard1")
+        .setCoreName("unloadcollection_shard1_replica3")
+        .setNode(jettys.get(2).getNodeName())
+        .process(cloudClient).isSuccess());
+
     waitForRecoveriesToFinish("unloadcollection", zkStateReader, false);
-    
+
     // so that we start with some versions when we reload...
     DirectUpdateHandler2.commitOnClose = false;
-    
-    try (HttpSolrClient addClient = getHttpSolrClient(url3 + "/unloadcollection3")) {
+
+    try (HttpSolrClient addClient = getHttpSolrClient(jettys.get(2).getBaseUrl() + "/unloadcollection_shard1_replica3")) {
       addClient.setConnectionTimeout(30000);
 
       // add a few docs
@@ -115,11 +93,11 @@
         fail("Leader never changed");
       }
     }
-    
+
     // ensure there is a leader
     zkStateReader.getLeaderRetry("unloadcollection", "shard1", 15000);
-    
-    try (HttpSolrClient addClient = getHttpSolrClient(url2 + "/unloadcollection2")) {
+
+    try (HttpSolrClient addClient = getHttpSolrClient(jettys.get(1).getBaseUrl() + "/unloadcollection_shard1_replica2")) {
       addClient.setConnectionTimeout(30000);
       addClient.setSoTimeout(90000);
 
@@ -130,23 +108,15 @@
         addClient.add(doc1);
       }
     }
-    
-    // create another replica for our collection
-    client = clients.get(3);
-    String url4 = getBaseUrl(client);
-    try (HttpSolrClient adminClient = getHttpSolrClient(url4)) {
-      adminClient.setConnectionTimeout(15000);
-      adminClient.setSoTimeout(30000);
 
-      Create createCmd = new Create();
-      createCmd.setCoreName("unloadcollection4");
-      createCmd.setCollection("unloadcollection");
-      String core4dataDir = tmpDir.getAbsolutePath() + File.separator + System.nanoTime() + "unloadcollection" + "_4n";
-      createCmd.setDataDir(getDataDir(core4dataDir));
-      adminClient.request(createCmd);
-    }
+    assertTrue(CollectionAdminRequest
+        .addReplicaToShard("unloadcollection", "shard1")
+        .setCoreName("unloadcollection_shard1_replica4")
+        .setNode(jettys.get(3).getNodeName())
+        .process(cloudClient).isSuccess());
+
     waitForRecoveriesToFinish("unloadcollection", zkStateReader, false);
-    
+
     // unload the leader again
     leaderProps = getLeaderUrlFromZk("unloadcollection", "shard1");
     try (HttpSolrClient collectionClient = getHttpSolrClient(leaderProps.getBaseUrl())) {
@@ -165,29 +135,23 @@
         fail("Leader never changed");
       }
     }
-    
+
     zkStateReader.getLeaderRetry("unloadcollection", "shard1", 15000);
-    
-    
+
     // set this back
     DirectUpdateHandler2.commitOnClose = true;
-    
-    // bring the downed leader back as replica
-    try (HttpSolrClient adminClient = getHttpSolrClient(leaderProps.getBaseUrl())) {
-      adminClient.setConnectionTimeout(15000);
-      adminClient.setSoTimeout(30000);
+    assertTrue(CollectionAdminRequest
+        .addReplicaToShard("unloadcollection", "shard1")
+        .setCoreName(leaderProps.getCoreName())
+        .setDataDir(core1DataDir)
+        .setNode(leaderProps.getNodeName())
+        .process(cloudClient).isSuccess());
 
-      Create createCmd = new Create();
-      createCmd.setCoreName(leaderProps.getCoreName());
-      createCmd.setCollection("unloadcollection");
-      createCmd.setDataDir(getDataDir(core1DataDir));
-      adminClient.request(createCmd);
-    }
     waitForRecoveriesToFinish("unloadcollection", zkStateReader, false);
 
     long found1, found3;
-    
-    try (HttpSolrClient adminClient = getHttpSolrClient(url2 + "/unloadcollection")) {
+
+    try (HttpSolrClient adminClient = getHttpSolrClient(jettys.get(1).getBaseUrl() + "/unloadcollection_shard1_replica2")) {
       adminClient.setConnectionTimeout(15000);
       adminClient.setSoTimeout(30000);
       adminClient.commit();
@@ -195,7 +159,8 @@
       q.set("distrib", false);
       found1 = adminClient.query(q).getResults().getNumFound();
     }
-    try (HttpSolrClient adminClient = getHttpSolrClient(url3 + "/unloadcollection")) {
+
+    try (HttpSolrClient adminClient = getHttpSolrClient(jettys.get(2).getBaseUrl() + "/unloadcollection_shard1_replica3")) {
       adminClient.setConnectionTimeout(15000);
       adminClient.setSoTimeout(30000);
       adminClient.commit();
@@ -204,7 +169,7 @@
       found3 = adminClient.query(q).getResults().getNumFound();
     }
 
-    try (HttpSolrClient adminClient = getHttpSolrClient(url4 + "/unloadcollection")) {
+    try (HttpSolrClient adminClient = getHttpSolrClient(jettys.get(3).getBaseUrl() + "/unloadcollection_shard1_replica4")) {
       adminClient.setConnectionTimeout(15000);
       adminClient.setSoTimeout(30000);
       adminClient.commit();

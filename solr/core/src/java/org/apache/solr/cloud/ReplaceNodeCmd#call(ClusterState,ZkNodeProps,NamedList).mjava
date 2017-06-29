@@ -5,6 +5,7 @@
     String source = message.getStr("source");
     String target = message.getStr("target");
     String async = message.getStr("async");
+    int timeout = message.getInt("timeout", 10 * 60); // 10 minutes
     boolean parallel = message.getBool("parallel", false);
     ClusterState clusterState = zkStateReader.getClusterState();
 
@@ -15,13 +16,34 @@
       throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Target Node: " + target + " is not live");
     }
     List<ZkNodeProps> sourceReplicas = getReplicasOfNode(source, clusterState);
-
+    // how many leaders are we moving? for these replicas we have to make sure that either:
+    // * another existing replica can become a leader, or
+    // * we wait until the newly created replica completes recovery (and can become the new leader)
+    int numLeaders = 0;
+    for (ZkNodeProps props : sourceReplicas) {
+      if (props.getBool(ZkStateReader.LEADER_PROP, false)) {
+        numLeaders++;
+      }
+    }
+    // map of collectionName_coreNodeName to watchers
+    Map<String, RecoveryWatcher> watchers = new HashMap<>();
     List<ZkNodeProps> createdReplicas = new ArrayList<>();
 
     AtomicBoolean anyOneFailed = new AtomicBoolean(false);
     CountDownLatch countDownLatch = new CountDownLatch(sourceReplicas.size());
 
+    CountDownLatch replicasToRecover = new CountDownLatch(numLeaders);
+
     for (ZkNodeProps sourceReplica : sourceReplicas) {
+      if (sourceReplica.getBool(ZkStateReader.LEADER_PROP, false)) {
+        String shardName = sourceReplica.getStr(SHARD_ID_PROP);
+        String replicaName = sourceReplica.getStr(ZkStateReader.REPLICA_PROP);
+        String collectionName = sourceReplica.getStr(COLLECTION_PROP);
+        String key = collectionName + "_" + replicaName;
+        RecoveryWatcher watcher = new RecoveryWatcher(collectionName, shardName, replicaName, replicasToRecover);
+        watchers.put(key, watcher);
+        zkStateReader.registerCollectionStateWatcher(collectionName, watcher);
+      }
       NamedList nl = new NamedList();
       log.info("Going to create replica for collection={} shard={} on node={}", sourceReplica.getStr(COLLECTION_PROP), sourceReplica.getStr(SHARD_ID_PROP), target);
       ZkNodeProps msg = sourceReplica.plus("parallel", String.valueOf(parallel)).plus(CoreAdminParams.NODE, target);
@@ -51,10 +73,26 @@
       }
     }
 
-    log.debug("Waiting for replace node action to complete");
-    countDownLatch.await(5, TimeUnit.MINUTES);
-    log.debug("Finished waiting for replace node action to complete");
+    log.debug("Waiting for replicas to be added");
+    if (!countDownLatch.await(timeout, TimeUnit.SECONDS)) {
+      log.info("Timed out waiting for replicas to be added");
+      anyOneFailed.set(true);
+    } else {
+      log.debug("Finished waiting for replicas to be added");
+    }
 
+    // now wait for leader replicas to recover
+    log.debug("Waiting for " + numLeaders + " leader replicas to recover");
+    if (!replicasToRecover.await(timeout, TimeUnit.SECONDS)) {
+      log.info("Timed out waiting for " + replicasToRecover.getCount() + " leader replicas to recover");
+      anyOneFailed.set(true);
+    } else {
+      log.debug("Finished waiting for leader replicas to recover");
+    }
+    // remove the watchers, we're done either way
+    for (RecoveryWatcher watcher : watchers.values()) {
+      zkStateReader.removeCollectionStateWatcher(watcher.collectionId, watcher);
+    }
     if (anyOneFailed.get()) {
       log.info("Failed to create some replicas. Cleaning up all replicas on target node");
       CountDownLatch cleanupLatch = new CountDownLatch(createdReplicas.size());
@@ -79,6 +117,7 @@
         }
       }
       cleanupLatch.await(5, TimeUnit.MINUTES);
+      return;
     }
 
 

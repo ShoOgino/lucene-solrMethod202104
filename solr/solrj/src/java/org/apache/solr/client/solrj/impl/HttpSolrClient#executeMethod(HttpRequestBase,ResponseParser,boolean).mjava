@@ -1,0 +1,147 @@
+  protected NamedList<Object> executeMethod(HttpRequestBase method, final ResponseParser processor, final boolean isV2Api) throws SolrServerException {
+    method.addHeader("User-Agent", AGENT);
+ 
+    org.apache.http.client.config.RequestConfig.Builder requestConfigBuilder = HttpClientUtil.createDefaultRequestConfigBuilder();
+    if (soTimeout != null) {
+      requestConfigBuilder.setSocketTimeout(soTimeout);
+    }
+    if (connectionTimeout != null) {
+      requestConfigBuilder.setConnectTimeout(connectionTimeout);
+    }
+    if (followRedirects != null) {
+      requestConfigBuilder.setRedirectsEnabled(followRedirects);
+    }
+
+    method.setConfig(requestConfigBuilder.build());
+    
+    HttpEntity entity = null;
+    InputStream respBody = null;
+    boolean shouldClose = true;
+    try {
+      // Execute the method.
+      HttpClientContext httpClientRequestContext = HttpClientUtil.createNewHttpClientRequestContext();
+      final HttpResponse response = httpClient.execute(method, httpClientRequestContext);
+
+      int httpStatus = response.getStatusLine().getStatusCode();
+      
+      // Read the contents
+      entity = response.getEntity();
+      respBody = entity.getContent();
+      Header ctHeader = response.getLastHeader("content-type");
+      String contentType;
+      if (ctHeader != null) {
+        contentType = ctHeader.getValue();
+      } else {
+        contentType = "";
+      }
+      
+      // handle some http level checks before trying to parse the response
+      switch (httpStatus) {
+        case HttpStatus.SC_OK:
+        case HttpStatus.SC_BAD_REQUEST:
+        case HttpStatus.SC_CONFLICT:  // 409
+          break;
+        case HttpStatus.SC_MOVED_PERMANENTLY:
+        case HttpStatus.SC_MOVED_TEMPORARILY:
+          if (!followRedirects) {
+            throw new SolrServerException("Server at " + getBaseURL()
+                + " sent back a redirect (" + httpStatus + ").");
+          }
+          break;
+        default:
+          if (processor == null || "".equals(contentType)) {
+            throw new RemoteSolrException(baseUrl, httpStatus, "non ok status: " + httpStatus
+                + ", message:" + response.getStatusLine().getReasonPhrase(),
+                null);
+          }
+      }
+      if (processor == null || processor instanceof InputStreamResponseParser) {
+        
+        // no processor specified, return raw stream
+        NamedList<Object> rsp = new NamedList<>();
+        rsp.add("stream", respBody);
+        rsp.add("closeableResponse", response);
+        // Only case where stream should not be closed
+        shouldClose = false;
+        return rsp;
+      }
+      
+      String procCt = processor.getContentType();
+      if (procCt != null) {
+        String procMimeType = ContentType.parse(procCt).getMimeType().trim().toLowerCase(Locale.ROOT);
+        String mimeType = ContentType.parse(contentType).getMimeType().trim().toLowerCase(Locale.ROOT);
+        if (!procMimeType.equals(mimeType)) {
+          // unexpected mime type
+          String msg = "Expected mime type " + procMimeType + " but got " + mimeType + ".";
+          Header encodingHeader = response.getEntity().getContentEncoding();
+          String encoding;
+          if (encodingHeader != null) {
+            encoding = encodingHeader.getValue();
+          } else {
+            encoding = "UTF-8"; // try UTF-8
+          }
+          try {
+            msg = msg + " " + IOUtils.toString(respBody, encoding);
+          } catch (IOException e) {
+            throw new RemoteSolrException(baseUrl, httpStatus, "Could not parse response with encoding " + encoding, e);
+          }
+          throw new RemoteSolrException(baseUrl, httpStatus, msg, null);
+        }
+      }
+      
+      NamedList<Object> rsp = null;
+      String charset = EntityUtils.getContentCharSet(response.getEntity());
+      try {
+        rsp = processor.processResponse(respBody, charset);
+      } catch (Exception e) {
+        throw new RemoteSolrException(baseUrl, httpStatus, e.getMessage(), e);
+      }
+      if (isV2Api) {
+        Object err = rsp.get("error");
+        if (err != null) {
+          throw RemoteExecutionException.create(baseUrl, rsp);
+        }
+      }
+      if (httpStatus != HttpStatus.SC_OK && !isV2Api) {
+        NamedList<String> metadata = null;
+        String reason = null;
+        try {
+          NamedList err = (NamedList) rsp.get("error");
+          if (err != null) {
+            reason = (String) err.get("msg");
+            if(reason == null) {
+              reason = (String) err.get("trace");
+            }
+            metadata = (NamedList<String>)err.get("metadata");
+          }
+        } catch (Exception ex) {}
+        if (reason == null) {
+          StringBuilder msg = new StringBuilder();
+          msg.append(response.getStatusLine().getReasonPhrase())
+            .append("\n\n")
+            .append("request: ")
+            .append(method.getURI());
+          reason = java.net.URLDecoder.decode(msg.toString(), UTF_8);
+        }
+        RemoteSolrException rss = new RemoteSolrException(baseUrl, httpStatus, reason, null);
+        if (metadata != null) rss.setMetadata(metadata);
+        throw rss;
+      }
+      return rsp;
+    } catch (ConnectException e) {
+      throw new SolrServerException("Server refused connection at: "
+          + getBaseURL(), e);
+    } catch (SocketTimeoutException e) {
+      throw new SolrServerException(
+          "Timeout occured while waiting response from server at: "
+              + getBaseURL(), e);
+    } catch (IOException e) {
+      throw new SolrServerException(
+          "IOException occured when talking to server at: " + getBaseURL(), e);
+    } finally {
+      if (shouldClose) {
+        Utils.consumeFully(entity);
+      }
+    }
+  }
+

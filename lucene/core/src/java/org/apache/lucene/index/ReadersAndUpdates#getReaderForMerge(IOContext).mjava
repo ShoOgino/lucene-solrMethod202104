@@ -1,15 +1,52 @@
-  /**
-   * Returns a reader for merge. This method applies field updates if there are
-   * any and marks that this segment is currently merging.
-   */
+  /** Returns a reader for merge, with the latest doc values updates and deletions. */
   synchronized SegmentReader getReaderForMerge(IOContext context) throws IOException {
-    assert Thread.holdsLock(writer);
-    // must execute these two statements as atomic operation, otherwise we
-    // could lose updates if e.g. another thread calls writeFieldUpdates in
-    // between, or the updates are applied to the obtained reader, but then
-    // re-applied in IW.commitMergedDeletes (unnecessary work and potential
-    // bugs).
+
+    // This ensures any newly resolved doc value updates while we are merging are
+    // saved for re-applying after this segment is done merging:
     isMerging = true;
-    return getReader(context);
+
+    assert mergingDVUpdates.isEmpty();
+
+    // We must carry over any still-pending DV updates because they were not
+    // successfully written, e.g. because there was a hole in the delGens,
+    // or they arrived after we wrote all DVs for merge but before we set
+    // isMerging here:
+    for (Map.Entry<String, List<DocValuesFieldUpdates>> ent : pendingDVUpdates.entrySet()) {
+      List<DocValuesFieldUpdates> mergingUpdates = mergingDVUpdates.get(ent.getKey());
+      if (mergingUpdates == null) {
+        mergingUpdates = new ArrayList<>();
+        mergingDVUpdates.put(ent.getKey(), mergingUpdates);
+      }
+      mergingUpdates.addAll(ent.getValue());
+    }
+    
+    SegmentReader reader = getReader(context);
+    int delCount = pendingDeleteCount + info.getDelCount();
+    if (delCount != reader.numDeletedDocs()) {
+
+      // beware of zombies:
+      assert delCount > reader.numDeletedDocs(): "delCount=" + delCount + " reader.numDeletedDocs()=" + reader.numDeletedDocs();
+
+      assert liveDocs != null;
+      
+      // Create a new reader with the latest live docs:
+      SegmentReader newReader = new SegmentReader(info, reader, liveDocs, info.info.maxDoc() - delCount);
+      boolean success = false;
+      try {
+        reader.decRef();
+        success = true;
+      } finally {
+        if (success == false) {
+          newReader.decRef();
+        }
+      }
+      reader = newReader;
+    }
+
+    liveDocsShared = true;
+
+    assert verifyDocCounts();
+
+    return reader;
   }
 

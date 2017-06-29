@@ -1,7 +1,30 @@
   @Override
   public void prepare(ResponseBuilder rb) throws IOException {
-    if (rb.req.getParams().getBool(AnalyticsParams.ANALYTICS,false)) {
-      rb.setNeedDocSet( true );
+    // First check to see if there is an analytics request using the current format
+    String analyticsRequest = rb.req.getParams().get(AnalyticsRequestParser.analyticsParamName);
+    rb._isOlapAnalytics = false;
+    rb.doAnalytics = false;
+    if (analyticsRequest != null) {
+      rb.doAnalytics = true;
+      rb._analyticsRequestManager = AnalyticsRequestParser.parse(analyticsRequest, new ExpressionFactory(rb.req.getSchema()), rb.isDistrib);
+    }
+    // If there is no request in the current format, check for the old olap-style format
+    else if (rb.req.getParams().getBool(OldAnalyticsParams.OLD_ANALYTICS,false)) {
+      rb._analyticsRequestManager = AnalyticsRequestParser.parse(OldAnalyticsRequestConverter.convert(rb.req.getParams()), new ExpressionFactory(rb.req.getSchema()), rb.isDistrib);
+      rb._isOlapAnalytics = true;
+      rb.doAnalytics = true;
+    }
+    
+    if (rb.doAnalytics) {
+      AnalyticsRequestManager reqManager = (AnalyticsRequestManager)rb._analyticsRequestManager;
+      // Check to see if the request is distributed
+      if (rb.isDistrib) {
+        reqManager.sendShards = true;
+        reqManager.shardStream = new AnalyticsShardRequestManager(rb.req.getParams(), reqManager);
+      } else {
+        reqManager.sendShards = false;
+        rb.setNeedDocSet( true );
+      }
     }
   }
 

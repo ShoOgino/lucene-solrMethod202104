@@ -10,13 +10,19 @@
     final Collection<SegmentCommitInfo> toBeMerged = new HashSet<>();
 
     final List<SegmentCommitInfo> infosSorted = new ArrayList<>(infos.asList());
-    Collections.sort(infosSorted, new SegmentByteSizeDescending(writer));
+
+    // The size can change concurrently while we are running here, because deletes
+    // are now applied concurrently, and this can piss off TimSort!  So we
+    // call size() once per segment and sort by that:
+    Map<SegmentCommitInfo,Long> sizeInBytes = getSegmentSizes(writer, infos.asList());
+    
+    Collections.sort(infosSorted, new SegmentByteSizeDescending(sizeInBytes));
 
     // Compute total index bytes & print details about the index
     long totIndexBytes = 0;
     long minSegmentBytes = Long.MAX_VALUE;
     for(SegmentCommitInfo info : infosSorted) {
-      final long segBytes = size(info, writer);
+      final long segBytes = sizeInBytes.get(info);
       if (verbose(writer)) {
         String extra = merging.contains(info) ? " [merging]" : "";
         if (segBytes >= maxMergedSegmentBytes/2.0) {
@@ -36,7 +42,7 @@
     // of the maxSegmentCount:
     int tooBigCount = 0;
     while (tooBigCount < infosSorted.size()) {
-      long segBytes = size(infosSorted.get(tooBigCount), writer);
+      long segBytes = sizeInBytes.get(infosSorted.get(tooBigCount));
       if (segBytes < maxMergedSegmentBytes/2.0) {
         break;
       }
@@ -76,7 +82,7 @@
       for(int idx = tooBigCount; idx<infosSorted.size(); idx++) {
         final SegmentCommitInfo info = infosSorted.get(idx);
         if (merging.contains(info)) {
-          mergingBytes += size(info, writer);
+          mergingBytes += sizeInBytes.get(info);
         } else if (!toBeMerged.contains(info)) {
           eligible.add(info);
         }
@@ -109,7 +115,7 @@
           boolean hitTooLarge = false;
           for(int idx = startIdx;idx<eligible.size() && candidate.size() < maxMergeAtOnce;idx++) {
             final SegmentCommitInfo info = eligible.get(idx);
-            final long segBytes = size(info, writer);
+            final long segBytes = sizeInBytes.get(info);
 
             if (totAfterMergeBytes + segBytes > maxMergedSegmentBytes) {
               hitTooLarge = true;
@@ -129,7 +135,7 @@
           // segments, and already pre-excluded the too-large segments:
           assert candidate.size() > 0;
 
-          final MergeScore score = score(candidate, hitTooLarge, mergingBytes, writer);
+          final MergeScore score = score(candidate, hitTooLarge, mergingBytes, writer, sizeInBytes);
           if (verbose(writer)) {
             message("  maybe=" + writer.segString(candidate) + " score=" + score.getScore() + " " + score.getExplanation() + " tooLarge=" + hitTooLarge + " size=" + String.format(Locale.ROOT, "%.3f MB", totAfterMergeBytes/1024./1024.), writer);
           }

@@ -1,0 +1,111 @@
+  @Test
+  public void testReadApi() throws Exception  {
+    CloudSolrClient solrClient = cluster.getSolrClient();
+
+    String setClusterPolicyCommand = "{" +
+        " 'set-cluster-policy': [" +
+        "      {'cores':'<10', 'node':'#ANY'}," +
+        "      {'replica':'<2', 'shard': '#EACH', 'node': '#ANY'}," +
+        "      {'nodeRole':'overseer', 'replica':0}" +
+        "    ]" +
+        "}";
+    SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, setClusterPolicyCommand);
+    NamedList<Object> response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    String setPreferencesCommand = "{" +
+        " 'set-cluster-preferences': [" +
+        "        {'minimize': 'cores', 'precision': 3}," +
+        "        {'maximize': 'freedisk','precision': 100}," +
+        "        {'minimize': 'sysLoadAvg','precision': 10}," +
+        "        {'minimize': 'heapUsage','precision': 10}]" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setPreferencesCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    String setPolicyCommand =  "{'set-policy': {" +
+        "    'xyz':[" +
+        "      {'replica':'<2', 'shard': '#EACH', 'node': '#ANY'}," +
+        "      {'nodeRole':'overseer', 'replica':0}" +
+        "    ]," +
+        "    'policy1':[" +
+        "      {'replica':'<2', 'shard': '#EACH', 'node': '#ANY'}" +
+        "    ]" +
+        "}}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setPolicyCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    req = createAutoScalingRequest(SolrRequest.METHOD.GET, null);
+    response = solrClient.request(req);
+
+    List<Map> clusterPrefs = (List<Map>) response.get("cluster-preferences");
+    assertNotNull(clusterPrefs);
+    assertEquals(4, clusterPrefs.size());
+
+    List<Map> clusterPolicy = (List<Map>) response.get("cluster-policy");
+    assertNotNull(clusterPolicy);
+    assertEquals(3, clusterPolicy.size());
+
+    Map policies = (Map) response.get("policies");
+    assertNotNull(policies);
+    assertEquals(2, policies.size());
+    assertNotNull(policies.get("xyz"));
+    assertNotNull(policies.get("policy1"));
+
+    req = createAutoScalingRequest(SolrRequest.METHOD.GET, "/diagnostics", null);
+    response = solrClient.request(req);
+
+    Map<String, Object> diagnostics = (Map<String, Object>) response.get("diagnostics");
+    List sortedNodes = (List) diagnostics.get("sortedNodes");
+    assertNotNull(sortedNodes);
+
+    assertEquals(2, sortedNodes.size());
+    for (int i = 0; i < 2; i++) {
+      Map node = (Map) sortedNodes.get(i);
+      assertNotNull(node);
+      assertEquals(5, node.size());
+      assertNotNull(node.get("node"));
+      assertNotNull(node.get("cores"));
+      assertEquals(0L, node.get("cores"));
+      assertNotNull(node.get("freedisk"));
+      assertTrue(node.get("freedisk") instanceof Double);
+      assertNotNull(node.get("sysLoadAvg"));
+      assertTrue(node.get("sysLoadAvg") instanceof Double);
+      assertNotNull(node.get("heapUsage"));
+      assertTrue(node.get("heapUsage") instanceof Double);
+    }
+
+    List<Map<String, Object>> violations = (List<Map<String, Object>>) diagnostics.get("violations");
+    assertNotNull(violations);
+    assertEquals(0, violations.size());
+
+    violations = (List<Map<String, Object>>) diagnostics.get("violations");
+    assertNotNull(violations);
+    assertEquals(0, violations.size());
+
+    // lets create a collection which violates the rule replicas < 2
+    CollectionAdminRequest.Create create = CollectionAdminRequest.Create.createCollection("readApiTestViolations", CONFIGSET_NAME, 1, 6);
+    create.setMaxShardsPerNode(10);
+    CollectionAdminResponse adminResponse = create.process(solrClient);
+    assertTrue(adminResponse.isSuccess());
+
+    // get the diagnostics output again
+    req = createAutoScalingRequest(SolrRequest.METHOD.GET, "/diagnostics", null);
+    response = solrClient.request(req);
+    diagnostics = (Map<String, Object>) response.get("diagnostics");
+    sortedNodes = (List) diagnostics.get("sortedNodes");
+    assertNotNull(sortedNodes);
+
+    violations = (List<Map<String, Object>>) diagnostics.get("violations");
+    assertNotNull(violations);
+    assertEquals(2, violations.size());
+    for (Map<String, Object> violation : violations) {
+      assertEquals("readApiTestViolations", violation.get("collection"));
+      assertEquals("shard1", violation.get("shard"));
+      assertEquals(Utils.makeMap("replica", "3", "delta", -1), violation.get("violation"));
+      assertNotNull(violation.get("clause"));
+    }
+  }
+

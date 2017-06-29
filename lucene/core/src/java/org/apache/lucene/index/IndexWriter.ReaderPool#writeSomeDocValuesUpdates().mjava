@@ -1,0 +1,61 @@
+    void writeSomeDocValuesUpdates() throws IOException {
+
+      assert Thread.holdsLock(IndexWriter.this) == false;
+
+      if (writeDocValuesLock.compareAndSet(false, true)) {
+        try {
+
+          LiveIndexWriterConfig config = getConfig();
+          double mb = config.getRAMBufferSizeMB();
+          // If the reader pool is > 50% of our IW buffer, then write the updates:
+          if (mb != IndexWriterConfig.DISABLE_AUTO_FLUSH) {
+            long startNS = System.nanoTime();
+            
+            long ramBytesUsed = ramBytesUsed();
+            if (ramBytesUsed > 0.5 * mb * 1024 * 1024) {
+              if (infoStream.isEnabled("BD")) {
+                infoStream.message("BD", String.format(Locale.ROOT, "now write some pending DV updates: %.2f MB used vs IWC Buffer %.2f MB",
+                                                       ramBytesUsed/1024./1024., mb));
+              }
+          
+              // Sort by largest ramBytesUsed:
+              PriorityQueue<ReadersAndUpdates> queue = new PriorityQueue<>(readerMap.size(), (a, b) -> Long.compare(b.ramBytesUsed.get(), a.ramBytesUsed.get()));
+              synchronized (this) {
+                for (ReadersAndUpdates rld : readerMap.values()) {
+                  queue.add(rld);
+                }
+              }
+
+              int count = 0;
+              while (ramBytesUsed > 0.5 * mb * 1024 * 1024) {
+                ReadersAndUpdates rld = queue.poll();
+                if (rld == null) {
+                  break;
+                }
+
+                // We need to do before/after because not all RAM in this RAU is used by DV updates, and
+                // not all of those bytes can be written here:
+                long bytesUsedBefore = rld.ramBytesUsed.get();
+
+                // Only acquire IW lock on each write, since this is a time consuming operation.  This way
+                // other threads get a chance to run in between our writes.
+                synchronized (IndexWriter.this) {
+                  rld.writeFieldUpdates(directory, bufferedUpdatesStream.getCompletedDelGen(), infoStream);
+                }
+                long bytesUsedAfter = rld.ramBytesUsed.get();
+                ramBytesUsed -= bytesUsedBefore - bytesUsedAfter;
+                count++;
+              }
+
+              if (infoStream.isEnabled("BD")) {
+                infoStream.message("BD", String.format(Locale.ROOT, "done write some DV updates for %d segments: now %.2f MB used vs IWC Buffer %.2f MB; took %.2f sec",
+                                                       count, ramBytesUsed()/1024./1024., mb, ((System.nanoTime() - startNS)/1000000000.)));
+              }
+            }
+          }
+        } finally {
+          writeDocValuesLock.set(false);
+        }
+      }
+    }
+

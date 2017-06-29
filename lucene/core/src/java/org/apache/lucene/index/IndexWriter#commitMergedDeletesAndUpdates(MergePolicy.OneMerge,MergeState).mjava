@@ -10,6 +10,8 @@
    */
   synchronized private ReadersAndUpdates commitMergedDeletesAndUpdates(MergePolicy.OneMerge merge, MergeState mergeState) throws IOException {
 
+    mergeFinishedGen.incrementAndGet();
+    
     testPoint("startCommitMergeDeletes");
 
     final List<SegmentCommitInfo> sourceSegments = merge.segments;
@@ -22,9 +24,13 @@
     // started merging:
     long minGen = Long.MAX_VALUE;
 
-    // Lazy init (only when we find a delete to carry over):
-    final MergedDeletesAndUpdates holder = new MergedDeletesAndUpdates();
-    final DocValuesFieldUpdates.Container mergedDVUpdates = new DocValuesFieldUpdates.Container();
+    // Lazy init (only when we find a delete or update to carry over):
+    final ReadersAndUpdates mergedDeletesAndUpdates = readerPool.get(merge.info, true);
+    
+    // field -> delGen -> dv field updates
+    Map<String,Map<Long,DocValuesFieldUpdates>> mappedDVUpdates = new HashMap<>();
+
+    boolean anyDVUpdates = false;
 
     assert sourceSegments.size() == mergeState.docMaps.length;
     for (int i = 0; i < sourceSegments.size(); i++) {
@@ -33,36 +39,12 @@
       final int maxDoc = info.info.maxDoc();
       final Bits prevLiveDocs = merge.readers.get(i).getLiveDocs();
       final ReadersAndUpdates rld = readerPool.get(info, false);
-      // We hold a ref so it should still be in the pool:
+      // We hold a ref, from when we opened the readers during mergeInit, so it better still be in the pool:
       assert rld != null: "seg=" + info.info.name;
       final Bits currentLiveDocs = rld.getLiveDocs();
-      final Map<String,DocValuesFieldUpdates> mergingFieldUpdates = rld.getMergingFieldUpdates();
-      final String[] mergingFields;
-      final DocValuesFieldUpdates[] dvFieldUpdates;
-      final DocValuesFieldUpdates.Iterator[] updatesIters;
-      if (mergingFieldUpdates.isEmpty()) {
-        mergingFields = null;
-        updatesIters = null;
-        dvFieldUpdates = null;
-      } else {
-        mergingFields = new String[mergingFieldUpdates.size()];
-        dvFieldUpdates = new DocValuesFieldUpdates[mergingFieldUpdates.size()];
-        updatesIters = new DocValuesFieldUpdates.Iterator[mergingFieldUpdates.size()];
-        int idx = 0;
-        for (Entry<String,DocValuesFieldUpdates> e : mergingFieldUpdates.entrySet()) {
-          String field = e.getKey();
-          DocValuesFieldUpdates updates = e.getValue();
-          mergingFields[idx] = field;
-          dvFieldUpdates[idx] = mergedDVUpdates.getUpdates(field, updates.type);
-          if (dvFieldUpdates[idx] == null) {
-            dvFieldUpdates[idx] = mergedDVUpdates.newUpdates(field, updates.type, mergeState.segmentInfo.maxDoc());
-          }
-          updatesIters[idx] = updates.iterator();
-          updatesIters[idx].nextDoc(); // advance to first update doc
-          ++idx;
-        }
-      }
-//      System.out.println("[" + Thread.currentThread().getName() + "] IW.commitMergedDeletes: info=" + info + ", mergingUpdates=" + mergingUpdates);
+
+      MergeState.DocMap segDocMap = mergeState.docMaps[i];
+      MergeState.DocMap segLeafDocMap = mergeState.leafDocMaps[i];
 
       if (prevLiveDocs != null) {
 
@@ -94,26 +76,7 @@
               assert currentLiveDocs.get(j) == false;
             } else if (currentLiveDocs.get(j) == false) {
               // the document was deleted while we were merging:
-              if (holder.mergedDeletesAndUpdates == null || holder.initializedWritableLiveDocs == false) {
-                holder.init(readerPool, merge, true);
-              }
-              holder.mergedDeletesAndUpdates.delete(mergeState.docMaps[i].get(mergeState.leafDocMaps[i].get(j)));
-              if (mergingFields != null) { // advance all iters beyond the deleted document
-                skipDeletedDoc(updatesIters, j);
-              }
-            } else if (mergingFields != null) {
-              maybeApplyMergedDVUpdates(merge, mergeState, holder, mergingFields, dvFieldUpdates, updatesIters, i, j);
-            }
-          }
-        } else if (mergingFields != null) {
-          // need to check each non-deleted document if it has any updates
-          for (int j = 0; j < maxDoc; j++) {
-            if (prevLiveDocs.get(j)) {
-              // document isn't deleted, check if any of the fields have an update to it
-              maybeApplyMergedDVUpdates(merge, mergeState, holder, mergingFields, dvFieldUpdates, updatesIters, i, j);
-            } else {
-              // advance all iters beyond the deleted document
-              skipDeletedDoc(updatesIters, j);
+              mergedDeletesAndUpdates.delete(segDocMap.get(segLeafDocMap.get(j)));
             }
           }
         }
@@ -123,52 +86,83 @@
         // does:
         for (int j = 0; j < maxDoc; j++) {
           if (currentLiveDocs.get(j) == false) {
-            if (holder.mergedDeletesAndUpdates == null || !holder.initializedWritableLiveDocs) {
-              holder.init(readerPool, merge, true);
-            }
-            holder.mergedDeletesAndUpdates.delete(mergeState.docMaps[i].get(mergeState.leafDocMaps[i].get(j)));
-            if (mergingFields != null) { // advance all iters beyond the deleted document
-              skipDeletedDoc(updatesIters, j);
-            }
-          } else if (mergingFields != null) {
-            maybeApplyMergedDVUpdates(merge, mergeState, holder, mergingFields, dvFieldUpdates, updatesIters, i, j);
+            mergedDeletesAndUpdates.delete(segDocMap.get(segLeafDocMap.get(j)));
           }
         }
-      } else if (mergingFields != null) {
-        // no deletions before or after, but there were updates
-        for (int j = 0; j < maxDoc; j++) {
-          maybeApplyMergedDVUpdates(merge, mergeState, holder, mergingFields, dvFieldUpdates, updatesIters, i, j);
+      }
+
+      // Now carry over all doc values updates that were resolved while we were merging, remapping the docIDs to the newly merged docIDs.
+      // We only carry over packets that finished resolving; if any are still running (concurrently) they will detect that our merge completed
+      // and re-resolve against the newly merged segment:
+      
+      Map<String,List<DocValuesFieldUpdates>> mergingDVUpdates = rld.getMergingDVUpdates();
+
+      for (Map.Entry<String,List<DocValuesFieldUpdates>> ent : mergingDVUpdates.entrySet()) {
+
+        String field = ent.getKey();
+
+        Map<Long,DocValuesFieldUpdates> mappedField = mappedDVUpdates.get(field);
+        if (mappedField == null) {
+          mappedField = new HashMap<>();
+          mappedDVUpdates.put(field, mappedField);
+        }
+
+        for (DocValuesFieldUpdates updates : ent.getValue()) {
+
+          if (bufferedUpdatesStream.stillRunning(updates.delGen)) {
+            continue;
+          }
+              
+          // sanity check:
+          assert field.equals(updates.field);
+
+          DocValuesFieldUpdates mappedUpdates = mappedField.get(updates.delGen);
+          if (mappedUpdates == null) {
+            switch (updates.type) {
+              case NUMERIC:
+                mappedUpdates = new NumericDocValuesFieldUpdates(updates.delGen, updates.field, merge.info.info.maxDoc());
+                break;
+              case BINARY:
+                mappedUpdates = new BinaryDocValuesFieldUpdates(updates.delGen, updates.field, merge.info.info.maxDoc());
+                break;
+              default:
+                throw new AssertionError();
+            }
+            mappedField.put(updates.delGen, mappedUpdates);
+          }
+
+          DocValuesFieldUpdates.Iterator it = updates.iterator();
+          int doc;
+          while ((doc = it.nextDoc()) != NO_MORE_DOCS) {
+            int mappedDoc = segDocMap.get(segLeafDocMap.get(doc));
+            if (mappedDoc != -1) {
+              // not deleted
+              mappedUpdates.add(mappedDoc, it.value());
+              anyDVUpdates = true;
+            }
+          }
         }
       }
     }
 
-    if (mergedDVUpdates.any()) {
-//      System.out.println("[" + Thread.currentThread().getName() + "] IW.commitMergedDeletes: mergedDeletes.info=" + mergedDeletes.info + ", mergedFieldUpdates=" + mergedFieldUpdates);
-      boolean success = false;
-      try {
-        // if any error occurs while writing the field updates we should release
-        // the info, otherwise it stays in the pool but is considered not "live"
-        // which later causes false exceptions in pool.dropAll().
-        // NOTE: currently this is the only place which throws a true
-        // IOException. If this ever changes, we need to extend that try/finally
-        // block to the rest of the method too.
-        holder.mergedDeletesAndUpdates.writeFieldUpdates(directory, mergedDVUpdates);
-        success = true;
-      } finally {
-        if (!success) {
-          holder.mergedDeletesAndUpdates.dropChanges();
-          readerPool.drop(merge.info);
+    if (anyDVUpdates) {
+      // Persist the merged DV updates onto the RAU for the merged segment:
+      for(Map<Long,DocValuesFieldUpdates> d : mappedDVUpdates.values()) {
+        for (DocValuesFieldUpdates updates : d.values()) {
+          updates.finish();
+          mergedDeletesAndUpdates.addDVUpdate(updates);
         }
       }
     }
-    
+
     if (infoStream.isEnabled("IW")) {
-      if (holder.mergedDeletesAndUpdates == null) {
+      if (mergedDeletesAndUpdates == null) {
         infoStream.message("IW", "no new deletes or field updates since merge started");
       } else {
-        String msg = holder.mergedDeletesAndUpdates.getPendingDeleteCount() + " new deletes";
-        if (mergedDVUpdates.any()) {
-          msg += " and " + mergedDVUpdates.size() + " new field updates";
+        String msg = mergedDeletesAndUpdates.getPendingDeleteCount() + " new deletes";
+        if (anyDVUpdates) {
+          msg += " and " + mergedDeletesAndUpdates.getNumDVUpdates() + " new field updates";
+          msg += " (" + mergedDeletesAndUpdates.ramBytesUsed.get() + ") bytes";
         }
         msg += " since merge started";
         infoStream.message("IW", msg);
@@ -177,6 +171,6 @@
 
     merge.info.setBufferedDeletesGen(minGen);
 
-    return holder.mergedDeletesAndUpdates;
+    return mergedDeletesAndUpdates;
   }
 

@@ -1,4 +1,3 @@
-  @Test
   public void testSegmentMerges() throws Exception {
     Directory dir = newDirectory();
     Random random = random();
@@ -7,28 +6,54 @@
     
     int docid = 0;
     int numRounds = atLeast(10);
+    if (VERBOSE) {
+      System.out.println("TEST: " + numRounds + " rounds");
+    }
     for (int rnd = 0; rnd < numRounds; rnd++) {
+      if (VERBOSE) {
+        System.out.println("\nTEST: round=" + rnd);
+      }
       Document doc = new Document();
       doc.add(new StringField("key", "doc", Store.NO));
       doc.add(new NumericDocValuesField("ndv", -1));
       int numDocs = atLeast(30);
+      if (VERBOSE) {
+        System.out.println("TEST: " + numDocs + " docs");
+      }
       for (int i = 0; i < numDocs; i++) {
         doc.removeField("id");
-        doc.add(new StringField("id", Integer.toString(docid++), Store.NO));
+        doc.add(new StringField("id", Integer.toString(docid), Store.YES));
+        if (VERBOSE) {
+          System.out.println("TEST: add doc id=" + docid);
+        }
         writer.addDocument(doc);
+        docid++;
       }
       
       long value = rnd + 1;
+      if (VERBOSE) {
+        System.out.println("TEST: update all ndv values to " + value);
+      }
       writer.updateNumericDocValue(new Term("key", "doc"), "ndv", value);
       
-      if (random.nextDouble() < 0.2) { // randomly delete some docs
-        writer.deleteDocuments(new Term("id", Integer.toString(random.nextInt(docid))));
+      if (random.nextDouble() < 0.2) { // randomly delete one doc
+        int delID = random.nextInt(docid);
+        if (VERBOSE) {
+          System.out.println("TEST: delete random doc id=" + delID);
+        }
+        writer.deleteDocuments(new Term("id", Integer.toString(delID)));
       }
       
       // randomly commit or reopen-IW (or nothing), before forceMerge
       if (random.nextDouble() < 0.4) {
+        if (VERBOSE) {
+          System.out.println("\nTEST: commit writer");
+        }
         writer.commit();
       } else if (random.nextDouble() < 0.1) {
+        if (VERBOSE) {
+          System.out.println("\nTEST: close writer");
+        }
         writer.close();
         conf = newIndexWriterConfig(new MockAnalyzer(random));
         writer = new IndexWriter(dir, conf);
@@ -41,18 +66,35 @@
       // and some MPs might now merge it, thereby invalidating test's
       // assumption that the reader has no deletes).
       doc = new Document();
-      doc.add(new StringField("id", Integer.toString(docid++), Store.NO));
+      doc.add(new StringField("id", Integer.toString(docid), Store.YES));
       doc.add(new StringField("key", "doc", Store.NO));
       doc.add(new NumericDocValuesField("ndv", value));
+      if (VERBOSE) {
+        System.out.println("\nTEST: add one more doc id=" + docid);
+      }
       writer.addDocument(doc);
+      docid++;
 
+      if (VERBOSE) {
+        System.out.println("\nTEST: force merge");
+      }
       writer.forceMerge(1, true);
+      
       final DirectoryReader reader;
       if (random.nextBoolean()) {
+        if (VERBOSE) {
+          System.out.println("\nTEST: commit and open non-NRT reader");
+        }
         writer.commit();
         reader = DirectoryReader.open(dir);
       } else {
+        if (VERBOSE) {
+          System.out.println("\nTEST: open NRT reader");
+        }
         reader = DirectoryReader.open(writer);
+      }
+      if (VERBOSE) {
+        System.out.println("TEST: got reader=" + reader);
       }
       
       assertEquals(1, reader.leaves().size());
@@ -60,9 +102,13 @@
       assertNull("index should have no deletes after forceMerge", r.getLiveDocs());
       NumericDocValues ndv = r.getNumericDocValues("ndv");
       assertNotNull(ndv);
+      if (VERBOSE) {
+        System.out.println("TEST: maxDoc=" + r.maxDoc());
+      }
       for (int i = 0; i < r.maxDoc(); i++) {
+        Document rdoc = r.document(i);
         assertEquals(i, ndv.nextDoc());
-        assertEquals(value, ndv.longValue());
+        assertEquals("docid=" + i + " has wrong ndv value; doc=" + rdoc, value, ndv.longValue());
       }
       reader.close();
     }

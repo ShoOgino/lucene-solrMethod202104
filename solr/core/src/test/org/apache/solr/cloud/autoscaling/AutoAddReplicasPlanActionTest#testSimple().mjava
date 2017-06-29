@@ -1,0 +1,68 @@
+  @Test
+  public void testSimple() throws Exception {
+    JettySolrRunner jetty1 = cluster.getJettySolrRunner(0);
+    JettySolrRunner jetty2 = cluster.getJettySolrRunner(1);
+    JettySolrRunner jetty3 = cluster.getJettySolrRunner(2);
+
+    String collection1 = "testSimple1";
+    String collection2 = "testSimple2";
+    CollectionAdminRequest.createCollection(collection1, "conf", 2, 2)
+        .setCreateNodeSet(jetty1.getNodeName()+","+jetty2.getNodeName())
+        .setAutoAddReplicas(true)
+        .setMaxShardsPerNode(2)
+        .process(cluster.getSolrClient());
+    CollectionAdminRequest.createCollection(collection2, "conf", 1, 2)
+        .setCreateNodeSet(jetty2.getNodeName()+","+jetty3.getNodeName())
+        .setAutoAddReplicas(false)
+        .setMaxShardsPerNode(1)
+        .process(cluster.getSolrClient());
+    // the number of cores in jetty1 (5) will be larger than jetty3 (1)
+    CollectionAdminRequest.createCollection("testSimple3", "conf", 3, 1)
+        .setCreateNodeSet(jetty1.getNodeName())
+        .setAutoAddReplicas(false)
+        .setMaxShardsPerNode(3)
+        .process(cluster.getSolrClient());
+
+    // we remove the implicit created trigger, so the replicas won't be moved
+    String removeTriggerCommand = "{" +
+        "'remove-trigger' : {" +
+        "'name' : '.auto_add_replicas'" +
+        "}" +
+        "}";
+    SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, removeTriggerCommand);
+    NamedList response = cluster.getSolrClient().request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    JettySolrRunner lostJetty = random().nextBoolean()? jetty1 : jetty2;
+    String lostNodeName = lostJetty.getNodeName();
+    Set<String> coreNodeNames = lostJetty.getCoreContainer().getCores().stream()
+        .map(solrCore -> solrCore.getCoreDescriptor().getCloudDescriptor().getCoreNodeName())
+        .collect(Collectors.toSet());
+    lostJetty.stop();
+    waitForNodeLeave(lostNodeName);
+
+    List<SolrRequest> operations = getOperations(jetty3, lostNodeName);
+    assertOperations(collection1, operations, lostNodeName,coreNodeNames,  null);
+
+    lostJetty.start();
+    ClusterStateUtil.waitForAllActiveAndLiveReplicas(cluster.getSolrClient().getZkStateReader(), 30000);
+    String setClusterPreferencesCommand = "{" +
+        "'set-cluster-preferences': [" +
+        "{'minimize': 'cores','precision': 0}]" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setClusterPreferencesCommand);
+    response = cluster.getSolrClient().request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    lostJetty = random().nextBoolean()? jetty1 : jetty2;
+    lostNodeName = lostJetty.getNodeName();
+    coreNodeNames = lostJetty.getCoreContainer().getCores().stream()
+        .map(solrCore -> solrCore.getCoreDescriptor().getCloudDescriptor().getCoreNodeName())
+        .collect(Collectors.toSet());
+    lostJetty.stop();
+    waitForNodeLeave(lostNodeName);
+
+    operations = getOperations(jetty3, lostNodeName);
+    assertOperations(collection1, operations, lostNodeName, coreNodeNames, jetty3);
+  }
+

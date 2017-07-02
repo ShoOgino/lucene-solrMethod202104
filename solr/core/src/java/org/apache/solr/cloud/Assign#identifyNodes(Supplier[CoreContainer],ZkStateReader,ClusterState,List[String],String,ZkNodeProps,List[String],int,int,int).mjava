@@ -12,11 +12,11 @@
     String policyName = message.getStr(POLICY);
     Map autoScalingJson = Utils.getJson(zkStateReader.getZkClient(), SOLR_AUTOSCALING_CONF_PATH, true);
 
-    if (rulesMap == null && policyName == null) {
+    if (rulesMap == null && policyName == null && autoScalingJson.get(Policy.CLUSTER_POLICY) == null) {
+      log.debug("Identify nodes using default");
       int i = 0;
       List<ReplicaPosition> result = new ArrayList<>();
-      for (String aShard : shardNames) {
-
+      for (String aShard : shardNames)
         for (Map.Entry<Replica.Type, Integer> e : ImmutableMap.of(Replica.Type.NRT, numNrtReplicas,
             Replica.Type.TLOG, numTlogReplicas,
             Replica.Type.PULL, numPullReplicas
@@ -26,20 +26,21 @@
             i++;
           }
         }
-
-      }
       return result;
     } else {
-      if (numTlogReplicas + numPullReplicas != 0) {
+      if (numTlogReplicas + numPullReplicas != 0 && rulesMap != null) {
         throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
             Replica.Type.TLOG + " or " + Replica.Type.PULL + " replica types not supported with placement rules or cluster policies");
       }
     }
 
     if (policyName != null || autoScalingJson.get(Policy.CLUSTER_POLICY) != null) {
+      if (message.getStr(CREATE_NODE_SET) == null)
+        nodeList = Collections.emptyList();// unless explicitly specified do not pass node list to Policy
       return getPositionsUsingPolicy(collectionName,
-          shardNames, numNrtReplicas, policyName, zkStateReader, nodeList);
+          shardNames, numNrtReplicas, numTlogReplicas, numPullReplicas, policyName, zkStateReader, nodeList);
     } else {
+      log.debug("Identify nodes using rules framework");
       List<Rule> rules = new ArrayList<>();
       for (Object map : rulesMap) rules.add(new Rule((Map) map));
       Map<String, Integer> sharVsReplicaCount = new HashMap<>();

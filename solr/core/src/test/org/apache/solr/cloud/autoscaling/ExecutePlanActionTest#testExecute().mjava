@@ -1,0 +1,47 @@
+  @Test
+  public void testExecute() throws Exception {
+    CloudSolrClient solrClient = cluster.getSolrClient();
+    String collectionName = "testExecute";
+    CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(collectionName,
+        "conf", 1, 2);
+    create.setMaxShardsPerNode(1);
+    create.process(solrClient);
+
+    waitForState("Timed out waiting for replicas of new collection to be active",
+        collectionName, clusterShape(1, 2));
+
+    JettySolrRunner sourceNode = cluster.getRandomJetty(random());
+    String sourceNodeName = sourceNode.getNodeName();
+    ClusterState clusterState = solrClient.getZkStateReader().getClusterState();
+    DocCollection docCollection = clusterState.getCollection(collectionName);
+    List<Replica> replicas = docCollection.getReplicas(sourceNodeName);
+    assertNotNull(replicas);
+    assertFalse(replicas.isEmpty());
+
+    List<JettySolrRunner> otherJetties = cluster.getJettySolrRunners().stream()
+        .filter(jettySolrRunner -> jettySolrRunner != sourceNode).collect(Collectors.toList());
+    assertFalse(otherJetties.isEmpty());
+    JettySolrRunner survivor = otherJetties.get(0);
+
+    try (ExecutePlanAction action = new ExecutePlanAction()) {
+      action.init(Collections.singletonMap("name", "execute_plan"));
+      CollectionAdminRequest.MoveReplica moveReplica = new CollectionAdminRequest.MoveReplica(collectionName, replicas.get(0).getName(), survivor.getNodeName());
+      List<SolrRequest> operations = Collections.singletonList(moveReplica);
+      NodeLostTrigger.NodeLostEvent nodeLostEvent = new NodeLostTrigger.NodeLostEvent(AutoScaling.EventType.NODELOST,
+          "mock_trigger_name", TimeSource.CURRENT_TIME.getTime(), sourceNodeName);
+      ActionContext actionContext = new ActionContext(survivor.getCoreContainer(), null,
+          new HashMap<>(Collections.singletonMap("operations", operations)));
+      action.process(nodeLostEvent, actionContext);
+
+      List<NamedList<Object>> responses = (List<NamedList<Object>>) actionContext.getProperty("responses");
+      assertNotNull(responses);
+      assertEquals(1, responses.size());
+      NamedList<Object> response = responses.get(0);
+      assertNull(response.get("failure"));
+      assertNotNull(response.get("success"));
+    }
+
+    waitForState("Timed out waiting for replicas of new collection to be active",
+        collectionName, clusterShape(1, 2));
+  }
+

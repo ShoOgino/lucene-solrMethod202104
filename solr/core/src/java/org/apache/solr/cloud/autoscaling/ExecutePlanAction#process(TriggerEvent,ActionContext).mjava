@@ -1,5 +1,34 @@
   @Override
-  public void process(TriggerEvent event, ActionContext actionContext) {
-
+  public void process(TriggerEvent event, ActionContext context) {
+    log.debug("-- processing event: {} with context properties: {}", event, context.getProperties());
+    CoreContainer container = context.getCoreContainer();
+    List<SolrRequest> operations = (List<SolrRequest>) context.getProperty("operations");
+    if (operations == null || operations.isEmpty()) {
+      log.info("No operations to execute for event: {}", event);
+      return;
+    }
+    try (CloudSolrClient cloudSolrClient = new CloudSolrClient.Builder()
+        .withZkHost(container.getZkController().getZkServerAddress())
+        .withHttpClient(container.getUpdateShardHandler().getHttpClient())
+        .build()) {
+      for (SolrRequest operation : operations) {
+        log.info("Executing operation: {}", operation.getParams());
+        try {
+          SolrResponse response = operation.process(cloudSolrClient);
+          context.getProperties().compute("responses", (s, o) -> {
+            List<NamedList<Object>> responses = (List<NamedList<Object>>) o;
+            if (responses == null)  responses = new ArrayList<>(operations.size());
+            responses.add(response.getResponse());
+            return responses;
+          });
+        } catch (SolrServerException | HttpSolrClient.RemoteSolrException e) {
+          throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
+              "Unexpected exception executing operation: " + operation.getParams(), e);
+        }
+      }
+    } catch (IOException e) {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
+          "Unexpected IOException while processing event: " + event, e);
+    }
   }
 

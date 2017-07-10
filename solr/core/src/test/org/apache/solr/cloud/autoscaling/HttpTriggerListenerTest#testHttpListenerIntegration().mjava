@@ -1,0 +1,67 @@
+  @Test
+  public void testHttpListenerIntegration() throws Exception {
+    CloudSolrClient solrClient = cluster.getSolrClient();
+    String setTriggerCommand = "{" +
+        "'set-trigger' : {" +
+        "'name' : 'node_added_trigger'," +
+        "'event' : 'nodeAdded'," +
+        "'waitFor' : '0s'," +
+        "'enabled' : true," +
+        "'actions' : [" +
+        "{'name':'test','class':'" + TestDummyAction.class.getName() + "'}" +
+        "]" +
+        "}}";
+    SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, setTriggerCommand);
+    NamedList<Object> response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    String setListenerCommand = "{" +
+        "'set-listener' : " +
+        "{" +
+        "'name' : 'foo'," +
+        "'trigger' : 'node_added_trigger'," +
+        "'stage' : ['WAITING', 'STARTED','ABORTED','SUCCEEDED', 'FAILED']," +
+        "'beforeAction' : 'test'," +
+        "'afterAction' : ['test']," +
+        "'class' : '" + HttpTriggerListener.class.getName() + "'," +
+        "'url' : '" + mockService.server.getURI().toString() + "/${config.name:invalid}/${config.properties.xyz:invalid}/${stage}'," +
+        "'payload': 'actionName=${actionName}, source=${event.source}, type=${event.eventType}'," +
+        "'header.X-Foo' : '${config.name:invalid}'," +
+        "'xyz': 'foo'" +
+        "}" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setListenerCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    assertEquals(requests.toString(), 0, requests.size());
+
+    cluster.startJettySolrRunner();
+    boolean await = triggerFiredLatch.await(20, TimeUnit.SECONDS);
+    assertTrue("The trigger did not fire at all", await);
+
+    Thread.sleep(5000);
+
+    assertEquals(requests.toString(), 4, requests.size());
+    requests.forEach(s -> assertTrue(s.contains("Content-Type: application/json")));
+    requests.forEach(s -> assertTrue(s.contains("X-Foo: foo")));
+    requests.forEach(s -> assertTrue(s.contains("source=node_added_trigger")));
+    requests.forEach(s -> assertTrue(s.contains("type=NODEADDED")));
+
+    String request = requests.get(0);
+    assertTrue(request, request.startsWith("/foo/foo/STARTED"));
+    assertTrue(request, request.contains("actionName=,")); // empty actionName
+
+    request = requests.get(1);
+    assertTrue(request, request.startsWith("/foo/foo/BEFORE_ACTION"));
+    assertTrue(request, request.contains("actionName=test,")); // actionName
+
+    request = requests.get(2);
+    assertTrue(request, request.startsWith("/foo/foo/AFTER_ACTION"));
+    assertTrue(request, request.contains("actionName=test,")); // actionName
+
+    request = requests.get(3);
+    assertTrue(request, request.startsWith("/foo/foo/SUCCEEDED"));
+    assertTrue(request, request.contains("actionName=,")); // empty actionName
+  }
+

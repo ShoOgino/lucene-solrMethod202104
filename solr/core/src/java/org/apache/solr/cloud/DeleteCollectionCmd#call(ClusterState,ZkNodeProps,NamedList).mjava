@@ -2,6 +2,8 @@
   public void call(ClusterState state, ZkNodeProps message, NamedList results) throws Exception {
     ZkStateReader zkStateReader = ocmh.zkStateReader;
     final String collection = message.getStr(NAME);
+    DocCollection coll = state.getCollectionOrNull(collection);
+    String policy = coll == null ? null : coll.getPolicyName();
     try {
       // Remove the snapshots meta-data for this collection in ZK. Deleting actual index files
       // should be taken care of as part of collection delete operation.
@@ -51,6 +53,31 @@
         throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
             "Could not fully remove collection: " + collection);
       }
+      String collectionSpecificPolicy = "COLL_POLICY_" + collection;
+      if (collectionSpecificPolicy.equals(policy)) {
+        for (Map.Entry<String, ClusterState.CollectionRef> e : state.getCollectionStates().entrySet()) {
+          if (collection.equals(e.getKey())) continue;
+          DocCollection c = e.getValue().get();
+          if (collectionSpecificPolicy.equals(c.getPolicyName())) {
+            log.info(StrUtils.formatString("{0} is being used by collection {1} . So, it's not deleted", collectionSpecificPolicy, e.getKey()));
+            return;
+          }
+
+        }
+        AutoScalingHandler ash = (AutoScalingHandler) ocmh.overseer.getZkController().getCoreContainer()
+            .getRequestHandler(AutoScalingHandler.HANDLER_PATH);
+        SolrQueryResponse rsp = new SolrQueryResponse();
+        try {
+          ash.handleRemovePolicy(null, rsp, new CommandOperation(AutoScalingParams.CMD_REMOVE_POLICY, collectionSpecificPolicy));
+        } catch (SolrException e) {
+          if (e.getMessage().contains("No policy exists with name")) {
+            log.warn("The policy: " + collectionSpecificPolicy + " does not exist to be removed");
+          } else {
+            throw e;
+          }
+        }
+      }
+
 
     } finally {
 

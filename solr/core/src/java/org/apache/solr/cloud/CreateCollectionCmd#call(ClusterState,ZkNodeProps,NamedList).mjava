@@ -21,6 +21,9 @@
       int numNrtReplicas = message.getInt(NRT_REPLICAS, message.getInt(REPLICATION_FACTOR, numTlogReplicas>0?0:1));
       int numPullReplicas = message.getInt(PULL_REPLICAS, 0);
       boolean autoAddReplicas = message.getBool(AUTO_ADD_REPLICAS, false);
+      Map autoScalingJson = Utils.getJson(ocmh.zkStateReader.getZkClient(), SOLR_AUTOSCALING_CONF_PATH, true);
+      String policy = message.getStr(Policy.POLICY);
+      boolean usePolicyFramework = autoScalingJson.get(Policy.CLUSTER_POLICY) != null || policy != null;
 
       ShardHandler shardHandler = ocmh.shardHandlerFactory.getShardHandler();
       final String async = message.getStr(ASYNC);
@@ -38,7 +41,8 @@
         ClusterStateMutator.getShardNames(numSlices, shardNames);
       }
 
-      int maxShardsPerNode = message.getInt(MAX_SHARDS_PER_NODE, 1);
+      int maxShardsPerNode = message.getInt(MAX_SHARDS_PER_NODE, usePolicyFramework? 0: 1);
+      if(maxShardsPerNode == 0) message.getProperties().put(MAX_SHARDS_PER_NODE, "0");
 
       if (numNrtReplicas + numTlogReplicas <= 0) {
         throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, NRT_REPLICAS + " + " + TLOG_REPLICAS + " must be greater than 0");
@@ -72,7 +76,7 @@
 
         int maxShardsAllowedToCreate = maxShardsPerNode * nodeList.size();
         int requestedShardsToCreate = numSlices * totalNumReplicas;
-        if (maxShardsAllowedToCreate < requestedShardsToCreate) {
+        if (!usePolicyFramework &&  maxShardsAllowedToCreate < requestedShardsToCreate) {
           throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Cannot create collection " + collectionName + ". Value of "
               + MAX_SHARDS_PER_NODE + " is " + maxShardsPerNode
               + ", and the number of nodes currently live or live and part of your "+CREATE_NODE_SET+" is " + nodeList.size()
@@ -83,6 +87,25 @@
               + " and value of " + PULL_REPLICAS + " is " + numPullReplicas
               + ". This requires " + requestedShardsToCreate
               + " shards to be created (higher than the allowed number)");
+        }
+        if (usePolicyFramework && maxShardsPerNode > 0) {
+          if (policy == null) {
+            //this means we should create a policy for this collection
+            AutoScalingHandler ash = (AutoScalingHandler) ocmh.overseer.getZkController().getCoreContainer().getRequestHandler(AutoScalingHandler.HANDLER_PATH);
+            Map newPolicy = Utils.makeMap(REPLICA, "<" + (maxShardsPerNode + 1), SHARD, Policy.EACH, "node", Policy.ANY);
+            SolrQueryResponse rsp = new SolrQueryResponse();
+            policy = "COLL_POLICY_" + collectionName;
+            ash.handleSetPolicies(null, rsp, new CommandOperation(AutoScalingParams.CMD_SET_POLICY, singletonMap(
+                policy
+                , Collections.singletonList(newPolicy))));
+            if (!"success".equals(rsp.getValues().get("result"))) {
+              throw new SolrException(ErrorCode.SERVER_ERROR, "unable to create new policy");
+            }
+            message.getProperties().put(Policy.POLICY, policy);
+
+          } else {
+            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Cannot create collection");
+          }
         }
 
         replicaPositions = Assign.identifyNodes(() -> ocmh.overseer.getZkController().getCoreContainer(),

@@ -18,37 +18,46 @@
     }
     
     Object createNodeSetStr = message.get(OverseerCollectionMessageHandler.CREATE_NODE_SET);
-    List<Assign.ReplicaCount> sortedNodeList = getNodesForNewReplicas(clusterState, collectionName, sliceName, totalReplicas,
-        createNodeSetStr, ocmh.overseer.getZkController().getCoreContainer());
 
     ZkStateReader zkStateReader = ocmh.zkStateReader;
+    boolean usePolicyFramework = usePolicyFramework(collection,ocmh);
+    List<ReplicaPosition> positions = null;
+    if (usePolicyFramework) {
+      if (collection.getPolicyName() != null) message.getProperties().put(Policy.POLICY, collection.getPolicyName());
+      positions = Assign.identifyNodes(() -> ocmh.overseer.getZkController().getCoreContainer(),
+          zkStateReader,
+          clusterState,
+          Assign.getLiveOrLiveAndCreateNodeSetList(clusterState.getLiveNodes(), message, RANDOM),
+          collectionName,
+          message,
+          Collections.singletonList(sliceName),
+          numNrtReplicas,
+          numTlogReplicas,
+          numPullReplicas);
+    } else {
+      List<Assign.ReplicaCount> sortedNodeList = getNodesForNewReplicas(clusterState, collectionName, sliceName, totalReplicas,
+          createNodeSetStr, ocmh.overseer.getZkController().getCoreContainer());
+      int i = 0;
+      positions = new ArrayList<>();
+      for (Map.Entry<Replica.Type, Integer> e : ImmutableMap.of(Replica.Type.NRT, numNrtReplicas,
+          Replica.Type.TLOG, numTlogReplicas,
+          Replica.Type.PULL, numPullReplicas
+      ).entrySet()) {
+        for (int j = 0; j < e.getValue(); j++) {
+          positions.add(new ReplicaPosition(sliceName, j+1, e.getKey(), sortedNodeList.get(i % sortedNodeList.size()).nodeName));
+          i++;
+        }
+      }
+    }
     Overseer.getStateUpdateQueue(zkStateReader.getZkClient()).offer(Utils.toJSON(message));
     // wait for a while until we see the shard
     ocmh.waitForNewShard(collectionName, sliceName);
 
     String async = message.getStr(ASYNC);
-    
-    int createdNrtReplicas = 0, createdTlogReplicas = 0, createdPullReplicas = 0;
     CountDownLatch countDownLatch = new CountDownLatch(totalReplicas);
-    for (int j = 1; j <= totalReplicas; j++) {
-      int coreNameNumber;
-      Replica.Type typeToCreate;
-      if (createdNrtReplicas < numNrtReplicas) {
-        createdNrtReplicas++;
-        coreNameNumber = createdNrtReplicas;
-        typeToCreate = Replica.Type.NRT;
-      } else if (createdTlogReplicas < numTlogReplicas) {
-        createdTlogReplicas++;
-        coreNameNumber = createdTlogReplicas;
-        typeToCreate = Replica.Type.TLOG;
-      } else {
-        createdPullReplicas++;
-        coreNameNumber = createdPullReplicas;
-        typeToCreate = Replica.Type.PULL;
-      }
-      String nodeName = sortedNodeList.get(((j - 1)) % sortedNodeList.size()).nodeName;
-      String coreName = Assign.buildCoreName(collectionName, sliceName, typeToCreate, coreNameNumber);
-//      String coreName = collectionName + "_" + sliceName + "_replica" + j;
+    for (ReplicaPosition position : positions) {
+      String nodeName = position.node;
+      String coreName = Assign.buildCoreName(collectionName, sliceName, position.type, position.index);
       log.info("Creating replica " + coreName + " as part of slice " + sliceName + " of collection " + collectionName
           + " on " + nodeName);
 
@@ -56,15 +65,15 @@
       ZkNodeProps addReplicasProps = new ZkNodeProps(
           COLLECTION_PROP, collectionName,
           SHARD_ID_PROP, sliceName,
-          CoreAdminParams.REPLICA_TYPE, typeToCreate.name(),
+          ZkStateReader.REPLICA_TYPE, position.type.name(),
           CoreAdminParams.NODE, nodeName,
           CoreAdminParams.NAME, coreName);
       Map<String, Object> propertyParams = new HashMap<>();
-      ocmh.addPropertyParams(message, propertyParams);;
+      ocmh.addPropertyParams(message, propertyParams);
       addReplicasProps = addReplicasProps.plus(propertyParams);
-      if(async!=null) addReplicasProps.getProperties().put(ASYNC, async);
+      if (async != null) addReplicasProps.getProperties().put(ASYNC, async);
       final NamedList addResult = new NamedList();
-      ocmh.addReplica(zkStateReader.getClusterState(), addReplicasProps, addResult, ()-> {
+      ocmh.addReplica(zkStateReader.getClusterState(), addReplicasProps, addResult, () -> {
         countDownLatch.countDown();
         Object addResultFailure = addResult.get("failure");
         if (addResultFailure != null) {

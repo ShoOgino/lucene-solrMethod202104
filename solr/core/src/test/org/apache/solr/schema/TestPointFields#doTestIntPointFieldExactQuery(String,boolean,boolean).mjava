@@ -4,41 +4,36 @@
    * @param searchable set to true if searches against "field" should succeed, false if field is only stored and searches should always get numFound=0
    */
   private void doTestIntPointFieldExactQuery(final String field, final boolean testLong, final boolean searchable) throws Exception {
-    final String MATCH_ONE = "//*[@numFound='" + (searchable ? "1" : "0") + "']";
-    final String MATCH_TWO = "//*[@numFound='" + (searchable ? "2" : "0") + "']";
-
-    for (int i=0; i < 10; i++) {
-      assertU(adoc("id", String.valueOf(i), field, String.valueOf(i+1)));
+    int numValues = 10 * RANDOM_MULTIPLIER;
+    Map<String,Integer> randCount = new HashMap<>(numValues);
+    String[] rand = testLong ? toStringArray(getRandomLongs(numValues, false))
+                             : toStringArray(getRandomInts(numValues, false));
+    for (int i = 0 ; i < numValues ; i++) {
+      randCount.merge(rand[i], 1, (a, b) -> a + b); // count unique values
+      assertU(adoc("id", String.valueOf(i), field, rand[i]));
     }
     assertU(commit());
-    for (int i = 0; i < 10; i++) {
-      assertQ(req("q", field + ":"+(i+1), "fl", "id, " + field), 
-          MATCH_ONE);
+
+    for (int i = 0 ; i < numValues ; i++) {
+      assertQ(req("q", field + ":" + (rand[i].startsWith("-") ? "\\" : "") + rand[i],
+          "fl", "id," + field), getTestString(searchable, randCount.get(rand[i])));
     }
     
-    for (int i = 0; i < 10; i++) {
-      assertQ(req("debug", "true", "q", field + ":" + (i+1) + " OR " + field + ":" + ((i+1)%10 + 1)), MATCH_TWO);
+    StringBuilder builder = new StringBuilder();
+    for (String value : randCount.keySet()) {
+      if (builder.length() != 0) {
+        builder.append(" OR ");
+      }
+      if (value.startsWith("-")) {
+        builder.append("\\"); // escape negative sign
+      }
+      builder.append(value);
     }
+    assertQ(req("debug", "true", "q", field + ":(" + builder.toString() + ")"), getTestString(searchable, numValues));
     
     assertU(adoc("id", String.valueOf(Integer.MAX_VALUE), field, String.valueOf(Integer.MAX_VALUE)));
     assertU(commit());
-    assertQ(req("q", field + ":"+Integer.MAX_VALUE, "fl", "id, " + field), 
-        MATCH_ONE);
-    
-    if (testLong) {
-      for (long i = (long)Integer.MAX_VALUE; i < (long)Integer.MAX_VALUE + 10; i++) {
-        assertU(adoc("id", String.valueOf(i), field, String.valueOf(i+1)));
-      }
-      assertU(commit());
-      for (long i = (long)Integer.MAX_VALUE; i < (long)Integer.MAX_VALUE + 10; i++) {
-        assertQ(req("q", field + ":"+(i+1), "fl", "id, " + field), 
-                MATCH_ONE);
-      }
-      assertU(adoc("id", String.valueOf(Long.MAX_VALUE), field, String.valueOf(Long.MAX_VALUE)));
-      assertU(commit());
-      assertQ(req("q", field + ":"+Long.MAX_VALUE, "fl", "id, " + field), 
-              MATCH_ONE);
-    }
+    assertQ(req("q", field + ":"+Integer.MAX_VALUE, "fl", "id, " + field), getTestString(searchable, 1));
     
     clearIndex();
     assertU(commit());

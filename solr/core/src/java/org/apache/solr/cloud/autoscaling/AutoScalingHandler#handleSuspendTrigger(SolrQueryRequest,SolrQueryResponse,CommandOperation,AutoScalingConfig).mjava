@@ -1,0 +1,51 @@
+  private AutoScalingConfig handleSuspendTrigger(SolrQueryRequest req, SolrQueryResponse rsp, CommandOperation op,
+                                                 AutoScalingConfig currentConfig) throws KeeperException, InterruptedException {
+    String triggerName = op.getStr(NAME);
+
+    if (triggerName == null || triggerName.trim().length() == 0) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "The trigger name cannot be null or empty");
+    }
+
+    String timeout = op.getStr(TIMEOUT, null);
+    Date resumeTime = null;
+    if (timeout != null) {
+      try {
+        int timeoutSeconds = parseHumanTime(timeout);
+        resumeTime = new Date(TimeUnit.MILLISECONDS.convert(timeSource.getTime(), TimeUnit.NANOSECONDS)
+            + TimeUnit.MILLISECONDS.convert(timeoutSeconds, TimeUnit.SECONDS));
+      } catch (IllegalArgumentException e) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Invalid 'timeout' value for suspend trigger: " + triggerName);
+      }
+    }
+
+    Map<String, AutoScalingConfig.TriggerConfig> triggers = currentConfig.getTriggerConfigs();
+    Set<String> changed = new HashSet<>();
+
+    if (!Policy.EACH.equals(triggerName) && !triggers.containsKey(triggerName)) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "No trigger exists with name: " + triggerName);
+    }
+    Map<String, AutoScalingConfig.TriggerConfig> newTriggers = new HashMap<>();
+    for (Map.Entry<String, AutoScalingConfig.TriggerConfig> entry : triggers.entrySet()) {
+      if (Policy.EACH.equals(triggerName) || triggerName.equals(entry.getKey())) {
+        AutoScalingConfig.TriggerConfig trigger = entry.getValue();
+        if (trigger.enabled) {
+          trigger = trigger.withEnabled(false);
+          if (resumeTime != null) {
+            trigger = trigger.withProperty(RESUME_AT, resumeTime.getTime());
+          }
+          newTriggers.put(entry.getKey(), trigger);
+          changed.add(trigger.name);
+        } else {
+          newTriggers.put(entry.getKey(), entry.getValue());
+        }
+      } else {
+        newTriggers.put(entry.getKey(), entry.getValue());
+      }
+    }
+    rsp.getValues().add("changed", changed);
+    if (!changed.isEmpty()) {
+      currentConfig = currentConfig.withTriggerConfigs(newTriggers);
+    }
+    return currentConfig;
+  }
+

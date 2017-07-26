@@ -1,0 +1,45 @@
+  @Test
+  public void test() throws IOException, SolrServerException, KeeperException, InterruptedException {
+    Set<String> coreNames = new HashSet<>();
+    Set<String> coreNodeNames = new HashSet<>();
+
+    int numOperations = random().nextInt(4 * 15);
+    int numLiveReplicas = 4;
+
+    boolean clearedCounter = false;
+    for (int i = 0; i < numOperations; i++) {
+      boolean deleteReplica = random().nextBoolean() && numLiveReplicas > 1;
+      // No need to clear counter more than one time
+      if (random().nextInt(30) < 5 && !clearedCounter) {
+        // clear counter
+        cluster.getZkClient().delete("/collections/"+COLLECTION+"/counter", -1, true);
+        clearedCounter = true;
+      }
+      if (deleteReplica) {
+        assertTrue(ClusterStateUtil.waitForLiveAndActiveReplicaCount(
+            cluster.getSolrClient().getZkStateReader(), COLLECTION, numLiveReplicas, 30000));
+        DocCollection dc = getCollectionState(COLLECTION);
+        Replica replica = getRandomReplica(dc.getSlice("shard1"), (r) -> r.getState() == Replica.State.ACTIVE);
+        CollectionAdminRequest.deleteReplica(COLLECTION, "shard1", replica.getName()).process(cluster.getSolrClient());
+        numLiveReplicas--;
+      } else {
+        CollectionAdminResponse response = CollectionAdminRequest.addReplicaToShard(COLLECTION, "shard1")
+            .process(cluster.getSolrClient());
+        assertTrue(response.isSuccess());
+        String coreName = response.getCollectionCoresStatus()
+            .keySet().iterator().next();
+        assertFalse("Core name is not unique coreName=" + coreName + " " + coreNames, coreNames.contains(coreName));
+        coreNames.add(coreName);
+
+        Replica newReplica = getCollectionState(COLLECTION).getReplicas().stream()
+            .filter(r -> r.getCoreName().equals(coreName))
+            .findAny().get();
+        String coreNodeName = newReplica.getName();
+        assertFalse("Core node name is not unique", coreNodeNames.contains(coreName));
+        coreNodeNames.add(coreNodeName);
+
+        numLiveReplicas++;
+      }
+    }
+  }
+

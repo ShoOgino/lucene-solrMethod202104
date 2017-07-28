@@ -1,0 +1,50 @@
+  @Test
+  public void testSimple() throws Exception{
+    JettySolrRunner jetty2 = cluster.getJettySolrRunner(1);
+    JettySolrRunner jetty3 = cluster.getJettySolrRunner(2);
+    ZkStateReader zkStateReader = cluster.getSolrClient().getZkStateReader();
+
+    // start the tests
+    JettySolrRunner lostJetty = random().nextBoolean() ? cluster.getJettySolrRunner(0) : cluster.getJettySolrRunner(1);
+    String lostNodeName = lostJetty.getNodeName();
+    List<Replica> replacedHdfsReplicas = getReplacedSharedFsReplicas(COLLECTION1, zkStateReader, lostNodeName);
+    lostJetty.stop();
+    waitForNodeLeave(lostNodeName);
+    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, clusterShape(2, 2));
+    checkSharedFsReplicasMovedCorrectly(replacedHdfsReplicas, zkStateReader, COLLECTION1);
+    lostJetty.start();
+    assertTrue("Timeout waiting for all live and active", ClusterStateUtil.waitForAllActiveAndLiveReplicas(cluster.getSolrClient().getZkStateReader(), 30000));
+
+    // check cluster property is considered
+    disableAutoAddReplicasInCluster();
+    lostNodeName = jetty3.getNodeName();
+    jetty3.stop();
+    waitForNodeLeave(lostNodeName);
+    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, clusterShape(2, 1));
+    jetty3.start();
+    assertTrue("Timeout waiting for all live and active", ClusterStateUtil.waitForAllActiveAndLiveReplicas(cluster.getSolrClient().getZkStateReader(), 30000));
+    enableAutoAddReplicasInCluster();
+
+
+    // test for multiple collections
+    new CollectionAdminRequest.AsyncCollectionAdminRequest(CollectionParams.CollectionAction.MODIFYCOLLECTION) {
+      @Override
+      public SolrParams getParams() {
+        ModifiableSolrParams params = (ModifiableSolrParams) super.getParams();
+        params.set("collection", COLLECTION2);
+        params.set("autoAddReplicas", true);
+        return params;
+      }
+    }.process(cluster.getSolrClient());
+
+    lostNodeName = jetty2.getNodeName();
+    replacedHdfsReplicas = getReplacedSharedFsReplicas(COLLECTION2, zkStateReader, lostNodeName);
+    jetty2.stop();
+    waitForNodeLeave(lostNodeName);
+    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, clusterShape(2, 2));
+    waitForState("Waiting for collection " + COLLECTION2, COLLECTION2, clusterShape(2, 2));
+    checkSharedFsReplicasMovedCorrectly(replacedHdfsReplicas, zkStateReader, COLLECTION2);
+
+    // overseer failover test..
+  }
+

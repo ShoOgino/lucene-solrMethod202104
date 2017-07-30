@@ -1,0 +1,41 @@
+  @Test
+  public void testRepFactor1LeaderStartup() throws Exception {
+    CloudSolrClient solrClient = cluster.getSolrClient();
+
+    String collectionName = "testRepFactor1LeaderStartup";
+    CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(collectionName, 1, 1)
+        .setCreateNodeSet(cluster.getJettySolrRunner(0).getNodeName());
+    create.process(solrClient);
+
+    waitForState("The collection should have 1 shard and 1 replica", collectionName, clusterShape(1, 1));
+
+    solrClient.setDefaultCollection(collectionName);
+    solrClient.getZkStateReader().registerCore(collectionName);
+
+    String addListenerCommand = "{" +
+        "'add-listener' : {'name':'newSearcherListener','event':'newSearcher', 'class':'" + SleepingSolrEventListener.class.getName() + "'}" +
+        "'add-listener' : {'name':'firstSearcherListener','event':'firstSearcher', 'class':'" + SleepingSolrEventListener.class.getName() + "'}" +
+        "}";
+
+    ConfigRequest request = new ConfigRequest(SolrRequest.METHOD.POST, "/config", addListenerCommand);
+    solrClient.request(request);
+
+    solrClient.add(new SolrInputDocument("id", "1"));
+    solrClient.commit();
+
+    AtomicInteger expectedDocs = new AtomicInteger(1);
+    AtomicReference<String> failingCoreNodeName = new AtomicReference<>();
+    CollectionStateWatcher stateWatcher = createActiveReplicaSearcherWatcher(expectedDocs, failingCoreNodeName);
+
+    JettySolrRunner runner = cluster.getJettySolrRunner(0);
+    cluster.stopJettySolrRunner(0);
+    waitForState("", collectionName, clusterShape(1, 0));
+    // restart
+    sleepTime.set(10000);
+    cluster.startJettySolrRunner(runner);
+    cluster.getSolrClient().getZkStateReader().registerCollectionStateWatcher(collectionName, stateWatcher);
+    waitForState("", collectionName, clusterShape(1, 1));
+    assertNull("No replica should have been active without registering a searcher, found: " + failingCoreNodeName.get(), failingCoreNodeName.get());
+    cluster.getSolrClient().getZkStateReader().removeCollectionStateWatcher(collectionName, stateWatcher);
+  }
+

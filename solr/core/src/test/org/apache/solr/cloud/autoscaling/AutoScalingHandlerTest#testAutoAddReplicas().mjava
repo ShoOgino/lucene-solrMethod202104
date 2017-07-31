@@ -1,61 +1,24 @@
-  @Test
-  public void testAutoAddReplicas() throws Exception {
-    String collection = "test-collection";
-    CollectionAdminRequest
-        .createCollection(collection, CONFIGSET_NAME,1, 1)
-        .setAutoAddReplicas(true)
-        .process(cluster.getSolrClient());
-    byte[] data = zkClient().getData(SOLR_AUTOSCALING_CONF_PATH, null, null, true);
-    ZkNodeProps loaded = ZkNodeProps.load(data);
-    Map triggers = (Map) loaded.get("triggers");
-    assertNotNull(triggers);
-    assertEquals("auto add replicas trigger were not created", triggers.size(), 1);
-    Map<String, Object> autoAddReplicasTrigger = (Map<String, Object>) triggers.get(".auto_add_replicas");
-    assertNotNull(autoAddReplicasTrigger);
-    List<Map<String, Object>> actions = (List<Map<String, Object>>) autoAddReplicasTrigger.get("actions");
-    assertNotNull(actions);
-    assertEquals(2, actions.size());
-    assertEquals("auto_add_replicas_plan", actions.get(0).get("name").toString());
-    assertEquals("solr.AutoAddReplicasPlanAction", actions.get(0).get("class").toString());
-
-    // lets turn of autoAddReplicas, currently it doesn't change anything in autoscaling config
-    // because AutoAddReplicasPlanAction will just ignore any collections with autoAddReplicas turned off
-    new CollectionAdminRequest.AsyncCollectionAdminRequest(CollectionParams.CollectionAction.MODIFYCOLLECTION) {
-      @Override
-      public SolrParams getParams() {
-        ModifiableSolrParams params = (ModifiableSolrParams) super.getParams();
-        params.set("collection", collection);
-        params.set("autoAddReplicas", false);
-        return params;
+  private static void testAutoAddReplicas() throws Exception {
+    TimeOut timeOut = new TimeOut(30, TimeUnit.SECONDS);
+    while (!timeOut.hasTimedOut()) {
+      byte[] data = zkClient().getData(SOLR_AUTOSCALING_CONF_PATH, null, null, true);
+      ZkNodeProps loaded = ZkNodeProps.load(data);
+      Map triggers = (Map) loaded.get("triggers");
+      if (triggers != null && triggers.containsKey(".auto_add_replicas")) {
+        Map<String, Object> autoAddReplicasTrigger = (Map<String, Object>) triggers.get(".auto_add_replicas");
+        assertNotNull(autoAddReplicasTrigger);
+        List<Map<String, Object>> actions = (List<Map<String, Object>>) autoAddReplicasTrigger.get("actions");
+        assertNotNull(actions);
+        assertEquals(2, actions.size());
+        assertEquals("auto_add_replicas_plan", actions.get(0).get("name").toString());
+        assertEquals("solr.AutoAddReplicasPlanAction", actions.get(0).get("class").toString());
+        break;
+      } else {
+        Thread.sleep(300);
       }
-    }.process(cluster.getSolrClient());
-
-    // lets delete all autoscaling config
-    zkClient().setData(SOLR_AUTOSCALING_CONF_PATH, Utils.toJSON(new ZkNodeProps()), true);
-
-    // now enable autoAddReplicas and assert that the trigger was re-created correctly
-    new CollectionAdminRequest.AsyncCollectionAdminRequest(CollectionParams.CollectionAction.MODIFYCOLLECTION) {
-      @Override
-      public SolrParams getParams() {
-        ModifiableSolrParams params = (ModifiableSolrParams) super.getParams();
-        params.set("collection", collection);
-        params.set("autoAddReplicas", true);
-        return params;
-      }
-    }.process(cluster.getSolrClient());
-    data = zkClient().getData(SOLR_AUTOSCALING_CONF_PATH, null, null, true);
-    loaded = ZkNodeProps.load(data);
-    triggers = (Map) loaded.get("triggers");
-    assertNotNull(triggers);
-    assertEquals("auto add replicas trigger did not created", triggers.size(), 1);
-    autoAddReplicasTrigger = (Map<String, Object>) triggers.get(".auto_add_replicas");
-    assertNotNull(autoAddReplicasTrigger);
-    actions = (List<Map<String, Object>>) autoAddReplicasTrigger.get("actions");
-    assertNotNull(actions);
-    assertEquals(2, actions.size());
-    assertEquals("auto_add_replicas_plan", actions.get(0).get("name").toString());
-    assertEquals("solr.AutoAddReplicasPlanAction", actions.get(0).get("class").toString());
-
-    CollectionAdminRequest.deleteCollection(collection).process(cluster.getSolrClient());
+    }
+    if (timeOut.hasTimedOut()) {
+      fail("Timeout waiting for .auto_add_replicas being created");
+    }
   }
 

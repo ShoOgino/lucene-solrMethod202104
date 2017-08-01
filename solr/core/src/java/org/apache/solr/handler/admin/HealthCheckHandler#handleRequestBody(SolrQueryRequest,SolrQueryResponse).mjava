@@ -1,0 +1,43 @@
+  @Override
+  public void handleRequestBody(SolrQueryRequest req, SolrQueryResponse rsp) throws Exception {
+
+    log.info("Invoked HealthCheckHandler on [{}]", coreContainer.getZkController().getNodeName());
+    CoreContainer cores = getCoreContainer();
+
+    if(cores == null) {
+      rsp.setException(new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Core container not initialized"));
+      return;
+    }
+    if(!cores.isZooKeeperAware()) {
+      rsp.setException(new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Health check is only available when running in SolrCloud mode"));
+      return;
+    }
+    ZkStateReader zkStateReader = cores.getZkController().getZkStateReader();
+    ClusterState clusterState = zkStateReader.getClusterState();
+    // Check for isConnected and isClosed
+    if(zkStateReader.getZkClient().isClosed() || !zkStateReader.getZkClient().isConnected()) {
+      rsp.add(STATUS, FAILURE);
+      rsp.setException(new SolrException(SolrException.ErrorCode.SERVICE_UNAVAILABLE, "Host Unavailable: Not connected to zk"));
+      return;
+    }
+
+    try {
+      zkStateReader.updateLiveNodes();
+
+      // Set status to true if this node is in live_nodes
+      if (clusterState.getLiveNodes().contains(cores.getZkController().getNodeName())) {
+        rsp.add(STATUS, OK);
+      } else {
+        rsp.add(STATUS, FAILURE);
+        rsp.setException(new SolrException(SolrException.ErrorCode.SERVICE_UNAVAILABLE, "Host Unavailable: Not in live nodes as per zk"));
+      }
+    } catch (KeeperException e) {
+      rsp.add(STATUS, FAILURE);
+      rsp.setException(new SolrException(SolrException.ErrorCode.SERVICE_UNAVAILABLE, "Host Unavailable: Not connected to zk"));
+    }
+
+    rsp.setHttpCaching(false);
+
+    return;
+  }
+

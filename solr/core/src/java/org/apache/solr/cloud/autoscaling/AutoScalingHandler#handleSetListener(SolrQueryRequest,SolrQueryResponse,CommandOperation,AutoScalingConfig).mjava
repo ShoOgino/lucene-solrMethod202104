@@ -7,37 +7,37 @@
     List<String> beforeActions = op.getStrs(BEFORE_ACTION, Collections.emptyList());
     List<String> afterActions = op.getStrs(AFTER_ACTION, Collections.emptyList());
 
-    if (listenerName == null || listenerName.trim().length() == 0) {
-      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "The listener name cannot be null or empty");
-    }
+    if (op.hasError()) return currentConfig;
 
     Map<String, AutoScalingConfig.TriggerConfig> triggers = currentConfig.getTriggerConfigs();
     if (triggers == null || !triggers.containsKey(triggerName)) {
-      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "A trigger with the name " + triggerName + " does not exist");
+      op.addError("A trigger with the name " + triggerName + " does not exist");
+      return currentConfig;
     }
     AutoScalingConfig.TriggerConfig triggerConfig = triggers.get(triggerName);
 
     if (stageNames.isEmpty() && beforeActions.isEmpty() && afterActions.isEmpty()) {
-      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Either 'stage' or 'beforeAction' or 'afterAction' must be specified");
+      op.addError("Either 'stage' or 'beforeAction' or 'afterAction' must be specified");
+      return currentConfig;
     }
 
     for (String stage : stageNames) {
       try {
         TriggerEventProcessorStage.valueOf(stage);
       } catch (IllegalArgumentException e) {
-        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Invalid stage name: " + stage);
+        op.addError("Invalid stage name: " + stage);
       }
     }
+    if (op.hasError()) return currentConfig;
 
-    if (listenerClass == null || listenerClass.trim().length() == 0) {
-      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "The 'class' of the listener cannot be null or empty");
-    }
     // validate that we can load the listener class
     // todo nocommit -- what about MemClassLoader?
     try {
       container.getResourceLoader().findClass(listenerClass, TriggerListener.class);
     } catch (Exception e) {
-      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Listener not found: " + listenerClass, e);
+      log.warn("error loading listener class ", e);
+      op.addError("Listener not found: " + listenerClass + ". error message:" + e.getMessage());
+      return currentConfig;
     }
 
     Set<String> actionNames = new HashSet<>();
@@ -47,7 +47,8 @@
       actionNames.remove(action.name);
     }
     if (!actionNames.isEmpty()) {
-      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "The trigger '" + triggerName + "' does not have actions named: " + actionNames);
+      op.addError("The trigger '" + triggerName + "' does not have actions named: " + actionNames);
+      return currentConfig;
     }
     AutoScalingConfig.TriggerListenerConfig listener = new AutoScalingConfig.TriggerListenerConfig(listenerName, op.getValuesExcluding("name"));
     // todo - handle races between competing set-trigger and set-listener invocations

@@ -1,0 +1,26 @@
+  @Test
+  public void testHealthCheckHandler() throws IOException, SolrServerException, InterruptedException, KeeperException {
+    SolrRequest req = new GenericSolrRequest(SolrRequest.METHOD.GET, HEALTH_CHECK_HANDLER_PATH, new ModifiableSolrParams());
+    try (HttpSolrClient httpSolrClient = getHttpSolrClient(cluster.getJettySolrRunner(0).getBaseUrl().toString())) {
+      SolrResponse response = req.process(cluster.getSolrClient());
+      assertEquals(CommonParams.OK, response.getResponse().get(CommonParams.STATUS));
+
+      JettySolrRunner jetty = cluster.getJettySolrRunner(0);
+      cluster.expireZkSession(jetty);
+      Set<String> live_nodes = cluster.getSolrClient().getZkStateReader().getClusterState().getLiveNodes();
+
+      int counter = 0;
+      while (live_nodes.size() == 1 && counter++ < 100) {
+        Thread.sleep(100);
+        live_nodes = cluster.getSolrClient().getZkStateReader().getClusterState().getLiveNodes();
+      }
+
+      try {
+        req.process(httpSolrClient);
+      } catch (HttpSolrClient.RemoteSolrException e) {
+        assertTrue(e.getMessage(), e.getMessage().contains("Host Unavailable"));
+        assertEquals(SolrException.ErrorCode.SERVICE_UNAVAILABLE.code, e.code());
+      }
+    }
+  }
+

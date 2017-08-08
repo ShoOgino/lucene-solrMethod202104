@@ -16,7 +16,7 @@
       // the initial query for the frontier for the first query
       Query frontierQuery = q;
       // Find all documents in this graph that are leaf nodes to speed traversal
-      DocSet leafNodes = resolveLeafNodes(toField);
+      DocSet leafNodes = resolveLeafNodes();
       // Start the breadth first graph traversal.
       
       do {
@@ -28,25 +28,29 @@
           // if we've reached the max depth, don't worry about collecting edges.
           fromSet = fromSearcher.getDocSetBits(frontierQuery);
           // explicitly the frontier size is zero now so we can break
-          frontierSize = 0;
+          frontierQuery = null;
         } else {
           // when we're not at the max depth level, we need to collect edges          
           // Create the graph result collector for this level
-          GraphTermsCollector graphResultCollector = new GraphTermsCollector(toField,capacity, resultBits, leafNodes);
+          GraphEdgeCollector graphResultCollector = collectSchemaField.getType().isPointField()
+              ? new GraphPointsCollector(collectSchemaField, new BitDocSet(resultBits), leafNodes)
+              : new GraphTermsCollector(collectSchemaField, new BitDocSet(resultBits), leafNodes);
+
+          fromSet = new BitDocSet(new FixedBitSet(capacity));
+          graphResultCollector.setCollectDocs(fromSet.getBits());
+
           fromSearcher.search(frontierQuery, graphResultCollector);
-          fromSet = graphResultCollector.getDocSet();
-          // All edge ids on the frontier.
-          BytesRefHash collectorTerms = graphResultCollector.getCollectorTerms();
-          frontierSize = collectorTerms.size();
-          // The resulting doc set from the frontier.
-          FrontierQuery fq = buildFrontierQuery(collectorTerms, frontierSize);
-          if (fq == null) {
-            // in case we get null back, make sure we know we're done at this level.
-            frontierSize = 0;
-          } else {
-            frontierQuery = fq.getQuery();
-            frontierSize = fq.getFrontierSize();
+
+          frontierQuery = graphResultCollector.getResultQuery(matchSchemaField, isUseAutn());
+          // If there is a filter to be used while crawling the graph, add that.
+          if (frontierQuery != null && getTraversalFilter() != null) {
+            BooleanQuery.Builder builder = new BooleanQuery.Builder();
+            builder.add(frontierQuery, BooleanClause.Occur.MUST);
+            builder.add(getTraversalFilter(), BooleanClause.Occur.MUST);
+            frontierQuery = builder.build();
           }
+
+
         }
         if (currentDepth == 0 && !returnRoot) {
           // grab a copy of the root bits but only if we need it.
@@ -58,7 +62,7 @@
         if ((maxDepth != -1 && currentDepth >= maxDepth)) {
           break;
         }
-      } while (frontierSize > 0);
+      } while (frontierQuery != null);
       // helper bit set operations on the final result set
       if (!returnRoot) {
         resultBits.andNot(rootBits);

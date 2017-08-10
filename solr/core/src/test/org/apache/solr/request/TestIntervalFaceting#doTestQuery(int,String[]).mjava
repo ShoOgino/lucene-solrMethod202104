@@ -6,18 +6,22 @@
   private void doTestQuery(int cardinality, String[] fields) throws Exception {
     String[] startOptions = new String[]{"(", "["};
     String[] endOptions = new String[]{")", "]"};
-    // the query should match some documents in most cases
-    Integer[] qRange = getRandomRange(cardinality, "id");
     ModifiableSolrParams params = new ModifiableSolrParams();
-    params.set("q", "id:[" + qRange[0] + " TO " + qRange[1] + "]");
+    if (rarely()) {
+      params.set("q", "*:*");
+    } else {
+      // the query should match some documents in most cases
+      String[] qRange = getRandomRange(cardinality, "id");
+      params.set("q", "id:[" + qRange[0] + " TO " + qRange[1] + "]");
+    }
     params.set("facet", "true");
-    String field = fields[random().nextInt(fields.length)]; //choose from any of the fields
+    String field = pickRandom(fields); //choose from any of the fields
     params.set("facet.interval", field);
     // number of intervals
     for (int i = 0; i < 1 + random().nextInt(20); i++) {
-      Integer[] interval = getRandomRange(cardinality, field);
-      String open = startOptions[interval[0] % 2];
-      String close = endOptions[interval[1] % 2];
+      String[] interval = getRandomRange(cardinality, field);
+      String open = pickRandom(startOptions);
+      String close = pickRandom(endOptions);
       params.add("f." + field + ".facet.interval.set", open + interval[0] + "," + interval[1] + close);
       params.add("facet.query", field + ":" + open.replace('(', '{') + interval[0] + " TO " + interval[1] + close.replace(')', '}'));
     }
@@ -28,10 +32,11 @@
       NamedList<Object> facetIntervals = (NamedList<Object>) ((NamedList<Object>) (NamedList<Object>) ((NamedList<Object>) rsp.getValues().get("facet_counts"))
           .get("facet_intervals")).get(field);
       assertEquals("Responses don't have the same number of facets: \n" + facetQueries + "\n" + facetIntervals,
-          facetQueries.size(), facetIntervals.size());
+          facetQueries.size(), getCountDistinctIntervals(facetIntervals));
       for (int i = 0; i < facetIntervals.size(); i++) {
-        assertEquals("Interval did not match: " + facetIntervals.getName(i), facetIntervals.getVal(i).toString(),
-            facetQueries.get(field + ":" + facetIntervals.getName(i).replace(",", " TO ").replace('(', '{').replace(')', '}')).toString());
+        assertEquals("Interval did not match: " + field + ": " + facetIntervals.getName(i) + "\nResponse: " + rsp.getValues().get("facet_counts"), 
+            facetQueries.get(field + ":" + facetIntervals.getName(i).replace(",", " TO ").replace('(', '{').replace(')', '}')).toString(),
+            facetIntervals.getVal(i).toString());
       }
     } finally {
       req.close();

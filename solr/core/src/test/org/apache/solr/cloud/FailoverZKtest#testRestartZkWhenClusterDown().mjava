@@ -1,0 +1,34 @@
+  public void testRestartZkWhenClusterDown() throws Exception {
+    String coll = "coll1";
+    CollectionAdminRequest.createCollection(coll, 2, 1).process(cluster.getSolrClient());
+    cluster.getSolrClient().add(coll, new SolrInputDocument("id", "1"));
+    for (JettySolrRunner runner : cluster.getJettySolrRunners()) {
+      ChaosMonkey.stop(runner);
+    }
+    ZkTestServer zkTestServer = cluster.getZkServer();
+    zkTestServer.shutdown();
+    Thread[] threads = new Thread[cluster.getJettySolrRunners().size()];
+    for (int i = 0; i < cluster.getJettySolrRunners().size(); i++) {
+      final JettySolrRunner runner = cluster.getJettySolrRunner(i);
+      threads[i] = new Thread(() -> {
+        try {
+          ChaosMonkey.start(runner);
+        } catch (Exception e) {
+          e.printStackTrace();
+        }
+        });
+      threads[i].start();
+    }
+    Thread.sleep(5000);
+    zkTestServer = new ZkTestServer(zkTestServer.getZkDir(), zkTestServer.getPort());
+    zkTestServer.run();
+    for (Thread thread : threads) {
+      thread.join();
+    }
+    waitForLiveNodes(2);
+    waitForState("Timeout waiting for " + coll, coll, clusterShape(2, 1));
+    QueryResponse rsp = new QueryRequest(new SolrQuery("*:*")).process(cluster.getSolrClient(), coll);
+    assertEquals(1, rsp.getResults().getNumFound());
+    zkTestServer.shutdown();
+  }
+

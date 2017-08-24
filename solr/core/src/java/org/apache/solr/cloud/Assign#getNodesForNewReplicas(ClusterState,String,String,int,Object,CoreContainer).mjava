@@ -1,0 +1,61 @@
+  // Only called from createShard and addReplica (so far).
+  //
+  // Gets a list of candidate nodes to put the required replica(s) on. Throws errors if not enough replicas
+  // could be created on live nodes given maxShardsPerNode, Replication factor (if from createShard) etc.
+  public static List<ReplicaCount> getNodesForNewReplicas(ClusterState clusterState, String collectionName,
+                                                          String shard, int nrtReplicas,
+                                                          Object createNodeSet, CoreContainer cc) throws KeeperException, InterruptedException {
+    log.debug("getNodesForNewReplicas() shard: {} , replicas : {} , createNodeSet {}", shard, nrtReplicas, createNodeSet );
+    DocCollection coll = clusterState.getCollection(collectionName);
+    Integer maxShardsPerNode = coll.getMaxShardsPerNode();
+    List<String> createNodeList = null;
+
+    if (createNodeSet instanceof List) {
+      createNodeList = (List) createNodeSet;
+    } else {
+      createNodeList = createNodeSet == null ? null : StrUtils.splitSmart((String) createNodeSet, ",", true);
+    }
+
+     HashMap<String, ReplicaCount> nodeNameVsShardCount = getNodeNameVsShardCount(collectionName, clusterState, createNodeList);
+
+    if (createNodeList == null) { // We only care if we haven't been told to put new replicas on specific nodes.
+      int availableSlots = 0;
+      for (Map.Entry<String, ReplicaCount> ent : nodeNameVsShardCount.entrySet()) {
+        //ADDREPLICA can put more than maxShardsPerNode on an instance, so this test is necessary.
+        if (maxShardsPerNode > ent.getValue().thisCollectionNodes) {
+          availableSlots += (maxShardsPerNode - ent.getValue().thisCollectionNodes);
+        }
+      }
+      if (availableSlots < nrtReplicas) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+            String.format(Locale.ROOT, "Cannot create %d new replicas for collection %s given the current number of live nodes and a maxShardsPerNode of %d",
+                nrtReplicas, collectionName, maxShardsPerNode));
+      }
+    }
+
+    List l = (List) coll.get(DocCollection.RULE);
+    List<ReplicaPosition> replicaPositions = null;
+    if (l != null) {
+      replicaPositions = getNodesViaRules(clusterState, shard, nrtReplicas, cc, coll, createNodeList, l);
+    }
+    String policyName = coll.getStr(POLICY);
+    AutoScalingConfig autoScalingConfig = cc.getZkController().zkStateReader.getAutoScalingConfig();
+    if (policyName != null || !autoScalingConfig.getPolicy().getClusterPolicy().isEmpty()) {
+      replicaPositions = Assign.getPositionsUsingPolicy(collectionName, Collections.singletonList(shard), nrtReplicas, 0, 0,
+          policyName, cc.getZkController().zkStateReader, createNodeList);
+    }
+
+    if(replicaPositions != null){
+      List<ReplicaCount> repCounts = new ArrayList<>();
+      for (ReplicaPosition p : replicaPositions) {
+        repCounts.add(new ReplicaCount(p.node));
+      }
+      return repCounts;
+    }
+
+    ArrayList<ReplicaCount> sortedNodeList = new ArrayList<>(nodeNameVsShardCount.values());
+    Collections.sort(sortedNodeList, (x, y) -> (x.weight() < y.weight()) ? -1 : ((x.weight() == y.weight()) ? 0 : 1));
+    return sortedNodeList;
+
+  }
+

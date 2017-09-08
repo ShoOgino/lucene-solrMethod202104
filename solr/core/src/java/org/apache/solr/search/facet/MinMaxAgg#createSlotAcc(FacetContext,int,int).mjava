@@ -2,21 +2,39 @@
   public SlotAcc createSlotAcc(FacetContext fcontext, int numDocs, int numSlots) throws IOException {
     ValueSource vs = getArg();
 
-    if (vs instanceof StrFieldSource) {
-      String field = ((StrFieldSource) vs).getField();
-      SchemaField sf = fcontext.qcontext.searcher().getSchema().getField(field);
+    SchemaField sf = null;
+
+    if (vs instanceof FieldNameValueSource) {
+      String field = ((FieldNameValueSource)vs).getFieldName();
+      sf = fcontext.qcontext.searcher().getSchema().getField(field);
+
       if (sf.multiValued() || sf.getType().multiValuedFieldCache()) {
-        if (sf.hasDocValues()) {
-          // dv
-        } else {
-          // uif
-        }
+        vs = null;
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "min/max aggregations can't be used on multi-valued field " + field);
       } else {
-        return new SingleValuedOrdAcc(fcontext, sf, numSlots);
+        vs = sf.getType().getValueSource(sf, null);
+      }
+    }
+
+    if (vs instanceof StrFieldSource) {
+      return new SingleValuedOrdAcc(fcontext, sf, numSlots);
+    }
+
+    // Since functions don't currently have types, we rely on the type of the field
+    if (sf != null && sf.getType().getNumberType() != null) {
+      switch (sf.getType().getNumberType()) {
+        case FLOAT:
+        case DOUBLE:
+          return new DFuncAcc(vs, fcontext, numSlots);
+        case INTEGER:
+        case LONG:
+          return new LFuncAcc(vs, fcontext, numSlots);
+        case DATE:
+          return new DateFuncAcc(vs, fcontext, numSlots);
       }
     }
 
     // numeric functions
-    return new ValSlotAcc(vs, fcontext, numSlots);
+    return new DFuncAcc(vs, fcontext, numSlots);
   }
 

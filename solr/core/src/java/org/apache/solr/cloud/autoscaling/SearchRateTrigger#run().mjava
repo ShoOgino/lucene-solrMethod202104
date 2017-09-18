@@ -62,10 +62,8 @@
         .collect(Collectors.toMap(entry -> entry.getKey(), entry -> entry.getValue().get()));
 
     Map<String, Map<String, Double>> hotShards = new HashMap<>();
-    Map<String, String> warmShards = new HashMap<>();
     List<ReplicaInfo> hotReplicas = new ArrayList<>();
     collectionRates.forEach((coll, shardRates) -> {
-      final Object[] warmShard = new Object[2];
       shardRates.forEach((sh, replicaRates) -> {
         double shardRate = replicaRates.stream()
             .map(r -> {
@@ -76,14 +74,6 @@
               return r;
             })
             .mapToDouble(r -> (Double)r.getVariable(AutoScalingParams.RATE)).sum();
-        if (warmShard[0] == null) {
-          warmShard[0] = sh;
-          warmShard[1] = shardRate;
-        }
-        if (shardRate > (double)warmShard[1]) {
-          warmShard[0] = sh;
-          warmShard[1] = shardRate;
-        }
         if (waitForElapsed(coll + "." + sh, now, lastShardEvent) &&
             (shardRate > rate) &&
             (collection.equals(Policy.ANY) || collection.equals(coll)) &&
@@ -91,12 +81,11 @@
           hotShards.computeIfAbsent(coll, s -> new HashMap<>()).put(sh, shardRate);
         }
       });
-      warmShards.put(coll, (String)warmShard[0]);
     });
 
     Map<String, Double> hotCollections = new HashMap<>();
-    collectionRates.forEach((coll, shRates) -> {
-      double total = shRates.entrySet().stream()
+    collectionRates.forEach((coll, shardRates) -> {
+      double total = shardRates.entrySet().stream()
           .mapToDouble(e -> e.getValue().stream()
               .mapToDouble(r -> (Double)r.getVariable(AutoScalingParams.RATE)).sum()).sum();
       if (waitForElapsed(coll, now, lastCollectionEvent) &&
@@ -112,7 +101,7 @@
 
     // generate event
 
-    if (processor.process(new SearchRateEvent(getName(), now, hotNodes, hotCollections, hotShards, hotReplicas, warmShards))) {
+    if (processor.process(new SearchRateEvent(getName(), now, hotNodes, hotCollections, hotShards, hotReplicas))) {
       // update lastEvent times
       hotNodes.keySet().forEach(node -> lastNodeEvent.put(node, now));
       hotCollections.keySet().forEach(coll -> lastCollectionEvent.put(coll, now));

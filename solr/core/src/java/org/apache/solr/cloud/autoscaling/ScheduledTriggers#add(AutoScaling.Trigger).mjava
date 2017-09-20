@@ -23,6 +23,12 @@
       scheduledTriggers.replace(newTrigger.getName(), scheduledTrigger);
     }
     newTrigger.setProcessor(event -> {
+      if (coreContainer.isShutDown()) {
+        String msg = String.format(Locale.ROOT, "Ignoring autoscaling event %s because Solr has been shutdown.", event.toString());
+        log.warn(msg);
+        listeners.fireListeners(event.getSource(), event, TriggerEventProcessorStage.ABORTED, msg);
+        return false;
+      }
       ScheduledTrigger scheduledSource = scheduledTriggers.get(event.getSource());
       if (scheduledSource == null) {
         String msg = String.format(Locale.ROOT, "Ignoring autoscaling event %s because the source trigger: %s doesn't exist.", event.toString(), event.getSource());
@@ -40,13 +46,14 @@
         return false;
       }
       if (hasPendingActions.compareAndSet(false, true)) {
-        listeners.fireListeners(event.getSource(), event, TriggerEventProcessorStage.STARTED);
         final boolean enqueued;
         if (replaying) {
           enqueued = false;
         } else {
           enqueued = scheduledTrigger.enqueue(event);
         }
+        // fire STARTED event listeners after enqueuing the event is successful
+        listeners.fireListeners(event.getSource(), event, TriggerEventProcessorStage.STARTED);
         List<TriggerAction> actions = source.getActions();
         if (actions != null) {
           actionExecutor.submit(() -> {
@@ -56,6 +63,11 @@
               // let the action executor thread wait instead of the trigger thread so we use the throttle here
               actionThrottle.minimumWaitBetweenActions();
               actionThrottle.markAttemptingAction();
+
+              // in future, we could wait for pending tasks in a different thread and re-enqueue
+              // this event so that we continue processing other events and not block this action executor
+              waitForPendingTasks(newTrigger, actions);
+
               ActionContext actionContext = new ActionContext(coreContainer, newTrigger, new HashMap<>());
               for (TriggerAction action : actions) {
                 List<String> beforeActions = (List<String>)actionContext.getProperties().computeIfAbsent(TriggerEventProcessorStage.BEFORE_ACTION.toString(), k -> new ArrayList<String>());

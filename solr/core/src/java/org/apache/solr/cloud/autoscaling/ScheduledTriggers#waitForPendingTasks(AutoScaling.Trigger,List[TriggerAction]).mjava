@@ -1,0 +1,63 @@
+  private void waitForPendingTasks(AutoScaling.Trigger newTrigger, List<TriggerAction> actions) throws AlreadyClosedException {
+    try (CloudSolrClient cloudSolrClient = new CloudSolrClient.Builder()
+        .withZkHost(coreContainer.getZkController().getZkServerAddress())
+        .withHttpClient(coreContainer.getUpdateShardHandler().getHttpClient())
+        .build()) {
+
+      SolrZkClient zkClient = coreContainer.getZkController().getZkClient();
+
+      for (TriggerAction action : actions) {
+        if (action instanceof ExecutePlanAction) {
+          String parentPath = ZkStateReader.SOLR_AUTOSCALING_TRIGGER_STATE_PATH + "/" + newTrigger.getName() + "/" + action.getName();
+          if (!zkClient.exists(parentPath, true))  {
+            break;
+          }
+          List<String> children = zkClient.getChildren(parentPath, null, true);
+          if (children != null) {
+            for (String child : children) {
+              String path = parentPath + '/' + child;
+              byte[] data = zkClient.getData(path, null, null, true);
+              if (data != null) {
+                Map map = (Map) Utils.fromJSON(data);
+                String requestid = (String) map.get("requestid");
+                try {
+                  log.debug("Found pending task with requestid={}", requestid);
+                  RequestStatusResponse statusResponse = waitForTaskToFinish(cloudSolrClient, requestid,
+                      ExecutePlanAction.DEFAULT_TASK_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                  if (statusResponse != null) {
+                    RequestStatusState state = statusResponse.getRequestStatus();
+                    if (state == RequestStatusState.COMPLETED || state == RequestStatusState.FAILED || state == RequestStatusState.NOT_FOUND) {
+                      zkClient.delete(path, -1, true);
+                    }
+                  }
+                } catch (Exception e) {
+                  if (coreContainer.isShutDown())  {
+                    throw e; // propagate the abort to the caller
+                  }
+                  Throwable rootCause = ExceptionUtils.getRootCause(e);
+                  if (rootCause instanceof IllegalStateException && rootCause.getMessage().contains("Connection pool shut down")) {
+                    throw e;
+                  }
+                  if (rootCause instanceof TimeoutException && rootCause.getMessage().contains("Could not connect to ZooKeeper")) {
+                    throw e;
+                  }
+                  log.error("Unexpected exception while waiting for pending task with requestid: " + requestid + " to finish", e);
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Thread interrupted", e);
+    } catch (Exception e) {
+      if (coreContainer.isShutDown())  {
+        throw new AlreadyClosedException("The Solr instance has been shutdown");
+      }
+      // we catch but don't rethrow because a failure to wait for pending tasks
+      // should not keep the actions from executing
+      log.error("Unexpected exception while waiting for pending tasks to finish", e);
+    }
+  }
+

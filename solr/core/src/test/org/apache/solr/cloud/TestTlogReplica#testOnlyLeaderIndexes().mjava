@@ -10,16 +10,13 @@
         .process(cloudClient, collectionName);
 
     {
-      UpdateHandler updateHandler = getSolrCore(true).get(0).getUpdateHandler();
-      RefCounted<IndexWriter> iwRef = updateHandler.getSolrCoreState().getIndexWriter(null);
-      assertTrue("IndexWriter at leader must see updates ", iwRef.get().hasUncommittedChanges());
-      iwRef.decref();
+      long docsPending = (long) getSolrCore(true).get(0).getMetricRegistry().getGauges().get("UPDATE.updateHandler.docsPending").getValue();
+      assertEquals(4, docsPending);
     }
 
     for (SolrCore solrCore : getSolrCore(false)) {
-      RefCounted<IndexWriter> iwRef = solrCore.getUpdateHandler().getSolrCoreState().getIndexWriter(null);
-      assertFalse("IndexWriter at replicas must not see updates ", iwRef.get().hasUncommittedChanges());
-      iwRef.decref();
+      long docsPending = (long) solrCore.getMetricRegistry().getGauges().get("UPDATE.updateHandler.docsPending").getValue();
+      assertEquals(0, docsPending);
     }
 
     checkRTG(1, 4, cluster.getJettySolrRunners());
@@ -32,16 +29,12 @@
     // The DBQ is not processed at replicas, so we still can get doc2 and other docs by RTG
     checkRTG(2,4, getSolrRunner(false));
 
+    Map<SolrCore, Long> timeCopyOverPerCores = getTimesCopyOverOldUpdates(getSolrCore(false));
     new UpdateRequest()
         .commit(cloudClient, collectionName);
 
     waitForNumDocsInAllActiveReplicas(2);
-
-    // Update log roll over
-    for (SolrCore solrCore : getSolrCore(false)) {
-      UpdateLog updateLog = solrCore.getUpdateHandler().getUpdateLog();
-      assertFalse(updateLog.hasUncommittedChanges());
-    }
+    assertCopyOverOldUpdates(1, timeCopyOverPerCores);
 
     // UpdateLog copy over old updates
     for (int i = 15; i <= 150; i++) {
@@ -52,5 +45,6 @@
     }
     checkRTG(120,150, cluster.getJettySolrRunners());
     waitForReplicasCatchUp(20);
+    assertCopyOverOldUpdates(2, timeCopyOverPerCores);
   }
 

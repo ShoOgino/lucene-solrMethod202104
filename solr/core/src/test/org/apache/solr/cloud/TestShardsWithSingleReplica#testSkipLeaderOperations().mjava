@@ -1,0 +1,33 @@
+  public void testSkipLeaderOperations() throws Exception {
+    String overseerLeader = getOverseerLeader();
+    List<JettySolrRunner> notOverseerNodes = cluster.getJettySolrRunners()
+        .stream()
+        .filter(solrRunner -> !solrRunner.getNodeName().equals(overseerLeader))
+        .collect(Collectors.toList());
+    String collection = "collection1";
+    CollectionAdminRequest
+        .createCollection(collection, 2, 1)
+        .setCreateNodeSet(notOverseerNodes
+            .stream()
+            .map(JettySolrRunner::getNodeName)
+            .collect(Collectors.joining(","))
+        )
+        .process(cluster.getSolrClient());
+
+    for (JettySolrRunner solrRunner : notOverseerNodes) {
+      cluster.stopJettySolrRunner(solrRunner);
+    }
+    waitForState("Expected empty liveNodes", collection,
+        (liveNodes, collectionState) -> liveNodes.size() == 1);
+
+    CollectionAdminResponse resp = CollectionAdminRequest.getOverseerStatus().process(cluster.getSolrClient());
+    for (JettySolrRunner solrRunner : notOverseerNodes) {
+      cluster.startJettySolrRunner(solrRunner);
+    }
+
+    waitForState("Expected 2x1 for collection: " + collection, collection,
+        clusterShape(2, 1));
+    CollectionAdminResponse resp2 = CollectionAdminRequest.getOverseerStatus().process(cluster.getSolrClient());
+    assertEquals(getNumLeaderOpeations(resp), getNumLeaderOpeations(resp2));
+  }
+

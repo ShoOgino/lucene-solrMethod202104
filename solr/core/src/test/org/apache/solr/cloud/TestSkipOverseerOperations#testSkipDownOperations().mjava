@@ -1,0 +1,36 @@
+  public void testSkipDownOperations() throws Exception {
+    String overseerLeader = getOverseerLeader();
+    List<JettySolrRunner> notOverseerNodes = cluster.getJettySolrRunners()
+        .stream()
+        .filter(solrRunner -> !solrRunner.getNodeName().equals(overseerLeader))
+        .collect(Collectors.toList());
+    String collection = "collection2";
+    CollectionAdminRequest
+        .createCollection(collection, 2, 2)
+        .setCreateNodeSet(notOverseerNodes
+            .stream()
+            .map(JettySolrRunner::getNodeName)
+            .collect(Collectors.joining(","))
+        )
+        .setMaxShardsPerNode(2)
+        .process(cluster.getSolrClient());
+
+    for (JettySolrRunner solrRunner : notOverseerNodes) {
+      solrRunner.stop();
+    }
+    waitForState("Expected single liveNode", collection,
+        (liveNodes, collectionState) -> liveNodes.size() == 1);
+
+    CollectionAdminResponse resp = CollectionAdminRequest.getOverseerStatus().process(cluster.getSolrClient());
+    for (JettySolrRunner solrRunner : notOverseerNodes) {
+      solrRunner.start();
+    }
+
+    waitForState("Expected 2x2 for collection: " + collection, collection,
+        clusterShape(2, 2));
+    CollectionAdminResponse resp2 = CollectionAdminRequest.getOverseerStatus().process(cluster.getSolrClient());
+    // 2 for recovering state, 4 for active state
+    assertEquals(getNumStateOpeations(resp) + 6, getNumStateOpeations(resp2));
+    CollectionAdminRequest.deleteCollection(collection).process(cluster.getSolrClient());
+  }
+

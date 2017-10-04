@@ -1,0 +1,55 @@
+  @Override
+  public void onEvent(TriggerEvent event, TriggerEventProcessorStage stage, String actionName, ActionContext context,
+               Throwable error, String message) throws Exception {
+    if (!enabled) {
+      return;
+    }
+    try (CloudSolrClient cloudSolrClient = new CloudSolrClient.Builder()
+        .withZkHost(coreContainer.getZkController().getZkServerAddress())
+        .withHttpClient(coreContainer.getUpdateShardHandler().getHttpClient())
+        .build()) {
+      SolrInputDocument doc = new SolrInputDocument();
+      doc.addField(CommonParams.TYPE, DOC_TYPE);
+      doc.addField(SOURCE_FIELD, SOURCE);
+      doc.addField("id", IdUtils.timeRandomId());
+      doc.addField("event.id_s", event.getId());
+      doc.addField(EVENT_TYPE_FIELD, event.getEventType().toString());
+      doc.addField(EVENT_SOURCE_FIELD, event.getSource());
+      doc.addField("event.time_l", event.getEventTime());
+      doc.addField("timestamp", new Date());
+      addMap("event.property.", doc, event.getProperties());
+      doc.addField(STAGE_FIELD, stage.toString());
+      if (actionName != null) {
+        doc.addField(ACTION_FIELD, actionName);
+      }
+      if (message != null) {
+        doc.addField(MESSAGE_FIELD, message);
+      }
+      addError(doc, error);
+      // add JSON versions of event and context
+      String eventJson = Utils.toJSONString(event);
+      doc.addField("event_str", eventJson);
+      if (context != null) {
+        // capture specifics of operations after compute_plan action
+        addOperations(doc, (List<SolrRequest>)context.getProperties().get("operations"));
+        // capture specifics of responses after execute_plan action
+        addResponses(doc, (List<NamedList<Object>>)context.getProperties().get("responses"));
+        addActions(BEFORE_ACTIONS_FIELD, doc, (List<String>)context.getProperties().get(TriggerEventProcessorStage.BEFORE_ACTION.toString()));
+        addActions(AFTER_ACTIONS_FIELD, doc, (List<String>)context.getProperties().get(TriggerEventProcessorStage.AFTER_ACTION.toString()));
+        String contextJson = Utils.toJSONString(context);
+        doc.addField("context_str", contextJson);
+      }
+      UpdateRequest req = new UpdateRequest();
+      req.add(doc);
+      cloudSolrClient.request(req, collection);
+    } catch (Exception e) {
+      if ((e instanceof SolrException) && e.getMessage().contains("Collection not found")) {
+        // relatively benign
+        log.info("Collection " + collection + " does not exist, disabling logging.");
+        enabled = false;
+      } else {
+        log.warn("Exception sending event to collection " + collection, e);
+      }
+    }
+  }
+

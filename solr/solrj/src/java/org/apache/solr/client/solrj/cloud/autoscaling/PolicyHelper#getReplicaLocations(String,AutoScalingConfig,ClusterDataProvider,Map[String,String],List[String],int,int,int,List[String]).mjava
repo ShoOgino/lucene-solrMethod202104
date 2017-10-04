@@ -1,0 +1,74 @@
+  public static List<ReplicaPosition> getReplicaLocations(String collName, AutoScalingConfig autoScalingConfig,
+                                                          ClusterDataProvider cdp,
+                                                          Map<String, String> optionalPolicyMapping,
+                                                          List<String> shardNames,
+                                                          int nrtReplicas,
+                                                          int tlogReplicas,
+                                                          int pullReplicas,
+                                                          List<String> nodesList) {
+    List<ReplicaPosition> positions = new ArrayList<>();
+      final ClusterDataProvider delegate = cdp;
+      cdp = new ClusterDataProvider() {
+        @Override
+        public Map<String, Object> getNodeValues(String node, Collection<String> tags) {
+          return delegate.getNodeValues(node, tags);
+        }
+
+        @Override
+        public Map<String, Map<String, List<ReplicaInfo>>> getReplicaInfo(String node, Collection<String> keys) {
+          return delegate.getReplicaInfo(node, keys);
+        }
+
+        @Override
+        public Collection<String> getNodes() {
+          return delegate.getNodes();
+        }
+
+        @Override
+        public String getPolicyNameByCollection(String coll) {
+          return policyMapping.get() != null && policyMapping.get().containsKey(coll) ?
+              optionalPolicyMapping.get(coll) :
+              delegate.getPolicyNameByCollection(coll);
+        }
+      };
+
+    policyMapping.set(optionalPolicyMapping);
+    Policy.Session session = null;
+    try {
+      session = SESSION_REF.get() != null ?
+          SESSION_REF.get().initOrGet(cdp, autoScalingConfig.getPolicy()) :
+          autoScalingConfig.getPolicy().createSession(cdp);
+
+      Map<Replica.Type, Integer> typeVsCount = new EnumMap<>(Replica.Type.class);
+      typeVsCount.put(Replica.Type.NRT, nrtReplicas);
+      typeVsCount.put(Replica.Type.TLOG, tlogReplicas);
+      typeVsCount.put(Replica.Type.PULL, pullReplicas);
+      for (String shardName : shardNames) {
+        int idx = 0;
+        for (Map.Entry<Replica.Type, Integer> e : typeVsCount.entrySet()) {
+          for (int i = 0; i < e.getValue(); i++) {
+            Policy.Suggester suggester = session.getSuggester(ADDREPLICA)
+                .hint(Hint.REPLICATYPE, e.getKey())
+                .hint(Hint.COLL_SHARD, new Pair<>(collName, shardName));
+            if (nodesList != null) {
+              for (String nodeName : nodesList) {
+                suggester = suggester.hint(Hint.TARGET_NODE, nodeName);
+              }
+            }
+            SolrRequest op = suggester.getOperation();
+            if (op == null) {
+              throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "No node can satisfy the rules " +
+                  Utils.toJSONString(Utils.getDeepCopy(session.expandedClauses, 4, true)));
+            }
+            session = suggester.getSession();
+            positions.add(new ReplicaPosition(shardName, ++idx, e.getKey(), op.getParams().get(NODE)));
+          }
+        }
+      }
+    } finally {
+      if (session != null && SESSION_REF.get() != null) SESSION_REF.get().updateSession(session);
+      policyMapping.remove();
+    }
+    return positions;
+  }
+

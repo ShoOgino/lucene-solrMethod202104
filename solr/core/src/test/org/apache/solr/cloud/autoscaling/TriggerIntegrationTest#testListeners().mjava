@@ -1,0 +1,144 @@
+  @Test
+  public void testListeners() throws Exception {
+    CloudSolrClient solrClient = cluster.getSolrClient();
+    String setTriggerCommand = "{" +
+        "'set-trigger' : {" +
+        "'name' : 'node_added_trigger'," +
+        "'event' : 'nodeAdded'," +
+        "'waitFor' : '" + waitForSeconds + "s'," +
+        "'enabled' : true," +
+        "'actions' : [" +
+        "{'name':'test','class':'" + TestTriggerAction.class.getName() + "'}," +
+        "{'name':'test1','class':'" + TestDummyAction.class.getName() + "'}," +
+        "]" +
+        "}}";
+    SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, setTriggerCommand);
+    NamedList<Object> response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    if (!actionInitCalled.await(3, TimeUnit.SECONDS))  {
+      fail("The TriggerAction should have been created by now");
+    }
+
+    String setListenerCommand = "{" +
+        "'set-listener' : " +
+        "{" +
+        "'name' : 'foo'," +
+        "'trigger' : 'node_added_trigger'," +
+        "'stage' : ['STARTED','ABORTED','SUCCEEDED', 'FAILED']," +
+        "'beforeAction' : 'test'," +
+        "'afterAction' : ['test', 'test1']," +
+        "'class' : '" + TestTriggerListener.class.getName() + "'" +
+        "}" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setListenerCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    String setListenerCommand1 = "{" +
+        "'set-listener' : " +
+        "{" +
+        "'name' : 'bar'," +
+        "'trigger' : 'node_added_trigger'," +
+        "'stage' : ['FAILED','SUCCEEDED']," +
+        "'beforeAction' : ['test', 'test1']," +
+        "'afterAction' : 'test'," +
+        "'class' : '" + TestTriggerListener.class.getName() + "'" +
+        "}" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setListenerCommand1);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    listenerEvents.clear();
+    failDummyAction = false;
+
+    JettySolrRunner newNode = cluster.startJettySolrRunner();
+    boolean await = triggerFiredLatch.await(20, TimeUnit.SECONDS);
+    assertTrue("The trigger did not fire at all", await);
+    assertTrue(triggerFired.get());
+
+    assertEquals("both listeners should have fired", 2, listenerEvents.size());
+
+    Thread.sleep(2000);
+
+    // check foo events
+    List<TestEvent> testEvents = listenerEvents.get("foo");
+    assertNotNull("foo events: " + testEvents, testEvents);
+    assertEquals("foo events: " + testEvents, 5, testEvents.size());
+
+    assertEquals(TriggerEventProcessorStage.STARTED, testEvents.get(0).stage);
+
+    assertEquals(TriggerEventProcessorStage.BEFORE_ACTION, testEvents.get(1).stage);
+    assertEquals("test", testEvents.get(1).actionName);
+
+    assertEquals(TriggerEventProcessorStage.AFTER_ACTION, testEvents.get(2).stage);
+    assertEquals("test", testEvents.get(2).actionName);
+
+    assertEquals(TriggerEventProcessorStage.AFTER_ACTION, testEvents.get(3).stage);
+    assertEquals("test1", testEvents.get(3).actionName);
+
+    assertEquals(TriggerEventProcessorStage.SUCCEEDED, testEvents.get(4).stage);
+
+    // check bar events
+    testEvents = listenerEvents.get("bar");
+    assertNotNull("bar events", testEvents);
+    assertEquals("bar events", 4, testEvents.size());
+
+    assertEquals(TriggerEventProcessorStage.BEFORE_ACTION, testEvents.get(0).stage);
+    assertEquals("test", testEvents.get(0).actionName);
+
+    assertEquals(TriggerEventProcessorStage.AFTER_ACTION, testEvents.get(1).stage);
+    assertEquals("test", testEvents.get(1).actionName);
+
+    assertEquals(TriggerEventProcessorStage.BEFORE_ACTION, testEvents.get(2).stage);
+    assertEquals("test1", testEvents.get(2).actionName);
+
+    assertEquals(TriggerEventProcessorStage.SUCCEEDED, testEvents.get(3).stage);
+
+    // reset
+    triggerFired.set(false);
+    triggerFiredLatch = new CountDownLatch(1);
+    listenerEvents.clear();
+    failDummyAction = true;
+
+    newNode = cluster.startJettySolrRunner();
+    await = triggerFiredLatch.await(20, TimeUnit.SECONDS);
+    assertTrue("The trigger did not fire at all", await);
+
+    Thread.sleep(2000);
+
+    // check foo events
+    testEvents = listenerEvents.get("foo");
+    assertNotNull("foo events: " + testEvents, testEvents);
+    assertEquals("foo events: " + testEvents, 4, testEvents.size());
+
+    assertEquals(TriggerEventProcessorStage.STARTED, testEvents.get(0).stage);
+
+    assertEquals(TriggerEventProcessorStage.BEFORE_ACTION, testEvents.get(1).stage);
+    assertEquals("test", testEvents.get(1).actionName);
+
+    assertEquals(TriggerEventProcessorStage.AFTER_ACTION, testEvents.get(2).stage);
+    assertEquals("test", testEvents.get(2).actionName);
+
+    assertEquals(TriggerEventProcessorStage.FAILED, testEvents.get(3).stage);
+    assertEquals("test1", testEvents.get(3).actionName);
+
+    // check bar events
+    testEvents = listenerEvents.get("bar");
+    assertNotNull("bar events", testEvents);
+    assertEquals("bar events", 4, testEvents.size());
+
+    assertEquals(TriggerEventProcessorStage.BEFORE_ACTION, testEvents.get(0).stage);
+    assertEquals("test", testEvents.get(0).actionName);
+
+    assertEquals(TriggerEventProcessorStage.AFTER_ACTION, testEvents.get(1).stage);
+    assertEquals("test", testEvents.get(1).actionName);
+
+    assertEquals(TriggerEventProcessorStage.BEFORE_ACTION, testEvents.get(2).stage);
+    assertEquals("test1", testEvents.get(2).actionName);
+
+    assertEquals(TriggerEventProcessorStage.FAILED, testEvents.get(3).stage);
+    assertEquals("test1", testEvents.get(3).actionName);
+  }
+

@@ -1,0 +1,69 @@
+  @Test
+  public void testSimple() throws Exception {
+    JettySolrRunner jetty1 = cluster.getJettySolrRunner(0);
+    JettySolrRunner jetty2 = cluster.getJettySolrRunner(1);
+    JettySolrRunner jetty3 = cluster.getJettySolrRunner(2);
+    CollectionAdminRequest.createCollection(COLLECTION1, "conf", 2, 2)
+        .setCreateNodeSet(jetty1.getNodeName()+","+jetty2.getNodeName())
+        .setAutoAddReplicas(true)
+        .setMaxShardsPerNode(2)
+        .process(cluster.getSolrClient());
+    CollectionAdminRequest.createCollection(COLLECTION2, "conf", 2, 2)
+        .setCreateNodeSet(jetty2.getNodeName()+","+jetty3.getNodeName())
+        .setAutoAddReplicas(false)
+        .setMaxShardsPerNode(2)
+        .process(cluster.getSolrClient());
+    // the number of cores in jetty1 (5) will be larger than jetty3 (1)
+    CollectionAdminRequest.createCollection("testSimple3", "conf", 3, 1)
+        .setCreateNodeSet(jetty1.getNodeName())
+        .setAutoAddReplicas(false)
+        .setMaxShardsPerNode(3)
+        .process(cluster.getSolrClient());
+
+    ZkStateReader zkStateReader = cluster.getSolrClient().getZkStateReader();
+
+    // start the tests
+    JettySolrRunner lostJetty = random().nextBoolean() ? cluster.getJettySolrRunner(0) : cluster.getJettySolrRunner(1);
+    String lostNodeName = lostJetty.getNodeName();
+    List<Replica> replacedHdfsReplicas = getReplacedSharedFsReplicas(COLLECTION1, zkStateReader, lostNodeName);
+    lostJetty.stop();
+    waitForNodeLeave(lostNodeName);
+    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, clusterShape(2, 2));
+    checkSharedFsReplicasMovedCorrectly(replacedHdfsReplicas, zkStateReader, COLLECTION1);
+    lostJetty.start();
+    assertTrue("Timeout waiting for all live and active", ClusterStateUtil.waitForAllActiveAndLiveReplicas(cluster.getSolrClient().getZkStateReader(), 90000));
+
+    // check cluster property is considered
+    disableAutoAddReplicasInCluster();
+    lostNodeName = jetty3.getNodeName();
+    jetty3.stop();
+    waitForNodeLeave(lostNodeName);
+    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, clusterShape(2, 1));
+    jetty3.start();
+    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, clusterShape(2, 2));
+    waitForState("Waiting for collection " + COLLECTION2, COLLECTION2, clusterShape(2, 2));
+    enableAutoAddReplicasInCluster();
+
+
+    // test for multiple collections
+    new CollectionAdminRequest.AsyncCollectionAdminRequest(CollectionParams.CollectionAction.MODIFYCOLLECTION) {
+      @Override
+      public SolrParams getParams() {
+        ModifiableSolrParams params = (ModifiableSolrParams) super.getParams();
+        params.set("collection", COLLECTION2);
+        params.set("autoAddReplicas", true);
+        return params;
+      }
+    }.process(cluster.getSolrClient());
+
+    lostNodeName = jetty2.getNodeName();
+    replacedHdfsReplicas = getReplacedSharedFsReplicas(COLLECTION2, zkStateReader, lostNodeName);
+    jetty2.stop();
+    waitForNodeLeave(lostNodeName);
+    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, clusterShape(2, 2));
+    waitForState("Waiting for collection " + COLLECTION2, COLLECTION2, clusterShape(2, 2));
+    checkSharedFsReplicasMovedCorrectly(replacedHdfsReplicas, zkStateReader, COLLECTION2);
+
+    // overseer failover test..
+  }
+

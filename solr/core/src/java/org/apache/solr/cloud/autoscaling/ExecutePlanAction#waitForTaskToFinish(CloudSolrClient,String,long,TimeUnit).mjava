@@ -1,0 +1,37 @@
+  static CollectionAdminRequest.RequestStatusResponse waitForTaskToFinish(CloudSolrClient cloudSolrClient, String requestId, long duration, TimeUnit timeUnit) throws SolrServerException, IOException, InterruptedException {
+    long timeoutSeconds = timeUnit.toSeconds(duration);
+    RequestStatusState state = RequestStatusState.NOT_FOUND;
+    CollectionAdminRequest.RequestStatusResponse statusResponse = null;
+    for (int i = 0; i < timeoutSeconds; i++) {
+      try {
+        statusResponse = CollectionAdminRequest.requestStatus(requestId).process(cloudSolrClient);
+        state = statusResponse.getRequestStatus();
+        if (state == RequestStatusState.COMPLETED || state == RequestStatusState.FAILED) {
+          log.info("Task with requestId={} finished with state={} in {}s", requestId, state, i * 5);
+          CollectionAdminRequest.deleteAsyncId(requestId).process(cloudSolrClient);
+          return statusResponse;
+        } else if (state == RequestStatusState.NOT_FOUND) {
+          // the request for this id was never actually submitted! no harm done, just bail out
+          log.warn("Task with requestId={} was not found on overseer", requestId);
+          CollectionAdminRequest.deleteAsyncId(requestId).process(cloudSolrClient);
+          return statusResponse;
+        }
+      } catch (Exception e) {
+        Throwable rootCause = ExceptionUtils.getRootCause(e);
+        if (rootCause instanceof IllegalStateException && rootCause.getMessage().contains("Connection pool shut down"))  {
+          throw e;
+        }
+        if (rootCause instanceof TimeoutException && rootCause.getMessage().contains("Could not connect to ZooKeeper")) {
+          throw e;
+        }
+        log.error("Unexpected Exception while querying status of requestId=" + requestId, e);
+      }
+      if (i > 0 && i % 5 == 0) {
+        log.debug("Task with requestId={} still not complete after {}s. Last state={}", requestId, i * 5, state);
+      }
+      TimeUnit.SECONDS.sleep(5);
+    }
+    log.debug("Task with requestId={} did not complete within 5 minutes. Last state={}", requestId, state);
+    return statusResponse;
+  }
+

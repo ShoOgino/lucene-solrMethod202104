@@ -1,0 +1,58 @@
+  @Test
+  public void testNodeAddedTriggerRestoreState() throws Exception {
+    // for this test we want to update the trigger so we must assert that the actions were created twice
+    TriggerIntegrationTest.actionInitCalled = new CountDownLatch(2);
+
+    CloudSolrClient solrClient = cluster.getSolrClient();
+    waitForSeconds = 5;
+    String setTriggerCommand = "{" +
+        "'set-trigger' : {" +
+        "'name' : 'node_added_restore_trigger'," +
+        "'event' : 'nodeAdded'," +
+        "'waitFor' : '5s'," + // should be enough for us to update the trigger
+        "'enabled' : true," +
+        "'actions' : [{'name':'test','class':'" + TestTriggerAction.class.getName() + "'}]" +
+        "}}";
+    SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, setTriggerCommand);
+    NamedList<Object> response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    TimeOut timeOut = new TimeOut(2, TimeUnit.SECONDS);
+    while (actionInitCalled.getCount() == 0 && !timeOut.hasTimedOut()) {
+      Thread.sleep(200);
+    }
+    assertTrue("The action specified in node_added_restore_trigger was not instantiated even after 2 seconds", actionInitCalled.getCount() > 0);
+
+    // start a new node
+    JettySolrRunner newNode = cluster.startJettySolrRunner();
+
+    // ensure that the old trigger sees the new node, todo find a better way to do this
+    Thread.sleep(500 + TimeUnit.MILLISECONDS.convert(DEFAULT_SCHEDULED_TRIGGER_DELAY_SECONDS, TimeUnit.SECONDS));
+
+    waitForSeconds = 0;
+    setTriggerCommand = "{" +
+        "'set-trigger' : {" +
+        "'name' : 'node_added_restore_trigger'," +
+        "'event' : 'nodeAdded'," +
+        "'waitFor' : '0s'," + // update a property so that it replaces the old trigger, also we want it to fire immediately
+        "'enabled' : true," +
+        "'actions' : [{'name':'test','class':'" + TestTriggerAction.class.getName() + "'}]" +
+        "}}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setTriggerCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    // wait until the second instance of action is created
+    if (!actionInitCalled.await(3, TimeUnit.SECONDS))  {
+      fail("Two TriggerAction instances should have been created by now");
+    }
+
+    boolean await = triggerFiredLatch.await(5, TimeUnit.SECONDS);
+    assertTrue("The trigger did not fire at all", await);
+    assertTrue(triggerFired.get());
+    NodeAddedTrigger.NodeAddedEvent nodeAddedEvent = (NodeAddedTrigger.NodeAddedEvent) events.iterator().next();
+    assertNotNull(nodeAddedEvent);
+    List<String> nodeNames = (List<String>)nodeAddedEvent.getProperty(TriggerEvent.NODE_NAMES);
+    assertTrue(nodeNames.contains(newNode.getNodeName()));
+  }
+

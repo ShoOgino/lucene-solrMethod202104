@@ -1,0 +1,66 @@
+  @Override
+  public void run() {
+    try {
+      synchronized (this) {
+        if (isClosed) {
+          log.warn("NodeAddedTrigger ran but was already closed");
+          throw new RuntimeException("Trigger has been closed");
+        }
+      }
+      log.debug("Running NodeAddedTrigger {}", name);
+
+      ZkStateReader reader = zkController.getZkStateReader();
+      Set<String> newLiveNodes = reader.getClusterState().getLiveNodes();
+      log.debug("Found livenodes: {}", newLiveNodes);
+
+      // have any nodes that we were tracking been removed from the cluster?
+      // if so, remove them from the tracking map
+      Set<String> trackingKeySet = nodeNameVsTimeAdded.keySet();
+      trackingKeySet.retainAll(newLiveNodes);
+
+      // have any new nodes been added?
+      Set<String> copyOfNew = new HashSet<>(newLiveNodes);
+      copyOfNew.removeAll(lastLiveNodes);
+      copyOfNew.forEach(n -> {
+        long eventTime = timeSource.getTime();
+        log.debug("Tracking new node: {} at time {}", n, eventTime);
+        nodeNameVsTimeAdded.put(n, eventTime);
+      });
+
+      // has enough time expired to trigger events for a node?
+      List<String> nodeNames = new ArrayList<>();
+      List<Long> times = new ArrayList<>();
+      for (Iterator<Map.Entry<String, Long>> it = nodeNameVsTimeAdded.entrySet().iterator(); it.hasNext(); ) {
+        Map.Entry<String, Long> entry = it.next();
+        String nodeName = entry.getKey();
+        Long timeAdded = entry.getValue();
+        long now = timeSource.getTime();
+        if (TimeUnit.SECONDS.convert(now - timeAdded, TimeUnit.NANOSECONDS) >= getWaitForSecond()) {
+          nodeNames.add(nodeName);
+          times.add(timeAdded);
+        }
+      }
+      AutoScaling.TriggerEventProcessor processor = processorRef.get();
+      if (!nodeNames.isEmpty()) {
+        if (processor != null) {
+          log.debug("NodeAddedTrigger {} firing registered processor for nodes: {} added at times {}", name, nodeNames, times);
+          if (processor.process(new NodeAddedEvent(getEventType(), getName(), times, nodeNames))) {
+            // remove from tracking set only if the fire was accepted
+            nodeNames.forEach(n -> {
+              nodeNameVsTimeAdded.remove(n);
+              removeMarker(n);
+            });
+          }
+        } else  {
+          nodeNames.forEach(n -> {
+            nodeNameVsTimeAdded.remove(n);
+            removeMarker(n);
+          });
+        }
+      }
+      lastLiveNodes = new HashSet<>(newLiveNodes);
+    } catch (RuntimeException e) {
+      log.error("Unexpected exception in NodeAddedTrigger", e);
+    }
+  }
+

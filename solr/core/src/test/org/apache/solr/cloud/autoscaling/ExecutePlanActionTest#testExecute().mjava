@@ -1,0 +1,76 @@
+  @Test
+  public void testExecute() throws Exception {
+    CloudSolrClient solrClient = cluster.getSolrClient();
+    String collectionName = "testExecute";
+    CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(collectionName,
+        "conf", 1, 2);
+    create.setMaxShardsPerNode(1);
+    create.process(solrClient);
+
+    waitForState("Timed out waiting for replicas of new collection to be active",
+        collectionName, clusterShape(1, 2));
+
+    JettySolrRunner sourceNode = cluster.getRandomJetty(random());
+    String sourceNodeName = sourceNode.getNodeName();
+    ClusterState clusterState = solrClient.getZkStateReader().getClusterState();
+    DocCollection docCollection = clusterState.getCollection(collectionName);
+    List<Replica> replicas = docCollection.getReplicas(sourceNodeName);
+    assertNotNull(replicas);
+    assertFalse(replicas.isEmpty());
+
+    List<JettySolrRunner> otherJetties = cluster.getJettySolrRunners().stream()
+        .filter(jettySolrRunner -> jettySolrRunner != sourceNode).collect(Collectors.toList());
+    assertFalse(otherJetties.isEmpty());
+    JettySolrRunner survivor = otherJetties.get(0);
+
+    try (ExecutePlanAction action = new ExecutePlanAction()) {
+      action.init(Collections.singletonMap("name", "execute_plan"));
+
+      // used to signal if we found that ExecutePlanAction did in fact create the right znode before executing the operation
+      AtomicBoolean znodeCreated = new AtomicBoolean(false);
+
+      CollectionAdminRequest.AsyncCollectionAdminRequest moveReplica = new CollectionAdminRequest.MoveReplica(collectionName, replicas.get(0).getName(), survivor.getNodeName());
+      CollectionAdminRequest.AsyncCollectionAdminRequest mockRequest = new CollectionAdminRequest.AsyncCollectionAdminRequest(CollectionParams.CollectionAction.LIST) {
+        @Override
+        public String processAsync(String asyncId, SolrClient client) throws IOException, SolrServerException {
+          String parentPath = ZkStateReader.SOLR_AUTOSCALING_TRIGGER_STATE_PATH + "/xyz/execute_plan";
+          try {
+            if (zkClient().exists(parentPath, true)) {
+              java.util.List<String> children = zkClient().getChildren(parentPath, null, true);
+              if (!children.isEmpty()) {
+                String child = children.get(0);
+                byte[] data = zkClient().getData(parentPath + "/" + child, null, null, true);
+                Map m = (Map) Utils.fromJSON(data);
+                if (m.containsKey("requestid")) {
+                  znodeCreated.set(m.get("requestid").equals(asyncId));
+                }
+              }
+            }
+          } catch (Exception e) {
+            throw new RuntimeException(e);
+          }
+          super.processAsync(asyncId, client);
+          return asyncId;
+        }
+      };
+      List<CollectionAdminRequest.AsyncCollectionAdminRequest> operations = Lists.asList(moveReplica, new CollectionAdminRequest.AsyncCollectionAdminRequest[]{mockRequest});
+      NodeLostTrigger.NodeLostEvent nodeLostEvent = new NodeLostTrigger.NodeLostEvent(TriggerEventType.NODELOST,
+          "mock_trigger_name", Collections.singletonList(TimeSource.CURRENT_TIME.getTime()),
+          Collections.singletonList(sourceNodeName));
+      ActionContext actionContext = new ActionContext(survivor.getCoreContainer(), new NodeLostTrigger("xyz", Collections.singletonMap("event", TriggerEventType.NODELOST.name()), survivor.getCoreContainer(), survivor.getCoreContainer().getZkController()),
+          new HashMap<>(Collections.singletonMap("operations", operations)));
+      action.process(nodeLostEvent, actionContext);
+
+      assertTrue("ExecutePlanAction should have stored the requestid in ZK before executing the request", znodeCreated.get());
+      List<NamedList<Object>> responses = (List<NamedList<Object>>) actionContext.getProperty("responses");
+      assertNotNull(responses);
+      assertEquals(2, responses.size());
+      NamedList<Object> response = responses.get(0);
+      assertNull(response.get("failure"));
+      assertNotNull(response.get("success"));
+    }
+
+    waitForState("Timed out waiting for replicas of new collection to be active",
+        collectionName, clusterShape(1, 2));
+  }
+

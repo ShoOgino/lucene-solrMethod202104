@@ -1,6 +1,17 @@
   @Test
   public void testReadApi() throws Exception  {
     CloudSolrClient solrClient = cluster.getSolrClient();
+    // first trigger
+    String setTriggerCommand = "{" +
+        "'set-trigger' : {" +
+        "'name' : 'node_added_trigger1'," +
+        "'event' : 'nodeAdded'," +
+        "'waitFor' : '0s'," +
+        "'enabled' : true" +
+        "}}";
+    SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, setTriggerCommand);
+    NamedList<Object> response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
 
     String setClusterPolicyCommand = "{" +
         " 'set-cluster-policy': [" +
@@ -9,8 +20,8 @@
         "      {'nodeRole':'overseer', 'replica':0}" +
         "    ]" +
         "}";
-    SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, setClusterPolicyCommand);
-    NamedList<Object> response = solrClient.request(req);
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setClusterPolicyCommand);
+    response = solrClient.request(req);
     assertEquals(response.get("result").toString(), "success");
 
     String setPreferencesCommand = "{" +
@@ -31,6 +42,9 @@
         "    ]," +
         "    'policy1':[" +
         "      {'replica':'<2', 'shard': '#EACH', 'node': '#ANY'}" +
+        "    ]," +
+        "    'policy2':[" +
+        "      {'replica':'<7', 'shard': '#EACH', 'node': '#ANY'}" +
         "    ]" +
         "}}";
     req = createAutoScalingRequest(SolrRequest.METHOD.POST, setPolicyCommand);
@@ -39,6 +53,16 @@
 
     req = createAutoScalingRequest(SolrRequest.METHOD.GET, null);
     response = solrClient.request(req);
+
+    Map triggers = (Map) response.get("triggers");
+    assertNotNull(triggers);
+    assertEquals(1, countNotImplicitTriggers(triggers));
+    assertTrue(triggers.containsKey("node_added_trigger1"));
+    Map node_added_trigger1 = (Map) triggers.get("node_added_trigger1");
+    assertEquals(4, node_added_trigger1.size());
+    assertEquals(0L, node_added_trigger1.get("waitFor"));
+    assertEquals(true, node_added_trigger1.get("enabled"));
+    assertEquals(2, ((List)node_added_trigger1.get("actions")).size());
 
     List<Map> clusterPrefs = (List<Map>) response.get("cluster-preferences");
     assertNotNull(clusterPrefs);
@@ -50,7 +74,7 @@
 
     Map policies = (Map) response.get("policies");
     assertNotNull(policies);
-    assertEquals(2, policies.size());
+    assertEquals(3, policies.size());
     assertNotNull(policies.get("xyz"));
     assertNotNull(policies.get("policy1"));
 
@@ -85,18 +109,7 @@
     assertNotNull(violations);
     assertEquals(0, violations.size());
 
-    String setEmptyClusterPolicyCommand = "{" +
-        " 'set-cluster-policy': []" +
-        "}";
-    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setEmptyClusterPolicyCommand);
-    response = solrClient.request(req);
-    assertEquals(response.get("result").toString(), "success");
-
-    req = createAutoScalingRequest(SolrRequest.METHOD.POST, "{set-cluster-policy : []}");
-    response = solrClient.request(req);
-    assertEquals(response.get("result").toString(), "success");
-
-    // lets create a collection which violates the rule replicas < 2
+    // assert that when a cluster policy is in effect, using maxShardsPerNode throws an exception
     try {
       CollectionAdminRequest.Create create = CollectionAdminRequest.Create.createCollection("readApiTestViolations", CONFIGSET_NAME, 1, 6);
       create.setMaxShardsPerNode(10);
@@ -104,9 +117,19 @@
       fail();
     } catch (Exception e) {
       assertTrue(e.getMessage().contains("'maxShardsPerNode>0' is not supported when autoScaling policies are used"));
-
     }
 
+    // temporarily increase replica limit in cluster policy so that we can create a collection with 6 replicas
+    String tempClusterPolicyCommand = "{" +
+        " 'set-cluster-policy': [" +
+        "      {'cores':'<10', 'node':'#ANY'}," +
+        "      {'replica':'<4', 'shard': '#EACH', 'node': '#ANY'}," +
+        "      {'nodeRole':'overseer', 'replica':0}" +
+        "    ]" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, tempClusterPolicyCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
 
     // lets create a collection which violates the rule replicas < 2
     CollectionAdminRequest.Create create = CollectionAdminRequest.Create.createCollection("readApiTestViolations", CONFIGSET_NAME, 1, 6);
@@ -117,11 +140,6 @@
     req = createAutoScalingRequest(SolrRequest.METHOD.POST, setClusterPolicyCommand);
     response = solrClient.request(req);
     assertEquals(response.get("result").toString(), "success");
-
-    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setClusterPolicyCommand);
-    response = solrClient.request(req);
-    assertEquals(response.get("result").toString(), "success");
-
 
     // get the diagnostics output again
     req = createAutoScalingRequest(SolrRequest.METHOD.GET, "/diagnostics", null);
@@ -136,7 +154,8 @@
     for (Map<String, Object> violation : violations) {
       assertEquals("readApiTestViolations", violation.get("collection"));
       assertEquals("shard1", violation.get("shard"));
-      assertEquals(Utils.makeMap("replica", "3", "delta", -1), violation.get("violation"));
+      assertEquals(-1l, getObjectByPath(violation, true, "violation/delta"));
+      assertEquals(3l, getObjectByPath(violation, true, "violation/replica/NRT"));
       assertNotNull(violation.get("clause"));
     }
   }

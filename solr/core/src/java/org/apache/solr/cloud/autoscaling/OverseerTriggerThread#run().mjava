@@ -1,0 +1,151 @@
+  @Override
+  public void run() {
+    int lastZnodeVersion = znodeVersion;
+
+    // we automatically add a trigger for auto add replicas if it does not exists already
+    while (!isClosed)  {
+      try {
+        AutoScalingConfig autoScalingConfig = zkStateReader.getAutoScalingConfig();
+        AutoScalingConfig withAutoAddReplicasTrigger = withAutoAddReplicasTrigger(autoScalingConfig);
+        if (withAutoAddReplicasTrigger.equals(autoScalingConfig)) break;
+        log.debug("Adding .autoAddReplicas trigger");
+        zkClient.setData(SOLR_AUTOSCALING_CONF_PATH, Utils.toJSON(withAutoAddReplicasTrigger), withAutoAddReplicasTrigger.getZkVersion(), true);
+        break;
+      } catch (KeeperException.BadVersionException bve) {
+        // somebody else has changed the configuration so we must retry
+      } catch (InterruptedException e) {
+        // Restore the interrupted status
+        Thread.currentThread().interrupt();
+        log.warn("Interrupted", e);
+        break;
+      } catch (KeeperException e) {
+        log.error("A ZK error has occurred", e);
+      }
+    }
+
+    if (isClosed || Thread.currentThread().isInterrupted())  return;
+
+    try {
+      refreshAutoScalingConf(new AutoScalingWatcher());
+    } catch (KeeperException.ConnectionLossException | KeeperException.SessionExpiredException e) {
+      log.warn("ZooKeeper watch triggered for autoscaling conf, but Solr cannot talk to ZK: [{}]", e.getMessage());
+    } catch (KeeperException e) {
+      log.error("A ZK error has occurred", e);
+      throw new ZooKeeperException(SolrException.ErrorCode.SERVER_ERROR, "A ZK error has occurred", e);
+    } catch (InterruptedException e) {
+      // Restore the interrupted status
+      Thread.currentThread().interrupt();
+      log.warn("Interrupted", e);
+    } catch (Exception e)  {
+      log.error("Unexpected exception", e);
+    }
+
+    while (true) {
+      Map<String, AutoScaling.Trigger> copy = null;
+      try {
+        // this can throw InterruptedException and we don't want to unlock if it did, so we keep this outside
+        // of the try/finally block
+        updateLock.lockInterruptibly();
+
+        // must check for close here before we await on the condition otherwise we can only be woken up on interruption
+        if (isClosed) {
+          log.warn("OverseerTriggerThread has been closed, exiting.");
+          break;
+        }
+
+        log.debug("Current znodeVersion {}, lastZnodeVersion {}", znodeVersion, lastZnodeVersion);
+
+        try {
+          if (znodeVersion == lastZnodeVersion) {
+            updated.await();
+
+            // are we closed?
+            if (isClosed) {
+              log.warn("OverseerTriggerThread woken up but we are closed, exiting.");
+              break;
+            }
+
+            // spurious wakeup?
+            if (znodeVersion == lastZnodeVersion) continue;
+          }
+          copy = new HashMap<>(activeTriggers);
+          lastZnodeVersion = znodeVersion;
+          log.debug("Processed trigger updates upto znodeVersion {}", znodeVersion);
+        } catch (InterruptedException e) {
+          // Restore the interrupted status
+          Thread.currentThread().interrupt();
+          log.warn("Interrupted", e);
+          break;
+        } finally {
+          updateLock.unlock();
+        }
+      } catch (InterruptedException e) {
+        // Restore the interrupted status
+        Thread.currentThread().interrupt();
+        log.warn("Interrupted", e);
+        break;
+      }
+
+      // update the current config
+      scheduledTriggers.setAutoScalingConfig(autoScalingConfig);
+
+      Set<String> managedTriggerNames = scheduledTriggers.getScheduledTriggerNames();
+      // remove the triggers which are no longer active
+      for (String managedTriggerName : managedTriggerNames) {
+        if (!copy.containsKey(managedTriggerName)) {
+          scheduledTriggers.remove(managedTriggerName);
+        }
+      }
+      // check for nodeLost triggers in the current config, and if
+      // absent then clean up old nodeLost / nodeAdded markers
+      boolean cleanOldNodeLostMarkers = true;
+      boolean cleanOldNodeAddedMarkers = true;
+      try {
+        // add new triggers and/or replace and close the replaced triggers
+        for (Map.Entry<String, AutoScaling.Trigger> entry : copy.entrySet()) {
+          if (entry.getValue().getEventType().equals(TriggerEventType.NODELOST)) {
+            cleanOldNodeLostMarkers = false;
+          }
+          if (entry.getValue().getEventType().equals(TriggerEventType.NODEADDED)) {
+            cleanOldNodeAddedMarkers = false;
+          }
+          scheduledTriggers.add(entry.getValue());
+        }
+      } catch (AlreadyClosedException e) {
+        // this _should_ mean that we're closing, complain loudly if that's not the case
+        if (isClosed) {
+          return;
+        } else {
+          throw new IllegalStateException("Caught AlreadyClosedException from ScheduledTriggers, but we're not closed yet!", e);
+        }
+      }
+      if (cleanOldNodeLostMarkers) {
+        log.debug("-- clean old nodeLost markers");
+        try {
+          List<String> markers = zkClient.getChildren(ZkStateReader.SOLR_AUTOSCALING_NODE_LOST_PATH, null, true);
+          markers.forEach(n -> {
+            removeNodeMarker(ZkStateReader.SOLR_AUTOSCALING_NODE_LOST_PATH, n);
+          });
+        } catch (KeeperException.NoNodeException e) {
+          // ignore
+        } catch (KeeperException | InterruptedException e) {
+          log.warn("Error removing old nodeLost markers", e);
+        }
+      }
+      if (cleanOldNodeAddedMarkers) {
+        log.debug("-- clean old nodeAdded markers");
+        try {
+          List<String> markers = zkClient.getChildren(ZkStateReader.SOLR_AUTOSCALING_NODE_ADDED_PATH, null, true);
+          markers.forEach(n -> {
+            removeNodeMarker(ZkStateReader.SOLR_AUTOSCALING_NODE_ADDED_PATH, n);
+          });
+        } catch (KeeperException.NoNodeException e) {
+          // ignore
+        } catch (KeeperException | InterruptedException e) {
+          log.warn("Error removing old nodeAdded markers", e);
+        }
+
+      }
+    }
+  }
+

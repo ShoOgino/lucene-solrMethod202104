@@ -1,7 +1,28 @@
     @Override
     protected void getRemoteInfo(String solrNode, Set<String> requestedTags, SnitchContext ctx) {
       ClientSnitchCtx snitchContext = (ClientSnitchCtx) ctx;
-      readSysProps(solrNode, requestedTags, snitchContext);
+      Map<String, String> metricsKeyVsTag = new HashMap<>();
+      for (String tag : requestedTags) {
+        if (tag.startsWith(SYSPROP)) {
+          metricsKeyVsTag.put("solr.jvm:system.properties:" + tag.substring(SYSPROP.length()), tag);
+        } else if (tag.startsWith(METRICS_PREFIX)) {
+          metricsKeyVsTag.put(tag.substring(METRICS_PREFIX.length()), tag);
+        }
+      }
+      if (!metricsKeyVsTag.isEmpty()) {
+        ModifiableSolrParams params = new ModifiableSolrParams();
+        params.add("key", metricsKeyVsTag.keySet().toArray(new String[metricsKeyVsTag.size()]));
+        try {
+          SimpleSolrResponse rsp = snitchContext.invoke(solrNode, CommonParams.METRICS_PATH, params);
+          metricsKeyVsTag.forEach((key, tag) -> {
+            Object v = Utils.getObjectByPath(rsp.nl, true, Arrays.asList("metrics", key));
+            if (v != null) snitchContext.getTags().put(tag, v);
+          });
+        } catch (Exception e) {
+          log.warn("could not get tags from node " + solrNode, e);
+        }
+      }
+
       Set<String> groups = new HashSet<>();
       List<String> prefixes = new ArrayList<>();
       if (requestedTags.contains(DISK)) {

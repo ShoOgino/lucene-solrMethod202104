@@ -1,0 +1,66 @@
+  @Before
+  public void setUp() throws Exception {
+    super.setUp();
+
+    fired.set(false);
+    triggerFiredLatch = new CountDownLatch(1);
+    actionContextPropsRef.set(null);
+
+    // remove everything from autoscaling.json in ZK
+    zkClient().setData(ZkStateReader.SOLR_AUTOSCALING_CONF_PATH, "{}".getBytes(Charsets.UTF_8), true);
+
+    if (cluster.getJettySolrRunners().size() > NODE_COUNT) {
+      // stop some to get to original state
+      int numJetties = cluster.getJettySolrRunners().size();
+      for (int i = 0; i < numJetties - NODE_COUNT; i++) {
+        JettySolrRunner randomJetty = cluster.getRandomJetty(random());
+        List<JettySolrRunner> jettySolrRunners = cluster.getJettySolrRunners();
+        for (int i1 = 0; i1 < jettySolrRunners.size(); i1++) {
+          JettySolrRunner jettySolrRunner = jettySolrRunners.get(i1);
+          if (jettySolrRunner == randomJetty) {
+            cluster.stopJettySolrRunner(i1);
+            break;
+          }
+        }
+      }
+    }
+
+    CloudSolrClient solrClient = cluster.getSolrClient();
+
+    try {
+      CollectionAdminRequest.deleteCollection("testNodeLost").process(solrClient);
+    } catch (Exception e) {
+      // expected if testNodeLost hasn't run already
+    }
+    try {
+      CollectionAdminRequest.deleteCollection("testNodeAdded").process(solrClient);
+    } catch (Exception e) {
+      // expected if testNodeAdded hasn't run already
+    }
+    try {
+      CollectionAdminRequest.deleteCollection("testNodeWithMultipleReplicasLost").process(solrClient);
+    } catch (Exception e) {
+      // expected if testNodeWithMultipleReplicasLost hasn't run already
+    }
+
+    String setClusterPolicyCommand = "{" +
+        " 'set-cluster-policy': [" +
+        "      {'cores':'<10', 'node':'#ANY'}," +
+        "      {'replica':'<2', 'shard': '#EACH', 'node': '#ANY'}," +
+        "      {'nodeRole':'overseer', 'replica':0}" +
+        "    ]" +
+        "}";
+    SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, setClusterPolicyCommand);
+    NamedList<Object> response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    String setClusterPreferencesCommand = "{" +
+        "'set-cluster-preferences': [" +
+        "{'minimize': 'cores'}," +
+        "{'maximize': 'freedisk','precision': 100}]" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setClusterPreferencesCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+  }
+

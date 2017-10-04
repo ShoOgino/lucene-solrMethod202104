@@ -1,0 +1,95 @@
+  @Test
+  public void testHistory() throws Exception {
+    waitForState("Timed out wait for collection be active", PREFIX + "_collection",
+        clusterShape(1, 3));
+    waitForState("Timed out wait for collection be active", CollectionAdminParams.SYSTEM_COLL,
+        clusterShape(1, 3));
+    // todo remove this workaround after SOLR-9440
+    cluster.getSolrClient().getZkStateReader().registerCore(".system");
+    cluster.getSolrClient().getZkStateReader().registerCore(PREFIX + "_collection");
+
+    JettySolrRunner jetty = cluster.startJettySolrRunner();
+    String nodeAddedName = jetty.getNodeName();
+    boolean await = actionFiredLatch.await(60, TimeUnit.SECONDS);
+    assertTrue("action did not execute", await);
+    // commit on the history collection
+    Thread.sleep(2000);
+    solrClient.commit(CollectionAdminParams.SYSTEM_COLL);
+    Thread.sleep(2000);
+    // verify that new docs exist
+    ModifiableSolrParams query = params(CommonParams.Q, "type:" + SystemLogListener.DOC_TYPE,
+      CommonParams.FQ, "event.source_s:" + PREFIX + "_node_added_trigger");
+    QueryResponse resp = solrClient.query(CollectionAdminParams.SYSTEM_COLL, query);
+    SolrDocumentList docs = resp.getResults();
+    assertNotNull(docs);
+
+    query = params(CommonParams.QT, CommonParams.AUTOSCALING_HISTORY_PATH,
+      AutoscalingHistoryHandler.TRIGGER_PARAM, PREFIX + "_node_added_trigger");
+    QueryResponse rsp = solrClient.query(query);
+    docs = rsp.getResults();
+    if (docs.size() != 8) {
+      log.info("Cluster state: " + solrClient.getZkStateReader().getClusterState());
+      query = params(CommonParams.QT, CommonParams.AUTOSCALING_HISTORY_PATH);
+      log.info("Wrong response: ", rsp);
+      log.info("Full response: " + solrClient.query(query));
+    }
+    assertEquals(8, docs.size());
+
+    query = params(CommonParams.QT, CommonParams.AUTOSCALING_HISTORY_PATH,
+        AutoscalingHistoryHandler.STAGE_PARAM, "STARTED");
+    docs = solrClient.query(query).getResults();
+    assertEquals(1, docs.size());
+    assertEquals("NODEADDED", docs.get(0).getFieldValue("event.type_s"));
+
+    query = params(CommonParams.QT, CommonParams.AUTOSCALING_HISTORY_PATH,
+        AutoscalingHistoryHandler.NODE_PARAM, nodeAddedName);
+    docs = solrClient.query(query).getResults();
+    assertEquals(8, docs.size());
+    for (SolrDocument doc : docs) {
+      assertTrue(doc.getFieldValues("event.property.nodeNames_ss").contains(nodeAddedName));
+    }
+
+    query = params(CommonParams.QT, CommonParams.AUTOSCALING_HISTORY_PATH,
+        AutoscalingHistoryHandler.ACTION_PARAM, "test");
+    docs = solrClient.query(query).getResults();
+    assertEquals(2, docs.size());
+    assertEquals("BEFORE_ACTION", docs.get(0).getFieldValue("stage_s"));
+    assertEquals("AFTER_ACTION", docs.get(1).getFieldValue("stage_s"));
+
+    query = params(CommonParams.QT, CommonParams.AUTOSCALING_HISTORY_PATH,
+        AutoscalingHistoryHandler.ACTION_PARAM, "test");
+    docs = solrClient.query(query).getResults();
+    assertEquals(2, docs.size());
+    assertEquals("BEFORE_ACTION", docs.get(0).getFieldValue("stage_s"));
+    assertEquals("AFTER_ACTION", docs.get(1).getFieldValue("stage_s"));
+
+    query = params(CommonParams.QT, CommonParams.AUTOSCALING_HISTORY_PATH,
+        AutoscalingHistoryHandler.COLLECTION_PARAM, CollectionAdminParams.SYSTEM_COLL);
+    docs = solrClient.query(query).getResults();
+    assertEquals(5, docs.size());
+    assertEquals("AFTER_ACTION", docs.get(0).getFieldValue("stage_s"));
+    assertEquals("compute_plan", docs.get(0).getFieldValue("action_s"));
+
+    // reset latch
+    resetLatch();
+
+    // kill a node
+    cluster.stopJettySolrRunner(0);
+    await = actionFiredLatch.await(60, TimeUnit.SECONDS);
+    // wait for recovery
+    waitForRecovery(PREFIX + "_collection");
+    Thread.sleep(5000);
+    // commit on the history collection
+    solrClient.commit(CollectionAdminParams.SYSTEM_COLL);
+    query = params(CommonParams.QT, CommonParams.AUTOSCALING_HISTORY_PATH,
+        AutoscalingHistoryHandler.TRIGGER_PARAM, PREFIX + "_node_lost_trigger");
+    docs = solrClient.query(query).getResults();
+    assertEquals(8, docs.size());
+
+    query = params(CommonParams.QT, CommonParams.AUTOSCALING_HISTORY_PATH,
+        AutoscalingHistoryHandler.TRIGGER_PARAM, PREFIX + "_node_lost_trigger",
+        AutoscalingHistoryHandler.COLLECTION_PARAM, PREFIX + "_collection");
+    docs = solrClient.query(query).getResults();
+    assertEquals(5, docs.size());
+  }
+

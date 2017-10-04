@@ -1,0 +1,46 @@
+  @Test
+  public void testListenerAcceptance() throws Exception {
+    CoreContainer container = cluster.getJettySolrRunners().get(0).getCoreContainer();
+    Map<String, Object> props = createTriggerProps(0);
+    try (NodeLostTrigger trigger = new NodeLostTrigger("node_added_trigger", props, container, container.getZkController())) {
+      trigger.setProcessor(noFirstRunProcessor);
+
+      JettySolrRunner newNode = cluster.startJettySolrRunner();
+      cluster.waitForAllNodes(5);
+
+      trigger.run(); // starts tracking live nodes
+
+      // stop the newly created node
+      List<JettySolrRunner> jettySolrRunners = cluster.getJettySolrRunners();
+      for (int i = 0; i < jettySolrRunners.size(); i++) {
+        JettySolrRunner jettySolrRunner = jettySolrRunners.get(i);
+        if (newNode == jettySolrRunner) {
+          cluster.stopJettySolrRunner(i);
+          break;
+        }
+      }
+      cluster.waitForAllNodes(5);
+
+      AtomicInteger callCount = new AtomicInteger(0);
+      AtomicBoolean fired = new AtomicBoolean(false);
+
+      trigger.setProcessor(event -> {
+        if (callCount.incrementAndGet() < 2) {
+          return false;
+        } else  {
+          fired.compareAndSet(false, true);
+          return true;
+        }
+      });
+
+      trigger.run(); // first run should detect the lost node and fire immediately but listener isn't ready
+      assertEquals(1, callCount.get());
+      assertFalse(fired.get());
+      trigger.run(); // second run should again fire
+      assertEquals(2, callCount.get());
+      assertTrue(fired.get());
+      trigger.run(); // should not fire
+      assertEquals(2, callCount.get());
+    }
+  }
+

@@ -1,20 +1,29 @@
     public SolrRequest getOperation() {
       if (!isInitialized) {
-        String coll = (String) hints.get(Hint.COLL);
-        String shard = (String) hints.get(Hint.SHARD);
-        // if this is not a known collection from the existing clusterstate,
-        // then add it
-        if (session.matrix.stream().noneMatch(row -> row.collectionVsShardVsReplicas.containsKey(coll))) {
-          session.addClausesForCollection(session.dataProvider, coll);
+        Set<String> collections = (Set<String>) hints.getOrDefault(Hint.COLL, Collections.emptySet());
+        Set<Pair<String, String>> s = (Set<Pair<String, String>>) hints.getOrDefault(Hint.COLL_SHARD, Collections.emptySet());
+        if (!collections.isEmpty() || !s.isEmpty()) {
+          HashSet<Pair<String, String>> shards = new HashSet<>(s);
+          collections.stream().forEach(c -> shards.add(new Pair<>(c, null)));
+          for (Pair<String, String> shard : shards) {
+            // if this is not a known collection from the existing clusterstate,
+            // then add it
+            if (session.matrix.stream().noneMatch(row -> row.collectionVsShardVsReplicas.containsKey(shard.first()))) {
+              session.addClausesForCollection(session.dataProvider, shard.first());
+            }
+            for (Row row : session.matrix) {
+              Map<String, List<ReplicaInfo>> shardInfo = row.collectionVsShardVsReplicas.computeIfAbsent(shard.first(), it -> new HashMap<>());
+              if (shard.second() != null) shardInfo.computeIfAbsent(shard.second(), it -> new ArrayList<>());
+            }
+          }
           Collections.sort(session.expandedClauses);
         }
-        if (coll != null) {
-          for (Row row : session.matrix) {
-            if (!row.collectionVsShardVsReplicas.containsKey(coll)) row.collectionVsShardVsReplicas.put(coll, new HashMap<>());
-            if (shard != null) {
-              Map<String, List<ReplicaInfo>> shardInfo = row.collectionVsShardVsReplicas.get(coll);
-              if (!shardInfo.containsKey(shard)) shardInfo.put(shard, new ArrayList<>());
-            }
+        Set<String> srcNodes = (Set<String>) hints.get(Hint.SRC_NODE);
+        if (srcNodes != null && !srcNodes.isEmpty()) {
+          // the source node is dead so live nodes may not have it
+          for (String srcNode : srcNodes) {
+            if(session.matrix.stream().noneMatch(row -> row.node.equals(srcNode)))
+            session.matrix.add(new Row(srcNode, session.getPolicy().params, session.dataProvider));
           }
         }
         session.applyRules();

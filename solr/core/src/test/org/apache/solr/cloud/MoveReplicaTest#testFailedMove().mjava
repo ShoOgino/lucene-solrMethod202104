@@ -1,0 +1,57 @@
+  @Test
+  public void testFailedMove() throws Exception {
+    String coll = "movereplicatest_failed_coll";
+    int REPLICATION = 2;
+
+    CloudSolrClient cloudClient = cluster.getSolrClient();
+
+    Set<CollectionStateWatcher> watchers = new HashSet<>(accessor.getStateWatchers(coll));
+
+    CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(coll, "conf1", 2, REPLICATION);
+    cloudClient.request(create);
+
+    Replica replica = getRandomReplica(coll, cloudClient);
+    Set<String> liveNodes = cloudClient.getZkStateReader().getClusterState().getLiveNodes();
+    ArrayList<String> l = new ArrayList<>(liveNodes);
+    Collections.shuffle(l, random());
+    String targetNode = null;
+    for (String node : liveNodes) {
+      if (!replica.getNodeName().equals(node)) {
+        targetNode = node;
+        break;
+      }
+    }
+    assertNotNull(targetNode);
+    CollectionAdminRequest.MoveReplica moveReplica = createMoveReplicaRequest(coll, replica, targetNode);
+    // start moving
+    moveReplica.processAsync("001", cloudClient);
+    // shut down target node
+    for (int i = 0; i < cluster.getJettySolrRunners().size(); i++) {
+      if (cluster.getJettySolrRunner(i).getNodeName().equals(targetNode)) {
+        cluster.stopJettySolrRunner(i);
+      }
+    }
+    CollectionAdminRequest.RequestStatus requestStatus = CollectionAdminRequest.requestStatus("001");
+    // wait for async request success
+    boolean success = true;
+    for (int i = 0; i < 200; i++) {
+      CollectionAdminRequest.RequestStatusResponse rsp = requestStatus.process(cloudClient);
+      assertTrue(rsp.getRequestStatus().toString(), rsp.getRequestStatus() != RequestStatusState.COMPLETED);
+      if (rsp.getRequestStatus() == RequestStatusState.FAILED) {
+        success = false;
+        break;
+      }
+      Thread.sleep(500);
+    }
+    assertFalse(success);
+
+    Set<CollectionStateWatcher> newWatchers = new HashSet<>(accessor.getStateWatchers(coll));
+    for (Iterator<CollectionStateWatcher> it = newWatchers.iterator(); it.hasNext(); ) {
+      CollectionStateWatcher watcher = it.next();
+      if (watcher instanceof ReplaceNodeCmd.RecoveryWatcher) {
+        it.remove();
+      }
+    }
+    assertEquals(watchers, newWatchers);
+  }
+

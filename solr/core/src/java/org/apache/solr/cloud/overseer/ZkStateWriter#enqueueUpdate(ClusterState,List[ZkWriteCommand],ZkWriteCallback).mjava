@@ -9,7 +9,7 @@
    * be used to force an immediate flush of pending cluster state changes.
    *
    * @param prevState the cluster state information on which the given <code>cmd</code> is applied
-   * @param cmd       the {@link ZkWriteCommand} which specifies the change to be applied to cluster state
+   * @param cmds       the list of {@link ZkWriteCommand} which specifies the change to be applied to cluster state in atomic
    * @param callback  a {@link org.apache.solr.cloud.overseer.ZkStateWriter.ZkWriteCallback} object to be used
    *                  for any callbacks
    * @return modified cluster state created after applying <code>cmd</code> to <code>prevState</code>. If
@@ -20,48 +20,31 @@
    *                               in a {@link org.apache.zookeeper.KeeperException.BadVersionException} this instance becomes unusable and
    *                               must be discarded
    */
-  public ClusterState enqueueUpdate(ClusterState prevState, ZkWriteCommand cmd, ZkWriteCallback callback) throws IllegalStateException, Exception {
+  public ClusterState enqueueUpdate(ClusterState prevState, List<ZkWriteCommand> cmds, ZkWriteCallback callback) throws IllegalStateException, Exception {
     if (invalidState) {
       throw new IllegalStateException("ZkStateWriter has seen a tragic error, this instance can no longer be used");
     }
-    if (cmd == NO_OP) return prevState;
-
-    if (maybeFlushBefore(cmd)) {
-      // we must update the prev state to the new one
-      prevState = clusterState = writePendingUpdates();
-      if (callback != null) {
-        callback.onWrite();
-      }
-    }
+    if (cmds.isEmpty()) return prevState;
+    if (isNoOps(cmds)) return prevState;
 
     if (callback != null) {
       callback.onEnqueue();
     }
 
-    /*
-    We need to know if the collection has moved from stateFormat=1 to stateFormat=2 (as a result of MIGRATECLUSTERSTATE)
-     */
-    DocCollection previousCollection = prevState.getCollectionOrNull(cmd.name);
-    boolean wasPreviouslyStateFormat1 = previousCollection != null && previousCollection.getStateFormat() == 1;
-    boolean isCurrentlyStateFormat1 = cmd.collection != null && cmd.collection.getStateFormat() == 1;
-
-    if (cmd.collection == null) {
-      if (wasPreviouslyStateFormat1) {
+    for (ZkWriteCommand cmd : cmds) {
+      if (cmd == NO_OP) continue;
+      if (!isClusterStateModified && clusterStateGetModifiedWith(cmd, prevState)) {
         isClusterStateModified = true;
       }
-      clusterState = prevState.copyWith(cmd.name, null);
-      updates.put(cmd.name, null);
-    } else {
-      if (!isCurrentlyStateFormat1) {
+      prevState = prevState.copyWith(cmd.name, cmd.collection);
+      if (cmd.collection == null || cmd.collection.getStateFormat() != 1) {
         updates.put(cmd.name, cmd.collection);
+        numUpdates++;
       }
-      if (isCurrentlyStateFormat1 || wasPreviouslyStateFormat1) {
-        isClusterStateModified = true;
-      }
-      clusterState = prevState.copyWith(cmd.name, cmd.collection);
     }
+    clusterState = prevState;
 
-    if (maybeFlushAfter(cmd)) {
+    if (maybeFlushAfter()) {
       ClusterState state = writePendingUpdates();
       if (callback != null) {
         callback.onWrite();

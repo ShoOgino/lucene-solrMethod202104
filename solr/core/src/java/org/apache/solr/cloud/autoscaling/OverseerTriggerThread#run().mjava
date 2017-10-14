@@ -5,20 +5,20 @@
     // we automatically add a trigger for auto add replicas if it does not exists already
     while (!isClosed)  {
       try {
-        AutoScalingConfig autoScalingConfig = zkStateReader.getAutoScalingConfig();
+        AutoScalingConfig autoScalingConfig = dataProvider.getDistribStateManager().getAutoScalingConfig();
         AutoScalingConfig withAutoAddReplicasTrigger = withAutoAddReplicasTrigger(autoScalingConfig);
         if (withAutoAddReplicasTrigger.equals(autoScalingConfig)) break;
         log.debug("Adding .autoAddReplicas trigger");
-        zkClient.setData(SOLR_AUTOSCALING_CONF_PATH, Utils.toJSON(withAutoAddReplicasTrigger), withAutoAddReplicasTrigger.getZkVersion(), true);
+        dataProvider.getDistribStateManager().setData(SOLR_AUTOSCALING_CONF_PATH, Utils.toJSON(withAutoAddReplicasTrigger), withAutoAddReplicasTrigger.getZkVersion());
         break;
-      } catch (KeeperException.BadVersionException bve) {
+      } catch (BadVersionException bve) {
         // somebody else has changed the configuration so we must retry
       } catch (InterruptedException e) {
         // Restore the interrupted status
         Thread.currentThread().interrupt();
         log.warn("Interrupted", e);
         break;
-      } catch (KeeperException e) {
+      } catch (IOException | KeeperException e) {
         log.error("A ZK error has occurred", e);
       }
     }
@@ -27,11 +27,8 @@
 
     try {
       refreshAutoScalingConf(new AutoScalingWatcher());
-    } catch (KeeperException.ConnectionLossException | KeeperException.SessionExpiredException e) {
+    } catch (ConnectException e) {
       log.warn("ZooKeeper watch triggered for autoscaling conf, but Solr cannot talk to ZK: [{}]", e.getMessage());
-    } catch (KeeperException e) {
-      log.error("A ZK error has occurred", e);
-      throw new ZooKeeperException(SolrException.ErrorCode.SERVER_ERROR, "A ZK error has occurred", e);
     } catch (InterruptedException e) {
       // Restore the interrupted status
       Thread.currentThread().interrupt();
@@ -119,29 +116,30 @@
           throw new IllegalStateException("Caught AlreadyClosedException from ScheduledTriggers, but we're not closed yet!", e);
         }
       }
+      DistribStateManager stateManager = dataProvider.getDistribStateManager();
       if (cleanOldNodeLostMarkers) {
         log.debug("-- clean old nodeLost markers");
         try {
-          List<String> markers = zkClient.getChildren(ZkStateReader.SOLR_AUTOSCALING_NODE_LOST_PATH, null, true);
+          List<String> markers = stateManager.listData(ZkStateReader.SOLR_AUTOSCALING_NODE_LOST_PATH);
           markers.forEach(n -> {
             removeNodeMarker(ZkStateReader.SOLR_AUTOSCALING_NODE_LOST_PATH, n);
           });
-        } catch (KeeperException.NoNodeException e) {
+        } catch (NoSuchElementException e) {
           // ignore
-        } catch (KeeperException | InterruptedException e) {
+        } catch (Exception e) {
           log.warn("Error removing old nodeLost markers", e);
         }
       }
       if (cleanOldNodeAddedMarkers) {
         log.debug("-- clean old nodeAdded markers");
         try {
-          List<String> markers = zkClient.getChildren(ZkStateReader.SOLR_AUTOSCALING_NODE_ADDED_PATH, null, true);
+          List<String> markers = stateManager.listData(ZkStateReader.SOLR_AUTOSCALING_NODE_ADDED_PATH);
           markers.forEach(n -> {
             removeNodeMarker(ZkStateReader.SOLR_AUTOSCALING_NODE_ADDED_PATH, n);
           });
-        } catch (KeeperException.NoNodeException e) {
+        } catch (NoSuchElementException e) {
           // ignore
-        } catch (KeeperException | InterruptedException e) {
+        } catch (Exception e) {
           log.warn("Error removing old nodeAdded markers", e);
         }
 

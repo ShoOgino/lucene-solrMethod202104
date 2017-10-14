@@ -1,37 +1,33 @@
   private void waitForPendingTasks(AutoScaling.Trigger newTrigger, List<TriggerAction> actions) throws AlreadyClosedException {
-    try (CloudSolrClient cloudSolrClient = new CloudSolrClient.Builder()
-        .withZkHost(coreContainer.getZkController().getZkServerAddress())
-        .withHttpClient(coreContainer.getUpdateShardHandler().getHttpClient())
-        .build()) {
-
-      SolrZkClient zkClient = coreContainer.getZkController().getZkClient();
+    DistribStateManager stateManager = dataProvider.getDistribStateManager();
+    try {
 
       for (TriggerAction action : actions) {
         if (action instanceof ExecutePlanAction) {
           String parentPath = ZkStateReader.SOLR_AUTOSCALING_TRIGGER_STATE_PATH + "/" + newTrigger.getName() + "/" + action.getName();
-          if (!zkClient.exists(parentPath, true))  {
+          if (!stateManager.hasData(parentPath))  {
             break;
           }
-          List<String> children = zkClient.getChildren(parentPath, null, true);
+          List<String> children = stateManager.listData(parentPath);
           if (children != null) {
             for (String child : children) {
               String path = parentPath + '/' + child;
-              byte[] data = zkClient.getData(path, null, null, true);
+              VersionedData data = stateManager.getData(path, null);
               if (data != null) {
-                Map map = (Map) Utils.fromJSON(data);
+                Map map = (Map) Utils.fromJSON(data.getData());
                 String requestid = (String) map.get("requestid");
                 try {
                   log.debug("Found pending task with requestid={}", requestid);
-                  RequestStatusResponse statusResponse = waitForTaskToFinish(cloudSolrClient, requestid,
+                  RequestStatusResponse statusResponse = waitForTaskToFinish(dataProvider, requestid,
                       ExecutePlanAction.DEFAULT_TASK_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                   if (statusResponse != null) {
                     RequestStatusState state = statusResponse.getRequestStatus();
                     if (state == RequestStatusState.COMPLETED || state == RequestStatusState.FAILED || state == RequestStatusState.NOT_FOUND) {
-                      zkClient.delete(path, -1, true);
+                      stateManager.removeData(path, -1);
                     }
                   }
                 } catch (Exception e) {
-                  if (coreContainer.isShutDown())  {
+                  if (dataProvider.isClosed())  {
                     throw e; // propagate the abort to the caller
                   }
                   Throwable rootCause = ExceptionUtils.getRootCause(e);
@@ -52,7 +48,7 @@
       Thread.currentThread().interrupt();
       throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Thread interrupted", e);
     } catch (Exception e) {
-      if (coreContainer.isShutDown())  {
+      if (dataProvider.isClosed())  {
         throw new AlreadyClosedException("The Solr instance has been shutdown");
       }
       // we catch but don't rethrow because a failure to wait for pending tasks

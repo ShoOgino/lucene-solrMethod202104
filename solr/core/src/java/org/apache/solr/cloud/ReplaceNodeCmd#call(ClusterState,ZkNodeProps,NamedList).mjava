@@ -3,6 +3,7 @@
     ZkStateReader zkStateReader = ocmh.zkStateReader;
     String source = message.getStr(CollectionParams.SOURCE_NODE, message.getStr("source"));
     String target = message.getStr(CollectionParams.TARGET_NODE, message.getStr("target"));
+    boolean waitForFinalState = message.getBool(CommonAdminParams.WAIT_FOR_FINAL_STATE, false);
     if (source == null || target == null) {
       throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "sourceNode and targetNode are required params" );
     }
@@ -21,14 +22,15 @@
     // how many leaders are we moving? for these replicas we have to make sure that either:
     // * another existing replica can become a leader, or
     // * we wait until the newly created replica completes recovery (and can become the new leader)
+    // If waitForFinalState=true we wait for all replicas
     int numLeaders = 0;
     for (ZkNodeProps props : sourceReplicas) {
-      if (props.getBool(ZkStateReader.LEADER_PROP, false)) {
+      if (props.getBool(ZkStateReader.LEADER_PROP, false) || waitForFinalState) {
         numLeaders++;
       }
     }
     // map of collectionName_coreNodeName to watchers
-    Map<String, RecoveryWatcher> watchers = new HashMap<>();
+    Map<String, CollectionStateWatcher> watchers = new HashMap<>();
     List<ZkNodeProps> createdReplicas = new ArrayList<>();
 
     AtomicBoolean anyOneFailed = new AtomicBoolean(false);
@@ -63,15 +65,24 @@
 
       if (addedReplica != null) {
         createdReplicas.add(addedReplica);
-        if (sourceReplica.getBool(ZkStateReader.LEADER_PROP, false)) {
+        if (sourceReplica.getBool(ZkStateReader.LEADER_PROP, false) || waitForFinalState) {
           String shardName = sourceReplica.getStr(SHARD_ID_PROP);
           String replicaName = sourceReplica.getStr(ZkStateReader.REPLICA_PROP);
           String collectionName = sourceReplica.getStr(COLLECTION_PROP);
           String key = collectionName + "_" + replicaName;
-          RecoveryWatcher watcher = new RecoveryWatcher(collectionName, shardName, replicaName,
-              addedReplica.getStr(ZkStateReader.CORE_NAME_PROP), replicasToRecover);
+          CollectionStateWatcher watcher;
+          if (waitForFinalState) {
+            watcher = new ActiveReplicaWatcher(collectionName, null,
+                Collections.singletonList(addedReplica.getStr(ZkStateReader.CORE_NAME_PROP)), replicasToRecover);
+          } else {
+            watcher = new LeaderRecoveryWatcher(collectionName, shardName, replicaName,
+                addedReplica.getStr(ZkStateReader.CORE_NAME_PROP), replicasToRecover);
+          }
           watchers.put(key, watcher);
+          log.debug("--- adding " + key + ", " + watcher);
           zkStateReader.registerCollectionStateWatcher(collectionName, watcher);
+        } else {
+          log.debug("--- not waiting for " + addedReplica);
         }
       }
     }
@@ -93,8 +104,8 @@
       log.debug("Finished waiting for leader replicas to recover");
     }
     // remove the watchers, we're done either way
-    for (RecoveryWatcher watcher : watchers.values()) {
-      zkStateReader.removeCollectionStateWatcher(watcher.collectionId, watcher);
+    for (Map.Entry<String, CollectionStateWatcher> e : watchers.entrySet()) {
+      zkStateReader.removeCollectionStateWatcher(e.getKey(), e.getValue());
     }
     if (anyOneFailed.get()) {
       log.info("Failed to create some replicas. Cleaning up all replicas on target node");

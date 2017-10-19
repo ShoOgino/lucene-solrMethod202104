@@ -3,10 +3,8 @@
    * there's a chance that the request will fail due to cached stale state,
    * which means the state must be refreshed from ZK and retried.
    */
-  protected NamedList<Object> requestWithRetryOnStaleState(SolrRequest request, int retryCount, String collection)
+  protected NamedList<Object> requestWithRetryOnStaleState(SolrRequest request, int retryCount, List<String> inputCollections)
       throws SolrServerException, IOException {
-    SolrRequest originalRequest = request;
-
     connect(); // important to call this before you start working with the ZkStateReader
 
     // build up a _stateVer_ param to pass to the server containing all of the
@@ -23,8 +21,8 @@
       isCollectionRequestOfV2 = ((V2Request) request).isPerCollectionRequest();
     }
     boolean isAdmin = ADMIN_PATHS.contains(request.getPath());
-    if (collection != null &&  !isAdmin && !isCollectionRequestOfV2) { // don't do _stateVer_ checking for admin, v2 api requests
-      Set<String> requestedCollectionNames = getCollectionNames(collection);
+    if (!inputCollections.isEmpty() && !isAdmin && !isCollectionRequestOfV2) { // don't do _stateVer_ checking for admin, v2 api requests
+      Set<String> requestedCollectionNames = resolveAliases(inputCollections);
 
       StringBuilder stateVerParamBuilder = null;
       for (String requestedCollection : requestedCollectionNames) {
@@ -64,7 +62,7 @@
 
     NamedList<Object> resp = null;
     try {
-      resp = sendRequest(request, collection);
+      resp = sendRequest(request, inputCollections);
       //to avoid an O(n) operation we always add STATE_VERSION to the last and try to read it from there
       Object o = resp == null || resp.size() == 0 ? null : resp.get(STATE_VERSION, resp.size() - 1);
       if(o != null && o instanceof Map) {
@@ -83,7 +81,7 @@
       // don't do retry support for admin requests
       // or if the request doesn't have a collection specified
       // or request is v2 api and its method is not GET
-      if (collection == null || isAdmin || (request instanceof V2Request && request.getMethod() != SolrRequest.METHOD.GET)) {
+      if (inputCollections.isEmpty() || isAdmin || (request instanceof V2Request && request.getMethod() != SolrRequest.METHOD.GET)) {
         if (exc instanceof SolrServerException) {
           throw (SolrServerException)exc;
         } else if (exc instanceof IOException) {
@@ -99,8 +97,8 @@
       int errorCode = (rootCause instanceof SolrException) ?
           ((SolrException)rootCause).code() : SolrException.ErrorCode.UNKNOWN.code;
 
-      log.error("Request to collection {} failed due to ("+errorCode+
-          ") {}, retry? "+retryCount, collection, rootCause.toString());
+      log.error("Request to collection {} failed due to (" + errorCode + ") {}, retry? " + retryCount,
+          inputCollections, rootCause.toString());
 
       boolean wasCommError =
           (rootCause instanceof ConnectException ||
@@ -112,7 +110,7 @@
         // it was a communication error. it is likely that
         // the node to which the request to be sent is down . So , expire the state
         // so that the next attempt would fetch the fresh state
-        // just re-read state for all of them, if it has not been retired
+        // just re-read state for all of them, if it has not been retried
         // in retryExpiryTime time
         for (DocCollection ext : requestedCollections) {
           ExpiringCachedDocCollection cacheEntry = collectionStateCache.get(ext.getName());
@@ -124,7 +122,7 @@
           // and we could not get any information from the server
           //it is probably not worth trying again and again because
           // the state would not have been updated
-          return requestWithRetryOnStaleState(request, retryCount + 1, collection);
+          return requestWithRetryOnStaleState(request, retryCount + 1, inputCollections);
         }
       }
 
@@ -168,8 +166,8 @@
 
       // if the state was stale, then we retry the request once with new state pulled from Zk
       if (stateWasStale) {
-        log.warn("Re-trying request to  collection(s) "+collection+" after stale state error from server.");
-        resp = requestWithRetryOnStaleState(request, retryCount+1, collection);
+        log.warn("Re-trying request to  collection(s) "+inputCollections+" after stale state error from server.");
+        resp = requestWithRetryOnStaleState(request, retryCount+1, inputCollections);
       } else {
         if(exc instanceof SolrException) {
           throw exc;

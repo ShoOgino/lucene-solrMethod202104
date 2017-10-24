@@ -1,5 +1,29 @@
   @Override
   public Map<String, Map<String, List<ReplicaInfo>>> getReplicaInfo(String node, Collection<String> keys) {
-    return data.computeIfAbsent(node, s -> Collections.emptyMap());//todo fill other details
+    Map<String, Map<String, List<ReplicaInfo>>> result = nodeVsCollectionVsShardVsReplicaInfo.computeIfAbsent(node, s -> emptyMap());
+    if (!keys.isEmpty()) {
+      Map<String, Pair<String, ReplicaInfo>> keyVsReplica = new HashMap<>();
+      Row.forEachReplica(result, r -> {
+        for (String key : keys) {
+          if (r.getVariables().containsKey(key)) continue;
+          keyVsReplica.put("solr.core." + r.getCollection() + "." + r.getShard() + "." + Utils.parseMetricsReplicaName(r.getCollection(), r.getCore()) + ":" + key, new Pair<>(key, r));
+        }
+      });
+
+      if (!keyVsReplica.isEmpty()) {
+        ClientSnitchCtx ctx = new ClientSnitchCtx(null, null, emptyMap(), solrClient);
+        fetchMetrics(node, ctx,
+            keyVsReplica.entrySet().stream()
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getKey)));
+        ctx.getTags().forEach((k, o) -> {
+          Pair<String, ReplicaInfo> p = keyVsReplica.get(k);
+          Suggestion.ConditionType validator = Suggestion.getTagType(p.first());
+          if (validator != null) o = validator.convertVal(o);
+          if (p != null) p.second().getVariables().put(p.first(), o);
+        });
+
+      }
+    }
+    return result;
   }
 

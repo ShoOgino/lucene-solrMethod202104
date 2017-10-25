@@ -1,0 +1,110 @@
+  /** runs for a single test case, so that if you hit a test failure you can write a reproducer just for that scenario */
+  private static void doTestScoring(Similarity similarity, CollectionStatistics corpus, TermStatistics term, float boost, float freq, int norm) throws IOException {
+    boolean success = false;
+    SimWeight weight = similarity.computeWeight(boost, corpus, term);
+    SimScorer scorer = similarity.simScorer(weight, NORM_VALUES.get(norm).getContext());
+    try {
+      float score = scorer.score(0, freq);
+      // check that score isn't infinite or negative
+      assertTrue("infinite/NaN score: " + score, Float.isFinite(score));
+      assertTrue("negative score: " + score, score >= 0);
+      // check explanation matches
+      Explanation explanation = scorer.explain(0, Explanation.match(freq, "freq, occurrences of term within document"));
+      if (score != explanation.getValue()) {
+        fail("expected: " + score + ", got: " + explanation);
+      }
+      CheckHits.verifyExplanation("<test query>", 0, score, true, explanation);
+      
+      // check score(freq-1), given the same norm it should be <= score(freq) [scores non-decreasing for more term occurrences]
+      final float prevFreq;
+      if (random().nextBoolean() && freq == (int)freq && freq > 1 && term.docFreq() > 1) {
+        // previous in integer space
+        prevFreq = freq - 1;
+      } else {
+        // previous in float space (e.g. for sloppyPhrase)
+        prevFreq = Math.nextDown(freq);
+      }
+      
+      float prevScore = scorer.score(0, prevFreq);
+      // check that score isn't infinite or negative
+      assertTrue(Float.isFinite(prevScore));
+      assertTrue(prevScore >= 0);
+      // check explanation matches
+      Explanation prevExplanation = scorer.explain(0, Explanation.match(prevFreq, "freq, occurrences of term within document"));
+      if (prevScore != prevExplanation.getValue()) {
+        fail("expected: " + prevScore + ", got: " + prevExplanation);
+      }
+      CheckHits.verifyExplanation("test query (prevFreq)", 0, prevScore, true, prevExplanation);
+
+      if (prevScore > score) {
+        System.out.println(prevExplanation);
+        System.out.println(explanation);
+        fail("score(" + prevFreq + ")=" + prevScore + " > score(" + freq + ")=" + score);
+      }
+      
+      // check score(norm-1), given the same freq it should be >= score(norm) [scores non-decreasing as docs get shorter]
+      if (norm > 1) {
+        SimScorer prevNormScorer = similarity.simScorer(weight, NORM_VALUES.get(norm - 1).getContext());
+        float prevNormScore = prevNormScorer.score(0, freq);
+        // check that score isn't infinite or negative
+        assertTrue(Float.isFinite(prevNormScore));
+        assertTrue(prevNormScore >= 0);
+        // check explanation matches
+        Explanation prevNormExplanation = prevNormScorer.explain(0, Explanation.match(freq, "freq, occurrences of term within document"));
+        if (prevNormScore != prevNormExplanation.getValue()) {
+          fail("expected: " + prevNormScore + ", got: " + prevNormExplanation);
+        }
+        CheckHits.verifyExplanation("test query (prevNorm)", 0, prevNormScore, true, prevNormExplanation);
+
+        if (prevNormScore < score) {
+          System.out.println(prevNormExplanation);
+          System.out.println(explanation);
+          fail("score(" + freq + "," + (norm-1) + ")=" + prevNormScore + " < score(" + freq + "," + norm + ")=" + score);
+        }
+      }
+      
+      // check score(term-1), given the same freq/norm it should be >= score(term) [scores non-decreasing as terms get rarer]
+      if (term.docFreq() > 1 && (term.totalTermFreq() == -1 || freq < term.totalTermFreq())) {
+        final long prevTotalTermFreq;
+        if (term.totalTermFreq() == -1) {
+          prevTotalTermFreq = -1;
+        } else {
+          prevTotalTermFreq = term.totalTermFreq() - 1;
+        }
+        TermStatistics prevTerm = new TermStatistics(term.term(), term.docFreq() - 1, prevTotalTermFreq);
+        SimWeight prevWeight = similarity.computeWeight(boost, corpus, term);
+        SimScorer prevTermScorer = similarity.simScorer(prevWeight, NORM_VALUES.get(norm).getContext());
+        float prevTermScore = prevTermScorer.score(0, freq);
+        // check that score isn't infinite or negative
+        assertTrue(Float.isFinite(prevTermScore));
+        assertTrue(prevTermScore >= 0);
+        // check explanation matches
+        Explanation prevTermExplanation = prevTermScorer.explain(0, Explanation.match(freq, "freq, occurrences of term within document"));
+        if (prevTermScore != prevTermExplanation.getValue()) {
+          fail("expected: " + prevTermScore + ", got: " + prevTermExplanation);
+        }
+        CheckHits.verifyExplanation("test query (prevTerm)", 0, prevTermScore, true, prevTermExplanation);
+
+        if (prevTermScore < score) {
+          System.out.println(prevTermExplanation);
+          System.out.println(explanation);
+          fail("score(" + freq + "," + (prevTerm) + ")=" + prevTermScore + " < score(" + freq + "," + term + ")=" + score);
+        }
+      }
+      
+      success = true;
+    } finally {
+      if (!success) {
+        System.out.println(similarity);
+        System.out.println(corpus);
+        System.out.println(term);
+        if (norm == 0) {
+          System.out.println("norms=omitted");
+        } else {
+          System.out.println("norm=" + norm + " (doc length ~ " + SmallFloat.byte4ToInt((byte) norm) + ")");
+        }
+        System.out.println("freq=" + freq);
+      }
+    }
+  }  
+

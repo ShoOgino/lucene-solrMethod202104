@@ -60,6 +60,15 @@
         // we do not want to lose this event just because the trigger was closed, perhaps a replacement will need it
         return false;
       }
+      // reject events during cooldown period
+      if (cooldownStart.get() + cooldownPeriod.get() > System.nanoTime()) {
+        log.debug("-------- Cooldown period - rejecting event: " + event);
+        event.getProperties().put(TriggerEvent.COOLDOWN, true);
+        listeners.fireListeners(event.getSource(), event, TriggerEventProcessorStage.IGNORED, "In cooldown period.");
+        return false;
+      } else {
+        log.debug("++++++++ Cooldown inactive - processing event: " + event);
+      }
       if (hasPendingActions.compareAndSet(false, true)) {
         final boolean enqueued;
         if (replaying) {
@@ -85,17 +94,16 @@
 
               ActionContext actionContext = new ActionContext(dataProvider, newTrigger, new HashMap<>());
               for (TriggerAction action : actions) {
-                List<String> beforeActions = (List<String>)actionContext.getProperties().computeIfAbsent(TriggerEventProcessorStage.BEFORE_ACTION.toString(), k -> new ArrayList<String>());
+                List<String> beforeActions = (List<String>) actionContext.getProperties().computeIfAbsent(TriggerEventProcessorStage.BEFORE_ACTION.toString(), k -> new ArrayList<String>());
                 beforeActions.add(action.getName());
                 listeners.fireListeners(event.getSource(), event, TriggerEventProcessorStage.BEFORE_ACTION, action.getName(), actionContext);
                 try {
                   action.process(event, actionContext);
                 } catch (Exception e) {
                   listeners.fireListeners(event.getSource(), event, TriggerEventProcessorStage.FAILED, action.getName(), actionContext, e, null);
-                  log.error("Error executing action: " + action.getName() + " for trigger event: " + event, e);
-                  throw e;
+                  throw new Exception("Error executing action: " + action.getName() + " for trigger event: " + event, e);
                 }
-                List<String> afterActions = (List<String>)actionContext.getProperties().computeIfAbsent(TriggerEventProcessorStage.AFTER_ACTION.toString(), k -> new ArrayList<String>());
+                List<String> afterActions = (List<String>) actionContext.getProperties().computeIfAbsent(TriggerEventProcessorStage.AFTER_ACTION.toString(), k -> new ArrayList<String>());
                 afterActions.add(action.getName());
                 listeners.fireListeners(event.getSource(), event, TriggerEventProcessorStage.AFTER_ACTION, action.getName(), actionContext);
               }
@@ -104,7 +112,10 @@
                 assert ev.getId().equals(event.getId());
               }
               listeners.fireListeners(event.getSource(), event, TriggerEventProcessorStage.SUCCEEDED);
+            } catch (Exception e) {
+              log.warn("Exception executing actions", e);
             } finally {
+              cooldownStart.set(System.nanoTime());
               hasPendingActions.set(false);
             }
           });
@@ -122,6 +133,7 @@
         return true;
       } else {
         // there is an action in the queue and we don't want to enqueue another until it is complete
+        listeners.fireListeners(event.getSource(), event, TriggerEventProcessorStage.IGNORED, "Already processing another event.");
         return false;
       }
     });

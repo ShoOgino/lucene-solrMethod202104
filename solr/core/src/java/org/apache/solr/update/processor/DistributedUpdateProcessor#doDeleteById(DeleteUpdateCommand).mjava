@@ -1,0 +1,78 @@
+  // Implementing min_rf here was a bit tricky. When a request comes in for a delete by id to a replica that does _not_
+  // have any documents specified by those IDs, the request is not forwarded to any other replicas on that shard. Thus
+  // we have to spoof the replicationTracker and set the achieved rf to the number of active replicas.
+  //
+  private void doDeleteById(DeleteUpdateCommand cmd) throws IOException {
+    if (zkEnabled) {
+      zkCheck();
+      nodes = setupRequest(cmd.getId(), null, cmd.getRoute());
+    } else {
+      isLeader = getNonZkLeaderAssumption(req);
+    }
+
+    // check if client has requested minimum replication factor information. will set replicationTracker to null if
+    // we aren't the leader or subShardLeader
+    checkReplicationTracker(cmd);
+
+    boolean dropCmd = false;
+    if (!forwardToLeader) {
+      dropCmd  = versionDelete(cmd);
+    }
+
+    if (dropCmd) {
+      // TODO: do we need to add anything to the response?
+      return;
+    }
+
+    if (zkEnabled && isLeader && !isSubShardLeader)  {
+      DocCollection coll = zkController.getClusterState().getCollection(collection);
+      List<Node> subShardLeaders = getSubShardLeaders(coll, cloudDesc.getShardId(), cmd.getId(), null);
+      // the list<node> will actually have only one element for an add request
+      if (subShardLeaders != null && !subShardLeaders.isEmpty()) {
+        ModifiableSolrParams params = new ModifiableSolrParams(filterParams(req.getParams()));
+        params.set(DISTRIB_UPDATE_PARAM, DistribPhase.FROMLEADER.toString());
+        params.set(DISTRIB_FROM, ZkCoreNodeProps.getCoreUrl(
+            zkController.getBaseUrl(), req.getCore().getName()));
+        params.set(DISTRIB_FROM_PARENT, cloudDesc.getShardId());
+        cmdDistrib.distribDelete(cmd, subShardLeaders, params, true, null, null);
+      }
+
+      final List<Node> nodesByRoutingRules = getNodesByRoutingRules(zkController.getClusterState(), coll, cmd.getId(), null);
+      if (nodesByRoutingRules != null && !nodesByRoutingRules.isEmpty())  {
+        ModifiableSolrParams params = new ModifiableSolrParams(filterParams(req.getParams()));
+        params.set(DISTRIB_UPDATE_PARAM, DistribPhase.FROMLEADER.toString());
+        params.set(DISTRIB_FROM, ZkCoreNodeProps.getCoreUrl(
+            zkController.getBaseUrl(), req.getCore().getName()));
+        params.set(DISTRIB_FROM_COLLECTION, cloudDesc.getCollectionName());
+        params.set(DISTRIB_FROM_SHARD, cloudDesc.getShardId());
+        cmdDistrib.distribDelete(cmd, nodesByRoutingRules, params, true, null, null);
+      }
+    }
+
+    if (nodes != null) {
+      ModifiableSolrParams params = new ModifiableSolrParams(filterParams(req.getParams()));
+      params.set(DISTRIB_UPDATE_PARAM,
+          (isLeader || isSubShardLeader ? DistribPhase.FROMLEADER.toString()
+              : DistribPhase.TOLEADER.toString()));
+      params.set(DISTRIB_FROM, ZkCoreNodeProps.getCoreUrl(
+          zkController.getBaseUrl(), req.getCore().getName()));
+
+      if (req.getParams().get(UpdateRequest.MIN_REPFACT) != null) {
+        params.add(UpdateRequest.MIN_REPFACT, req.getParams().get(UpdateRequest.MIN_REPFACT));
+      }
+      cmdDistrib.distribDelete(cmd, nodes, params, false, rollupReplicationTracker, leaderReplicationTracker);
+    }
+
+    // cmd.getIndexId == null when delete by query
+    // TODO: what to do when no idField?
+    if (returnVersions && rsp != null && cmd.getIndexedId() != null && idField != null) {
+      if (deleteResponse == null) {
+        deleteResponse = new NamedList<>(1);
+        rsp.add("deletes",deleteResponse);
+      }
+      if (scratch == null) scratch = new CharsRefBuilder();
+      idField.getType().indexedToReadable(cmd.getIndexedId(), scratch);
+      deleteResponse.add(scratch.toString(), cmd.getVersion());  // we're returning the version of the delete.. not the version of the doc we deleted.
+    }
+  }
+

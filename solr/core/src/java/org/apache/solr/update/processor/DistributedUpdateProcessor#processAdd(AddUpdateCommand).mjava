@@ -1,8 +1,8 @@
   @Override
   public void processAdd(AddUpdateCommand cmd) throws IOException {
-    
+
     assert TestInjection.injectFailUpdateRequests();
-    
+
     updateCommand = cmd;
 
     if (zkEnabled) {
@@ -11,36 +11,10 @@
     } else {
       isLeader = getNonZkLeaderAssumption(req);
     }
-    
-    // check if client has requested minimum replication factor information
-    int minRf = -1; // disabled by default
-    if (replicationTracker != null) {
-      minRf = replicationTracker.minRf; // for subsequent requests in the same batch
-    } else {
-      SolrParams rp = cmd.getReq().getParams();      
-      String distribUpdate = rp.get(DISTRIB_UPDATE_PARAM);
-      // somewhat tricky logic here: we only activate the replication tracker if we're on 
-      // a leader or this is the top-level request processor
-      if (distribUpdate == null || distribUpdate.equals(DistribPhase.TOLEADER.toString())) {
-        String minRepFact = rp.get(UpdateRequest.MIN_REPFACT);
-        if (minRepFact != null) {
-          try {
-            minRf = Integer.parseInt(minRepFact);
-          } catch (NumberFormatException nfe) {
-            minRf = -1;
-          }
-          
-          if (minRf <= 0)
-            throw new SolrException(ErrorCode.BAD_REQUEST, "Invalid value "+minRepFact+" for "+UpdateRequest.MIN_REPFACT+
-                "; must be >0 and less than or equal to the collection replication factor.");
-        }
-        
-        if (minRf > 1) {
-          String myShardId = forwardToLeader ? null : cloudDesc.getShardId();
-          replicationTracker = new RequestReplicationTracker(myShardId, minRf);
-        }                
-      }
-    }
+
+    // check if client has requested minimum replication factor information. will set replicationTracker to null if
+    // we aren't the leader or subShardLeader
+    checkReplicationTracker(cmd);
 
     // If we were sent a previous version, set this to the AddUpdateCommand (if not already set)
     if (!cmd.isInPlaceUpdate()) {
@@ -49,9 +23,9 @@
     // TODO: if minRf > 1 and we know the leader is the only active replica, we could fail
     // the request right here but for now I think it is better to just return the status
     // to the client that the minRf wasn't reached and let them handle it    
-    
+
     boolean dropCmd = false;
-    if (!forwardToLeader) {      
+    if (!forwardToLeader) {
       dropCmd = versionAdd(cmd);
     }
 
@@ -83,19 +57,19 @@
         cmdDistrib.distribAdd(cmd, nodesByRoutingRules, params, true);
       }
     }
-    
-    ModifiableSolrParams params = null;
+
     if (nodes != null) {
-      params = new ModifiableSolrParams(filterParams(req.getParams()));
+      ModifiableSolrParams params = new ModifiableSolrParams(filterParams(req.getParams()));
       params.set(DISTRIB_UPDATE_PARAM,
-                 (isLeader || isSubShardLeader ?
-                  DistribPhase.FROMLEADER.toString() :
-                  DistribPhase.TOLEADER.toString()));
+          (isLeader || isSubShardLeader ?
+              DistribPhase.FROMLEADER.toString() :
+              DistribPhase.TOLEADER.toString()));
       params.set(DISTRIB_FROM, ZkCoreNodeProps.getCoreUrl(
           zkController.getBaseUrl(), req.getCore().getName()));
-      
-      if (replicationTracker != null && minRf > 1)
-        params.set(UpdateRequest.MIN_REPFACT, String.valueOf(minRf));
+
+      if (req.getParams().get(UpdateRequest.MIN_REPFACT) != null) {
+        params.set(UpdateRequest.MIN_REPFACT, req.getParams().get(UpdateRequest.MIN_REPFACT));
+      }
 
       if (cmd.isInPlaceUpdate()) {
         params.set(DISTRIB_INPLACE_PREVVERSION, String.valueOf(cmd.prevVersion));
@@ -106,12 +80,12 @@
         // and the current in-place update (that depends on the previous update), if reordered
         // in the stream, can result in the current update being bottled up behind the previous
         // update in the stream and can lead to degraded performance.
-        cmdDistrib.distribAdd(cmd, nodes, params, true, replicationTracker);
+        cmdDistrib.distribAdd(cmd, nodes, params, true, rollupReplicationTracker, leaderReplicationTracker);
       } else {
-        cmdDistrib.distribAdd(cmd, nodes, params, false, replicationTracker);
+        cmdDistrib.distribAdd(cmd, nodes, params, false, rollupReplicationTracker, leaderReplicationTracker);
       }
     }
-    
+
     // TODO: what to do when no idField?
     if (returnVersions && rsp != null && idField != null) {
       if (addsResponse == null) {
@@ -122,10 +96,11 @@
       idField.getType().indexedToReadable(cmd.getIndexedId(), scratch);
       addsResponse.add(scratch.toString(), cmd.getVersion());
     }
-    
+
     // TODO: keep track of errors?  needs to be done at a higher level though since
     // an id may fail before it gets to this processor.
     // Given that, it may also make sense to move the version reporting out of this
     // processor too.
+
   }
 

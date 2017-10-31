@@ -1,4 +1,5 @@
   public void doDeleteByQuery(DeleteUpdateCommand cmd) throws IOException {
+
     // even in non zk mode, tests simulate updates from a leader
     if(!zkEnabled) {
       isLeader = getNonZkLeaderAssumption(req);
@@ -15,13 +16,15 @@
     //       - log + execute the local DBQ
     // FROM: we are a replica receiving a DBQ from our leader
     //       - log + execute the local DBQ
-    DistribPhase phase = 
-    DistribPhase.parseParam(req.getParams().get(DISTRIB_UPDATE_PARAM));
+    DistribPhase phase = DistribPhase.parseParam(req.getParams().get(DISTRIB_UPDATE_PARAM));
 
-    DocCollection coll = zkEnabled 
+    DocCollection coll = zkEnabled
       ? zkController.getClusterState().getCollection(collection) : null;
 
     if (zkEnabled && DistribPhase.NONE == phase) {
+      if (req.getParams().get(UpdateRequest.MIN_REPFACT) != null && rollupReplicationTracker == null) {
+        rollupReplicationTracker = new RollupRequestReplicationTracker(req.getParams().get(UpdateRequest.MIN_REPFACT));
+      }
       boolean leaderForAnyShard = false;  // start off by assuming we are not a leader for any shard
 
       ModifiableSolrParams outParams = new ModifiableSolrParams(filterParams(req.getParams()));
@@ -61,7 +64,15 @@
       }
 
       outParams.remove("commit"); // this will be distributed from the local commit
-      cmdDistrib.distribDelete(cmd, leaders, outParams);
+
+
+      if (req.getParams().get(UpdateRequest.MIN_REPFACT) != null) {
+        // If we've determined that there are no docs on this shard that need to be deleted, then we don't send
+        // sub-requests to any other replicas for this shard. In this case, min_rf is meaningless for this shard
+        // so flag that in replicationTracker
+        outParams.add(UpdateRequest.MIN_REPFACT, req.getParams().get(UpdateRequest.MIN_REPFACT));
+      }
+      cmdDistrib.distribDelete(cmd, leaders, outParams, false, rollupReplicationTracker, null);
 
       if (!leaderForAnyShard) {
         return;
@@ -70,6 +81,10 @@
       // change the phase to TOLEADER so we look up and forward to our own replicas (if any)
       phase = DistribPhase.TOLEADER;
     }
+
+    // check if client has requested minimum replication factor information. will set replicationTracker to null if
+    // we aren't the leader or subShardLeader
+    checkReplicationTracker(cmd);
 
     List<Node> replicas = null;
 
@@ -91,9 +106,7 @@
 
     boolean isReplayOrPeersync = (cmd.getFlags() & (UpdateCommand.REPLAY | UpdateCommand.PEER_SYNC)) != 0;
     boolean leaderLogic = isLeader && !isReplayOrPeersync;
-
     versionDeleteByQuery(cmd);
-
     if (zkEnabled)  {
       // forward to all replicas
       ModifiableSolrParams params = new ModifiableSolrParams(filterParams(req.getParams()));
@@ -118,7 +131,7 @@
             for (ZkCoreNodeProps replicaProp : replicaProps) {
               myReplicas.add(new StdNode(replicaProp, collection, myShardId));
             }
-            cmdDistrib.distribDelete(cmd, myReplicas, params);
+            cmdDistrib.distribDelete(cmd, myReplicas, params, false, rollupReplicationTracker, leaderReplicationTracker);
             someReplicas = true;
           }
         }
@@ -126,11 +139,10 @@
         Thread.currentThread().interrupt();
         throw new ZooKeeperException(ErrorCode.SERVER_ERROR, "", e);
       }
-
       if (leaderLogic) {
         List<Node> subShardLeaders = getSubShardLeaders(coll, cloudDesc.getShardId(), null, null);
         if (subShardLeaders != null)  {
-          cmdDistrib.distribDelete(cmd, subShardLeaders, params, true);
+          cmdDistrib.distribDelete(cmd, subShardLeaders, params, true, rollupReplicationTracker, leaderReplicationTracker);
         }
         final List<Node> nodesByRoutingRules = getNodesByRoutingRules(zkController.getClusterState(), coll, null, null);
         if (nodesByRoutingRules != null && !nodesByRoutingRules.isEmpty())  {
@@ -140,10 +152,11 @@
               zkController.getBaseUrl(), req.getCore().getName()));
           params.set(DISTRIB_FROM_COLLECTION, cloudDesc.getCollectionName());
           params.set(DISTRIB_FROM_SHARD, cloudDesc.getShardId());
-          cmdDistrib.distribDelete(cmd, nodesByRoutingRules, params, true);
+
+          cmdDistrib.distribDelete(cmd, nodesByRoutingRules, params, true, rollupReplicationTracker, leaderReplicationTracker);
         }
         if (replicas != null) {
-          cmdDistrib.distribDelete(cmd, replicas, params);
+          cmdDistrib.distribDelete(cmd, replicas, params, false, rollupReplicationTracker, leaderReplicationTracker);
           someReplicas = true;
         }
       }

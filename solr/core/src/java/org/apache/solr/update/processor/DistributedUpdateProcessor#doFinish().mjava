@@ -1,8 +1,8 @@
   // TODO: optionally fail if n replicas are not reached...
   private void doFinish() {
     // TODO: if not a forward and replication req is not specified, we could
-    // send in a background thread    
-    
+    // send in a background thread
+
     cmdDistrib.finish();    
     List<Error> errors = cmdDistrib.getErrors();
     // TODO - we may need to tell about more than one error...
@@ -30,9 +30,8 @@
       // Since it is not a forward request, for each fail, try to tell them to
       // recover - the doc was already added locally, so it should have been
       // legit
-       
-      DistribPhase phase =
-          DistribPhase.parseParam(error.req.uReq.getParams().get(DISTRIB_UPDATE_PARAM));       
+
+      DistribPhase phase = DistribPhase.parseParam(error.req.uReq.getParams().get(DISTRIB_UPDATE_PARAM));
       if (phase != DistribPhase.FROMLEADER)
         continue; // don't have non-leaders try to recovery other nodes
 
@@ -92,7 +91,8 @@
         }
 
         // If the client specified minRf and we didn't achieve the minRf, don't send recovery and let client retry
-        if (replicationTracker != null && replicationTracker.getAchievedRf() < replicationTracker.minRf) {
+        if (leaderReplicationTracker != null &&
+            leaderReplicationTracker.getAchievedRf() < leaderReplicationTracker.getRequestedRf()) {
           continue;
         }
 
@@ -130,14 +130,33 @@
         }
       }
     }
+    // in either case, we need to attach the achieved and min rf to the response.
+    if (leaderReplicationTracker != null || rollupReplicationTracker != null) {
+      int achievedRf = Integer.MAX_VALUE;
+      int requestedRf = Integer.MAX_VALUE;
 
-    if (replicationTracker != null) {
-      rsp.getResponseHeader().add(UpdateRequest.REPFACT, replicationTracker.getAchievedRf());
-      rsp.getResponseHeader().add(UpdateRequest.MIN_REPFACT, replicationTracker.minRf);
-      replicationTracker = null;
+      if (leaderReplicationTracker != null) {
+
+        achievedRf = leaderReplicationTracker.getAchievedRf();
+        requestedRf = leaderReplicationTracker.getRequestedRf();
+
+        // Transfer this to the rollup tracker if it exists
+        if (rollupReplicationTracker != null) {
+          rollupReplicationTracker.testAndSetAchievedRf(achievedRf);
+        }
+      }
+
+      // Rollup tracker has accumulated stats.
+      if (rollupReplicationTracker != null) {
+        achievedRf = rollupReplicationTracker.getAchievedRf();
+        requestedRf = rollupReplicationTracker.getRequestedRf();
+      }
+      rsp.getResponseHeader().add(UpdateRequest.MIN_REPFACT, requestedRf);
+      rsp.getResponseHeader().add(UpdateRequest.REPFACT, achievedRf);
+      rollupReplicationTracker = null;
+      leaderReplicationTracker = null;
+
     }
-
-    
     if (0 < errorsForClient.size()) {
       throw new DistributedUpdatesAsyncException(errorsForClient);
     }

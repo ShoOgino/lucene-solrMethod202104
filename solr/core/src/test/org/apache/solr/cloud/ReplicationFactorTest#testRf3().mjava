@@ -5,8 +5,8 @@
     String testCollectionName = "repfacttest_c8n_1x3";
     String shardId = "shard1";
     int minRf = 2;
-    
-    createCollection(testCollectionName, "conf1", numShards, replicationFactor, maxShardsPerNode);
+
+    createCollectionWithRetry(testCollectionName, "conf1", numShards, replicationFactor, maxShardsPerNode);
     cloudClient.setDefaultCollection(testCollectionName);
     
     List<Replica> replicas = 
@@ -15,17 +15,30 @@
                 
     int rf = sendDoc(1, minRf);
     assertRf(3, "all replicas should be active", rf);
-        
+
+    // Uses cloudClient do do it's work
+    doDBIdWithRetry(3, 5, "deletes should have propagated to all 3 replicas", 1);
+    doDBQWithRetry(3, 5, "deletes should have propagated to all 3 replicas", 1);
+
+
     getProxyForReplica(replicas.get(0)).close();
     
     rf = sendDoc(2, minRf);
     assertRf(2, "one replica should be down", rf);
 
+    // Uses cloudClient do do it's work
+    doDBQWithRetry(2, 5, "deletes should have propagated to 2 replicas", 1);
+    doDBIdWithRetry(2, 5, "deletes should have propagated to 2 replicas", 1);
+
+
     getProxyForReplica(replicas.get(1)).close();    
 
     rf = sendDoc(3, minRf);
     assertRf(1, "both replicas should be down", rf);
-    
+
+    doDBQWithRetry(1, 5, "deletes should have propagated to only 1 replica", 1);
+    doDBIdWithRetry(1, 5, "deletes should have propagated to only 1 replica", 1);
+
     // heal the partitions
     getProxyForReplica(replicas.get(0)).reopen();    
     getProxyForReplica(replicas.get(1)).reopen();
@@ -36,7 +49,10 @@
     
     rf = sendDoc(4, minRf);
     assertRf(3, "partitions to replicas have been healed", rf);
-    
+
+    doDBQWithRetry(3, 5, "deletes should have propagated to all 3 replicas", 1);
+    doDBIdWithRetry(3, 5, "deletes should have propagated to all 3 replicas", 1);
+
     // now send a batch
     List<SolrInputDocument> batch = new ArrayList<SolrInputDocument>(10);
     for (int i=5; i < 15; i++) {
@@ -48,7 +64,10 @@
     
     int batchRf = sendDocsWithRetry(batch, minRf, 5, 1);
     assertRf(3, "batch should have succeeded on all replicas", batchRf);
-    
+
+    doDBQWithRetry(3, 5, "deletes should have propagated to only 1 replica", 15);
+    doDBIdWithRetry(3, 5, "deletes should have propagated to only 1 replica", 15);
+
     // add some chaos to the batch
     getProxyForReplica(replicas.get(0)).close();
     
@@ -64,6 +83,9 @@
     batchRf = sendDocsWithRetry(batch, minRf, 5, 1);
     assertRf(2, "batch should have succeeded on 2 replicas (only one replica should be down)", batchRf);
 
+    doDBQWithRetry(2, 5, "deletes should have propagated to only 1 replica", 15);
+    doDBIdWithRetry(2, 5, "deletes should have propagated to only 1 replica", 15);
+
     // close the 2nd replica, and send a 3rd batch with expected achieved rf=1
     getProxyForReplica(replicas.get(1)).close();
     
@@ -78,10 +100,13 @@
     batchRf = sendDocsWithRetry(batch, minRf, 5, 1);
     assertRf(1, "batch should have succeeded on the leader only (both replicas should be down)", batchRf);
 
+    doDBQWithRetry(1, 5, "deletes should have propagated to only 1 replica", 15);
+    doDBIdWithRetry(1, 5, "deletes should have propagated to only 1 replica", 15);
+
     getProxyForReplica(replicas.get(0)).reopen();        
     getProxyForReplica(replicas.get(1)).reopen();
-    
-    Thread.sleep(2000);
-    ensureAllReplicasAreActive(testCollectionName, shardId, numShards, replicationFactor, 30);    
-  } 
+
+    Thread.sleep(2000); 
+    ensureAllReplicasAreActive(testCollectionName, shardId, numShards, replicationFactor, 30);
+  }
 

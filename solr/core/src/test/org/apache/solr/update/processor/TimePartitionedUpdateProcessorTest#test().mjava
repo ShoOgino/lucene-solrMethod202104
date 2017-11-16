@@ -1,0 +1,92 @@
+  @Test
+  public void test() throws Exception {
+    // First create a config using REST API.  To do this, we create a collection with the name of the eventual config.
+    // We configure it, and ultimately delete it the collection, leaving a config with the same name behind.
+    // Then when we create the "real" collections referencing this config.
+    CollectionAdminRequest.createCollection(configName, 1, 1).process(solrClient);
+    // manipulate the config...
+    checkNoError(solrClient.request(new V2Request.Builder("/collections/" + configName + "/config")
+        .withMethod(SolrRequest.METHOD.POST)
+        .withPayload("{" +
+            "  'set-user-property' : {'timePartitionAliasName':'" + alias + "'}," + // no data driven
+            "  'set-user-property' : {'update.autoCreateFields':false}," + // no data driven
+            "  'add-updateprocessor' : {" +
+            "    'name':'tolerant', 'class':'solr.TolerantUpdateProcessorFactory'" +
+            "  }," +
+            "  'add-updateprocessor' : {" + // for testing
+            "    'name':'inc', 'class':'" + IncrementURPFactory.class.getName() + "'," +
+            "    'fieldName':'" + intField + "'" +
+            "  }," +
+            "}").build()));
+    checkNoError(solrClient.request(new V2Request.Builder("/collections/" + configName + "/config/params")
+        .withMethod(SolrRequest.METHOD.POST)
+        .withPayload("{" +
+            "  'set' : {" +
+            "    '_UPDATE' : {'processor':'inc,tolerant'}" +
+            "  }" +
+            "}").build()));
+    CollectionAdminRequest.deleteCollection(configName).process(solrClient);
+
+    // start with one collection and an alias for it
+    final String col23rd = alias + "_2017-10-23";
+    CollectionAdminRequest.createCollection(col23rd, configName, 1, 1)
+        .withProperty(TimePartitionedUpdateProcessor.TIME_PARTITION_ALIAS_NAME_CORE_PROP, alias)
+        .process(solrClient);
+
+    assertEquals("We only expect 2 configSets",
+        Arrays.asList("_default", configName), new ConfigSetAdminRequest.List().process(solrClient).getConfigSets());
+
+    CollectionAdminRequest.createAlias(alias, col23rd).process(solrClient);
+    //TODO use SOLR-11617 client API to set alias metadata
+    final ZkStateReader zkStateReader = cluster.getSolrClient().getZkStateReader();
+    UnaryOperator<Aliases> op = a -> a.cloneWithCollectionAliasMetadata(alias, TimePartitionedUpdateProcessor.ROUTER_FIELD_METADATA, timeField);
+    zkStateReader.aliasesHolder.applyModificationAndExportToZk(op);
+
+
+    // now we index a document
+    solrClient.add(alias, newDoc(Instant.parse("2017-10-23T00:00:00Z")));
+    solrClient.commit(alias);
+    //assertDocRoutedToCol(lastDocId, col23rd);
+    assertInvariants();
+
+    // a document that is too old (throws exception... if we have a TolerantUpdateProcessor then we see it there)
+    try {
+      final UpdateResponse resp = solrClient.add(alias, newDoc(Instant.parse("2017-10-01T00:00:00Z")));
+      final Object errors = resp.getResponseHeader().get("errors");
+      assertTrue(errors != null && errors.toString().contains("couldn't be routed"));
+    } catch (SolrException e) {
+      assertTrue(e.getMessage().contains("couldn't be routed"));
+    }
+    numDocsDeletedOrFailed++;
+
+    // add another collection, add to alias  (soonest comes first)
+    final String col24th = alias + "_2017-10-24";
+    CollectionAdminRequest.createCollection(col24th, configName,  2, 2) // more shards and replicas now
+        .setMaxShardsPerNode(2)
+        .withProperty("timePartitionAliasName", alias)
+        .process(solrClient);
+    CollectionAdminRequest.createAlias(alias, col24th + "," + col23rd).process(solrClient);
+
+    // index 3 documents in a random fashion
+    addDocsAndCommit(
+        newDoc(Instant.parse("2017-10-23T00:00:00Z")),
+        newDoc(Instant.parse("2017-10-24T01:00:00Z")),
+        newDoc(Instant.parse("2017-10-24T02:00:00Z"))
+    );
+    assertInvariants();
+
+    // assert that the IncrementURP has updated all '0' to '1'
+    final SolrDocumentList checkIncResults = solrClient.query(alias, params("q", "NOT " + intField + ":1")).getResults();
+    assertEquals(checkIncResults.toString(), 0, checkIncResults.getNumFound());
+
+    //delete a random document id; ensure we don't find it
+    int idToDelete = 1 + random().nextInt(lastDocId);
+    if (idToDelete == 2) { // #2 didn't make it
+      idToDelete++;
+    }
+    solrClient.deleteById(alias, Integer.toString(idToDelete));
+    solrClient.commit(alias);
+    numDocsDeletedOrFailed++;
+    assertInvariants();
+  }
+

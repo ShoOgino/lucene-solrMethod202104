@@ -1,0 +1,35 @@
+  protected TimePartitionedUpdateProcessor(SolrQueryRequest req, SolrQueryResponse rsp, UpdateRequestProcessor next,
+                                           String aliasName,
+                                           DistribPhase aliasDistribPhase) {
+    super(next);
+    assert aliasDistribPhase == DistribPhase.NONE;
+    final SolrCore core = req.getCore();
+    this.thisCollection = core.getCoreDescriptor().getCloudDescriptor().getCollectionName();
+    this.aliasName = aliasName;
+    CoreContainer cc = core.getCoreContainer();
+    zkController = cc.getZkController();
+    cmdDistrib = new SolrCmdDistributor(cc.getUpdateShardHandler());
+
+    final Map<String, String> aliasMetadata = zkController.getZkStateReader().getAliases().getCollectionAliasMetadata(aliasName);
+    if (aliasMetadata == null) {
+      throw newAliasMustExistException(); // if it did exist, we'd have a non-null map
+    }
+    routeField = aliasMetadata.get(ROUTER_FIELD_METADATA);
+
+    ModifiableSolrParams outParams = new ModifiableSolrParams(req.getParams());
+    // Don't distribute these params; they will be distributed from the local processCommit separately.
+    //   (See RequestHandlerUtils.handleCommit from which this list was retrieved from)
+    outParams.remove(UpdateParams.OPTIMIZE);
+    outParams.remove(UpdateParams.COMMIT);
+    outParams.remove(UpdateParams.SOFT_COMMIT);
+    outParams.remove(UpdateParams.PREPARE_COMMIT);
+    outParams.remove(UpdateParams.ROLLBACK);
+    // Add these...
+    //  Ensures we skip over URPs prior to DistributedURP (see UpdateRequestProcessorChain)
+    outParams.set(DISTRIB_UPDATE_PARAM, DistribPhase.NONE.toString());
+    //  Signal this is a distributed search from this URP (see #wrap())
+    outParams.set(ALIAS_DISTRIB_UPDATE_PARAM, DistribPhase.TOLEADER.toString());
+    outParams.set(DISTRIB_FROM, ZkCoreNodeProps.getCoreUrl(zkController.getBaseUrl(), core.getName()));
+    outParamsToLeader = outParams;
+  }
+

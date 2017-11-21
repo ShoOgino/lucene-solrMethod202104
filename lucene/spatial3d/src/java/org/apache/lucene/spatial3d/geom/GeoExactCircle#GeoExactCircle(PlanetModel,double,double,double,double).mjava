@@ -28,11 +28,6 @@
       actualAccuracy = accuracy;
     }
     
-    // Since the provide cutoff angle is really a surface distance, we need to use the point-on-bearing even for spheres.
-    final List<SidedPlane> circlePlanes = new ArrayList<>();
-    // If it turns out that there's only one circle plane, this array will be populated but unused
-    final List<GeoPoint[]> notableEdgePoints = new ArrayList<>();
-      
     // We construct approximation planes until we have a low enough error estimate
     final List<ApproximationSlice> slices = new ArrayList<>(100);
     // Construct four cardinal points, and then we'll build the first two planes
@@ -53,7 +48,10 @@
       slices.add(new ApproximationSlice(center, southPoint, Math.PI, northPoint, Math.PI * 2.0, westPoint, Math.PI * 1.5));
       edgePoint = northPoint;
     }
-      
+    //System.out.println("Edgepoint = " + edgePoint);
+    
+    final List<PlaneDescription> activeSlices = new ArrayList<>();
+    
     // Now, iterate over slices until we have converted all of them into safe SidedPlanes.
     while (slices.size() > 0) {
       // Peel off a slice from the back
@@ -65,12 +63,17 @@
       final GeoPoint interpPoint1 = planetModel.surfacePointOnBearing(center, cutoffAngle, interpPoint1Bearing);
       final double interpPoint2Bearing = (thisSlice.point2Bearing + thisSlice.middlePointBearing) * 0.5;
       final GeoPoint interpPoint2 = planetModel.surfacePointOnBearing(center, cutoffAngle, interpPoint2Bearing);
+      
       // Is this point on the plane? (that is, is the approximation good enough?)
       if (Math.abs(thisSlice.plane.evaluate(interpPoint1)) < actualAccuracy && Math.abs(thisSlice.plane.evaluate(interpPoint2)) < actualAccuracy) {
-        // Good enough; add it to the list of planes, unless it was identical to the previous plane
-        if (circlePlanes.size() == 0 || !circlePlanes.get(circlePlanes.size()-1).isNumericallyIdentical(thisSlice.plane)) {
-          circlePlanes.add(thisSlice.plane);
-          notableEdgePoints.add(new GeoPoint[]{thisSlice.endPoint1, thisSlice.endPoint2});
+        if (activeSlices.size() == 0 || !activeSlices.get(activeSlices.size()-1).plane.isNumericallyIdentical(thisSlice.plane)) {
+          activeSlices.add(new PlaneDescription(thisSlice.plane, thisSlice.endPoint1, thisSlice.endPoint2, thisSlice.middlePoint));
+          //System.out.println("Point1 bearing = "+thisSlice.point1Bearing);
+        } else if (activeSlices.size() > 0) {
+          // Numerically identical plane; create a new slice to replace the one there.
+          final PlaneDescription oldSlice = activeSlices.remove(activeSlices.size()-1);
+          activeSlices.add(new PlaneDescription(thisSlice.plane, oldSlice.endPoint1, thisSlice.endPoint2, thisSlice.endPoint1));
+          //System.out.println(" new endpoint2 bearing: "+thisSlice.point2Bearing);
         }
       } else {
         // Split the plane into two, and add it back to the end
@@ -85,23 +88,92 @@
       }
     }
 
+    // Since the provide cutoff angle is really a surface distance, we need to use the point-on-bearing even for spheres.
+    final List<SidedPlane> circlePlanes = new ArrayList<>(activeSlices.size());
+    // If it turns out that there's only one circle plane, this array will be populated but unused
+    final List<GeoPoint[]> notableEdgePoints = new ArrayList<>(activeSlices.size());
+    // Back planes
+    final List<Membership> backPlanes = new ArrayList<>(activeSlices.size());
+    
+    // Compute bounding planes and actual circle planes
+    for (int i = 0; i < activeSlices.size(); i++) {
+      final PlaneDescription pd = activeSlices.get(i);
+      // Calculate the backplane
+      final Membership thisPlane = pd.plane;
+      // Go back through all the earlier points until we find one that's not within
+      GeoPoint backArticulationPoint = null;
+      for (int j = 1; j < activeSlices.size(); j++) {
+        int k = i - j;
+        if (k < 0) {
+          k += activeSlices.size();
+        }
+        final GeoPoint thisPoint = activeSlices.get(k).endPoint1;
+        if (!thisPlane.isWithin(thisPoint)) {
+          // Back up a notch
+          k++;
+          if (k >= activeSlices.size()) {
+            k -= activeSlices.size();
+          }
+          backArticulationPoint = activeSlices.get(k).endPoint1;
+          break;
+        }
+      }
+      // Go forward until we find one that's not within
+      GeoPoint forwardArticulationPoint = null;
+      for (int j = 1; j < activeSlices.size(); j++) {
+        int k = i + j;
+        if (k >= activeSlices.size()) {
+          k -= activeSlices.size();
+        }
+        final GeoPoint thisPoint = activeSlices.get(k).endPoint2;
+        if (!thisPlane.isWithin(thisPoint)) {
+          // back up
+          k--;
+          if (k < 0) {
+            k += activeSlices.size();
+          }
+          forwardArticulationPoint = activeSlices.get(k).endPoint2;
+          break;
+        }
+      }
+      
+      final Membership backPlane;
+      if (backArticulationPoint != null && forwardArticulationPoint != null) {
+        // We want a sided plane that goes through both identified articulation points and the center of the world.
+        backPlane = new SidedPlane(pd.onSidePoint, true, backArticulationPoint, forwardArticulationPoint);
+      } else {
+        backPlane = null;
+      }
+      
+      circlePlanes.add(pd.plane);
+      backPlanes.add(backPlane);
+      notableEdgePoints.add(new GeoPoint[]{pd.endPoint1, pd.endPoint2});
+    }
+
     //System.out.println("Number of planes needed: "+circlePlanes.size());
       
     this.edgePoints = new GeoPoint[]{edgePoint};      
     this.circlePlanes = circlePlanes;
     // Compute bounds
     if (circlePlanes.size() == 1) {
+      this.backBounds = null;
       this.eitherBounds = null;
       this.notableEdgePoints = null;
     } else {
       this.notableEdgePoints = notableEdgePoints;
+      this.backBounds = new HashMap<>(circlePlanes.size());
       this.eitherBounds = new HashMap<>(circlePlanes.size());
       for (int i = 0; i < circlePlanes.size(); i++) {
         final SidedPlane thisPlane = circlePlanes.get(i);
         final SidedPlane previousPlane = (i == 0)?circlePlanes.get(circlePlanes.size()-1):circlePlanes.get(i-1);
         final SidedPlane nextPlane = (i == circlePlanes.size()-1)?circlePlanes.get(0):circlePlanes.get(i+1);
+        if (backPlanes.get(i) != null) {
+          backBounds.put(thisPlane, backPlanes.get(i));
+        }
         eitherBounds.put(thisPlane, new EitherBound(previousPlane, nextPlane));
       }
     }
+    
+    //System.out.println("Is edgepoint within? "+isWithin(edgePoint));
   }
 

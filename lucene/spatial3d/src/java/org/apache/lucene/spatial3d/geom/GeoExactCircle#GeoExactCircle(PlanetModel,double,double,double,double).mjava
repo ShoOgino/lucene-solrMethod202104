@@ -15,9 +15,6 @@
       throw new IllegalArgumentException("Cutoff angle out of bounds");
     if (cutoffAngle < Vector.MINIMUM_RESOLUTION)
       throw new IllegalArgumentException("Cutoff angle cannot be effectively zero");
-    // We cannot allow exact circles to be large enough so that planes intersect at greater than 180 degrees.  This guarantees it.
-    if (cutoffAngle > Math.PI * 0.5)
-      throw new IllegalArgumentException("Cutoff angle out of bounds");
     
     this.center = new GeoPoint(planetModel, lat, lon);
     this.cutoffAngle = cutoffAngle;
@@ -49,8 +46,8 @@
       edgePoint = northPoint;
     }
     //System.out.println("Edgepoint = " + edgePoint);
-    
-    final List<PlaneDescription> activeSlices = new ArrayList<>();
+
+    this.circleSlices = new ArrayList<>();
     
     // Now, iterate over slices until we have converted all of them into safe SidedPlanes.
     while (slices.size() > 0) {
@@ -66,15 +63,8 @@
       
       // Is this point on the plane? (that is, is the approximation good enough?)
       if (Math.abs(thisSlice.plane.evaluate(interpPoint1)) < actualAccuracy && Math.abs(thisSlice.plane.evaluate(interpPoint2)) < actualAccuracy) {
-        if (activeSlices.size() == 0 || !activeSlices.get(activeSlices.size()-1).plane.isNumericallyIdentical(thisSlice.plane)) {
-          activeSlices.add(new PlaneDescription(thisSlice.plane, thisSlice.endPoint1, thisSlice.endPoint2, thisSlice.middlePoint));
-          //System.out.println("Point1 bearing = "+thisSlice.point1Bearing);
-        } else if (activeSlices.size() > 0) {
-          // Numerically identical plane; create a new slice to replace the one there.
-          final PlaneDescription oldSlice = activeSlices.remove(activeSlices.size()-1);
-          activeSlices.add(new PlaneDescription(thisSlice.plane, oldSlice.endPoint1, thisSlice.endPoint2, thisSlice.endPoint1));
-          //System.out.println(" new endpoint2 bearing: "+thisSlice.point2Bearing);
-        }
+        circleSlices.add(new CircleSlice(thisSlice.plane, thisSlice.endPoint1, thisSlice.endPoint2, center, thisSlice.middlePoint));
+        //assert thisSlice.plane.isWithin(center);
       } else {
         // Split the plane into two, and add it back to the end
         slices.add(new ApproximationSlice(center,
@@ -87,93 +77,9 @@
           interpPoint2, interpPoint2Bearing));
       }
     }
-
-    // Since the provide cutoff angle is really a surface distance, we need to use the point-on-bearing even for spheres.
-    final List<SidedPlane> circlePlanes = new ArrayList<>(activeSlices.size());
-    // If it turns out that there's only one circle plane, this array will be populated but unused
-    final List<GeoPoint[]> notableEdgePoints = new ArrayList<>(activeSlices.size());
-    // Back planes
-    final Map<Membership, Membership> backPlanes = new HashMap<>(activeSlices.size());
-    // Bounds
-    final Map<Membership, Membership> bounds = new HashMap<>(activeSlices.size());
-    
-    // Compute bounding planes and actual circle planes
-    for (int i = 0; i < activeSlices.size(); i++) {
-      final PlaneDescription pd = activeSlices.get(i);
-      // Calculate the backplane
-      final Membership thisPlane = pd.plane;
-      // Go back through all the earlier points until we find one that's not within
-      GeoPoint backArticulationPoint = null;
-      for (int j = 1; j < activeSlices.size(); j++) {
-        int k = i - j;
-        if (k < 0) {
-          k += activeSlices.size();
-        }
-        final GeoPoint thisPoint = activeSlices.get(k).endPoint1;
-        if (!thisPlane.isWithin(thisPoint)) {
-          // Back up a notch
-          k++;
-          if (k >= activeSlices.size()) {
-            k -= activeSlices.size();
-          }
-          backArticulationPoint = activeSlices.get(k).endPoint1;
-          break;
-        }
-      }
-      // Go forward until we find one that's not within
-      GeoPoint forwardArticulationPoint = null;
-      for (int j = 1; j < activeSlices.size(); j++) {
-        int k = i + j;
-        if (k >= activeSlices.size()) {
-          k -= activeSlices.size();
-        }
-        final GeoPoint thisPoint = activeSlices.get(k).endPoint2;
-        if (!thisPlane.isWithin(thisPoint)) {
-          // back up
-          k--;
-          if (k < 0) {
-            k += activeSlices.size();
-          }
-          forwardArticulationPoint = activeSlices.get(k).endPoint2;
-          break;
-        }
-      }
-      
-      final Membership backPlane;
-      if (backArticulationPoint != null && forwardArticulationPoint != null) {
-        // We want a sided plane that goes through both identified articulation points and the center of the world.
-        backPlane = new SidedPlane(pd.onSidePoint, true, backArticulationPoint, forwardArticulationPoint);
-      } else {
-        backPlane = null;
-      }
-      
-      circlePlanes.add(pd.plane);
-      if (backPlane != null) {
-        backPlanes.put(pd.plane, backPlane);
-      }
-      notableEdgePoints.add(new GeoPoint[]{pd.endPoint1, pd.endPoint2});
-      bounds.put(pd.plane, new EitherBound(new SidedPlane(pd.onSidePoint, pd.endPoint1, center), new SidedPlane(pd.onSidePoint, pd.endPoint2, center)));
-    }
-
-    //System.out.println("Number of planes needed: "+circlePlanes.size());
-      
-    this.circlePlanes = circlePlanes;
-    // Compute bounds
-    if (circlePlanes.size() == 1) {
-      this.backBounds = null;
-      this.eitherBounds = null;
-      this.notableEdgePoints = null;
-    } else {
-      this.notableEdgePoints = notableEdgePoints;
-      this.eitherBounds = bounds;
-      this.backBounds = backPlanes;
-    }
     
     this.edgePoints = new GeoPoint[]{edgePoint};
-    
-    if (!isWithin(northPoint) || !isWithin(southPoint) || !isWithin(eastPoint) || !isWithin(westPoint)) {
-      throw new IllegalArgumentException("Exact circle cannot be constructed this large given the planet model provided");
-    }
+
     //System.out.println("Is edgepoint within? "+isWithin(edgePoint));
   }
 

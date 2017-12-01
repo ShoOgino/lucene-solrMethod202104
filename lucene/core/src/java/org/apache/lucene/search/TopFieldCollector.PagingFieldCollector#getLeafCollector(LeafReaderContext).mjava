@@ -2,6 +2,10 @@
     public LeafCollector getLeafCollector(LeafReaderContext context) throws IOException {
       docBase = context.docBase;
       final int afterDoc = after.doc - docBase;
+      final boolean canEarlyTerminate = trackTotalHits == false &&
+          trackMaxScore == false &&
+          canEarlyTerminate(sort, context.reader().getMetaData().getSort());
+      final int initialTotalHits = totalHits;
       return new MultiComparatorLeafCollector(queue.getComparators(context), queue.getReverseMul(), mayNeedScoresTwice) {
 
         @Override
@@ -24,7 +28,16 @@
             final int cmp = reverseMul * comparator.compareBottom(doc);
             if (cmp <= 0) {
               // not competitive since documents are visited in doc id order
-              return;
+              if (canEarlyTerminate) {
+                // scale totalHits linearly based on the number of docs
+                // and terminate collection
+                totalHits += estimateRemainingHits(totalHits - initialTotalHits, doc, context.reader().maxDoc());
+                earlyTerminated = true;
+                throw new CollectionTerminatedException();
+              } else {
+                // just move to the next doc
+                return;
+              }
             }
           }
 

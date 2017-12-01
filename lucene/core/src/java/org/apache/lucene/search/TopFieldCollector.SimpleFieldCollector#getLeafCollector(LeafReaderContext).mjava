@@ -4,6 +4,10 @@
 
       final LeafFieldComparator[] comparators = queue.getComparators(context);
       final int[] reverseMul = queue.getReverseMul();
+      final boolean canEarlyTerminate = trackTotalHits == false &&
+          trackMaxScore == false &&
+          canEarlyTerminate(sort, context.reader().getMetaData().getSort());
+      final int initialTotalHits = totalHits;
 
       return new MultiComparatorLeafCollector(comparators, reverseMul, mayNeedScoresTwice) {
 
@@ -23,7 +27,16 @@
               // since docs are visited in doc Id order, if compare is 0, it means
               // this document is largest than anything else in the queue, and
               // therefore not competitive.
-              return;
+              if (canEarlyTerminate) {
+                // scale totalHits linearly based on the number of docs
+                // and terminate collection
+                totalHits += estimateRemainingHits(totalHits - initialTotalHits, doc, context.reader().maxDoc());
+                earlyTerminated = true;
+                throw new CollectionTerminatedException();
+              } else {
+                // just move to the next doc
+                return;
+              }
             }
 
             if (trackDocScores && !trackMaxScore) {

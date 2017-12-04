@@ -1,42 +1,28 @@
   /**
    * Returns the indexdir as given in index.properties. If index.properties exists in dataDir and
    * there is a property <i>index</i> available and it points to a valid directory
-   * in dataDir that is returned Else dataDir/index is returned. Only called for creating new indexSearchers
+   * in dataDir that is returned. Else dataDir/index is returned. Only called for creating new indexSearchers
    * and indexwriters. Use the getIndexDir() method to know the active index directory
    *
    * @return the indexdir as given in index.properties
+   *
+   * @throws SolrException if for any reason the a reasonable index directory cannot be determined.
    */
   public String getNewIndexDir() {
-    String result = dataDir + "index/";
-    Properties p = new Properties();
     Directory dir = null;
     try {
       dir = getDirectoryFactory().get(getDataDir(), DirContext.META_DATA, getSolrConfig().indexConfig.lockType);
-      IndexInput input;
-      try {
-        input = dir.openInput(IndexFetcher.INDEX_PROPERTIES, IOContext.DEFAULT);
-      } catch (FileNotFoundException | NoSuchFileException e) {
-        input = null;
+      String result = getIndexPropertyFromPropFile(dir);
+      if (!result.equals(lastNewIndexDir)) {
+        log.debug("New index directory detected: old=" + lastNewIndexDir + " new=" + result);
       }
-
-      if (input != null) {
-        final InputStream is = new PropertiesInputStream(input);
-        try {
-          p.load(new InputStreamReader(is, StandardCharsets.UTF_8));
-
-          String s = p.getProperty("index");
-          if (s != null && s.trim().length() > 0) {
-              result = dataDir + s;
-          }
-
-        } catch (Exception e) {
-          log.error("Unable to load " + IndexFetcher.INDEX_PROPERTIES, e);
-        } finally {
-          IOUtils.closeQuietly(is);
-        }
-      }
+      lastNewIndexDir = result;
+      return result;
     } catch (IOException e) {
       SolrException.log(log, "", e);
+      // See SOLR-11687. It is inadvisable to assume we can do the right thing for any but a small
+      // number of exceptions that ware caught and swallowed in getIndexProperty.
+      throw new SolrException(ErrorCode.SERVER_ERROR, "Error in getNewIndexDir, exception: ", e);
     } finally {
       if (dir != null) {
         try {
@@ -46,10 +32,5 @@
         }
       }
     }
-    if (!result.equals(lastNewIndexDir)) {
-      log.debug("New index directory detected: old="+lastNewIndexDir + " new=" + result);
-    }
-    lastNewIndexDir = result;
-    return result;
   }
 

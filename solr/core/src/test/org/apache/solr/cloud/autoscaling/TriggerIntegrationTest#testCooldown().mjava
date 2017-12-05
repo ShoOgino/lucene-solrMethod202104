@@ -71,6 +71,7 @@
     assertTrue("timestamp delta is less than default cooldown period", ev.timestamp - prevTimestamp > TimeUnit.SECONDS.toNanos(ScheduledTriggers.DEFAULT_COOLDOWN_PERIOD_SECONDS));
     prevTimestamp = ev.timestamp;
 
+    // this also resets the cooldown period
     long modifiedCooldownPeriodSeconds = 7;
     String setPropertiesCommand = "{\n" +
         "\t\"set-properties\" : {\n" +
@@ -89,13 +90,24 @@
     JettySolrRunner newNode3 = cluster.startJettySolrRunner();
     await = triggerFiredLatch.await(20, TimeUnit.SECONDS);
     assertTrue("The trigger did not fire at all", await);
+    triggerFiredLatch = new CountDownLatch(1);
+    triggerFired.compareAndSet(true, false);
+    // add another node
+    JettySolrRunner newNode4 = cluster.startJettySolrRunner();
+    await = triggerFiredLatch.await(20, TimeUnit.SECONDS);
+    assertTrue("The trigger did not fire at all", await);
     // wait for listener to capture the SUCCEEDED stage
     Thread.sleep(2000);
 
-    // there must be at least one IGNORED event due to cooldown, and one SUCCEEDED event
+    // there must be at least one SUCCEEDED (due to newNode3) then for newNode4 one IGNORED
+    // event due to cooldown, and one SUCCEEDED
     capturedEvents = listenerEvents.get("bar");
-    assertTrue(capturedEvents.toString(), capturedEvents.size() > 1);
-    for (int i = 0; i < capturedEvents.size() - 1; i++) {
+    assertTrue(capturedEvents.toString(), capturedEvents.size() > 2);
+    // first event should be SUCCEEDED
+    ev = capturedEvents.get(0);
+    assertEquals(ev.toString(), TriggerEventProcessorStage.SUCCEEDED, ev.stage);
+
+    for (int i = 1; i < capturedEvents.size() - 1; i++) {
       ev = capturedEvents.get(i);
       assertEquals(ev.toString(), TriggerEventProcessorStage.IGNORED, ev.stage);
       assertTrue(ev.toString(), ev.message.contains("cooldown"));

@@ -1,7 +1,7 @@
-  @AwaitsFix(bugUrl = "https://issues.apache.org/jira/browse/SOLR-11458")
+ // @AwaitsFix(bugUrl = "https://issues.apache.org/jira/browse/SOLR-11458")
   @Test
   public void testFailedMove() throws Exception {
-    String coll = "movereplicatest_failed_coll";
+    String coll = getTestClass().getSimpleName() + "_failed_coll_" + inPlaceMove;
     int REPLICATION = 2;
 
     CloudSolrClient cloudClient = cluster.getSolrClient();
@@ -9,6 +9,7 @@
     Set<CollectionStateWatcher> watchers = new HashSet<>(accessor.getStateWatchers(coll));
 
     CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(coll, "conf1", 2, REPLICATION);
+    create.setAutoAddReplicas(false);
     cloudClient.request(create);
 
     addDocs(coll, 100);
@@ -26,15 +27,17 @@
     }
     assertNotNull(targetNode);
     CollectionAdminRequest.MoveReplica moveReplica = createMoveReplicaRequest(coll, replica, targetNode);
+    moveReplica.setInPlaceMove(inPlaceMove);
     // start moving
-    moveReplica.processAsync("001", cloudClient);
+    String asyncId = IdUtils.randomId();
+    moveReplica.processAsync(asyncId, cloudClient);
     // shut down target node
     for (int i = 0; i < cluster.getJettySolrRunners().size(); i++) {
       if (cluster.getJettySolrRunner(i).getNodeName().equals(targetNode)) {
         cluster.stopJettySolrRunner(i);
       }
     }
-    CollectionAdminRequest.RequestStatus requestStatus = CollectionAdminRequest.requestStatus("001");
+    CollectionAdminRequest.RequestStatus requestStatus = CollectionAdminRequest.requestStatus(asyncId);
     // wait for async request success
     boolean success = true;
     for (int i = 0; i < 200; i++) {
@@ -50,6 +53,7 @@
 
     Set<CollectionStateWatcher> newWatchers = new HashSet<>(accessor.getStateWatchers(coll));
     assertEquals(watchers, newWatchers);
+
     log.info("--- current collection state: " + cloudClient.getZkStateReader().getClusterState().getCollection(coll));
     assertEquals(100, cluster.getSolrClient().query(coll, new SolrQuery("*:*")).getResults().getNumFound());
   }

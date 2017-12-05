@@ -14,10 +14,10 @@
       NamedList deleteResult = new NamedList();
       ocmh.deleteReplica(clusterState, removeReplicasProps, deleteResult, null);
       if (deleteResult.get("failure") != null) {
-        String errorString = String.format(Locale.ROOT, "Failed to cleanup replica collection=%s shard=%s name=%s",
-            coll.getName(), slice.getName(), replica.getName());
+        String errorString = String.format(Locale.ROOT, "Failed to cleanup replica collection=%s shard=%s name=%s, failure=%s",
+            coll.getName(), slice.getName(), replica.getName(), deleteResult.get("failure"));
         log.warn(errorString);
-        results.add("failure", errorString + ", because of : " + deleteResult.get("failure"));
+        results.add("failure", errorString);
         return;
       }
 
@@ -44,17 +44,48 @@
         CoreAdminParams.NODE, targetNode,
         CoreAdminParams.CORE_NODE_NAME, replica.getName(),
         CoreAdminParams.NAME, replica.getCoreName(),
+        WAIT_FOR_FINAL_STATE, String.valueOf(waitForFinalState),
         SKIP_CREATE_REPLICA_IN_CLUSTER_STATE, skipCreateReplicaInClusterState,
         CoreAdminParams.ULOG_DIR, ulogDir.substring(0, ulogDir.lastIndexOf(UpdateLog.TLOG_NAME)),
         CoreAdminParams.DATA_DIR, dataDir);
     if(async!=null) addReplicasProps.getProperties().put(ASYNC, async);
     NamedList addResult = new NamedList();
-    ocmh.addReplica(ocmh.zkStateReader.getClusterState(), addReplicasProps, addResult, null);
+    try {
+      ocmh.addReplica(ocmh.zkStateReader.getClusterState(), addReplicasProps, addResult, null);
+    } catch (Exception e) {
+      // fatal error - try rolling back
+      String errorString = String.format(Locale.ROOT, "Failed to create replica for collection=%s shard=%s" +
+          " on node=%s, failure=%s", coll.getName(), slice.getName(), targetNode, addResult.get("failure"));
+      results.add("failure", errorString);
+      log.warn("Error adding replica " + addReplicasProps + " - trying to roll back...", e);
+      addReplicasProps = addReplicasProps.plus(CoreAdminParams.NODE, replica.getNodeName());
+      NamedList rollback = new NamedList();
+      ocmh.addReplica(ocmh.zkStateReader.getClusterState(), addReplicasProps, rollback, null);
+      if (rollback.get("failure") != null) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Fatal error during MOVEREPLICA of " + replica
+            + ", collection may be inconsistent: " + rollback.get("failure"));
+      }
+      return;
+    }
     if (addResult.get("failure") != null) {
       String errorString = String.format(Locale.ROOT, "Failed to create replica for collection=%s shard=%s" +
-          " on node=%s", coll.getName(), slice.getName(), targetNode);
+          " on node=%s, failure=%s", coll.getName(), slice.getName(), targetNode, addResult.get("failure"));
       log.warn(errorString);
       results.add("failure", errorString);
+      log.debug("--- trying to roll back...");
+      // try to roll back
+      addReplicasProps = addReplicasProps.plus(CoreAdminParams.NODE, replica.getNodeName());
+      NamedList rollback = new NamedList();
+      try {
+        ocmh.addReplica(ocmh.zkStateReader.getClusterState(), addReplicasProps, rollback, null);
+      } catch (Exception e) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Fatal error during MOVEREPLICA of " + replica
+            + ", collection may be inconsistent!", e);
+      }
+      if (rollback.get("failure") != null) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Fatal error during MOVEREPLICA of " + replica
+            + ", collection may be inconsistent! Failure: " + rollback.get("failure"));
+      }
       return;
     } else {
       String successString = String.format(Locale.ROOT, "MOVEREPLICA action completed successfully, moved replica=%s at node=%s " +

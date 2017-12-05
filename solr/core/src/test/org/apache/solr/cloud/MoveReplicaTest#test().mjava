@@ -1,7 +1,6 @@
   @Test
   public void test() throws Exception {
-    cluster.waitForAllNodes(5000);
-    String coll = "movereplicatest_coll";
+    String coll = getTestClass().getSimpleName() + "_coll_" + inPlaceMove;
     log.info("total_jettys: " + cluster.getJettySolrRunners().size());
     int REPLICATION = 2;
 
@@ -9,6 +8,7 @@
 
     CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(coll, "conf1", 2, REPLICATION);
     create.setMaxShardsPerNode(2);
+    create.setAutoAddReplicas(false);
     cloudClient.request(create);
 
     addDocs(coll, 100);
@@ -38,8 +38,10 @@
     int targetNumCores = getNumOfCores(cloudClient, targetNode, coll);
 
     CollectionAdminRequest.MoveReplica moveReplica = createMoveReplicaRequest(coll, replica, targetNode);
-    moveReplica.processAsync("000", cloudClient);
-    CollectionAdminRequest.RequestStatus requestStatus = CollectionAdminRequest.requestStatus("000");
+    moveReplica.setInPlaceMove(inPlaceMove);
+    String asyncId = IdUtils.randomId();
+    moveReplica.processAsync(asyncId, cloudClient);
+    CollectionAdminRequest.RequestStatus requestStatus = CollectionAdminRequest.requestStatus(asyncId);
     // wait for async request success
     boolean success = false;
     for (int i = 0; i < 200; i++) {
@@ -98,6 +100,7 @@
     assertEquals(watchers, newWatchers);
 
     moveReplica = createMoveReplicaRequest(coll, replica, targetNode, shardId);
+    moveReplica.setInPlaceMove(inPlaceMove);
     moveReplica.process(cloudClient);
     checkNumOfCores(cloudClient, replica.getNodeName(), coll, sourceNumCores);
     // wait for recovery
@@ -137,5 +140,7 @@
     assertTrue("replica never fully recovered", recovered);
     newWatchers = new HashSet<>(accessor.getStateWatchers(coll));
     assertEquals(watchers, newWatchers);
+
+    assertEquals(100, cluster.getSolrClient().query(coll, new SolrQuery("*:*")).getResults().getNumFound());
   }
 

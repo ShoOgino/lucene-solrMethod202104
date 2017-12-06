@@ -8,26 +8,45 @@
                                                           List<String> nodesList) {
     List<ReplicaPosition> positions = new ArrayList<>();
     ClusterStateProvider stateProvider = new DelegatingClusterStateProvider(cloudManager.getClusterStateProvider()) {
-        @Override
-        public String getPolicyNameByCollection(String coll) {
-          return policyMapping.get() != null && policyMapping.get().containsKey(coll) ?
-              optionalPolicyMapping.get(coll) :
-              delegate.getPolicyNameByCollection(coll);
-        }
-      };
+      @Override
+      public String getPolicyNameByCollection(String coll) {
+        return policyMapping.get() != null && policyMapping.get().containsKey(coll) ?
+            optionalPolicyMapping.get(coll) :
+            delegate.getPolicyNameByCollection(coll);
+      }
+    };
     SolrCloudManager delegatingManager = new DelegatingCloudManager(cloudManager) {
       @Override
       public ClusterStateProvider getClusterStateProvider() {
         return stateProvider;
       }
+
+      @Override
+      public DistribStateManager getDistribStateManager() {
+        if (autoScalingConfig != null) {
+          return new DelegatingDistribStateManager(null) {
+            @Override
+            public AutoScalingConfig getAutoScalingConfig() throws InterruptedException, IOException {
+              return autoScalingConfig;
+            }
+          };
+        } else {
+          return super.getDistribStateManager();
+        }
+      }
     };
 
     policyMapping.set(optionalPolicyMapping);
+    SessionWrapper sessionWrapper = null;
     Policy.Session session = null;
     try {
-      session = SESSION_REF.get() != null ?
-          SESSION_REF.get().initOrGet(delegatingManager, autoScalingConfig.getPolicy()) :
-          autoScalingConfig.getPolicy().createSession(delegatingManager);
+      try {
+        SESSION_WRAPPPER_REF.set(sessionWrapper = getSession(delegatingManager));
+      } catch (Exception e) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "unable to get autoscaling policy session", e);
+
+      }
+      session = sessionWrapper.session;
 
       Map<Replica.Type, Integer> typeVsCount = new EnumMap<>(Replica.Type.class);
       typeVsCount.put(Replica.Type.NRT, nrtReplicas);
@@ -56,8 +75,10 @@
         }
       }
     } finally {
-      if (session != null && SESSION_REF.get() != null) SESSION_REF.get().updateSession(session);
       policyMapping.remove();
+      if (sessionWrapper != null) {
+        sessionWrapper.returnSession(session);
+      }
     }
     return positions;
   }

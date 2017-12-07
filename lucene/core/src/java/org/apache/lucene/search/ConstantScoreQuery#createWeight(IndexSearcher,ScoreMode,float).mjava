@@ -1,0 +1,69 @@
+  @Override
+  public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
+    final Weight innerWeight = searcher.createWeight(query, ScoreMode.COMPLETE_NO_SCORES, 1f);
+    if (scoreMode.needsScores()) {
+      return new ConstantScoreWeight(this, boost) {
+
+        @Override
+        public BulkScorer bulkScorer(LeafReaderContext context) throws IOException {
+          final BulkScorer innerScorer = innerWeight.bulkScorer(context);
+          if (innerScorer == null) {
+            return null;
+          }
+          return new ConstantBulkScorer(innerScorer, this, score());
+        }
+
+        @Override
+        public ScorerSupplier scorerSupplier(LeafReaderContext context) throws IOException {
+          ScorerSupplier innerScorerSupplier = innerWeight.scorerSupplier(context);
+          if (innerScorerSupplier == null) {
+            return null;
+          }
+          return new ScorerSupplier() {
+            @Override
+            public Scorer get(long leadCost) throws IOException {
+              final Scorer innerScorer = innerScorerSupplier.get(leadCost);
+              final float score = score();
+              return new FilterScorer(innerScorer) {
+                @Override
+                public float score() throws IOException {
+                  return score;
+                }
+                @Override
+                public float maxScore() {
+                  return score;
+                }
+                @Override
+                public Collection<ChildScorer> getChildren() {
+                  return Collections.singleton(new ChildScorer(innerScorer, "constant"));
+                }
+              };
+            }
+
+            @Override
+            public long cost() {
+              return innerScorerSupplier.cost();
+            }
+          };
+        }
+
+        @Override
+        public Scorer scorer(LeafReaderContext context) throws IOException {
+          ScorerSupplier scorerSupplier = scorerSupplier(context);
+          if (scorerSupplier == null) {
+            return null;
+          }
+          return scorerSupplier.get(Long.MAX_VALUE);
+        }
+
+        @Override
+        public boolean isCacheable(LeafReaderContext ctx) {
+          return innerWeight.isCacheable(ctx);
+        }
+
+      };
+    } else {
+      return innerWeight;
+    }
+  }
+

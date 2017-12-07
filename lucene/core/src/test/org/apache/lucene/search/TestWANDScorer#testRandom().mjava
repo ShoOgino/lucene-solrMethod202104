@@ -1,0 +1,49 @@
+  public void testRandom() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+    int numDocs = atLeast(1000);
+    for (int i = 0; i < numDocs; ++i) {
+      Document doc = new Document();
+      int numValues = random().nextInt(1 << random().nextInt(5));
+      int start = random().nextInt(10);
+      for (int j = 0; j < numValues; ++j) {
+        doc.add(new StringField("foo", Integer.toString(start + j), Store.NO));
+      }
+      w.addDocument(doc);
+    }
+    IndexReader reader = DirectoryReader.open(w);
+    w.close();
+    IndexSearcher searcher = newSearcher(reader);
+
+    for (int iter = 0; iter < 100; ++iter) {
+      int start = random().nextInt(10);
+      int numClauses = random().nextInt(1 << random().nextInt(5));
+      BooleanQuery.Builder builder = new BooleanQuery.Builder();
+      for (int i = 0; i < numClauses; ++i) {
+        builder.add(new TermQuery(new Term("foo", Integer.toString(start + i))), Occur.SHOULD);
+      }
+      Query query = builder.build();
+
+      TopScoreDocCollector collector1 = TopScoreDocCollector.create(10, null, true); // COMPLETE
+      TopScoreDocCollector collector2 = TopScoreDocCollector.create(10, null, false); // TOP_SCORES
+      
+      searcher.search(query, collector1);
+      searcher.search(query, collector2);
+      assertTopDocsEquals(collector1.topDocs(), collector2.topDocs());
+
+      int filterTerm = random().nextInt(30);
+      Query filteredQuery = new BooleanQuery.Builder()
+          .add(query, Occur.MUST)
+          .add(new TermQuery(new Term("foo", Integer.toString(filterTerm))), Occur.FILTER)
+          .build();
+
+      collector1 = TopScoreDocCollector.create(10, null, true); // COMPLETE
+      collector2 = TopScoreDocCollector.create(10, null, false); // TOP_SCORES
+      searcher.search(filteredQuery, collector1);
+      searcher.search(filteredQuery, collector2);
+      assertTopDocsEquals(collector1.topDocs(), collector2.topDocs());
+    }
+    reader.close();
+    dir.close();
+  }
+

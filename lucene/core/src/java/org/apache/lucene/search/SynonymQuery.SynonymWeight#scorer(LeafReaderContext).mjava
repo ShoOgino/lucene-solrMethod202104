@@ -1,19 +1,32 @@
     @Override
     public Scorer scorer(LeafReaderContext context) throws IOException {
       Similarity.SimScorer simScorer = null;
+      IndexOptions indexOptions = IndexOptions.NONE;
+      if (terms.length > 0) {
+        FieldInfo info = context.reader()
+            .getFieldInfos()
+            .fieldInfo(terms[0].field());
+        if (info != null) {
+          indexOptions = info.getIndexOptions();
+        }
+      }
       // we use termscorers + disjunction as an impl detail
       List<Scorer> subScorers = new ArrayList<>();
+      long maxFreq = 0;
       for (int i = 0; i < terms.length; i++) {
         TermState state = termContexts[i].get(context.ord);
         if (state != null) {
           TermsEnum termsEnum = context.reader().terms(terms[i].field()).iterator();
           termsEnum.seekExact(terms[i].bytes(), state);
+
+          maxFreq += getMaxFreq(indexOptions, termsEnum.totalTermFreq(), termsEnum.docFreq());
+
           PostingsEnum postings = termsEnum.postings(null, PostingsEnum.FREQS);
           // lazy init sim, in case no terms exist
           if (simScorer == null) {
             simScorer = similarity.simScorer(simWeight, context);
           }
-          subScorers.add(new TermScorer(this, postings, simScorer));
+          subScorers.add(new TermScorer(this, postings, simScorer, Float.POSITIVE_INFINITY));
         }
       }
       if (subScorers.isEmpty()) {
@@ -22,7 +35,7 @@
         // we must optimize this case (term not in segment), disjunctionscorer requires >= 2 subs
         return subScorers.get(0);
       } else {
-        return new SynonymScorer(simScorer, this, subScorers);
+        return new SynonymScorer(simScorer, this, subScorers, maxFreq);
       }
     }
 

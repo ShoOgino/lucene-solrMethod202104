@@ -1,0 +1,76 @@
+    @Override
+    public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
+      if (scoreMode.needsScores() == false) {
+        return match.createWeight(searcher, scoreMode, boost);
+      }
+      final Weight matchWeight = searcher.createWeight(match, scoreMode, boost);
+      final Weight contextWeight = searcher.createWeight(context, ScoreMode.COMPLETE_NO_SCORES, boost);
+      return new Weight(this) {
+
+        @Override
+        public void extractTerms(Set<Term> terms) {
+          matchWeight.extractTerms(terms);
+          if (boost >= 1) {
+            contextWeight.extractTerms(terms);
+          }
+        }
+
+        @Override
+        public Explanation explain(LeafReaderContext context, int doc) throws IOException {
+          final Explanation matchExplanation = matchWeight.explain(context, doc);
+          final Explanation contextExplanation = contextWeight.explain(context, doc);
+          if (matchExplanation.isMatch() == false || contextExplanation.isMatch() == false) {
+            return matchExplanation;
+          }
+          return Explanation.match(matchExplanation.getValue() * boost, "product of:",
+              matchExplanation,
+              Explanation.match(boost, "boost"));
+        }
+
+        @Override
+        public Scorer scorer(LeafReaderContext context) throws IOException {
+          final Scorer matchScorer = matchWeight.scorer(context);
+          if (matchScorer == null) {
+            return null;
+          }
+          final Scorer contextScorer = contextWeight.scorer(context);
+          if (contextScorer == null) {
+            return matchScorer;
+          }
+          TwoPhaseIterator contextTwoPhase = contextScorer.twoPhaseIterator();
+          DocIdSetIterator contextApproximation = contextTwoPhase == null
+              ? contextScorer.iterator()
+              : contextTwoPhase.approximation();
+          return new FilterScorer(matchScorer) {
+            @Override
+            public float score() throws IOException {
+              if (contextApproximation.docID() < docID()) {
+                contextApproximation.advance(docID());
+              }
+              assert contextApproximation.docID() >= docID();
+              float score = super.score();
+              if (contextApproximation.docID() == docID()
+                  && (contextTwoPhase == null || contextTwoPhase.matches())) {
+                score *= boost;
+              }
+              return score;
+            }
+            @Override
+            public float maxScore() {
+              float maxScore = matchScorer.maxScore();
+              if (boost > 1) {
+                maxScore *= boost;
+              }
+              return maxScore;
+            }
+          };
+        }
+
+        @Override
+        public boolean isCacheable(LeafReaderContext ctx) {
+          return matchWeight.isCacheable(ctx) && contextWeight.isCacheable(ctx);
+        }
+
+      };
+    }
+

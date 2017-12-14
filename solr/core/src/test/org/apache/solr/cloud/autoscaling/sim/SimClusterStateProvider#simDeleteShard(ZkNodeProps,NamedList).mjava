@@ -1,0 +1,41 @@
+  /**
+   * Delete a shard. This uses a similar algorithm as {@link org.apache.solr.cloud.DeleteShardCmd}
+   * @param message operation details
+   * @param results operation results
+   */
+  public void simDeleteShard(ZkNodeProps message, NamedList results) throws Exception {
+    String collectionName = message.getStr(COLLECTION_PROP);
+    String sliceName = message.getStr(SHARD_ID_PROP);
+    ClusterState clusterState = getClusterState();
+    DocCollection collection = clusterState.getCollection(collectionName);
+    if (collection == null) {
+      throw new Exception("Collection " + collectionName + " doesn't exist");
+    }
+    Slice slice = collection.getSlice(sliceName);
+    if (slice == null) {
+      throw new Exception(" Collection " + collectionName + " slice " + sliceName + " doesn't exist.");
+    }
+
+    opDelay(collectionName, CollectionParams.CollectionAction.DELETESHARD.name());
+
+    lock.lock();
+    try {
+      sliceProperties.computeIfAbsent(collectionName, coll -> new ConcurrentHashMap<>()).remove(sliceName);
+      nodeReplicaMap.forEach((n, replicas) -> {
+        Iterator<ReplicaInfo> it = replicas.iterator();
+        while (it.hasNext()) {
+          ReplicaInfo ri = it.next();
+          if (ri.getCollection().equals(collectionName) && ri.getShard().equals(sliceName)) {
+            it.remove();
+          }
+        }
+      });
+      collectionsStatesRef.set(null);
+      results.add("success", "");
+    } catch (Exception e) {
+      results.add("failure", e.toString());
+    } finally {
+      lock.unlock();
+    }
+  }
+

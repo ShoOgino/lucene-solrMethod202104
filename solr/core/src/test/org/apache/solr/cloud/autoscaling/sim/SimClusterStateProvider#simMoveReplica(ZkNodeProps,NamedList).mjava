@@ -1,0 +1,47 @@
+  /**
+   * Move replica. This uses a similar algorithm as {@link org.apache.solr.cloud.MoveReplicaCmd#moveNormalReplica(ClusterState, NamedList, String, String, DocCollection, Replica, Slice, int, boolean)}.
+   * @param message operation details
+   * @param results operation results.
+   */
+  public void simMoveReplica(ZkNodeProps message, NamedList results) throws Exception {
+    if (message.getStr(CommonAdminParams.ASYNC) != null) {
+      results.add(CoreAdminParams.REQUESTID, message.getStr(CommonAdminParams.ASYNC));
+    }
+    String collection = message.getStr(COLLECTION_PROP);
+    String targetNode = message.getStr("targetNode");
+    ClusterState clusterState = getClusterState();
+    DocCollection coll = clusterState.getCollection(collection);
+    if (coll == null) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Collection: " + collection + " does not exist");
+    }
+    String replicaName = message.getStr(REPLICA_PROP);
+    Replica replica = coll.getReplica(replicaName);
+    if (replica == null) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+          "Collection: " + collection + " replica: " + replicaName + " does not exist");
+    }
+    Slice slice = null;
+    for (Slice s : coll.getSlices()) {
+      if (s.getReplicas().contains(replica)) {
+        slice = s;
+      }
+    }
+    if (slice == null) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Replica has no 'slice' property! : " + replica);
+    }
+
+    opDelay(collection, CollectionParams.CollectionAction.MOVEREPLICA.name());
+
+    // TODO: for now simulate moveNormalReplica sequence, where we first add new replica and then delete the old one
+
+    String newSolrCoreName = Assign.buildSolrCoreName(stateManager, coll, slice.getName(), replica.getType());
+    String coreNodeName = Assign.assignCoreNodeName(stateManager, coll);
+    ReplicaInfo newReplica = new ReplicaInfo(coreNodeName, newSolrCoreName, collection, slice.getName(), replica.getType(), targetNode, null);
+    LOG.debug("-- new replica: " + newReplica);
+    // xxx should run leader election here already?
+    simAddReplica(targetNode, newReplica, false);
+    // this will trigger leader election
+    simRemoveReplica(replica.getNodeName(), replica.getName());
+    results.add("success", "");
+  }
+

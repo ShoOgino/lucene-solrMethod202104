@@ -1,0 +1,66 @@
+  /**
+   * Split a shard. This uses a similar algorithm as {@link SplitShardCmd}, including simulating its
+   * quirks, and leaving the original parent slice in place.
+   * @param message operation details
+   * @param results operation results.
+   */
+  public void simSplitShard(ZkNodeProps message, NamedList results) throws Exception {
+    String collectionName = message.getStr(COLLECTION_PROP);
+    AtomicReference<String> sliceName = new AtomicReference<>();
+    sliceName.set(message.getStr(SHARD_ID_PROP));
+    String splitKey = message.getStr("split.key");
+    ClusterState clusterState = getClusterState();
+    DocCollection collection = clusterState.getCollection(collectionName);
+    Slice parentSlice = SplitShardCmd.getParentSlice(clusterState, collectionName, sliceName, splitKey);
+    List<DocRouter.Range> subRanges = new ArrayList<>();
+    List<String> subSlices = new ArrayList<>();
+    List<String> subShardNames = new ArrayList<>();
+
+    opDelay(collectionName, CollectionParams.CollectionAction.SPLITSHARD.name());
+
+    SplitShardCmd.fillRanges(cloudManager, message, collection, parentSlice, subRanges, subSlices, subShardNames);
+    // mark the old slice as inactive
+    sliceProperties.computeIfAbsent(collectionName, c -> new ConcurrentHashMap<>())
+        .computeIfAbsent(sliceName.get(), s -> new ConcurrentHashMap<>())
+        .put(ZkStateReader.SHARD_STATE_PROP, Slice.State.INACTIVE.toString());
+    // add slice props
+    for (int i = 0; i < subRanges.size(); i++) {
+      String subSlice = subSlices.get(i);
+      DocRouter.Range range = subRanges.get(i);
+      Map<String, Object> sliceProps = sliceProperties.computeIfAbsent(collectionName, c -> new ConcurrentHashMap<>())
+          .computeIfAbsent(subSlice, ss -> new ConcurrentHashMap<>());
+      sliceProps.put(Slice.RANGE, range);
+      sliceProps.put(Slice.PARENT, sliceName.get());
+      sliceProps.put(ZkStateReader.SHARD_STATE_PROP, Slice.State.ACTIVE.toString());
+    }
+    // add replicas for new subShards
+    int repFactor = parentSlice.getReplicas().size();
+    List<ReplicaPosition> replicaPositions = Assign.identifyNodes(cloudManager,
+        clusterState,
+        new ArrayList<>(clusterState.getLiveNodes()),
+        collectionName,
+        new ZkNodeProps(collection.getProperties()),
+        // reproduce the bug
+        subSlices, repFactor, 0, 0);
+    PolicyHelper.SessionWrapper sessionWrapper = PolicyHelper.getLastSessionWrapper(true);
+    if (sessionWrapper != null) sessionWrapper.release();
+
+    for (ReplicaPosition replicaPosition : replicaPositions) {
+      String subSliceName = replicaPosition.shard;
+      String subShardNodeName = replicaPosition.node;
+      String solrCoreName = collectionName + "_" + subSliceName + "_replica" + (replicaPosition.index);
+      Map<String, Object> replicaProps = new HashMap<>();
+      replicaProps.put(ZkStateReader.SHARD_ID_PROP, replicaPosition.shard);
+      replicaProps.put(ZkStateReader.NODE_NAME_PROP, replicaPosition.node);
+      replicaProps.put(ZkStateReader.REPLICA_TYPE, replicaPosition.type.toString());
+      replicaProps.put(ZkStateReader.BASE_URL_PROP, Utils.getBaseUrlForNodeName(subShardNodeName, "http"));
+
+      ReplicaInfo ri = new ReplicaInfo("core_node" + Assign.incAndGetId(stateManager, collectionName, 0),
+          solrCoreName, collectionName, replicaPosition.shard, replicaPosition.type, subShardNodeName, replicaProps);
+      simAddReplica(replicaPosition.node, ri, false);
+    }
+    cloudManager.submit(new LeaderElection(Collections.singleton(collectionName), true));
+    results.add("success", "");
+
+  }
+

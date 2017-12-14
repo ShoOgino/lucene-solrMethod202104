@@ -1,0 +1,43 @@
+  /**
+   * Initialize from an existing cluster state
+   * @param initialState initial cluster state
+   */
+  public void simSetClusterState(ClusterState initialState) throws Exception {
+    lock.lock();
+    try {
+      collProperties.clear();
+      sliceProperties.clear();
+      nodeReplicaMap.clear();
+      liveNodes.clear();
+      for (String nodeId : stateManager.listData(ZkStateReader.LIVE_NODES_ZKNODE)) {
+        if (stateManager.hasData(ZkStateReader.LIVE_NODES_ZKNODE + "/" + nodeId)) {
+          stateManager.removeData(ZkStateReader.LIVE_NODES_ZKNODE + "/" + nodeId, -1);
+        }
+        if (stateManager.hasData(ZkStateReader.SOLR_AUTOSCALING_NODE_ADDED_PATH + "/" + nodeId)) {
+          stateManager.removeData(ZkStateReader.SOLR_AUTOSCALING_NODE_ADDED_PATH + "/" + nodeId, -1);
+        }
+      }
+      liveNodes.addAll(initialState.getLiveNodes());
+      for (String nodeId : liveNodes.get()) {
+        createEphemeralLiveNode(nodeId);
+      }
+      initialState.forEachCollection(dc -> {
+        collProperties.computeIfAbsent(dc.getName(), name -> new ConcurrentHashMap<>()).putAll(dc.getProperties());
+        opDelays.computeIfAbsent(dc.getName(), c -> new HashMap<>()).putAll(defaultOpDelays);
+        dc.getSlices().forEach(s -> {
+          sliceProperties.computeIfAbsent(dc.getName(), name -> new ConcurrentHashMap<>())
+              .computeIfAbsent(s.getName(), name -> new HashMap<>()).putAll(s.getProperties());
+          s.getReplicas().forEach(r -> {
+            ReplicaInfo ri = new ReplicaInfo(r.getName(), r.getCoreName(), dc.getName(), s.getName(), r.getType(), r.getNodeName(), r.getProperties());
+            if (liveNodes.get().contains(r.getNodeName())) {
+              nodeReplicaMap.computeIfAbsent(r.getNodeName(), rn -> new ArrayList<>()).add(ri);
+            }
+          });
+        });
+      });
+      collectionsStatesRef.set(null);
+    } finally {
+      lock.unlock();
+    }
+  }
+

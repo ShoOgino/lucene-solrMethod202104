@@ -1,0 +1,150 @@
+  /**
+   * Handler method for autoscaling requests. NOTE: only a specific subset of autoscaling requests is
+   * supported!
+   * @param req autoscaling request
+   * @return results
+   */
+  public SolrResponse simHandleSolrRequest(SolrRequest req) throws IOException, InterruptedException {
+    // pay the penalty for remote request, at least 5 ms
+    timeSource.sleep(5);
+
+    LOG.trace("--- got SolrRequest: " + req.getMethod() + " " + req.getPath() +
+        (req.getParams() != null ? " " + req.getParams().toQueryString() : ""));
+    if (req.getPath() != null && req.getPath().startsWith("/admin/autoscaling") ||
+        req.getPath().startsWith("/cluster/autoscaling")) {
+      incrementCount("autoscaling");
+      ModifiableSolrParams params = new ModifiableSolrParams(req.getParams());
+      params.set(CommonParams.PATH, req.getPath());
+      LocalSolrQueryRequest queryRequest = new LocalSolrQueryRequest(null, params);
+      RequestWriter.ContentWriter cw = req.getContentWriter("application/json");
+      ByteArrayOutputStream baos = new ByteArrayOutputStream();
+      cw.write(baos);
+      String payload = baos.toString("UTF-8");
+      LOG.trace("-- payload: {}", payload);
+      queryRequest.setContentStreams(Collections.singletonList(new ContentStreamBase.StringStream(payload)));
+      queryRequest.getContext().put("httpMethod", req.getMethod().toString());
+      SolrQueryResponse queryResponse = new SolrQueryResponse();
+      autoScalingHandler.handleRequest(queryRequest, queryResponse);
+      if (queryResponse.getException() != null) {
+        throw new IOException(queryResponse.getException());
+      }
+      SolrResponse rsp = new SolrResponseBase();
+      rsp.setResponse(queryResponse.getValues());
+      LOG.trace("-- response: {}", rsp);
+      return rsp;
+    }
+    if (req instanceof UpdateRequest) {
+      incrementCount("update");
+      // support only updates to the system collection
+      UpdateRequest ureq = (UpdateRequest)req;
+      if (ureq.getCollection() == null || !ureq.getCollection().equals(CollectionAdminParams.SYSTEM_COLL)) {
+        throw new UnsupportedOperationException("Only .system updates are supported but got: " + req);
+      }
+      List<SolrInputDocument> docs = ureq.getDocuments();
+      if (docs != null) {
+        systemColl.addAll(docs);
+      }
+      return new UpdateResponse();
+    }
+    // support only a specific subset of collection admin ops
+    if (!(req instanceof CollectionAdminRequest)) {
+      throw new UnsupportedOperationException("Only some CollectionAdminRequest-s are supported: " + req.getClass().getName());
+    }
+    SolrParams params = req.getParams();
+    String a = params.get(CoreAdminParams.ACTION);
+    SolrResponse rsp = new SolrResponseBase();
+    rsp.setResponse(new NamedList<>());
+    if (a != null) {
+      CollectionParams.CollectionAction action = CollectionParams.CollectionAction.get(a);
+      if (action == null) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Unknown action: " + a);
+      }
+      LOG.debug("Invoking Collection Action :{} with params {}", action.toLower(), req.getParams().toQueryString());
+      NamedList results = new NamedList();
+      rsp.setResponse(results);
+      incrementCount(action.name());
+      switch (action) {
+        case REQUESTSTATUS:
+          // we complete all async ops immediately
+          String requestId = req.getParams().get(REQUESTID);
+          SimpleOrderedMap<String> status = new SimpleOrderedMap<>();
+          status.add("state", RequestStatusState.COMPLETED.getKey());
+          status.add("msg", "found [" + requestId + "] in completed tasks");
+          results.add("status", status);
+          results.add("success", "");
+          // ExecutePlanAction expects a specific response class
+          rsp = new CollectionAdminRequest.RequestStatusResponse();
+          rsp.setResponse(results);
+          break;
+        case DELETESTATUS:
+          requestId = req.getParams().get(REQUESTID);
+          results.add("status", "successfully removed stored response for [" + requestId + "]");
+          results.add("success", "");
+          break;
+        case CREATE:
+          try {
+            clusterStateProvider.simCreateCollection(new ZkNodeProps(req.getParams().toNamedList().asMap(10)), results);
+          } catch (Exception e) {
+            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e);
+          }
+          break;
+        case DELETE:
+          clusterStateProvider.simDeleteCollection(req.getParams().get(CommonParams.NAME),
+              req.getParams().get(CommonAdminParams.ASYNC), results);
+          break;
+        case LIST:
+          results.add("collections", clusterStateProvider.simListCollections());
+          break;
+        case ADDREPLICA:
+          try {
+            clusterStateProvider.simAddReplica(new ZkNodeProps(req.getParams().toNamedList().asMap(10)), results);
+          } catch (Exception e) {
+            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e);
+          }
+          break;
+        case MOVEREPLICA:
+          try {
+            clusterStateProvider.simMoveReplica(new ZkNodeProps(req.getParams().toNamedList().asMap(10)), results);
+          } catch (Exception e) {
+            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e);
+          }
+          break;
+        case OVERSEERSTATUS:
+          if (req.getParams().get(CommonAdminParams.ASYNC) != null) {
+            results.add(REQUESTID, req.getParams().get(CommonAdminParams.ASYNC));
+          }
+          if (!liveNodesSet.get().isEmpty()) {
+            results.add("leader", liveNodesSet.get().iterator().next());
+          }
+          results.add("overseer_queue_size", 0);
+          results.add("overseer_work_queue_size", 0);
+          results.add("overseer_collection_queue_size", 0);
+          results.add("success", "");
+          break;
+        case ADDROLE:
+          nodeStateProvider.simAddNodeValue(req.getParams().get("node"), "nodeRole", req.getParams().get("role"));
+          break;
+        case CREATESHARD:
+          try {
+            clusterStateProvider.simCreateShard(new ZkNodeProps(req.getParams().toNamedList().asMap(10)), results);
+          } catch (Exception e) {
+            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e);
+          }
+          break;
+        case SPLITSHARD:
+          try {
+            clusterStateProvider.simSplitShard(new ZkNodeProps(req.getParams().toNamedList().asMap(10)), results);
+          } catch (Exception e) {
+            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e);
+          }
+          break;
+        default:
+          throw new UnsupportedOperationException("Unsupported collection admin action=" + action + " in request: " + req.getParams());
+      }
+    } else {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "action is a required param in request: " + req.getParams());
+    }
+    return rsp;
+
+  }
+

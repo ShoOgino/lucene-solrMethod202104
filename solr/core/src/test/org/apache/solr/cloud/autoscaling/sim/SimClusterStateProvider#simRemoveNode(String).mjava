@@ -1,0 +1,32 @@
+  /**
+   * Remove node from a cluster. This is equivalent to a situation when a node is lost.
+   * All replicas that were assigned to this node are marked as DOWN.
+   * @param nodeId node id
+   * @return true if a node existed and was removed
+   */
+  public boolean simRemoveNode(String nodeId) throws Exception {
+    lock.lock();
+    try {
+      Set<String> collections = new HashSet<>();
+      // mark every replica on that node as down
+      setReplicaStates(nodeId, Replica.State.DOWN, collections);
+      boolean res = liveNodes.remove(nodeId);
+      if (!collections.isEmpty()) {
+        collectionsStatesRef.set(null);
+      }
+      // remove ephemeral nodes
+      stateManager.getRoot().removeEphemeralChildren(nodeId);
+      // create a nodeLost marker if needed
+      AutoScalingConfig cfg = stateManager.getAutoScalingConfig(null);
+      if (cfg.hasTriggerForEvents(TriggerEventType.NODELOST)) {
+        stateManager.makePath(ZkStateReader.SOLR_AUTOSCALING_NODE_LOST_PATH + "/" + nodeId);
+      }
+      if (!collections.isEmpty()) {
+        cloudManager.submit(new LeaderElection(collections, true));
+      }
+      return res;
+    } finally {
+      lock.unlock();
+    }
+  }
+

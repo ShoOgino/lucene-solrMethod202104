@@ -1,0 +1,40 @@
+  /**
+   * Create a simulated cluster. This cluster uses the following components:
+   * <ul>
+   *   <li>{@link SimDistribStateManager} with non-shared root node.</li>
+   *   <li>{@link SimClusterStateProvider}</li>
+   *   <li>{@link SimNodeStateProvider}, where node values are automatically initialized when using
+   *   {@link #simAddNode()} method.</li>
+   *   <li>{@link GenericDistributedQueueFactory} that uses {@link SimDistribStateManager} as its storage.</li>
+   *   <li>an instance of {@link AutoScalingHandler} for managing AutoScalingConfig.</li>
+   *   <li>an instance of {@link OverseerTriggerThread} for managing triggers and processing events.</li>
+   * </ul>
+   * @param timeSource time source to use.
+   */
+  public SimCloudManager(TimeSource timeSource) throws Exception {
+    this.stateManager = new SimDistribStateManager(SimDistribStateManager.createNewRootNode());
+    this.loader = new SolrResourceLoader();
+    // init common paths
+    stateManager.makePath(ZkStateReader.CLUSTER_STATE);
+    stateManager.makePath(ZkStateReader.CLUSTER_PROPS);
+    stateManager.makePath(ZkStateReader.SOLR_AUTOSCALING_CONF_PATH);
+    stateManager.makePath(ZkStateReader.LIVE_NODES_ZKNODE);
+    stateManager.makePath(ZkStateReader.ROLES);
+    stateManager.makePath(ZkStateReader.SOLR_AUTOSCALING_EVENTS_PATH);
+    stateManager.makePath(ZkStateReader.SOLR_AUTOSCALING_TRIGGER_STATE_PATH);
+    stateManager.makePath(ZkStateReader.SOLR_AUTOSCALING_NODE_LOST_PATH);
+    stateManager.makePath(ZkStateReader.SOLR_AUTOSCALING_NODE_ADDED_PATH);
+
+    this.timeSource = timeSource != null ? timeSource : TimeSource.NANO_TIME;
+    this.clusterStateProvider = new SimClusterStateProvider(liveNodesSet, this);
+    this.nodeStateProvider = new SimNodeStateProvider(liveNodesSet, this.stateManager, this.clusterStateProvider, null);
+    this.queueFactory = new GenericDistributedQueueFactory(stateManager);
+    this.simCloudManagerPool = ExecutorUtil.newMDCAwareFixedThreadPool(200, new DefaultSolrThreadFactory("simCloudManagerPool"));
+    this.autoScalingHandler = new AutoScalingHandler(this, loader);
+    triggerThreadGroup = new ThreadGroup("Simulated Overseer autoscaling triggers");
+    OverseerTriggerThread trigger = new OverseerTriggerThread(loader, this,
+        new CloudConfig.CloudConfigBuilder("nonexistent", 0, "sim").build());
+    triggerThread = new Overseer.OverseerThread(triggerThreadGroup, trigger, "Simulated OverseerAutoScalingTriggerThread");
+    triggerThread.start();
+  }
+

@@ -1,0 +1,76 @@
+  /**
+   * Create a new collection. This operation uses policy framework for node and replica assignments.
+   * @param props collection details
+   * @param results results of the operation.
+   */
+  public void simCreateCollection(ZkNodeProps props, NamedList results) throws Exception {
+    if (props.getStr(CommonAdminParams.ASYNC) != null) {
+      results.add(CoreAdminParams.REQUESTID, props.getStr(CommonAdminParams.ASYNC));
+    }
+    boolean waitForFinalState = props.getBool(CommonAdminParams.WAIT_FOR_FINAL_STATE, false);
+    List<String> nodeList = new ArrayList<>();
+    List<String> shardNames = new ArrayList<>();
+    final String collectionName = props.getStr(NAME);
+    ClusterState clusterState = getClusterState();
+    ZkWriteCommand cmd = new ClusterStateMutator(cloudManager).createCollection(clusterState, props);
+    if (cmd.noop) {
+      LOG.warn("Collection {} already exists. exit", collectionName);
+      results.add("success", "no-op");
+      return;
+    }
+    opDelays.computeIfAbsent(collectionName, c -> new HashMap<>()).putAll(defaultOpDelays);
+
+    opDelay(collectionName, CollectionParams.CollectionAction.CREATE.name());
+
+    AtomicReference<PolicyHelper.SessionWrapper> sessionWrapper = new AtomicReference<>();
+    List<ReplicaPosition> replicaPositions = CreateCollectionCmd.buildReplicaPositions(cloudManager, getClusterState(), props,
+        nodeList, shardNames, sessionWrapper);
+    if (sessionWrapper.get() != null) {
+      sessionWrapper.get().release();
+    }
+    final CountDownLatch finalStateLatch = new CountDownLatch(replicaPositions.size());
+    AtomicInteger replicaNum = new AtomicInteger(1);
+    replicaPositions.forEach(pos -> {
+      Map<String, Object> replicaProps = new HashMap<>();
+      replicaProps.put(ZkStateReader.NODE_NAME_PROP, pos.node);
+      replicaProps.put(ZkStateReader.REPLICA_TYPE, pos.type.toString());
+      String coreName = String.format(Locale.ROOT, "%s_%s_replica_%s%s", collectionName, pos.shard, pos.type.name().substring(0,1).toLowerCase(Locale.ROOT),
+          replicaNum.getAndIncrement());
+      try {
+        replicaProps.put(ZkStateReader.CORE_NAME_PROP, coreName);
+        ReplicaInfo ri = new ReplicaInfo("core_node" + Assign.incAndGetId(stateManager, collectionName, 0),
+            coreName, collectionName, pos.shard, pos.type, pos.node, replicaProps);
+        cloudManager.submit(() -> {
+          simAddReplica(pos.node, ri, false);
+          finalStateLatch.countDown();
+          return true;
+        });
+      } catch (Exception e) {
+        throw new RuntimeException(e);
+      }
+    });
+    // add collection props
+    DocCollection coll = cmd.collection;
+    collProperties.computeIfAbsent(collectionName, c -> new ConcurrentHashMap<>()).putAll(coll.getProperties());
+    // add slice props
+    coll.getSlices().forEach(s -> {
+      Map<String, Object> sliceProps = sliceProperties.computeIfAbsent(coll.getName(), c -> new ConcurrentHashMap<>())
+          .computeIfAbsent(s.getName(), slice -> new ConcurrentHashMap<>());
+      s.getProperties().forEach((k, v) -> {
+        if (k != null && v != null) {
+          sliceProps.put(k, v);
+        }
+      });
+    });
+    cloudManager.submit(new LeaderElection(Collections.singleton(collectionName), true));
+    if (waitForFinalState) {
+      boolean finished = finalStateLatch.await(cloudManager.getTimeSource().convertDelay(TimeUnit.SECONDS, 60, TimeUnit.MILLISECONDS),
+          TimeUnit.MILLISECONDS);
+      if (!finished) {
+        results.add("failure", "Timeout waiting for all replicas to become active.");
+        return;
+      }
+    }
+    results.add("success", "");
+  }
+

@@ -1,0 +1,85 @@
+  @Test
+  public void testSearchRate() throws Exception {
+    SolrClient solrClient = cluster.simGetSolrClient();
+    String COLL1 = "collection1";
+    CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(COLL1,
+        "conf", 1, 2);
+    create.process(solrClient);
+    waitForState(COLL1, 10, TimeUnit.SECONDS, clusterShape(1, 2));
+
+    String setTriggerCommand = "{" +
+        "'set-trigger' : {" +
+        "'name' : 'search_rate_trigger'," +
+        "'event' : 'searchRate'," +
+        "'waitFor' : '" + waitForSeconds + "s'," +
+        "'enabled' : true," +
+        "'rate' : 1.0," +
+        "'actions' : [" +
+        "{'name':'test','class':'" + TestSearchRateAction.class.getName() + "'}" +
+        "]" +
+        "}}";
+    SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, setTriggerCommand);
+    NamedList<Object> response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    String setListenerCommand1 = "{" +
+        "'set-listener' : " +
+        "{" +
+        "'name' : 'srt'," +
+        "'trigger' : 'search_rate_trigger'," +
+        "'stage' : ['FAILED','SUCCEEDED']," +
+        "'class' : '" + TestTriggerListener.class.getName() + "'" +
+        "}" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setListenerCommand1);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+//    SolrParams query = params(CommonParams.Q, "*:*");
+//    for (int i = 0; i < 500; i++) {
+//      solrClient.query(COLL1, query);
+//    }
+
+    cluster.getSimClusterStateProvider().simSetCollectionValue(COLL1, "QUERY./select.requestTimes:1minRate", 500, true);
+
+    boolean await = triggerFiredLatch.await(20000 / SPEED, TimeUnit.MILLISECONDS);
+    assertTrue("The trigger did not fire at all", await);
+    // wait for listener to capture the SUCCEEDED stage
+    cluster.getTimeSource().sleep(2000);
+    assertEquals(listenerEvents.toString(), 1, listenerEvents.get("srt").size());
+    CapturedEvent ev = listenerEvents.get("srt").get(0);
+    long now = cluster.getTimeSource().getTime();
+    // verify waitFor
+    assertTrue(TimeUnit.SECONDS.convert(waitForSeconds, TimeUnit.NANOSECONDS) - WAIT_FOR_DELTA_NANOS <= now - ev.event.getEventTime());
+    Map<String, Double> nodeRates = (Map<String, Double>)ev.event.getProperties().get("node");
+    assertNotNull("nodeRates", nodeRates);
+    assertTrue(nodeRates.toString(), nodeRates.size() > 0);
+    AtomicDouble totalNodeRate = new AtomicDouble();
+    nodeRates.forEach((n, r) -> totalNodeRate.addAndGet(r));
+    List<ReplicaInfo> replicaRates = (List<ReplicaInfo>)ev.event.getProperties().get("replica");
+    assertNotNull("replicaRates", replicaRates);
+    assertTrue(replicaRates.toString(), replicaRates.size() > 0);
+    AtomicDouble totalReplicaRate = new AtomicDouble();
+    replicaRates.forEach(r -> {
+      assertTrue(r.toString(), r.getVariable("rate") != null);
+      totalReplicaRate.addAndGet((Double)r.getVariable("rate"));
+    });
+    Map<String, Object> shardRates = (Map<String, Object>)ev.event.getProperties().get("shard");
+    assertNotNull("shardRates", shardRates);
+    assertEquals(shardRates.toString(), 1, shardRates.size());
+    shardRates = (Map<String, Object>)shardRates.get(COLL1);
+    assertNotNull("shardRates", shardRates);
+    assertEquals(shardRates.toString(), 1, shardRates.size());
+    AtomicDouble totalShardRate = new AtomicDouble();
+    shardRates.forEach((s, r) -> totalShardRate.addAndGet((Double)r));
+    Map<String, Double> collectionRates = (Map<String, Double>)ev.event.getProperties().get("collection");
+    assertNotNull("collectionRates", collectionRates);
+    assertEquals(collectionRates.toString(), 1, collectionRates.size());
+    Double collectionRate = collectionRates.get(COLL1);
+    assertNotNull(collectionRate);
+    assertTrue(collectionRate > 5.0);
+    assertEquals(collectionRate, totalNodeRate.get(), 5.0);
+    assertEquals(collectionRate, totalShardRate.get(), 5.0);
+    assertEquals(collectionRate, totalReplicaRate.get(), 5.0);
+  }
+

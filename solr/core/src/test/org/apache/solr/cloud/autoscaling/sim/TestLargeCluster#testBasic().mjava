@@ -1,0 +1,93 @@
+  @Test
+  public void testBasic() throws Exception {
+    SolrClient solrClient = cluster.simGetSolrClient();
+    String setTriggerCommand = "{" +
+        "'set-trigger' : {" +
+        "'name' : 'node_lost_trigger'," +
+        "'event' : 'nodeLost'," +
+        "'waitFor' : '" + waitForSeconds + "s'," +
+        "'enabled' : true," +
+        "'actions' : [" +
+        "{'name':'compute','class':'" + ComputePlanAction.class.getName() + "'}," +
+        "{'name':'execute','class':'" + ExecutePlanAction.class.getName() + "'}," +
+        "{'name':'test','class':'" + TestTriggerAction.class.getName() + "'}" +
+        "]" +
+        "}}";
+    SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, setTriggerCommand);
+    NamedList<Object> response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    String setListenerCommand = "{" +
+        "'set-listener' : " +
+        "{" +
+        "'name' : 'foo'," +
+        "'trigger' : 'node_lost_trigger'," +
+        "'stage' : ['STARTED','ABORTED','SUCCEEDED', 'FAILED']," +
+        "'beforeAction' : ['compute', 'execute']," +
+        "'afterAction' : ['compute', 'execute']," +
+        "'class' : '" + TestTriggerListener.class.getName() + "'" +
+        "}" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setListenerCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    cluster.getTimeSource().sleep(5000);
+
+    // pick a few random nodes
+    List<String> nodes = new ArrayList<>();
+    int limit = 75;
+    for (String node : cluster.getClusterStateProvider().getLiveNodes()) {
+      nodes.add(node);
+      if (nodes.size() > limit) {
+        break;
+      }
+    }
+    Collections.shuffle(nodes, random());
+    // create collection on these nodes
+    String collectionName = "testBasic";
+    CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(collectionName,
+        "conf", 5, 5, 5, 5);
+    create.setMaxShardsPerNode(1);
+    create.setCreateNodeSet(String.join(",", nodes));
+    create.process(solrClient);
+
+    log.info("Ready after " + waitForState(collectionName, 30 * nodes.size(), TimeUnit.SECONDS, clusterShape(5, 15)) + "ms");
+
+    int KILL_NODES = 8;
+    // kill off a number of nodes
+    for (int i = 0; i < KILL_NODES; i++) {
+      cluster.simRemoveNode(nodes.get(i), false);
+    }
+    // should fully recover
+    log.info("Ready after " + waitForState(collectionName, 90 * KILL_NODES, TimeUnit.SECONDS, clusterShape(5, 15)) + "ms");
+
+    log.info("OP COUNTS: " + cluster.simGetOpCounts());
+    long moveReplicaOps = cluster.simGetOpCount(CollectionParams.CollectionAction.MOVEREPLICA.name());
+
+    // simulate a number of flaky nodes
+    int FLAKY_NODES = 10;
+    int flakyReplicas = 0;
+    for (int cnt = 0; cnt < 10; cnt++) {
+      for (int i = KILL_NODES; i < KILL_NODES + FLAKY_NODES; i++) {
+        flakyReplicas += cluster.getSimClusterStateProvider().simGetReplicaInfos(nodes.get(i))
+            .stream().filter(r -> r.getState().equals(Replica.State.ACTIVE)).count();
+        cluster.simRemoveNode(nodes.get(i), false);
+      }
+      cluster.getTimeSource().sleep(TimeUnit.SECONDS.toMillis(waitForSeconds) * 2);
+      for (int i = KILL_NODES; i < KILL_NODES + FLAKY_NODES; i++) {
+        final String nodeId = nodes.get(i);
+        cluster.submit(() -> cluster.getSimClusterStateProvider().simRestoreNode(nodeId));
+      }
+    }
+
+    log.info("Ready after " + waitForState(collectionName, 30 * nodes.size(), TimeUnit.SECONDS, clusterShape(5, 15)) + "ms");
+    log.info("OP COUNTS: " + cluster.simGetOpCounts());
+    long newMoveReplicaOps = cluster.simGetOpCount(CollectionParams.CollectionAction.MOVEREPLICA.name());
+    log.info("==== Flaky replicas: {}. Additional MOVEREPLICA count: {}", flakyReplicas, (newMoveReplicaOps - moveReplicaOps));
+    // flaky nodes lead to a number of MOVEREPLICA that is non-zero but lower than the number of flaky replicas
+    assertTrue("there should be new MOVERPLICA ops", newMoveReplicaOps - moveReplicaOps > 0);
+    assertTrue("there should be less than flakyReplicas=" + flakyReplicas + " MOVEREPLICA ops",
+        newMoveReplicaOps - moveReplicaOps < flakyReplicas);
+  }
+

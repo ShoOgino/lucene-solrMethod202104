@@ -1,0 +1,66 @@
+  /**
+   * Create a new shard. This uses a similar algorithm as {@link CreateShardCmd}.
+   * @param message operation details
+   * @param results operation results
+   */
+  public void simCreateShard(ZkNodeProps message, NamedList results) throws Exception {
+    if (message.getStr(CommonAdminParams.ASYNC) != null) {
+      results.add(CoreAdminParams.REQUESTID, message.getStr(CommonAdminParams.ASYNC));
+    }
+    String collectionName = message.getStr(COLLECTION_PROP);
+    String sliceName = message.getStr(SHARD_ID_PROP);
+    ClusterState clusterState = getClusterState();
+    lock.lock();
+    try {
+      ZkWriteCommand cmd = new CollectionMutator(cloudManager).createShard(clusterState, message);
+      if (cmd.noop) {
+        results.add("success", "no-op");
+        return;
+      }
+
+      opDelay(collectionName, CollectionParams.CollectionAction.CREATESHARD.name());
+
+      // copy shard properties -- our equivalent of creating an empty shard in cluster state
+      DocCollection collection = cmd.collection;
+      Slice slice = collection.getSlice(sliceName);
+      Map<String, Object> props = sliceProperties.computeIfAbsent(collection.getName(), c -> new ConcurrentHashMap<>())
+          .computeIfAbsent(sliceName, s -> new ConcurrentHashMap<>());
+      props.clear();
+      slice.getProperties().entrySet().stream()
+          .filter(e -> !e.getKey().equals("range"))
+          .filter(e -> !e.getKey().equals("replicas"))
+          .forEach(e -> props.put(e.getKey(), e.getValue()));
+      // 2. create new replicas
+      AtomicReference<PolicyHelper.SessionWrapper> sessionWrapper = new AtomicReference<>();
+      List<ReplicaPosition> positions = CreateShardCmd.buildReplicaPositions(cloudManager, clusterState, collectionName,
+          message, sessionWrapper);
+      if (sessionWrapper.get() != null) {
+        sessionWrapper.get().release();
+      }
+      AtomicInteger replicaNum = new AtomicInteger(1);
+      positions.forEach(pos -> {
+        Map<String, Object> replicaProps = new HashMap<>();
+        replicaProps.put(ZkStateReader.SHARD_ID_PROP, pos.shard);
+        replicaProps.put(ZkStateReader.NODE_NAME_PROP, pos.node);
+        replicaProps.put(ZkStateReader.REPLICA_TYPE, pos.type.toString());
+        replicaProps.put(ZkStateReader.BASE_URL_PROP, Utils.getBaseUrlForNodeName(pos.node, "http"));
+        String coreName = String.format(Locale.ROOT, "%s_%s_replica_%s%s", collectionName, pos.shard, pos.type.name().substring(0,1).toLowerCase(Locale.ROOT),
+            replicaNum.getAndIncrement());
+        try {
+          replicaProps.put(ZkStateReader.CORE_NAME_PROP, coreName);
+          ReplicaInfo ri = new ReplicaInfo("core_node" + Assign.incAndGetId(stateManager, collectionName, 0),
+              coreName, collectionName, pos.shard, pos.type, pos.node, replicaProps);
+          simAddReplica(pos.node, ri, false);
+        } catch (Exception e) {
+          throw new RuntimeException(e);
+        }
+      });
+      Map<String, Object> colProps = collProperties.computeIfAbsent(collectionName, c -> new ConcurrentHashMap<>());
+
+      cloudManager.submit(new LeaderElection(Collections.singleton(collectionName), true));
+      results.add("success", "");
+    } finally {
+      lock.unlock();
+    }
+  }
+

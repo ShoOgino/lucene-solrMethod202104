@@ -1,0 +1,58 @@
+  private Map<String, DocCollection> getCollectionStates() {
+    Map<String, DocCollection> collectionStates = collectionsStatesRef.get();
+    if (collectionStates != null) {
+      return collectionStates;
+    }
+    lock.lock();
+    collectionsStatesRef.set(null);
+    clusterStateVersion++;
+    saveClusterState.set(true);
+    try {
+      Map<String, Map<String, Map<String, Replica>>> collMap = new HashMap<>();
+      nodeReplicaMap.forEach((n, replicas) -> {
+        replicas.forEach(ri -> {
+          Map<String, Object> props;
+          synchronized (ri) {
+            props = new HashMap<>(ri.getVariables());
+          }
+          props.put(ZkStateReader.NODE_NAME_PROP, n);
+          props.put(ZkStateReader.CORE_NAME_PROP, ri.getCore());
+          props.put(ZkStateReader.REPLICA_TYPE, ri.getType().toString());
+          props.put(ZkStateReader.STATE_PROP, ri.getState().toString());
+          Replica r = new Replica(ri.getName(), props);
+          collMap.computeIfAbsent(ri.getCollection(), c -> new HashMap<>())
+              .computeIfAbsent(ri.getShard(), s -> new HashMap<>())
+              .put(ri.getName(), r);
+        });
+      });
+
+      // add empty slices
+      sliceProperties.forEach((c, perSliceProps) -> {
+        perSliceProps.forEach((slice, props) -> {
+          collMap.computeIfAbsent(c, co -> new ConcurrentHashMap<>()).computeIfAbsent(slice, s -> new ConcurrentHashMap<>());
+        });
+      });
+      // add empty collections
+      collProperties.keySet().forEach(c -> {
+        collMap.computeIfAbsent(c, co -> new ConcurrentHashMap<>());
+      });
+
+      Map<String, DocCollection> res = new HashMap<>();
+      collMap.forEach((coll, shards) -> {
+        Map<String, Slice> slices = new HashMap<>();
+        shards.forEach((s, replicas) -> {
+          Map<String, Object> sliceProps = sliceProperties.computeIfAbsent(coll, c -> new ConcurrentHashMap<>()).computeIfAbsent(s, sl -> new ConcurrentHashMap<>());
+          Slice slice = new Slice(s, replicas, sliceProps);
+          slices.put(s, slice);
+        });
+        Map<String, Object> collProps = collProperties.computeIfAbsent(coll, c -> new ConcurrentHashMap<>());
+        DocCollection dc = new DocCollection(coll, slices, collProps, DocRouter.DEFAULT, clusterStateVersion, ZkStateReader.CLUSTER_STATE);
+        res.put(coll, dc);
+      });
+      collectionsStatesRef.set(res);
+      return res;
+    } finally {
+      lock.unlock();
+    }
+  }
+

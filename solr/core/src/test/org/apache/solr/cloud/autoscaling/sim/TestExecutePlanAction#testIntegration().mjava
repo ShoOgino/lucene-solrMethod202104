@@ -1,0 +1,50 @@
+  @Test
+  public void testIntegration() throws Exception  {
+    SolrClient solrClient = cluster.simGetSolrClient();
+
+    String setTriggerCommand = "{" +
+        "'set-trigger' : {" +
+        "'name' : 'node_lost_trigger'," +
+        "'event' : 'nodeLost'," +
+        "'waitFor' : '1s'," +
+        "'enabled' : true," +
+        "'actions' : [{'name':'compute_plan', 'class' : 'solr.ComputePlanAction'}," +
+        "{'name':'execute_plan','class':'solr.ExecutePlanAction'}]" +
+        "}}";
+    SolrRequest req = AutoScalingHandlerTest.createAutoScalingRequest(SolrRequest.METHOD.POST, setTriggerCommand);
+    NamedList<Object> response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    String collectionName = "testIntegration";
+    CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(collectionName,
+        "conf", 1, 2);
+    create.setMaxShardsPerNode(1);
+    create.process(solrClient);
+
+    waitForState("Timed out waiting for replicas of new collection to be active",
+        collectionName, clusterShape(1, 2));
+
+    String sourceNodeName = cluster.getSimClusterStateProvider().simGetRandomNode(random());
+    ClusterState clusterState = cluster.getClusterStateProvider().getClusterState();
+    DocCollection docCollection = clusterState.getCollection(collectionName);
+    List<Replica> replicas = docCollection.getReplicas(sourceNodeName);
+    assertNotNull(replicas);
+    assertFalse(replicas.isEmpty());
+
+    List<String> otherNodes = cluster.getClusterStateProvider().getLiveNodes().stream()
+        .filter(node -> !node.equals(sourceNodeName)).collect(Collectors.toList());
+    assertFalse(otherNodes.isEmpty());
+    String survivor = otherNodes.get(0);
+
+    cluster.simRemoveNode(sourceNodeName, false);
+
+    waitForState("Timed out waiting for replicas of collection to be 2 again",
+        collectionName, clusterShape(1, 2));
+
+    clusterState = cluster.getClusterStateProvider().getClusterState();
+    docCollection = clusterState.getCollection(collectionName);
+    List<Replica> replicasOnSurvivor = docCollection.getReplicas(survivor);
+    assertNotNull(replicasOnSurvivor);
+    assertEquals(2, replicasOnSurvivor.size());
+  }
+

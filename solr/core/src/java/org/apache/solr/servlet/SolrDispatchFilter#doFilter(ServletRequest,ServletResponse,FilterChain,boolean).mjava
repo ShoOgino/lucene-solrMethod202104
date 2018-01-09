@@ -1,5 +1,7 @@
-  public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain, boolean retry) throws IOException, ServletException {
-    if (!(request instanceof HttpServletRequest)) return;
+  public void doFilter(ServletRequest _request, ServletResponse _response, FilterChain chain, boolean retry) throws IOException, ServletException {
+    if (!(_request instanceof HttpServletRequest)) return;
+    HttpServletRequest request = (HttpServletRequest)_request;
+    HttpServletResponse response = (HttpServletResponse)_response;
     
     try {
 
@@ -15,28 +17,24 @@
         }
       }
 
-      AtomicReference<ServletRequest> wrappedRequest = new AtomicReference<>();
-      if (!authenticateRequest(request, response, wrappedRequest)) { // the response and status code have already been
-                                                                     // sent
+      AtomicReference<HttpServletRequest> wrappedRequest = new AtomicReference<>();
+      if (!authenticateRequest(request, response, wrappedRequest)) { // the response and status code have already been sent
         return;
       }
       if (wrappedRequest.get() != null) {
         request = wrappedRequest.get();
       }
 
-      request = closeShield(request, retry);
-      response = closeShield(response, retry);
-      
       if (cores.getAuthenticationPlugin() != null) {
-        log.debug("User principal: {}", ((HttpServletRequest) request).getUserPrincipal());
+        log.debug("User principal: {}", request.getUserPrincipal());
       }
 
       // No need to even create the HttpSolrCall object if this path is excluded.
       if (excludePatterns != null) {
-        String requestPath = ((HttpServletRequest) request).getServletPath();
-        String extraPath = ((HttpServletRequest) request).getPathInfo();
-        if (extraPath != null) { // In embedded mode, servlet path is empty - include all post-context path here for
-                                 // testing
+        String requestPath = request.getServletPath();
+        String extraPath = request.getPathInfo();
+        if (extraPath != null) {
+          // In embedded mode, servlet path is empty - include all post-context path here for testing
           requestPath += extraPath;
         }
         for (Pattern p : excludePatterns) {
@@ -48,7 +46,7 @@
         }
       }
 
-      HttpSolrCall call = getHttpSolrCall((HttpServletRequest) request, (HttpServletResponse) response, retry);
+      HttpSolrCall call = getHttpSolrCall(closeShield(request, retry), closeShield(response, retry), retry);
       ExecutorUtil.setServerThreadFlag(Boolean.TRUE);
       try {
         Action result = call.call();
@@ -57,7 +55,7 @@
             chain.doFilter(request, response);
             break;
           case RETRY:
-            doFilter(request, response, chain, true);
+            doFilter(request, response, chain, true); // RECURSION
             break;
           case FORWARD:
             request.getRequestDispatcher(call.getPath()).forward(request, response);
@@ -68,7 +66,7 @@
         ExecutorUtil.setServerThreadFlag(null);
       }
     } finally {
-      consumeInputFully((HttpServletRequest) request);
+      consumeInputFully(request);
     }
   }
 

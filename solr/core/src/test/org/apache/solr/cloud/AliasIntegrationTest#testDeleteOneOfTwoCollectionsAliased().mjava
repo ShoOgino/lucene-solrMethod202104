@@ -1,0 +1,66 @@
+  // While writing the above test I wondered what happens when an alias points to two collections and one of them
+  // is deleted.
+  @Test
+  public void testDeleteOneOfTwoCollectionsAliased() throws Exception {
+    CollectionAdminRequest.createCollection("collection_one", "conf", 2, 1).process(cluster.getSolrClient());
+    CollectionAdminRequest.createCollection("collection_two", "conf", 1, 1).process(cluster.getSolrClient());
+    waitForState("Expected collection_one to be created with 2 shards and 1 replica", "collection_one", clusterShape(2, 1));
+    waitForState("Expected collection_two to be created with 1 shard and 1 replica", "collection_two", clusterShape(1, 1));
+
+    new UpdateRequest()
+        .add("id", "1", "a_t", "humpty dumpy sat on a wall")
+        .commit(cluster.getSolrClient(), "collection_one");
+
+
+    new UpdateRequest()
+        .add("id", "10", "a_t", "humpty dumpy sat on a high wall")
+        .add("id", "11", "a_t", "humpty dumpy sat on a low wall")
+        .commit(cluster.getSolrClient(), "collection_two");
+
+    // Create an alias pointing to both
+    CollectionAdminRequest.createAlias("collection_alias_pair", "collection_one,collection_two").process(cluster.getSolrClient());
+
+    QueryResponse res = cluster.getSolrClient().query("collection_alias_pair", new SolrQuery("*:*"));
+    assertEquals(3, res.getResults().getNumFound());
+
+    // Now delete one of the collections, should fail since an alias points to it.
+    RequestStatusState delResp = CollectionAdminRequest.deleteCollection("collection_one").processAndWait(cluster.getSolrClient(), 60);
+
+    assertEquals("Should have failed to delete collection: ", delResp, RequestStatusState.FAILED);
+
+    // Now redefine the alias to only point to colletion two
+    CollectionAdminRequest.createAlias("collection_alias_pair", "collection_two").process(cluster.getSolrClient());
+
+    //Delete collection_one.
+    delResp = CollectionAdminRequest.deleteCollection("collection_one").processAndWait(cluster.getSolrClient(), 60);
+
+    assertEquals("Should not have failed to delete collection, it was removed from the alias: ", delResp, RequestStatusState.COMPLETED);
+
+    // Should only see two docs now in second collection
+    res = cluster.getSolrClient().query("collection_alias_pair", new SolrQuery("*:*"));
+    assertEquals(2, res.getResults().getNumFound());
+
+    // We shouldn't be able to ping the deleted collection directly as
+    // was deleted (and, assuming that it only points to collection_old).
+    try {
+      cluster.getSolrClient().query("collection_one", new SolrQuery("*:*"));
+    } catch (SolrServerException se) {
+      assertTrue(se.getMessage().contains("No live SolrServers"));
+    }
+
+    // Clean up
+    CollectionAdminRequest.deleteAlias("collection_alias_pair").processAndWait(cluster.getSolrClient(), 60);
+    CollectionAdminRequest.deleteCollection("collection_two").processAndWait(cluster.getSolrClient(), 60);
+    // collection_one already deleted
+
+    assertNull("collection_alias_pair should be gone",
+        cluster.getSolrClient().getZkStateReader().getAliases().getCollectionAliasMap().get("collection_alias_pair"));
+
+    assertFalse("collection_one should be gone",
+        cluster.getSolrClient().getZkStateReader().getClusterState().hasCollection("collection_one"));
+
+    assertFalse("collection_two should be gone",
+        cluster.getSolrClient().getZkStateReader().getClusterState().hasCollection("collection_two"));
+
+  }
+

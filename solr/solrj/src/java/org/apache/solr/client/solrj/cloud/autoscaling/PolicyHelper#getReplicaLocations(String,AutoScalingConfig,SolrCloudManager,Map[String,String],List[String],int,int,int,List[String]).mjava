@@ -48,6 +48,30 @@
 
       }
       session = sessionWrapper.session;
+      Map<String, Double> diskSpaceReqd = new HashMap<>();
+      try {
+        DocCollection coll = cloudManager.getClusterStateProvider().getCollection(collName);
+        if (coll != null) {
+          for (String shardName : shardNames) {
+            Replica ldr = coll.getLeader(shardName);
+            if (ldr != null) {
+              Map<String, Map<String, List<ReplicaInfo>>> details = cloudManager.getNodeStateProvider().getReplicaInfo(ldr.getNodeName(),
+                  Collections.singleton(FREEDISK.perReplicaValue));
+              ReplicaInfo replicaInfo = details.getOrDefault(collName, emptyMap()).getOrDefault(shardName, singletonList(null)).get(0);
+              if (replicaInfo != null) {
+                Object idxSz = replicaInfo.getVariables().get(FREEDISK.perReplicaValue);
+                if (idxSz != null) {
+                  diskSpaceReqd.put(shardName, 1.5 * (Double) Suggestion.ConditionType.FREEDISK.validate(null, idxSz, false));
+                }
+              }
+            }
+
+          }
+        }
+      } catch (IOException e) {
+        /*ignore*/
+      }
+
 
       Map<Replica.Type, Integer> typeVsCount = new EnumMap<>(Replica.Type.class);
       typeVsCount.put(Replica.Type.NRT, nrtReplicas);
@@ -64,6 +88,9 @@
               for (String nodeName : nodesList) {
                 suggester = suggester.hint(Hint.TARGET_NODE, nodeName);
               }
+            }
+            if (diskSpaceReqd.get(shardName) != null) {
+              suggester.hint(Hint.MINFREEDISK, diskSpaceReqd.get(shardName));
             }
             SolrRequest op = suggester.getSuggestion();
             if (op == null) {

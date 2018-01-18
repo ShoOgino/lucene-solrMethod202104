@@ -60,7 +60,8 @@
         // we do not want to lose this event just because the trigger was closed, perhaps a replacement will need it
         return false;
       }
-      // reject events during cooldown period
+      // even though we pause all triggers during action execution there is a possibility that a trigger was already
+      // running at the time and would have already created an event so we reject such events during cooldown period
       if (cooldownStart.get() + cooldownPeriod.get() > cloudManager.getTimeSource().getTime()) {
         log.debug("-------- Cooldown period - rejecting event: " + event);
         event.getProperties().put(TriggerEvent.COOLDOWN, true);
@@ -70,6 +71,9 @@
         log.debug("++++++++ Cooldown inactive - processing event: " + event);
       }
       if (hasPendingActions.compareAndSet(false, true)) {
+        // pause all triggers while we execute actions so triggers do not operate on a cluster in transition
+        pauseTriggers();
+
         final boolean enqueued;
         if (replaying) {
           enqueued = false;
@@ -81,7 +85,7 @@
         List<TriggerAction> actions = source.getActions();
         if (actions != null) {
           if (actionExecutor.isShutdown()) {
-            String msg = String.format(Locale.ROOT, "Ignoring autoscaling event %s because the executor has already been closed", event.toString(), source);
+            String msg = String.format(Locale.ROOT, "Ignoring autoscaling event %s from trigger %s because the executor has already been closed", event.toString(), source);
             listeners.fireListeners(event.getSource(), event, TriggerEventProcessorStage.ABORTED, msg);
             log.warn(msg);
             // we do not want to lose this event just because the trigger was closed, perhaps a replacement will need it
@@ -121,6 +125,8 @@
             } finally {
               cooldownStart.set(cloudManager.getTimeSource().getTime());
               hasPendingActions.set(false);
+              // resume triggers after cool down period
+              resumeTriggers(cloudManager.getTimeSource().convertDelay(TimeUnit.NANOSECONDS, cooldownPeriod.get(), TimeUnit.MILLISECONDS));
             }
             log.debug("-- processing took {} ms for event id={}",
                 TimeUnit.NANOSECONDS.toMillis(cloudManager.getTimeSource().getTime() - eventProcessingStart), event.id);
@@ -135,6 +141,8 @@
           }
           listeners.fireListeners(event.getSource(), event, TriggerEventProcessorStage.SUCCEEDED);
           hasPendingActions.set(false);
+          // resume triggers now
+          resumeTriggers(0);
         }
         return true;
       } else {

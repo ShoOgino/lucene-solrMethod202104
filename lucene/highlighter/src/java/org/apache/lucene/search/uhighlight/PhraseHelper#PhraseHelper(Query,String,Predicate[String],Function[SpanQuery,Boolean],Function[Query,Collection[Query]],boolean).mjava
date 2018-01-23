@@ -15,12 +15,26 @@
     this.fieldName = field;
     this.fieldMatcher = fieldMatcher;
     // filter terms to those we want
-    positionInsensitiveTerms = new FieldFilteringTermSet();
+    positionInsensitiveTerms = new HashSet<>();
     spanQueries = new HashSet<>();
 
     // TODO Have toSpanQuery(query) Function as an extension point for those with custom Query impls
 
     boolean[] mustRewriteHolder = {false}; // boolean wrapped in 1-ary array so it's mutable from inner class
+
+    // When we call Weight.extractTerms, we do it on clauses that are NOT position sensitive.
+    // We only want the to track a Set of bytes for the Term, not Term class with field part.
+    Set<Term> extractPosInsensitiveTermsTarget = new TreeSet<Term>() {
+      @Override
+      public boolean add(Term term) {
+        // don't call super.add; we don't actually use the superclass
+        if (fieldMatcher.test(term.field())) {
+          return positionInsensitiveTerms.add(term.bytes());
+        } else {
+          return false;
+        }
+      }
+    };
 
     // For TermQueries or other position insensitive queries, collect the Terms.
     // For other Query types, WSTE will convert to an equivalent SpanQuery.  NOT extracting position spans here.
@@ -56,13 +70,15 @@
         return true; //TODO set to false and provide a hook to customize certain queries.
       }
 
+      // called on Query types that are NOT position sensitive, e.g. TermQuery
       @Override
       protected void extractWeightedTerms(Map<String, WeightedSpanTerm> terms, Query query, float boost)
           throws IOException {
         query.createWeight(UnifiedHighlighter.EMPTY_INDEXSEARCHER, ScoreMode.COMPLETE_NO_SCORES, boost)
-            .extractTerms(positionInsensitiveTerms);
+            .extractTerms(extractPosInsensitiveTermsTarget);
       }
 
+      // called on SpanQueries. Some other position-sensitive queries like PhraseQuery are converted beforehand
       @Override
       protected void extractWeightedSpanTerms(Map<String, WeightedSpanTerm> terms, SpanQuery spanQuery,
                                               float boost) throws IOException {
@@ -75,7 +91,6 @@
           }
         }
 
-        // TODO allow users to override the answer to mustRewriteQuery
         boolean mustRewriteQuery = mustRewriteQuery(spanQuery);
         if (ignoreQueriesNeedingRewrite && mustRewriteQuery) {
           return;// ignore this query

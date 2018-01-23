@@ -1,11 +1,59 @@
   @Override
   public void processAdd(AddUpdateCommand cmd) throws IOException {
     final Object routeValue = cmd.getSolrInputDocument().getFieldValue(routeField);
-    final String targetCollection = findTargetCollectionGivenRouteKey(routeValue);
-    if (targetCollection == null) {
-      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
-          "Doc " + cmd.getPrintableId() + " couldn't be routed with " + routeField + "=" + routeValue);
-    }
+    final Instant routeTimestamp = parseRouteKey(routeValue);
+
+    updateParsedCollectionAliases();
+    String targetCollection;
+    do {
+      targetCollection = findTargetCollectionGivenTimestamp(routeTimestamp);
+
+      if (targetCollection == null) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+            "Doc " + cmd.getPrintableId() + " couldn't be routed with " + routeField + "=" + routeTimestamp);
+      }
+
+      // Note: the following rule is tempting but not necessary and is not compatible with
+      // only using this URP when the alias distrib phase is NONE; otherwise a doc may be routed to from a non-recent
+      // collection to the most recent only to then go there directly instead of realizing a new collection is needed.
+      //      // If it's going to some other collection (not "this") then break to just send it there
+      //      if (!thisCollection.equals(targetCollection)) {
+      //        break;
+      //      }
+      // Also tempting but not compatible:  check that we're the leader, if not then break
+
+      // If the doc goes to the most recent collection then do some checks below, otherwise break the loop.
+      final Instant mostRecentCollTimestamp = parsedCollectionsDesc.get(0).getKey();
+      final String mostRecentCollName = parsedCollectionsDesc.get(0).getValue();
+      if (!mostRecentCollName.equals(targetCollection)) {
+        break;
+      }
+
+      // Check the doc isn't too far in the future
+      final Instant maxFutureTime = Instant.now().plusMillis(maxFutureMs);
+      if (routeTimestamp.isAfter(maxFutureTime)) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+            "The document's time routed key of " + routeValue + " is too far in the future given " +
+                ROUTER_MAX_FUTURE_TIME_METADATA + "=" + maxFutureMs);
+      }
+
+      // Create a new collection?
+      final Instant nextCollTimestamp = computeNextCollTimestamp(mostRecentCollTimestamp, intervalDateMath, intervalTimeZone);
+      if (routeTimestamp.isBefore(nextCollTimestamp)) {
+        break; // thus we don't need another collection
+      }
+
+      createCollectionAfter(mostRecentCollName); // *should* throw if fails for some reason but...
+      final boolean updated = updateParsedCollectionAliases();
+      if (!updated) { // thus we didn't make progress...
+        // this is not expected, even in known failure cases, but we check just in case
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
+            "We need to create a new time routed collection but for unknown reasons were unable to do so.");
+      }
+      // then retry the loop ...
+    } while(true);
+    assert targetCollection != null;
+
     if (thisCollection.equals(targetCollection)) {
       // pass on through; we've reached the right collection
       super.processAdd(cmd);

@@ -1,6 +1,5 @@
     @Override
     public Scorer scorer(LeafReaderContext context) throws IOException {
-      Similarity.SimScorer simScorer = null;
       IndexOptions indexOptions = IndexOptions.NONE;
       if (terms.length > 0) {
         FieldInfo info = context.reader()
@@ -12,21 +11,17 @@
       }
       // we use termscorers + disjunction as an impl detail
       List<Scorer> subScorers = new ArrayList<>();
-      long maxFreq = 0;
+      long totalMaxFreq = 0;
       for (int i = 0; i < terms.length; i++) {
-        TermState state = termContexts[i].get(context.ord);
+        TermState state = termStates[i].get(context);
         if (state != null) {
           TermsEnum termsEnum = context.reader().terms(terms[i].field()).iterator();
           termsEnum.seekExact(terms[i].bytes(), state);
-
-          maxFreq += getMaxFreq(indexOptions, termsEnum.totalTermFreq(), termsEnum.docFreq());
-
+          long termMaxFreq = getMaxFreq(indexOptions, termsEnum.totalTermFreq(), termsEnum.docFreq());
+          totalMaxFreq += termMaxFreq;
           PostingsEnum postings = termsEnum.postings(null, PostingsEnum.FREQS);
-          // lazy init sim, in case no terms exist
-          if (simScorer == null) {
-            simScorer = similarity.simScorer(simWeight, context);
-          }
-          subScorers.add(new TermScorer(this, postings, simScorer, Float.POSITIVE_INFINITY));
+          LeafSimScorer simScorer = new LeafSimScorer(simWeight, context.reader(), true, termMaxFreq);
+          subScorers.add(new TermScorer(this, postings, simScorer));
         }
       }
       if (subScorers.isEmpty()) {
@@ -35,7 +30,8 @@
         // we must optimize this case (term not in segment), disjunctionscorer requires >= 2 subs
         return subScorers.get(0);
       } else {
-        return new SynonymScorer(simScorer, this, subScorers, maxFreq);
+        LeafSimScorer simScorer = new LeafSimScorer(simWeight, context.reader(), true, totalMaxFreq);
+        return new SynonymScorer(simScorer, this, subScorers);
       }
     }
 

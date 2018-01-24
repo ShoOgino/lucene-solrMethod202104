@@ -10,51 +10,21 @@
             .hint(Suggester.Hint.SRC_NODE, event.getProperty(TriggerEvent.NODE_NAMES));
         break;
       case SEARCHRATE:
-        Map<String, Map<String, Double>> hotShards = (Map<String, Map<String, Double>>)event.getProperty(AutoScalingParams.SHARD);
-        Map<String, Double> hotCollections = (Map<String, Double>)event.getProperty(AutoScalingParams.COLLECTION);
-        List<ReplicaInfo> hotReplicas = (List<ReplicaInfo>)event.getProperty(AutoScalingParams.REPLICA);
-        Map<String, Double> hotNodes = (Map<String, Double>)event.getProperty(AutoScalingParams.NODE);
-
-        if (hotShards.isEmpty() && hotCollections.isEmpty() && hotReplicas.isEmpty()) {
-          // node -> MOVEREPLICA
-          if (hotNodes.isEmpty()) {
-            log.warn("Neither hot replicas / collection nor nodes are reported in event: " + event);
-            return NoneSuggester.INSTANCE;
-          }
-          suggester = session.getSuggester(CollectionParams.CollectionAction.MOVEREPLICA);
-          for (String node : hotNodes.keySet()) {
-            suggester = suggester.hint(Suggester.Hint.SRC_NODE, node);
-          }
-        } else {
-          // collection || shard || replica -> ADDREPLICA
-          suggester = session.getSuggester(CollectionParams.CollectionAction.ADDREPLICA);
-          Set<Pair> collectionShards = new HashSet<>();
-          hotShards.forEach((coll, shards) -> shards.forEach((s, r) -> collectionShards.add(new Pair(coll, s))));
-          for (Pair<String, String> colShard : collectionShards) {
-            suggester = suggester.hint(Suggester.Hint.COLL_SHARD, colShard);
-          }
-        }
-        break;
       case METRIC:
-        Map<String, Number> sourceNodes = (Map<String, Number>) event.getProperty(AutoScalingParams.NODE);
-        String collection = (String) event.getProperty(AutoScalingParams.COLLECTION);
-        String shard = (String) event.getProperty(AutoScalingParams.SHARD);
-        String preferredOp = (String) event.getProperty(PREFERRED_OP);
-        if (sourceNodes.isEmpty()) {
-          log.warn("No nodes reported in event: " + event);
-          return NoneSuggester.INSTANCE;
+        List<TriggerEvent.Op> ops = (List<TriggerEvent.Op>)event.getProperty(TriggerEvent.REQUESTED_OPS, Collections.emptyList());
+        int start = (Integer)event.getProperty(START, 0);
+        if (ops.isEmpty() || start >= ops.size()) {
+          return NoneSuggester.get(session);
         }
-        CollectionParams.CollectionAction action = CollectionParams.CollectionAction.get(preferredOp == null ? CollectionParams.CollectionAction.MOVEREPLICA.toLower() : preferredOp);
-        suggester = session.getSuggester(action);
-        for (String node : sourceNodes.keySet()) {
-          suggester = suggester.hint(Suggester.Hint.SRC_NODE, node);
+        TriggerEvent.Op op = ops.get(start);
+        suggester = session.getSuggester(op.getAction());
+        for (Map.Entry<Suggester.Hint, Object> e : op.getHints().entrySet()) {
+          suggester = suggester.hint(e.getKey(), e.getValue());
         }
-        if (collection != null) {
-          if (shard == null) {
-            suggester = suggester.hint(Suggester.Hint.COLL, collection);
-          } else {
-            suggester = suggester.hint(Suggester.Hint.COLL_SHARD, new Pair(collection, shard));
-          }
+        if (++start >= ops.size()) {
+          event.getProperties().remove(START);
+        } else {
+          event.getProperties().put(START, start);
         }
         break;
       default:

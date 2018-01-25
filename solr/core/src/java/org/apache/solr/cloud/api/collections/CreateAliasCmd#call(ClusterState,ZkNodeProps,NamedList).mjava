@@ -1,14 +1,84 @@
   @Override
   public void call(ClusterState state, ZkNodeProps message, NamedList results)
       throws Exception {
-    final String aliasName = message.getStr(NAME);
-    final List<String> canonicalCollectionList = parseCollectionsParameter(message.get("collections"));
-    final String canonicalCollectionsString = StrUtils.join(canonicalCollectionList, ',');
-
+    final String aliasName = message.getStr(CommonParams.NAME);
     ZkStateReader zkStateReader = ocmh.zkStateReader;
-    validateAllCollectionsExistAndNoDups(canonicalCollectionList, zkStateReader);
+    ZkStateReader.AliasesManager holder = zkStateReader.aliasesHolder;
 
-    zkStateReader.aliasesHolder.applyModificationAndExportToZk(aliases -> aliases.cloneWithCollectionAlias(aliasName, canonicalCollectionsString));
+    //TODO refactor callCreatePlainAlias
+    if (!anyRoutingParams(message)) {
+
+      final List<String> canonicalCollectionList = parseCollectionsParameter(message.get("collections"));
+      final String canonicalCollectionsString = StrUtils.join(canonicalCollectionList, ',');
+      validateAllCollectionsExistAndNoDups(canonicalCollectionList, zkStateReader);
+      holder.applyModificationAndExportToZk(aliases -> aliases.cloneWithCollectionAlias(aliasName, canonicalCollectionsString));
+
+    } else { //TODO refactor callCreateRoutedAlias
+
+      // Validate we got everything we need
+      if (!message.getProperties().keySet().containsAll(REQUIRED_ROUTER_PARAMS)) {
+        throw new SolrException(BAD_REQUEST, "A routed alias requires these params: " + REQUIRED_ROUTER_PARAMS
+        + " plus some create-collection prefixed ones.");
+      }
+
+      Map<String, String> aliasMetadata = new LinkedHashMap<>();
+      message.getProperties().entrySet().stream()
+          .filter(entry -> PARAM_IS_METADATA.test(entry.getKey()))
+          .forEach(entry -> aliasMetadata.put(entry.getKey(), (String) entry.getValue()));
+
+      //TODO read these from metadata where appropriate. This leads to consistent logic between initial routed alias
+      //  collection creation, and subsequent collections to be created.
+
+      final String routingType = message.getStr(ROUTER_TYPE);
+      final String tz = message.getStr(TZ);
+      final String start = message.getStr(ROUTER_START);
+      final String increment = message.getStr(ROUTER_INCREMENT);
+      final String maxFutureMs = message.getStr(ROUTER_MAX_FUTURE);
+
+      try {
+        if (maxFutureMs != null && 0 > Long.parseLong(maxFutureMs)) {
+          throw new NumberFormatException("Negative value not allowed here");
+        }
+      } catch (NumberFormatException e) {
+        throw new SolrException(BAD_REQUEST, ROUTER_MAX_FUTURE + " must be a valid long integer representing a number " +
+            "of milliseconds greater than or equal to zero");
+      }
+
+      if (!"time".equals(routingType)) {
+        throw new SolrException(BAD_REQUEST, "Only time based routing is supported at this time");
+      }
+
+      // Check for invalid timezone
+      TimeZone zone = TimeZoneUtils.parseTimezone(tz);
+
+      // check that the increment is valid date math
+      try {
+        new DateMathParser(zone).parseMath(increment);
+      } catch (ParseException e) {
+        throw new SolrException(BAD_REQUEST,e.getMessage(),e);
+      }
+
+      Instant startTime = parseStart(start, zone);
+
+      // It's too much work to check the routed field against the schema, there seems to be no good way to get
+      // a copy of the schema aside from loading it directly from zookeeper based on the config name, but that
+      // also requires I load solrconfig.xml to check what the value for managedSchemaResourceName is too, (or
+      // discover that managed schema is not turned on and read schema.xml instead... and check for dynamic
+      // field patterns too. As much as it would be nice to validate all inputs it's not worth the effort.
+
+      String initialCollectionName = TimeRoutedAliasUpdateProcessor
+          .formatCollectionNameFromInstant(aliasName, startTime);
+
+      // Create the collection
+      NamedList createResults = new NamedList();
+      RoutedAliasCreateCollectionCmd.createCollectionAndWait(state, createResults, aliasName, aliasMetadata, initialCollectionName, ocmh);
+      validateAllCollectionsExistAndNoDups(Collections.singletonList(initialCollectionName), zkStateReader);
+
+      // Create/update the alias
+      holder.applyModificationAndExportToZk(aliases -> aliases
+          .cloneWithCollectionAlias(aliasName, initialCollectionName)
+          .cloneWithCollectionAliasMetadata(aliasName, aliasMetadata));
+    }
 
     // Sleep a bit to allow ZooKeeper state propagation.
     //

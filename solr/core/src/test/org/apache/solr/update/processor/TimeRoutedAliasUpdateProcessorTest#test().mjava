@@ -15,7 +15,6 @@
     // manipulate the config...
 
         String conf = "{" +
-            "  'set-user-property' : {'timePartitionAliasName':'" + alias + "'}," + // no data driven
             "  'set-user-property' : {'update.autoCreateFields':false}," + // no data driven
             "  'add-updateprocessor' : {" +
             "    'name':'tolerant', 'class':'solr.TolerantUpdateProcessorFactory'" +
@@ -43,11 +42,12 @@
             .contains(configName)
     );
 
-    // start with one collection and an alias for it
+    // Start with one collection manually created (and use higher numShards & replicas than we'll use for others)
+    //  This tests we may pre-create the collection and it's acceptable.
     final String col23rd = alias + "_2017-10-23";
     CollectionAdminRequest.createCollection(col23rd, configName, 2, 2)
         .setMaxShardsPerNode(2)
-        .withProperty(TimeRoutedAliasUpdateProcessor.TIME_PARTITION_ALIAS_NAME_CORE_PROP, alias)
+        .withProperty(TimeRoutedAlias.ROUTED_ALIAS_NAME_CORE_PROP, alias)
         .process(solrClient);
 
     List<String> retrievedConfigSetNames = new ConfigSetAdminRequest.List().process(solrClient).getConfigSets();
@@ -56,16 +56,10 @@
         expectedConfigSetNames.size() == retrievedConfigSetNames.size());
     assertTrue("ConfigNames should be :" + expectedConfigSetNames, expectedConfigSetNames.containsAll(retrievedConfigSetNames) && retrievedConfigSetNames.containsAll(expectedConfigSetNames));
 
-    CollectionAdminRequest.createAlias(alias, col23rd).process(solrClient);
-    //TODO use SOLR-11617 client API to set alias metadata
-    final ZkStateReader zkStateReader = cluster.getSolrClient().getZkStateReader();
-
-    zkStateReader.aliasesHolder.applyModificationAndExportToZk(a ->
-        a.cloneWithCollectionAliasMetadata(alias, TimeRoutedAliasUpdateProcessor.ROUTER_FIELD_METADATA, timeField)
-        .cloneWithCollectionAliasMetadata(alias, "create-collection.collection.configName", configName)
-        .cloneWithCollectionAliasMetadata(alias, "create-collection.numShards", "1")
-        .cloneWithCollectionAliasMetadata(alias, "create-collection.replicationFactor", "1")
-        .cloneWithCollectionAliasMetadata(alias, "router.interval", "+1DAY"));
+    CollectionAdminRequest.createTimeRoutedAlias(alias, "2017-10-23T00:00:00Z", "+1DAY", timeField,
+        CollectionAdminRequest.createCollection("_unused_", configName, 1, 1)
+            .setMaxShardsPerNode(2))
+        .process(solrClient);
 
     // now we index a document
     assertUpdateResponse(solrClient.add(alias, newDoc(Instant.parse("2017-10-23T00:00:00Z"))));
@@ -79,12 +73,12 @@
     // a document which is too far into the future
     testFailedDocument(Instant.now().plus(30, ChronoUnit.MINUTES), "too far in the future");
 
-    // add another collection, add to alias  (soonest comes first)
+    // add another collection with the precise name we expect, but don't add to alias explicitly.  When we add a document
+    //   destined for this collection, Solr will see it already exists and add it to the alias.
     final String col24th = alias + "_2017-10-24";
     CollectionAdminRequest.createCollection(col24th, configName,  1, 1) // more shards and replicas now
-        .withProperty("timePartitionAliasName", alias)
+        .withProperty(TimeRoutedAlias.ROUTED_ALIAS_NAME_CORE_PROP, alias)
         .process(solrClient);
-    CollectionAdminRequest.createAlias(alias, col24th + "," + col23rd).process(solrClient);
 
     // index 3 documents in a random fashion
     addDocsAndCommit(

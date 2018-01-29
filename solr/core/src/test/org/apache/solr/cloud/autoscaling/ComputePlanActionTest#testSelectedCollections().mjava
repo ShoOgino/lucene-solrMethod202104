@@ -1,0 +1,82 @@
+  @Test
+  public void testSelectedCollections() throws Exception {
+    AssertingTriggerAction.expectedNode = null;
+
+    // start 3 more nodes
+    cluster.startJettySolrRunner();
+    cluster.startJettySolrRunner();
+    cluster.startJettySolrRunner();
+
+    cluster.waitForAllNodes(30);
+
+    CloudSolrClient solrClient = cluster.getSolrClient();
+    String setTriggerCommand = "{" +
+        "'set-trigger' : {" +
+        "'name' : 'node_lost_trigger'," +
+        "'event' : 'nodeLost'," +
+        "'waitFor' : '1s'," +
+        "'enabled' : true," +
+        "'actions' : [{'name':'compute_plan', 'class' : 'solr.ComputePlanAction', 'collections' : 'testSelected1,testSelected2'}," +
+        "{'name':'test','class':'" + ComputePlanActionTest.AssertingTriggerAction.class.getName() + "'}]" +
+        "}}";
+    SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, setTriggerCommand);
+    NamedList<Object> response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection("testSelected1",
+        "conf",2, 2);
+    create.process(solrClient);
+
+    create = CollectionAdminRequest.createCollection("testSelected2",
+        "conf",2, 2);
+    create.process(solrClient);
+
+    create = CollectionAdminRequest.createCollection("testSelected3",
+        "conf",2, 2);
+    create.process(solrClient);
+
+    waitForState("Timed out waiting for replicas of new collection to be active",
+        "testSelected1", clusterShape(2, 2));
+
+    waitForState("Timed out waiting for replicas of new collection to be active",
+        "testSelected2", clusterShape(2, 2));
+
+    waitForState("Timed out waiting for replicas of new collection to be active",
+        "testSelected3", clusterShape(2, 2));
+
+    // find a node that has replicas from all collections
+    SolrCloudManager cloudManager = cluster.getJettySolrRunner(0).getCoreContainer().getZkController().getSolrCloudManager();
+    NodeStateProvider stateProvider = cloudManager.getNodeStateProvider();
+    List<String> nodes = new ArrayList<>();
+    cloudManager.getClusterStateProvider().getLiveNodes().forEach(n -> {
+      Map<String, Map<String, List<ReplicaInfo>>> map = stateProvider.getReplicaInfo(n, ImplicitSnitch.tags);
+      if (map.containsKey("testSelected3") && map.containsKey("testSelected2") && map.containsKey("testSelected1")) {
+        nodes.add(n);
+      }
+    });
+    assertTrue(nodes.size() > 0);
+    // kill first such node
+    String node = nodes.get(0);
+    for (int i = 0; i < cluster.getJettySolrRunners().size(); i++) {
+      if (cluster.getJettySolrRunner(i).getNodeName().equals(node)) {
+        cluster.stopJettySolrRunner(i);
+        break;
+      }
+    }
+    assertTrue("Trigger was not fired even after 5 seconds", triggerFiredLatch.await(5, TimeUnit.SECONDS));
+    assertTrue(fired.get());
+    Map context = actionContextPropsRef.get();
+    assertNotNull(context);
+    List<SolrRequest> operations = (List<SolrRequest>) context.get("operations");
+    assertNotNull("The operations computed by ComputePlanAction should not be null" + getNodeStateProviderState() + context, operations);
+    assertEquals("ComputePlanAction should have computed exactly 2 operations", 2, operations.size());
+    SolrRequest request = operations.get(0);
+    SolrParams params = request.getParams();
+    assertEquals("Expected MOVEREPLICA action after adding node", MOVEREPLICA, CollectionParams.CollectionAction.get(params.get("action")));
+    assertFalse("not expected testSelected3", "testSelected3".equals(params.get("collection")));
+    request = operations.get(1);
+    params = request.getParams();
+    assertEquals("Expected MOVEREPLICA action after adding node", MOVEREPLICA, CollectionParams.CollectionAction.get(params.get("action")));
+    assertFalse("not expected testSelected3", "testSelected3".equals(params.get("collection")));
+  }
+

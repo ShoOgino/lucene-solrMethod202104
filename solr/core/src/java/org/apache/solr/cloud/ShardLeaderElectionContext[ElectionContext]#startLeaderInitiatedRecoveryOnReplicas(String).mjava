@@ -1,3 +1,4 @@
+  @Deprecated
   private void startLeaderInitiatedRecoveryOnReplicas(String coreName) throws Exception {
     try (SolrCore core = cc.getCore(coreName)) {
       CloudDescriptor cloudDesc = core.getCoreDescriptor().getCloudDescriptor();
@@ -7,10 +8,10 @@
 
       if (coll == null || shardId == null) {
         log.error("Cannot start leader-initiated recovery on new leader (core="+
-           coreName+",coreNodeName=" + coreNodeName + ") because collection and/or shard is null!");
+            coreName+",coreNodeName=" + coreNodeName + ") because collection and/or shard is null!");
         return;
       }
-      
+
       String znodePath = zkController.getLeaderInitiatedRecoveryZnodePath(coll, shardId);
       List<String> replicas = null;
       try {
@@ -18,21 +19,28 @@
       } catch (NoNodeException nne) {
         // this can be ignored
       }
-      
+
       if (replicas != null && replicas.size() > 0) {
         for (String replicaCoreNodeName : replicas) {
-          
+
           if (coreNodeName.equals(replicaCoreNodeName))
             continue; // added safe-guard so we don't mark this core as down
-          
+
+          if (zkController.getShardTerms(collection, shardId).registered(replicaCoreNodeName)) {
+            // the replica registered its term so it is running with the new LIR implementation
+            // we can put this replica into recovery by increase our terms
+            zkController.getShardTerms(collection, shardId).ensureTermsIsHigher(coreNodeName, Collections.singleton(replicaCoreNodeName));
+            continue;
+          }
+
           final Replica.State lirState = zkController.getLeaderInitiatedRecoveryState(coll, shardId, replicaCoreNodeName);
           if (lirState == Replica.State.DOWN || lirState == Replica.State.RECOVERY_FAILED) {
             log.info("After core={} coreNodeName={} was elected leader, a replica coreNodeName={} was found in state: "
                 + lirState.toString() + " and needing recovery.", coreName, coreNodeName, replicaCoreNodeName);
-            List<ZkCoreNodeProps> replicaProps =  
+            List<ZkCoreNodeProps> replicaProps =
                 zkController.getZkStateReader().getReplicaProps(collection, shardId, coreNodeName);
-            
-            if (replicaProps != null && replicaProps.size() > 0) {                
+
+            if (replicaProps != null && replicaProps.size() > 0) {
               ZkCoreNodeProps coreNodeProps = null;
               for (ZkCoreNodeProps p : replicaProps) {
                 if (((Replica)p.getNodeProps()).getName().equals(replicaCoreNodeName)) {
@@ -40,14 +48,14 @@
                   break;
                 }
               }
-              
+
               zkController.ensureReplicaInLeaderInitiatedRecovery(cc,
                   collection, shardId, coreNodeProps, core.getCoreDescriptor(),
                   false /* forcePublishState */);
-            }              
+            }
           }
         }
       }
-    } // core gets closed automagically    
+    } // core gets closed automagically
   }
 

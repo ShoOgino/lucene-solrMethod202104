@@ -6,6 +6,7 @@
 
     sendDoc(1, 2);
 
+    JettySolrRunner leaderJetty = getJettyOnPort(getReplicaPort(getShardLeader(testCollectionName, "shard1", 1000)));
     List<Replica> notLeaders =
         ensureAllReplicasAreActive(testCollectionName, "shard1", 1, 3, maxWaitSecsToSeeAllActive);
     assertTrue("Expected 2 non-leader replicas for collection " + testCollectionName
@@ -18,27 +19,21 @@
     // Now introduce a network partition between the leader and 1 replica, so a minRf of 2 is still achieved
     log.info("partitioning replica :  " + notLeaders.get(0));
     SocketProxy proxy0 = getProxyForReplica(notLeaders.get(0));
+    SocketProxy leaderProxy = getProxyForReplica(getShardLeader(testCollectionName, "shard1", 1000));
 
     proxy0.close();
+    // leader still can connect to replica 2, by closing leaderProxy, replica 1 can not do recovery
+    leaderProxy.close();
 
     // indexing during a partition
-    int achievedRf = sendDoc(2, 2);
+    int achievedRf = sendDoc(2, 2, leaderJetty);
     assertEquals("Unexpected achieved replication factor", 2, achievedRf);
-
+    try (ZkShardTerms zkShardTerms = new ZkShardTerms(testCollectionName, "shard1", cloudClient.getZkStateReader().getZkClient())) {
+      assertFalse(zkShardTerms.canBecomeLeader(notLeaders.get(0).getName()));
+    }
     Thread.sleep(sleepMsBeforeHealPartition);
-
-    // Verify that the partitioned replica is DOWN
-    ZkStateReader zkr = cloudClient.getZkStateReader();
-    zkr.forceUpdateCollection(testCollectionName);; // force the state to be fresh
-    ClusterState cs = zkr.getClusterState();
-    Collection<Slice> slices = cs.getCollection(testCollectionName).getActiveSlices();
-    Slice slice = slices.iterator().next();
-    Replica partitionedReplica = slice.getReplica(notLeaders.get(0).getName());
-    assertEquals("The partitioned replica did not get marked down",
-        Replica.State.DOWN.toString(), partitionedReplica.getStr(ZkStateReader.STATE_PROP));
-    log.info("un-partitioning replica :  " + notLeaders.get(0));
-
     proxy0.reopen();
+    leaderProxy.reopen();
 
     notLeaders =
         ensureAllReplicasAreActive(testCollectionName, "shard1", 1, 3, maxWaitSecsToSeeAllActive);
@@ -51,8 +46,10 @@
     proxy0.close();
     SocketProxy proxy1 = getProxyForReplica(notLeaders.get(1));
     proxy1.close();
+    leaderProxy = getProxyForReplica(getShardLeader(testCollectionName, "shard1", 1000));
+    leaderProxy.close();
 
-    achievedRf = sendDoc(3, 2);
+    achievedRf = sendDoc(3, 2, leaderJetty);
     assertEquals("Unexpected achieved replication factor", 1, achievedRf);
 
     Thread.sleep(sleepMsBeforeHealPartition);
@@ -62,6 +59,7 @@
 
     proxy0.reopen();
     proxy1.reopen();
+    leaderProxy.reopen();
 
     notLeaders =
         ensureAllReplicasAreActive(testCollectionName, "shard1", 1, 3, maxWaitSecsToSeeAllActive);

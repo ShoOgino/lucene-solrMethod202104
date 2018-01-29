@@ -1,0 +1,42 @@
+  private final Replica pingLeader(String ourUrl, CoreDescriptor coreDesc, boolean mayPutReplicaAsDown) throws Exception {
+    int numTried = 0;
+    while (true) {
+      CloudDescriptor cloudDesc = coreDesc.getCloudDescriptor();
+      DocCollection docCollection = zkStateReader.getClusterState().getCollection(cloudDesc.getCollectionName());
+      if (mayPutReplicaAsDown && numTried == 1 &&
+          docCollection.getReplica(coreDesc.getCloudDescriptor().getCoreNodeName()).getState() == Replica.State.ACTIVE) {
+        // this operation may take a long time, by putting replica into DOWN state, client won't query this replica
+        zkController.publish(coreDesc, Replica.State.DOWN);
+      }
+      numTried++;
+      final Replica leaderReplica = zkStateReader.getLeaderRetry(
+          cloudDesc.getCollectionName(), cloudDesc.getShardId());
+
+      if (isClosed()) {
+        return leaderReplica;
+      }
+
+      if (leaderReplica.getCoreUrl().equals(ourUrl)) {
+        return leaderReplica;
+      }
+
+      try (HttpSolrClient httpSolrClient = new HttpSolrClient.Builder(leaderReplica.getCoreUrl())
+          .withSocketTimeout(1000)
+          .withConnectionTimeout(1000)
+          .build()) {
+        SolrPingResponse resp = httpSolrClient.ping();
+        return leaderReplica;
+      } catch (IOException e) {
+        LOG.info("Failed to connect leader {} on recovery, try again", leaderReplica.getBaseUrl(), e);
+        Thread.sleep(500);
+      } catch (Exception e) {
+        if (e.getCause() instanceof IOException) {
+          LOG.info("Failed to connect leader {} on recovery, try again", leaderReplica.getBaseUrl(), e);
+          Thread.sleep(500);
+        } else {
+          return leaderReplica;
+        }
+      }
+    }
+  }
+

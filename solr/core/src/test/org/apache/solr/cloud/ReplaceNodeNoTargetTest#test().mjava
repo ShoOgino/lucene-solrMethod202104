@@ -1,0 +1,41 @@
+  @Test
+  public void test() throws Exception {
+    cluster.waitForAllNodes(5000);
+    String coll = "replacenodetest_coll_notarget";
+    log.info("total_jettys: " + cluster.getJettySolrRunners().size());
+
+    CloudSolrClient cloudClient = cluster.getSolrClient();
+    Set<String> liveNodes = cloudClient.getZkStateReader().getClusterState().getLiveNodes();
+    ArrayList<String> l = new ArrayList<>(liveNodes);
+    Collections.shuffle(l, random());
+    String node2bdecommissioned = l.get(0);
+    CloudSolrClient solrClient = cluster.getSolrClient();
+    String setClusterPolicyCommand = "{" +
+        " 'set-cluster-policy': [" +
+        "      {'replica':'<5', 'shard': '#EACH', 'node': '#ANY'}]}";
+    SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, setClusterPolicyCommand);
+    solrClient.request(req);
+
+    CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(coll, "conf1", 5, 2, 0, 0);
+
+    cloudClient.request(create);
+    createReplaceNodeRequest(node2bdecommissioned, null, null).processAsync("001", cloudClient);
+    CollectionAdminRequest.RequestStatus requestStatus = CollectionAdminRequest.requestStatus("001");
+    boolean success = false;
+    for (int i = 0; i < 300; i++) {
+      CollectionAdminRequest.RequestStatusResponse rsp = requestStatus.process(cloudClient);
+      if (rsp.getRequestStatus() == RequestStatusState.COMPLETED) {
+        success = true;
+        break;
+      }
+      assertFalse(rsp.getRequestStatus() == RequestStatusState.FAILED);
+      Thread.sleep(50);
+    }
+    assertTrue(success);
+    try (HttpSolrClient coreclient = getHttpSolrClient(cloudClient.getZkStateReader().getBaseUrlForNodeName(node2bdecommissioned))) {
+      CoreAdminResponse status = CoreAdminRequest.getStatus(null, coreclient);
+      assertTrue(status.getCoreStatus().size() == 0);
+    }
+
+  }
+

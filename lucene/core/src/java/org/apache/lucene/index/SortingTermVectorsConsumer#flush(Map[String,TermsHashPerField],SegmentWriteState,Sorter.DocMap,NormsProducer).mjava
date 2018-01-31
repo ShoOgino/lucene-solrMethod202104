@@ -1,0 +1,31 @@
+  @Override
+  void flush(Map<String, TermsHashPerField> fieldsToFlush, final SegmentWriteState state, Sorter.DocMap sortMap, NormsProducer norms) throws IOException {
+    super.flush(fieldsToFlush, state, sortMap, norms);
+    if (tmpDirectory != null) {
+      if (sortMap == null) {
+        // we're lucky the index is already sorted, just rename the temporary file and return
+        for (Map.Entry<String, String> entry : tmpDirectory.getTemporaryFiles().entrySet()) {
+          tmpDirectory.rename(entry.getValue(), entry.getKey());
+        }
+        return;
+      }
+      TermVectorsReader reader = docWriter.codec.termVectorsFormat()
+          .vectorsReader(tmpDirectory, state.segmentInfo, state.fieldInfos, IOContext.DEFAULT);
+      TermVectorsReader mergeReader = reader.getMergeInstance();
+      TermVectorsWriter writer = docWriter.codec.termVectorsFormat()
+          .vectorsWriter(state.directory, state.segmentInfo, IOContext.DEFAULT);
+      try {
+        reader.checkIntegrity();
+        for (int docID = 0; docID < state.segmentInfo.maxDoc(); docID++) {
+          Fields vectors = mergeReader.get(sortMap.newToOld(docID));
+          writeTermVectors(writer, vectors, state.fieldInfos);
+        }
+        writer.finish(state.fieldInfos, state.segmentInfo.maxDoc());
+      } finally {
+        IOUtils.close(reader, writer);
+        IOUtils.deleteFiles(tmpDirectory,
+            tmpDirectory.getTemporaryFiles().values());
+      }
+    }
+  }
+

@@ -43,10 +43,70 @@
 
     Fields seedFields = new SeedFields(fields, newFieldInfos, maxAllowed, allowPayloads);
 
+    NormsProducer fakeNorms = new NormsProducer() {
+
+      @Override
+      public void close() throws IOException {}
+
+      @Override
+      public long ramBytesUsed() {
+        return 0;
+      }
+
+      @Override
+      public NumericDocValues getNorms(FieldInfo field) throws IOException {
+        if (newFieldInfos.fieldInfo(field.number).hasNorms()) {
+          return new NumericDocValues() {
+            
+            int doc = -1;
+            
+            @Override
+            public int nextDoc() throws IOException {
+              if (++doc == segmentInfo.maxDoc()) {
+                return doc = NO_MORE_DOCS;
+              }
+              return doc;
+            }
+            
+            @Override
+            public int docID() {
+              return doc;
+            }
+            
+            @Override
+            public long cost() {
+              return segmentInfo.maxDoc();
+            }
+            
+            @Override
+            public int advance(int target) throws IOException {
+              return doc = target >= segmentInfo.maxDoc() ? DocIdSetIterator.NO_MORE_DOCS : target;
+            }
+            
+            @Override
+            public boolean advanceExact(int target) throws IOException {
+              doc = target;
+              return true;
+            }
+            
+            @Override
+            public long longValue() throws IOException {
+              return DOC_TO_NORM.applyAsLong(doc);
+            }
+          };
+        } else {
+          return null;
+        }
+      }
+
+      @Override
+      public void checkIntegrity() throws IOException {}
+      
+    };
     FieldsConsumer consumer = codec.postingsFormat().fieldsConsumer(writeState);
     boolean success = false;
     try {
-      consumer.write(seedFields);
+      consumer.write(seedFields, fakeNorms);
       success = true;
     } finally {
       if (success) {

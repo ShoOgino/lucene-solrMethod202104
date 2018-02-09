@@ -81,7 +81,7 @@
         .process(solrClient);
 
     // index 3 documents in a random fashion
-    addDocsAndCommit(
+    addDocsAndCommit(false, // send these to alias & collections
         newDoc(Instant.parse("2017-10-23T00:00:00Z")),
         newDoc(Instant.parse("2017-10-24T01:00:00Z")),
         newDoc(Instant.parse("2017-10-24T02:00:00Z"))
@@ -105,18 +105,34 @@
     // delete the Oct23rd (save memory)...
     //   make sure we track that we are effectively deleting docs there
     numDocsDeletedOrFailed += solrClient.query(col23rd, params("q", "*:*", "rows", "0")).getResults().getNumFound();
-    //   remove from alias
+    //   remove from the alias
     CollectionAdminRequest.createAlias(alias, col24th).process(solrClient);
     //   delete the collection
     CollectionAdminRequest.deleteCollection(col23rd).process(solrClient);
 
     // now we're going to add documents that will trigger more collections to be created
     //   for 25th & 26th
-    addDocsAndCommit(
+    addDocsAndCommit(false, // send these to alias & collections
         newDoc(Instant.parse("2017-10-24T03:00:00Z")),
         newDoc(Instant.parse("2017-10-25T04:00:00Z")),
-        newDoc(Instant.parse("2017-10-26T05:00:00Z"))
+        newDoc(Instant.parse("2017-10-26T05:00:00Z")),
+        newDoc(Instant.parse("2017-10-26T06:00:00Z"))
     );
     assertInvariants(alias + "_2017-10-26", alias + "_2017-10-25", col24th);
+
+
+    // update metadata to auto-delete oldest collections
+    CollectionAdminRequest.modifyAlias(alias)
+        .addMetadata(TimeRoutedAlias.ROUTER_AUTO_DELETE_AGE, "-1DAY")  // thus usually keep 2 collections of a day size
+        .process(solrClient);
+
+    // add more docs, creating one new collection, but trigger ones prior to
+    int numDocsToBeAutoDeleted = queryNumDocs(timeField+":[* TO \"2017-10-26T00:00:00Z\"}");
+    addDocsAndCommit(true, // send these to alias only
+        newDoc(Instant.parse("2017-10-26T07:00:00Z")), // existing
+        newDoc(Instant.parse("2017-10-27T08:00:00Z")) // new
+    );
+    numDocsDeletedOrFailed += numDocsToBeAutoDeleted;
+    assertInvariants(alias + "_2017-10-27", alias + "_2017-10-26");
   }
 

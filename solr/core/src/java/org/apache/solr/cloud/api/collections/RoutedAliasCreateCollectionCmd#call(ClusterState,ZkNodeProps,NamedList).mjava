@@ -9,13 +9,12 @@
     // TODO collection param (or intervalDateMath override?), useful for data capped collections
 
     //---- PARSE ALIAS INFO FROM ZK
-    final ZkStateReader.AliasesManager aliasesHolder = ocmh.zkStateReader.aliasesHolder;
-    final Aliases aliases = aliasesHolder.getAliases();
+    final ZkStateReader.AliasesManager aliasesManager = ocmh.zkStateReader.aliasesManager;
+    final Aliases aliases = aliasesManager.getAliases();
     final Map<String, String> aliasMetadata = aliases.getCollectionAliasMetadata(aliasName);
     if (aliasMetadata == null) {
       throw newAliasMustExistException(aliasName); // if it did exist, we'd have a non-null map
     }
-
     final TimeRoutedAlias timeRoutedAlias = new TimeRoutedAlias(aliasName, aliasMetadata);
 
     final List<Map.Entry<Instant, String>> parsedCollections =
@@ -47,13 +46,21 @@
     final Instant nextCollTimestamp = timeRoutedAlias.computeNextCollTimestamp(mostRecentCollTimestamp);
     final String createCollName = TimeRoutedAlias.formatCollectionNameFromInstant(aliasName, nextCollTimestamp);
 
+    //---- DELETE OLDEST COLLECTIONS AND REMOVE FROM ALIAS (if configured)
+    NamedList deleteResults = deleteOldestCollectionsAndUpdateAlias(timeRoutedAlias, aliasesManager, nextCollTimestamp);
+    if (deleteResults != null) {
+      results.add("delete", deleteResults);
+    }
+
     //---- CREATE THE COLLECTION
-    createCollectionAndWait(clusterState, results, aliasName, aliasMetadata, createCollName, ocmh);
+    NamedList createResults = createCollectionAndWait(clusterState, aliasName, aliasMetadata,
+        createCollName, ocmh);
+    if (createResults != null) {
+      results.add("create", createResults);
+    }
 
-    //TODO delete some of the oldest collection(s) ?
-
-    //---- UPDATE THE ALIAS
-    aliasesHolder.applyModificationAndExportToZk(curAliases -> {
+    //---- UPDATE THE ALIAS WITH NEW COLLECTION
+    aliasesManager.applyModificationAndExportToZk(curAliases -> {
       final List<String> curTargetCollections = curAliases.getCollectionAliasListMap().get(aliasName);
       if (curTargetCollections.contains(createCollName)) {
         return curAliases;

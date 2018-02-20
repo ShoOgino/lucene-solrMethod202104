@@ -1,0 +1,195 @@
+  /**
+   * Collect samples.
+   */
+  public List<MetricFamilySamples> collect() {
+    // start time of scraping.
+    long startTime = System.nanoTime();
+
+    Map<String, MetricFamilySamples> metricFamilySamplesMap = new LinkedHashMap<>();
+
+    ExecutorService executorService = Executors.newFixedThreadPool(numThreads);
+    List<Future<Map<String, MetricFamilySamples>>> futureList = new ArrayList<>();
+
+    try {
+      // Ping
+      if (config.getPing() != null) {
+        if (solrClient instanceof CloudSolrClient) {
+          List<HttpSolrClient> httpSolrClients = new ArrayList<>();
+          try {
+            httpSolrClients = getHttpSolrClients((CloudSolrClient) solrClient);
+            for (HttpSolrClient httpSolrClient : httpSolrClients) {
+              try {
+                List<String> cores = getCores(httpSolrClient);
+                for (String core : cores) {
+                  SolrScraperConfig pingConfig;
+                  try {
+                    pingConfig = config.getPing().clone();
+                  } catch (CloneNotSupportedException e) {
+                    logger.error(e.getMessage());
+                    continue;
+                  }
+
+                  pingConfig.getQuery().setCore(core);
+
+                  SolrScraper scraper = new SolrScraper(httpSolrClient, pingConfig, Arrays.asList("zk_host"), Arrays.asList(((CloudSolrClient) solrClient).getZkHost()));
+                  Future<Map<String, MetricFamilySamples>> future = executorService.submit(scraper);
+                  futureList.add(future);
+                }
+              } catch (SolrServerException | IOException e) {
+                logger.error(e.getMessage());
+              }
+            }
+
+            // get future
+            for (Future<Map<String, MetricFamilySamples>> future : futureList) {
+              try {
+                Map<String, MetricFamilySamples> m = future.get(60, TimeUnit.SECONDS);
+                mergeMetrics(metricFamilySamplesMap, m);
+              } catch (InterruptedException | ExecutionException | TimeoutException e) {
+                logger.error(e.getMessage());
+              }
+            }
+          } catch (SolrServerException | IOException e) {
+            logger.error(e.getMessage());
+          } finally {
+            for (HttpSolrClient httpSolrClient : httpSolrClients) {
+              try {
+                httpSolrClient.close();
+              } catch (IOException e) {
+                logger.error(e.getMessage());
+              }
+            }
+          }
+
+          try {
+            List<String> collections = getCollections((CloudSolrClient) solrClient);
+            for (String collection : collections) {
+              SolrScraperConfig pingConfig;
+              try {
+                pingConfig = config.getPing().clone();
+              } catch (CloneNotSupportedException e) {
+                logger.error(e.getMessage());
+                continue;
+              }
+
+              pingConfig.getQuery().setCollection(collection);
+              LinkedHashMap<String, String> distrib = new LinkedHashMap<>();
+              distrib.put("distrib", "true");
+              pingConfig.getQuery().setParams(Collections.singletonList(distrib));
+
+              SolrScraper scraper = new SolrScraper(solrClient, pingConfig);
+              Future<Map<String, MetricFamilySamples>> future = executorService.submit(scraper);
+              futureList.add(future);
+            }
+          } catch (SolrServerException | IOException e) {
+            logger.error(e.getMessage());
+          }
+        } else {
+          try {
+            List<String> cores = getCores((HttpSolrClient) solrClient);
+            for (String core : cores) {
+              SolrScraperConfig pingConfig = new SolrScraperConfig();
+              pingConfig.setQuery(config.getPing().getQuery());
+              pingConfig.getQuery().setCore(core);
+
+              pingConfig.setJsonQueries(config.getPing().getJsonQueries());
+
+              SolrScraper scraper = new SolrScraper(solrClient, pingConfig);
+              Future<Map<String, MetricFamilySamples>> future = executorService.submit(scraper);
+              futureList.add(future);
+            }
+          } catch (SolrServerException | IOException e) {
+            logger.error(e.getMessage());
+          }
+        }
+      }
+
+      // Metrics
+      if (config.getMetrics() != null) {
+        if (solrClient instanceof CloudSolrClient) {
+          List<HttpSolrClient> httpSolrClients = new ArrayList<>();
+          try {
+            httpSolrClients = getHttpSolrClients((CloudSolrClient) solrClient);
+            for (HttpSolrClient httpSolrClient : httpSolrClients) {
+              SolrScraper scraper = new SolrScraper(httpSolrClient, config.getMetrics(), Arrays.asList("zk_host"), Arrays.asList(((CloudSolrClient) solrClient).getZkHost()));
+              Future<Map<String, MetricFamilySamples>> future = executorService.submit(scraper);
+              futureList.add(future);
+            }
+
+            // get future
+            for (Future<Map<String, MetricFamilySamples>> future : futureList) {
+              try {
+                Map<String, MetricFamilySamples> m = future.get(60, TimeUnit.SECONDS);
+                mergeMetrics(metricFamilySamplesMap, m);
+              } catch (InterruptedException | ExecutionException | TimeoutException e) {
+                logger.error(e.getMessage());
+              }
+            }
+          } catch (SolrServerException | IOException e) {
+            logger.error(e.getMessage());
+          } finally {
+            for (HttpSolrClient httpSolrClient : httpSolrClients) {
+              try {
+                httpSolrClient.close();
+              } catch (IOException e) {
+                logger.error(e.getMessage());
+              }
+            }
+          }
+        } else {
+          SolrScraper scraper = new SolrScraper(solrClient, config.getMetrics());
+          Future<Map<String, MetricFamilySamples>> future = executorService.submit(scraper);
+          futureList.add(future);
+        }
+      }
+
+      // Collections
+      if (config.getCollections() != null) {
+        if (solrClient instanceof CloudSolrClient) {
+          SolrScraper scraper = new SolrScraper(solrClient, config.getCollections());
+          Future<Map<String, MetricFamilySamples>> future = executorService.submit(scraper);
+          futureList.add(future);
+        }
+      }
+
+      // Query
+      if (config.getQueries() != null) {
+        for (SolrScraperConfig c : config.getQueries()) {
+          SolrScraper scraper = new SolrScraper(solrClient, c);
+          Future<Map<String, MetricFamilySamples>> future = executorService.submit(scraper);
+          futureList.add(future);
+        }
+      }
+
+      // get future
+      for (Future<Map<String, MetricFamilySamples>> future : futureList) {
+        try {
+          Map<String, MetricFamilySamples> m = future.get(60, TimeUnit.SECONDS);
+          mergeMetrics(metricFamilySamplesMap, m);
+        } catch (InterruptedException | ExecutionException | TimeoutException e) {
+          logger.error(e.getMessage());
+        }
+      }
+    } finally {
+      executorService.shutdown();
+    }
+
+    // return value
+    List<MetricFamilySamples> metricFamiliesSamplesList = new ArrayList<>();
+
+    // add solr metrics
+    for (String gaugeMetricName : metricFamilySamplesMap.keySet()) {
+      MetricFamilySamples metricFamilySamples = metricFamilySamplesMap.get(gaugeMetricName);
+      if (metricFamilySamples.samples.size() > 0) {
+        metricFamiliesSamplesList.add(metricFamilySamples);
+      }
+    }
+
+    // add scrape duration metric
+    List<MetricFamilySamples.Sample> durationSample = new ArrayList<>();
+    durationSample.add(new MetricFamilySamples.Sample("solr_exporter_duration_seconds", new ArrayList<>(), new ArrayList<>(), (System.nanoTime() - startTime) / 1.0E9));
+    metricFamiliesSamplesList.add(new MetricFamilySamples("solr_exporter_duration_seconds", Type.GAUGE, "Time this Solr exporter took, in seconds.", durationSample));
+
+    return metricFamiliesSamplesList;
+  }
+

@@ -4,7 +4,6 @@
     numDims = in.readVInt();
     maxPointsInLeafNode = in.readVInt();
     bytesPerDim = in.readVInt();
-    bytesPerIndexEntry = numDims == 1 && version >= BKDWriter.VERSION_IMPLICIT_SPLIT_DIM_1D ? bytesPerDim : bytesPerDim + 1;
     packedBytesLength = numDims * bytesPerDim;
 
     // Read index:
@@ -27,55 +26,9 @@
     pointCount = in.readVLong();
     docCount = in.readVInt();
 
-    if (version >= BKDWriter.VERSION_PACKED_INDEX) {
-      int numBytes = in.readVInt();
-      packedIndex = new byte[numBytes];
-      in.readBytes(packedIndex, 0, numBytes);
-      leafBlockFPs = null;
-      splitPackedValues = null;
-    } else {
-      // legacy un-packed index
-
-      splitPackedValues = new byte[bytesPerIndexEntry*numLeaves];
-
-      in.readBytes(splitPackedValues, 0, splitPackedValues.length);
-
-      // Read the file pointers to the start of each leaf block:
-      long[] leafBlockFPs = new long[numLeaves];
-      long lastFP = 0;
-      for(int i=0;i<numLeaves;i++) {
-        long delta = in.readVLong();
-        leafBlockFPs[i] = lastFP + delta;
-        lastFP += delta;
-      }
-
-      // Possibly rotate the leaf block FPs, if the index not fully balanced binary tree (only happens
-      // if it was created by BKDWriter.merge or OneDimWriter).  In this case the leaf nodes may straddle the two bottom
-      // levels of the binary tree:
-      if (numDims == 1 && numLeaves > 1) {
-        int levelCount = 2;
-        while (true) {
-          if (numLeaves >= levelCount && numLeaves <= 2*levelCount) {
-            int lastLevel = 2*(numLeaves - levelCount);
-            assert lastLevel >= 0;
-            if (lastLevel != 0) {
-              // Last level is partially filled, so we must rotate the leaf FPs to match.  We do this here, after loading
-              // at read-time, so that we can still delta code them on disk at write:
-              long[] newLeafBlockFPs = new long[numLeaves];
-              System.arraycopy(leafBlockFPs, lastLevel, newLeafBlockFPs, 0, leafBlockFPs.length - lastLevel);
-              System.arraycopy(leafBlockFPs, 0, newLeafBlockFPs, leafBlockFPs.length - lastLevel, lastLevel);
-              leafBlockFPs = newLeafBlockFPs;
-            }
-            break;
-          }
-
-          levelCount *= 2;
-        }
-      }
-      
-      this.leafBlockFPs = leafBlockFPs;
-      packedIndex = null;
-    }
+    int numBytes = in.readVInt();
+    packedIndex = new byte[numBytes];
+    in.readBytes(packedIndex, 0, numBytes);
 
     this.in = in;
   }

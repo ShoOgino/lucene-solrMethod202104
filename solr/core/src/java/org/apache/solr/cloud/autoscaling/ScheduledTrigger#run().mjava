@@ -1,0 +1,55 @@
+  @Override
+  public void run() {
+    synchronized (this) {
+      if (isClosed) {
+        log.warn("ScheduledTrigger ran but was already closed");
+        throw new RuntimeException("Trigger has been closed");
+      }
+    }
+
+    DateMathParser dateMathParser = new DateMathParser(timeZone);
+    dateMathParser.setNow(new Date(lastRunAt.toEpochMilli()));
+    Instant nextRunTime, nextPlusGrace;
+    try {
+      Date next = dateMathParser.parseMath(everyStr);
+      dateMathParser.setNow(next);
+      nextPlusGrace = dateMathParser.parseMath(graceDurationStr).toInstant();
+      nextRunTime = next.toInstant();
+    } catch (ParseException e) {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
+          "Unable to calculate next run time. lastRan: " + lastRunAt.toString() + " and date math string: " + everyStr, e);
+    }
+
+    Instant now = Instant.now(); // todo how to play well with simulation framework?
+    AutoScaling.TriggerEventProcessor processor = processorRef.get();
+
+    if (now.isBefore(nextRunTime)) {
+      return; // it's not time yet
+    }
+    if (now.isAfter(nextPlusGrace)) {
+      // we are past time and we could not run per schedule so skip this event
+      if (log.isWarnEnabled())  {
+        log.warn("ScheduledTrigger was not able to run event at scheduled time: {}. Now: {}",
+            nextRunTime, now);
+      }
+      if (processor.process(new ScheduledEvent(getEventType(), getName(), nextRunTime.toEpochMilli(),
+          preferredOp, now.toEpochMilli(), true)))  {
+        lastRunAt = nextRunTime;
+        return;
+      }
+    }
+
+    if (processor != null)  {
+      if (log.isDebugEnabled()) {
+        log.debug("ScheduledTrigger {} firing registered processor for scheduled time {}, now={}", name,
+            nextRunTime, now);
+      }
+      if (processor.process(new ScheduledEvent(getEventType(), getName(), nextRunTime.toEpochMilli(),
+          preferredOp, now.toEpochMilli()))) {
+        lastRunAt = nextRunTime; // set to nextRunTime instead of now to avoid drift
+      }
+    } else  {
+      lastRunAt = nextRunTime; // set to nextRunTime instead of now to avoid drift
+    }
+  }
+

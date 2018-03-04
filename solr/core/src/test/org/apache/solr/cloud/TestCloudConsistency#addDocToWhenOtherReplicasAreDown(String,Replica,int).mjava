@@ -1,0 +1,34 @@
+  /**
+   * Adding doc when replicas (not leader) are down,
+   * These replicas are out-of-sync hence they should not become leader even when current leader is DOWN.
+   * Leader should be on node - 0
+   */
+  private void addDocToWhenOtherReplicasAreDown(String collection, Replica leader, int docId) throws Exception {
+    ChaosMonkey.stop(cluster.getJettySolrRunner(1));
+    ChaosMonkey.stop(cluster.getJettySolrRunner(2));
+    waitForState("", collection, (liveNodes, collectionState) ->
+      collectionState.getSlice("shard1").getReplicas().stream()
+          .filter(replica -> replica.getState() == Replica.State.DOWN).count() == 2);
+
+    addDocs(collection, 1, docId);
+    ChaosMonkey.stop(cluster.getJettySolrRunner(0));
+    waitForState("", collection, (liveNodes, collectionState) -> collectionState.getReplica(leader.getName()).getState() == Replica.State.DOWN);
+
+    ChaosMonkey.start(cluster.getJettySolrRunner(1));
+    ChaosMonkey.start(cluster.getJettySolrRunner(2));
+    TimeOut timeOut = new TimeOut(10, TimeUnit.SECONDS, TimeSource.CURRENT_TIME);
+    while (!timeOut.hasTimedOut()) {
+      Replica newLeader = getCollectionState(collection).getSlice("shard1").getLeader();
+      if (newLeader != null && !newLeader.getName().equals(leader.getName()) && newLeader.getState() == Replica.State.ACTIVE) {
+        fail("Out of sync replica became leader " + newLeader);
+      }
+    }
+
+    ChaosMonkey.start(cluster.getJettySolrRunner(0));
+    waitForState("Timeout waiting for leader", collection, (liveNodes, collectionState) -> {
+      Replica newLeader = collectionState.getLeader("shard1");
+      return newLeader != null && newLeader.getName().equals(leader.getName());
+    });
+    waitForState("Timeout waiting for active collection", collection, clusterShape(1, 3));
+  }
+

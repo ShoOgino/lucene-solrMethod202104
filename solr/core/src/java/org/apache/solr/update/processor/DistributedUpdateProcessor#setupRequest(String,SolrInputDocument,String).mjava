@@ -74,9 +74,13 @@
         // that means I want to forward onto my replicas...
         // so get the replicas...
         forwardToLeader = false;
-        List<ZkCoreNodeProps> replicaProps = zkController.getZkStateReader()
-            .getReplicaProps(collection, shardId, leaderReplica.getName(), null, Replica.State.DOWN);
-        if (replicaProps == null) {
+        ClusterState clusterState = zkController.getZkStateReader().getClusterState();
+        String leaderCoreNodeName = leaderReplica.getName();
+        List<Replica> replicas = clusterState.getCollection(collection)
+            .getSlice(shardId)
+            .getReplicas(EnumSet.of(Replica.Type.NRT, Replica.Type.TLOG));
+        replicas.removeIf((replica) -> replica.getName().equals(leaderCoreNodeName));
+        if (replicas.isEmpty()) {
           return null;
         }
 
@@ -89,16 +93,20 @@
           log.info("test.distrib.skip.servers was found and contains:" + skipListSet);
         }
 
-        List<Node> nodes = new ArrayList<>(replicaProps.size());
+        List<Node> nodes = new ArrayList<>(replicas.size());
+        skippedCoreNodeNames = new HashSet<>();
         ZkShardTerms zkShardTerms = zkController.getShardTerms(collection, shardId);
-        for (ZkCoreNodeProps props : replicaProps) {
-          String coreNodeName = ((Replica) props.getNodeProps()).getName();
-          if (skipList != null && skipListSet.contains(props.getCoreUrl())) {
-            log.info("check url:" + props.getCoreUrl() + " against:" + skipListSet + " result:true");
-          } else if(!isOldLIRMode && zkShardTerms.registered(coreNodeName) && !zkShardTerms.canBecomeLeader(coreNodeName)) {
-            log.info("skip url:{} cause its term is less than leader", props.getCoreUrl());
+        for (Replica replica: replicas) {
+          String coreNodeName = replica.getName();
+          if (skipList != null && skipListSet.contains(replica.getCoreUrl())) {
+            log.info("check url:" + replica.getCoreUrl() + " against:" + skipListSet + " result:true");
+          } else if(!isOldLIRMode && zkShardTerms.registered(coreNodeName) && zkShardTerms.skipSendingUpdatesTo(coreNodeName)) {
+            log.debug("skip url:{} cause its term is less than leader", replica.getCoreUrl());
+            skippedCoreNodeNames.add(replica.getName());
+          } else if (!clusterState.getLiveNodes().contains(replica.getNodeName()) || replica.getState() == Replica.State.DOWN) {
+            skippedCoreNodeNames.add(replica.getName());
           } else {
-            nodes.add(new StdNode(props, collection, shardId));
+            nodes.add(new StdNode(new ZkCoreNodeProps(replica), collection, shardId));
           }
         }
         return nodes;

@@ -10,9 +10,9 @@
     if (isClosed) {
       throw new AlreadyClosedException("ScheduledTriggers has been closed and cannot be used anymore");
     }
-    ScheduledTrigger st;
+    TriggerWrapper st;
     try {
-      st = new ScheduledTrigger(newTrigger, cloudManager, queueStats);
+      st = new TriggerWrapper(newTrigger, cloudManager, queueStats);
     } catch (Exception e) {
       if (isClosed) {
         throw new AlreadyClosedException("ScheduledTriggers has been closed and cannot be used anymore");
@@ -24,9 +24,9 @@
       }
       return;
     }
-    ScheduledTrigger scheduledTrigger = st;
+    TriggerWrapper triggerWrapper = st;
 
-    ScheduledTrigger old = scheduledTriggers.putIfAbsent(newTrigger.getName(), scheduledTrigger);
+    TriggerWrapper old = scheduledTriggerWrappers.putIfAbsent(newTrigger.getName(), triggerWrapper);
     if (old != null) {
       if (old.trigger.equals(newTrigger)) {
         // the trigger wasn't actually modified so we do nothing
@@ -34,8 +34,8 @@
       }
       IOUtils.closeQuietly(old);
       newTrigger.restoreState(old.trigger);
-      scheduledTrigger.setReplay(false);
-      scheduledTriggers.replace(newTrigger.getName(), scheduledTrigger);
+      triggerWrapper.setReplay(false);
+      scheduledTriggerWrappers.replace(newTrigger.getName(), triggerWrapper);
     }
     newTrigger.setProcessor(event -> {
       if (cloudManager.isClosed()) {
@@ -44,7 +44,7 @@
         listeners.fireListeners(event.getSource(), event, TriggerEventProcessorStage.ABORTED, msg);
         return false;
       }
-      ScheduledTrigger scheduledSource = scheduledTriggers.get(event.getSource());
+      TriggerWrapper scheduledSource = scheduledTriggerWrappers.get(event.getSource());
       if (scheduledSource == null) {
         String msg = String.format(Locale.ROOT, "Ignoring autoscaling event %s because the source trigger: %s doesn't exist.", event.toString(), event.getSource());
         listeners.fireListeners(event.getSource(), event, TriggerEventProcessorStage.FAILED, msg);
@@ -84,7 +84,7 @@
         if (replaying) {
           enqueued = false;
         } else {
-          enqueued = scheduledTrigger.enqueue(event);
+          enqueued = triggerWrapper.enqueue(event);
         }
         // fire STARTED event listeners after enqueuing the event is successful
         listeners.fireListeners(event.getSource(), event, TriggerEventProcessorStage.STARTED);
@@ -122,7 +122,7 @@
                 listeners.fireListeners(event.getSource(), event, TriggerEventProcessorStage.AFTER_ACTION, action.getName(), actionContext);
               }
               if (enqueued) {
-                TriggerEvent ev = scheduledTrigger.dequeue();
+                TriggerEvent ev = triggerWrapper.dequeue();
                 assert ev.getId().equals(event.getId());
               }
               listeners.fireListeners(event.getSource(), event, TriggerEventProcessorStage.SUCCEEDED);
@@ -139,9 +139,9 @@
           });
         } else {
           if (enqueued) {
-            TriggerEvent ev = scheduledTrigger.dequeue();
+            TriggerEvent ev = triggerWrapper.dequeue();
             if (!ev.getId().equals(event.getId())) {
-              throw new RuntimeException("Wrong event dequeued, queue of " + scheduledTrigger.trigger.getName()
+              throw new RuntimeException("Wrong event dequeued, queue of " + triggerWrapper.trigger.getName()
               + " is broken! Expected event=" + event + " but got " + ev);
             }
           }
@@ -158,7 +158,7 @@
       }
     });
     newTrigger.init(); // mark as ready for scheduling
-    scheduledTrigger.scheduledFuture = scheduledThreadPoolExecutor.scheduleWithFixedDelay(scheduledTrigger, 0,
+    triggerWrapper.scheduledFuture = scheduledThreadPoolExecutor.scheduleWithFixedDelay(triggerWrapper, 0,
         cloudManager.getTimeSource().convertDelay(TimeUnit.SECONDS, triggerDelay.get(), TimeUnit.MILLISECONDS),
         TimeUnit.MILLISECONDS);
   }

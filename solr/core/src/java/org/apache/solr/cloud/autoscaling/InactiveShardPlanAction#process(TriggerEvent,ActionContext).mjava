@@ -1,0 +1,36 @@
+  @Override
+  public void process(TriggerEvent event, ActionContext context) throws Exception {
+    SolrCloudManager cloudManager = context.getCloudManager();
+    ClusterState state = cloudManager.getClusterStateProvider().getClusterState();
+    Map<String, List<String>> cleanup = new LinkedHashMap<>();
+    Map<String, List<String>> inactive = new LinkedHashMap<>();
+    state.forEachCollection(coll ->
+      coll.getSlices().forEach(s -> {
+        if (Slice.State.INACTIVE.equals(s.getState())) {
+          inactive.computeIfAbsent(coll.getName(), c -> new ArrayList<>()).add(s.getName());
+          String tstampStr = s.getStr(ZkStateReader.STATE_TIMESTAMP_PROP);
+          if (tstampStr == null || tstampStr.isEmpty()) {
+            return;
+          }
+          long timestamp = Long.parseLong(tstampStr);
+          // this timestamp uses epoch time
+          long currentTime = cloudManager.getTimeSource().getEpochTime();
+          long delta = TimeUnit.NANOSECONDS.toSeconds(currentTime - timestamp);
+          log.debug("{}/{}: tstamp={}, time={}, delta={}", coll.getName(), s.getName(), timestamp, currentTime, delta);
+          if (delta > cleanupTTL) {
+            log.debug("-- delete inactive {} / {}", coll.getName(), s.getName());
+            List<SolrRequest> operations = (List<SolrRequest>)context.getProperties().computeIfAbsent("operations", k -> new ArrayList<>());
+            operations.add(CollectionAdminRequest.deleteShard(coll.getName(), s.getName()));
+            cleanup.computeIfAbsent(coll.getName(), c -> new ArrayList<>()).add(s.getName());
+          }
+        }
+      })
+    );
+    if (!cleanup.isEmpty()) {
+      Map<String, Object> results = new LinkedHashMap<>();
+      results.put("inactive", inactive);
+      results.put("cleanup", cleanup);
+      context.getProperties().put(getName(), results);
+    }
+  }
+

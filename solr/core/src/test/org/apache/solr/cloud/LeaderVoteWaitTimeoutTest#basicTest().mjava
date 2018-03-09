@@ -1,0 +1,36 @@
+  @Test
+  public void basicTest() throws Exception {
+    final String collectionName = "basicTest";
+    CollectionAdminRequest.createCollection(collectionName, 1, 1)
+        .setCreateNodeSet(cluster.getJettySolrRunner(0).getNodeName())
+        .process(cluster.getSolrClient());
+    cluster.getSolrClient().add(collectionName, new SolrInputDocument("id", "1"));
+    cluster.getSolrClient().add(collectionName, new SolrInputDocument("id", "2"));
+    cluster.getSolrClient().commit(collectionName);
+
+    try (ZkShardTerms zkShardTerms = new ZkShardTerms(collectionName, "shard1", cluster.getZkClient())) {
+      assertEquals(1, zkShardTerms.getTerms().size());
+      assertEquals(1L, zkShardTerms.getHighestTerm());
+    }
+
+    cluster.getJettySolrRunner(0).stop();
+
+    CollectionAdminRequest.addReplicaToShard(collectionName, "shard1")
+        .setNode(cluster.getJettySolrRunner(1).getNodeName())
+        .process(cluster.getSolrClient());
+
+    waitForState("Timeout waiting for replica win the election", collectionName, (liveNodes, collectionState) -> {
+      Replica newLeader = collectionState.getSlice("shard1").getLeader();
+      return newLeader.getNodeName().equals(cluster.getJettySolrRunner(1).getNodeName());
+    });
+
+    try (ZkShardTerms zkShardTerms = new ZkShardTerms(collectionName, "shard1", cluster.getZkClient())) {
+      Replica newLeader = getCollectionState(collectionName).getSlice("shard1").getLeader();
+      assertEquals(2, zkShardTerms.getTerms().size());
+      assertEquals(1L, zkShardTerms.getTerm(newLeader.getName()));
+    }
+
+    cluster.getJettySolrRunner(0).start();
+    CollectionAdminRequest.deleteCollection(collectionName).process(cluster.getSolrClient());
+  }
+

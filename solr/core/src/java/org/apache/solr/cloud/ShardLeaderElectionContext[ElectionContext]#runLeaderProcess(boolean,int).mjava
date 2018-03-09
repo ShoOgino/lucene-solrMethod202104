@@ -48,7 +48,7 @@
       }
       
       Replica.Type replicaType;
-      
+      String coreNodeName;
       try (SolrCore core = cc.getCore(coreName)) {
         
         if (core == null) {
@@ -62,13 +62,15 @@
         }
         
         replicaType = core.getCoreDescriptor().getCloudDescriptor().getReplicaType();
-        String coreNodeName = core.getCoreDescriptor().getCloudDescriptor().getCoreNodeName();
+        coreNodeName = core.getCoreDescriptor().getCloudDescriptor().getCoreNodeName();
         // should I be leader?
-        if (zkController.getShardTerms(collection, shardId).registered(coreNodeName)
-            && !zkController.getShardTerms(collection, shardId).canBecomeLeader(coreNodeName)) {
-          log.info("Can't become leader, term of replica {} less than leader", coreNodeName);
-          rejoinLeaderElection(core);
-          return;
+        ZkShardTerms zkShardTerms = zkController.getShardTerms(collection, shardId);
+        if (zkShardTerms.registered(coreNodeName) && !zkShardTerms.canBecomeLeader(coreNodeName)) {
+          if (!waitForEligibleBecomeLeaderAfterTimeout(zkShardTerms, coreNodeName, leaderVoteWait)) {
+            log.info("Can't become leader, term of replica {} less than leader", coreNodeName);
+            rejoinLeaderElection(core);
+            return;
+          }
         }
 
         if (isClosed) {
@@ -169,7 +171,10 @@
               }
             }
           }
-
+          // in case of leaderVoteWait timeout, a replica with lower term can win the election
+          if (zkController.getShardTerms(collection, shardId).registered(coreNodeName)) {
+            zkController.getShardTerms(collection, shardId).setTermEqualsToLeader(coreNodeName);
+          }
           super.runLeaderProcess(weAreReplacement, 0);
           try (SolrCore core = cc.getCore(coreName)) {
             if (core != null) {

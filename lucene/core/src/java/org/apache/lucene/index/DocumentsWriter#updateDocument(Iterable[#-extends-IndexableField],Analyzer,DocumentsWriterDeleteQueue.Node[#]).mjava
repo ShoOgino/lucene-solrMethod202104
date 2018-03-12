@@ -1,11 +1,12 @@
-  long updateDocuments(final Iterable<? extends Iterable<? extends IndexableField>> docs, final Analyzer analyzer,
-                       final Term delTerm) throws IOException, AbortingException {
+  long updateDocument(final Iterable<? extends IndexableField> doc, final Analyzer analyzer,
+      final DocumentsWriterDeleteQueue.Node<?> delNode) throws IOException, AbortingException {
+
     boolean hasEvents = preUpdate();
 
     final ThreadState perThread = flushControl.obtainAndLock();
+
     final DocumentsWriterPerThread flushingDWPT;
     long seqNo;
-
     try {
       // This must happen after we've pulled the ThreadState because IW.close
       // waits for all ThreadStates to be released:
@@ -15,18 +16,18 @@
       final DocumentsWriterPerThread dwpt = perThread.dwpt;
       final int dwptNumDocs = dwpt.getNumDocsInRAM();
       try {
-        seqNo = dwpt.updateDocuments(docs, analyzer, delTerm);
+        seqNo = dwpt.updateDocument(doc, analyzer, delNode);
       } catch (AbortingException ae) {
         flushControl.doOnAbort(perThread);
         dwpt.abort();
         throw ae;
       } finally {
-        // We don't know how many documents were actually
-        // counted as indexed, so we must subtract here to
+        // We don't know whether the document actually
+        // counted as being indexed, so we must subtract here to
         // accumulate our separate counter:
         numDocsInRAM.addAndGet(dwpt.getNumDocsInRAM() - dwptNumDocs);
       }
-      final boolean isUpdate = delTerm != null;
+      final boolean isUpdate = delNode != null && delNode.isDelete();
       flushingDWPT = flushControl.doAfterDocument(perThread, isUpdate);
 
       assert seqNo > perThread.lastSeqNo: "seqNo=" + seqNo + " lastSeqNo=" + perThread.lastSeqNo;
@@ -39,6 +40,7 @@
     if (postUpdate(flushingDWPT, hasEvents)) {
       seqNo = -seqNo;
     }
+    
     return seqNo;
   }
 

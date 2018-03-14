@@ -1,75 +1,80 @@
-  public long updateDocuments(Iterable<? extends Iterable<? extends IndexableField>> docs, Analyzer analyzer, DocumentsWriterDeleteQueue.Node<?> deleteNode) throws IOException, AbortingException {
-    testPoint("DocumentsWriterPerThread addDocuments start");
-    assert deleteQueue != null;
-    docState.analyzer = analyzer;
-    if (INFO_VERBOSE && infoStream.isEnabled("DWPT")) {
-      infoStream.message("DWPT", Thread.currentThread().getName() + " update delNode=" + deleteNode + " docID=" + docState.docID + " seg=" + segmentInfo.name);
-    }
-    int docCount = 0;
-    boolean allDocsIndexed = false;
+  public long updateDocuments(Iterable<? extends Iterable<? extends IndexableField>> docs, Analyzer analyzer, DocumentsWriterDeleteQueue.Node<?> deleteNode) throws IOException {
     try {
-      
-      for(Iterable<? extends IndexableField> doc : docs) {
-        // Even on exception, the document is still added (but marked
-        // deleted), so we don't need to un-reserve at that point.
-        // Aborting exceptions will actually "lose" more than one
-        // document, so the counter will be "wrong" in that case, but
-        // it's very hard to fix (we can't easily distinguish aborting
-        // vs non-aborting exceptions):
-        reserveOneDoc();
-        docState.doc = doc;
-        docState.docID = numDocsInRAM;
-        docCount++;
+      testPoint("DocumentsWriterPerThread addDocuments start");
+      assert hasHitAbortingException() == false: "DWPT has hit aborting exception but is still indexing";
+      assert deleteQueue != null;
+      docState.analyzer = analyzer;
+      if (INFO_VERBOSE && infoStream.isEnabled("DWPT")) {
+        infoStream.message("DWPT", Thread.currentThread().getName() + " update delTerm=" + deleteNode + " docID=" + docState.docID + " seg=" + segmentInfo.name);
+      }
+      int docCount = 0;
+      boolean allDocsIndexed = false;
+      try {
 
-        boolean success = false;
-        try {
-          consumer.processDocument();
-          success = true;
-        } finally {
-          if (!success) {
-            // Incr here because finishDocument will not
-            // be called (because an exc is being thrown):
-            numDocsInRAM++;
+        for (Iterable<? extends IndexableField> doc : docs) {
+          // Even on exception, the document is still added (but marked
+          // deleted), so we don't need to un-reserve at that point.
+          // Aborting exceptions will actually "lose" more than one
+          // document, so the counter will be "wrong" in that case, but
+          // it's very hard to fix (we can't easily distinguish aborting
+          // vs non-aborting exceptions):
+          reserveOneDoc();
+          docState.doc = doc;
+          docState.docID = numDocsInRAM;
+          docCount++;
+
+          boolean success = false;
+          try {
+            consumer.processDocument();
+            success = true;
+          } finally {
+            if (!success) {
+              // Incr here because finishDocument will not
+              // be called (because an exc is being thrown):
+              numDocsInRAM++;
+            }
+          }
+
+          numDocsInRAM++;
+        }
+        allDocsIndexed = true;
+
+        // Apply delTerm only after all indexing has
+        // succeeded, but apply it only to docs prior to when
+        // this batch started:
+        long seqNo;
+        if (deleteNode != null) {
+          seqNo = deleteQueue.add(deleteNode, deleteSlice);
+          assert deleteSlice.isTail(deleteNode) : "expected the delete term as the tail item";
+          deleteSlice.apply(pendingUpdates, numDocsInRAM - docCount);
+          return seqNo;
+        } else {
+          seqNo = deleteQueue.updateSlice(deleteSlice);
+          if (seqNo < 0) {
+            seqNo = -seqNo;
+            deleteSlice.apply(pendingUpdates, numDocsInRAM - docCount);
+          } else {
+            deleteSlice.reset();
           }
         }
 
-        numDocsInRAM++;
-      }
-      allDocsIndexed = true;
-
-      // Apply delTerm only after all indexing has
-      // succeeded, but apply it only to docs prior to when
-      // this batch started:
-      long seqNo;
-      if (deleteNode != null) {
-        seqNo = deleteQueue.add(deleteNode, deleteSlice);
-        assert deleteSlice.isTail(deleteNode) : "expected the delete node as the tail";
-        deleteSlice.apply(pendingUpdates, numDocsInRAM-docCount);
         return seqNo;
-      } else {
-        seqNo = deleteQueue.updateSlice(deleteSlice);
-        if (seqNo < 0) {
-          seqNo = -seqNo;
-          deleteSlice.apply(pendingUpdates, numDocsInRAM-docCount);
-        } else {
-          deleteSlice.reset();
+
+      } finally {
+        if (!allDocsIndexed && !aborted) {
+          // the iterator threw an exception that is not aborting
+          // go and mark all docs from this block as deleted
+          int docID = numDocsInRAM - 1;
+          final int endDocID = docID - docCount;
+          while (docID > endDocID) {
+            deleteDocID(docID);
+            docID--;
+          }
         }
+        docState.clear();
       }
-
-      return seqNo;
-
     } finally {
-      if (!allDocsIndexed && !aborted) {
-        // the iterator threw an exception that is not aborting 
-        // go and mark all docs from this block as deleted
-        int docID = numDocsInRAM-1;
-        final int endDocID = docID - docCount;
-        while (docID > endDocID) {
-          deleteDocID(docID);
-          docID--;
-        }
-      }
-      docState.clear();
+      maybeAbort("updateDocuments");
     }
   }
 

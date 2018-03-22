@@ -1,42 +1,24 @@
-  private final synchronized void closeMergeReaders(MergePolicy.OneMerge merge, boolean suppressExceptions) throws IOException {
-    final int numSegments = merge.readers.size();
-    Throwable th = null;
-
-    boolean drop = suppressExceptions == false;
-    
-    for (int i = 0; i < numSegments; i++) {
-      final SegmentReader sr = merge.readers.get(i);
-      if (sr != null) {
-        try {
-          final ReadersAndUpdates rld = readerPool.get(sr.getSegmentInfo(), false);
-          // We still hold a ref so it should not have been removed:
-          assert rld != null;
-          if (drop) {
-            rld.dropChanges();
-          } else {
-            rld.dropMergingUpdates();
-          }
-          rld.release(sr);
-          readerPool.release(rld);
-          if (drop) {
-            readerPool.drop(rld.info);
-          }
-        } catch (Throwable t) {
-          th = IOUtils.useOrSuppress(th, t);
+  @SuppressWarnings("try")
+  private synchronized void closeMergeReaders(MergePolicy.OneMerge merge, boolean suppressExceptions) throws IOException {
+    final boolean drop = suppressExceptions == false;
+    try (Closeable finalizer = merge::mergeFinished) {
+      IOUtils.applyToAll(merge.readers, sr -> {
+        final ReadersAndUpdates rld = readerPool.get(sr.getSegmentInfo(), false);
+        // We still hold a ref so it should not have been removed:
+        assert rld != null;
+        if (drop) {
+          rld.dropChanges();
+        } else {
+          rld.dropMergingUpdates();
         }
-        merge.readers.set(i, null);
-      }
-    }
-
-    try {
-      merge.mergeFinished();
-    } catch (Throwable t) {
-      th = IOUtils.useOrSuppress(th, t);
-    }
-    
-    // If any error occurred, throw it.
-    if (!suppressExceptions && th != null) {
-      throw IOUtils.rethrowAlways(th);
+        rld.release(sr);
+        readerPool.release(rld);
+        if (drop) {
+          readerPool.drop(rld.info);
+        }
+      });
+    } finally {
+      Collections.fill(merge.readers, null);
     }
   }
 

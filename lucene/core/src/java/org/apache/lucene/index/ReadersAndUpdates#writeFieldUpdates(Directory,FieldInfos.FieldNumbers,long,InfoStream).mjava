@@ -1,19 +1,12 @@
-  public synchronized boolean writeFieldUpdates(Directory dir, long maxDelGen, InfoStream infoStream) throws IOException {
-
+  public synchronized boolean writeFieldUpdates(Directory dir, FieldInfos.FieldNumbers fieldNumbers, long maxDelGen, InfoStream infoStream) throws IOException {
     long startTimeNS = System.nanoTime();
-    
-    assert Thread.holdsLock(writer);
-
     final Map<Integer,Set<String>> newDVFiles = new HashMap<>();
     Set<String> fieldInfosFiles = null;
     FieldInfos fieldInfos = null;
-
     boolean any = false;
-    int count = 0;
     for (List<DocValuesFieldUpdates> updates : pendingDVUpdates.values()) {
       // Sort by increasing delGen:
-      Collections.sort(updates, (a, b) -> Long.compare(a.delGen, b.delGen));
-      count += updates.size();
+      Collections.sort(updates, Comparator.comparingLong(a -> a.delGen));
       for (DocValuesFieldUpdates update : updates) {
         if (update.delGen <= maxDelGen && update.any()) {
           any = true;
@@ -39,7 +32,7 @@
       // IndexWriter.commitMergedDeletes).
       final SegmentReader reader;
       if (this.reader == null) {
-        reader = new SegmentReader(info, writer.segmentInfos.getIndexCreatedVersionMajor(), IOContext.READONCE);
+        reader = new SegmentReader(info, indexCreatedVersionMajor, IOContext.READONCE);
       } else {
         reader = this.reader;
       }
@@ -47,7 +40,7 @@
       try {
         // clone FieldInfos so that we can update their dvGen separately from
         // the reader's infos and write them to a new fieldInfos_gen file
-        FieldInfos.Builder builder = new FieldInfos.Builder(writer.globalFieldNumberMap);
+        FieldInfos.Builder builder = new FieldInfos.Builder(fieldNumbers);
         // cannot use builder.add(reader.getFieldInfos()) because it does not
         // clone FI.attributes as well FI.dvGen
         for (FieldInfo fi : reader.getFieldInfos()) {
@@ -72,7 +65,7 @@
         handleNumericDVUpdates(fieldInfos, trackingDir, docValuesFormat, reader, newDVFiles, maxDelGen, infoStream);
         handleBinaryDVUpdates(fieldInfos, trackingDir, docValuesFormat, reader, newDVFiles, maxDelGen, infoStream);
 
-        fieldInfosFiles = writeFieldInfosGen(fieldInfos, trackingDir, docValuesFormat, codec.fieldInfosFormat());
+        fieldInfosFiles = writeFieldInfosGen(fieldInfos, trackingDir, codec.fieldInfosFormat());
       } finally {
         if (reader != this.reader) {
           reader.close();
@@ -122,11 +115,12 @@
 
     // if there is a reader open, reopen it to reflect the updates
     if (reader != null) {
-      SegmentReader newReader = new SegmentReader(info, reader, liveDocs, info.info.maxDoc() - info.getDelCount() - pendingDeleteCount);
+      SegmentReader newReader = new SegmentReader(info, reader, pendingDeletes.getLiveDocs(), info.info.maxDoc() - info.getDelCount() - pendingDeletes.numPendingDeletes());
       boolean success2 = false;
       try {
         reader.decRef();
         reader = newReader;
+        pendingDeletes.onNewReader(reader, info);
         success2 = true;
       } finally {
         if (success2 == false) {
@@ -151,14 +145,10 @@
     }
     info.setDocValuesUpdatesFiles(newDVFiles);
 
-    // wrote new files, should checkpoint()
-    writer.checkpointNoSIS();
-
     if (infoStream.isEnabled("BD")) {
       infoStream.message("BD", String.format(Locale.ROOT, "done write field updates for seg=%s; took %.3fs; new files: %s",
                                              info, (System.nanoTime() - startTimeNS)/1000000000.0, newDVFiles));
     }
-
     return true;
   }
 

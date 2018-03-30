@@ -1,0 +1,65 @@
+  @Before
+  public void setupTest() throws Exception {
+    // ensure that exactly 2 jetty nodes are running
+    int numJetties = cluster.getJettySolrRunners().size();
+    log.info("Found {} jetty instances running", numJetties);
+    for (int i = 2; i < numJetties; i++) {
+      int r = random().nextInt(cluster.getJettySolrRunners().size());
+      log.info("Shutdown extra jetty instance at port {}", cluster.getJettySolrRunner(r).getLocalPort());
+      cluster.stopJettySolrRunner(r);
+    }
+    for (int i = cluster.getJettySolrRunners().size(); i < 2; i++) {
+      // start jetty instances
+      cluster.startJettySolrRunner();
+    }
+    cluster.waitForAllNodes(5);
+
+    NamedList<Object> overSeerStatus = cluster.getSolrClient().request(CollectionAdminRequest.getOverseerStatus());
+    String overseerLeader = (String) overSeerStatus.get("leader");
+    int overseerLeaderIndex = 0;
+    for (int i = 0; i < cluster.getJettySolrRunners().size(); i++) {
+      JettySolrRunner jetty = cluster.getJettySolrRunner(i);
+      if (jetty.getNodeName().equals(overseerLeader)) {
+        overseerLeaderIndex = i;
+        break;
+      }
+    }
+    Overseer overseer = cluster.getJettySolrRunner(overseerLeaderIndex).getCoreContainer().getZkController().getOverseer();
+    ScheduledTriggers scheduledTriggers = ((OverseerTriggerThread) overseer.getTriggerThread().getThread()).getScheduledTriggers();
+    // aggressively remove all active scheduled triggers
+    scheduledTriggers.removeAll();
+
+    // clear any persisted auto scaling configuration
+    Stat stat = zkClient().setData(SOLR_AUTOSCALING_CONF_PATH, Utils.toJSON(new ZkNodeProps()), true);
+    log.info(SOLR_AUTOSCALING_CONF_PATH + " reset, new znode version {}", stat.getVersion());
+
+    cluster.deleteAllCollections();
+    cluster.getSolrClient().setDefaultCollection(null);
+
+    // restart Overseer. Even though we reset the autoscaling config some already running
+    // trigger threads may still continue to execute and produce spurious events
+    cluster.stopJettySolrRunner(overseerLeaderIndex);
+    Thread.sleep(5000);
+
+    waitForSeconds = 1 + random().nextInt(3);
+    actionConstructorCalled = new CountDownLatch(1);
+    actionInitCalled = new CountDownLatch(1);
+    triggerFiredLatch = new CountDownLatch(1);
+    triggerFired = new AtomicBoolean(false);
+    events.clear();
+
+    while (cluster.getJettySolrRunners().size() < 2) {
+      // perhaps a test stopped a node but didn't start it back
+      // lets start a node
+      cluster.startJettySolrRunner();
+    }
+
+    cloudManager = cluster.getJettySolrRunner(0).getCoreContainer().getZkController().getSolrCloudManager();
+    // clear any events or markers
+    // todo: consider the impact of such cleanup on regular cluster restarts
+    deleteChildrenRecursively(ZkStateReader.SOLR_AUTOSCALING_EVENTS_PATH);
+    deleteChildrenRecursively(ZkStateReader.SOLR_AUTOSCALING_TRIGGER_STATE_PATH);
+    deleteChildrenRecursively(ZkStateReader.SOLR_AUTOSCALING_NODE_LOST_PATH);
+    deleteChildrenRecursively(ZkStateReader.SOLR_AUTOSCALING_NODE_ADDED_PATH);
+  }
+

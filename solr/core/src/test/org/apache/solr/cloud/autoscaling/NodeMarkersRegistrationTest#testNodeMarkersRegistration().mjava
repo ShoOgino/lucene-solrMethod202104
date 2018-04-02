@@ -1,10 +1,7 @@
   @Test
   public void testNodeMarkersRegistration() throws Exception {
-    // for this test we want to create two triggers so we must assert that the actions were created twice
-    actionInitCalled = new CountDownLatch(2);
-    // similarly we want both triggers to fire
-    triggerFiredLatch = new CountDownLatch(2);
-    actionConstructorCalled = new CountDownLatch(1);
+    triggerFiredLatch = new CountDownLatch(1);
+    listenerEventLatch = new CountDownLatch(1);
     TestLiveNodesListener listener = registerLiveNodesListener();
 
     NamedList<Object> overSeerStatus = cluster.getSolrClient().request(CollectionAdminRequest.getOverseerStatus());
@@ -74,6 +71,18 @@
     response = solrClient.request(req);
     assertEquals(response.get("result").toString(), "success");
 
+    String setListener = "{\n" +
+        "  \"set-listener\" : {\n" +
+        "    \"name\" : \"listener_node_added_triggerMR\",\n" +
+        "    \"trigger\" : \"node_added_triggerMR\",\n" +
+        "    \"stage\" : \"STARTED\",\n" +
+        "    \"class\" : \"" + AssertingListener.class.getName()  + "\"\n" +
+        "  }\n" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setListener);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
     overSeerStatus = cluster.getSolrClient().request(CollectionAdminRequest.getOverseerStatus());
     overseerLeader = (String) overSeerStatus.get("leader");
     overseerLeaderIndex = 0;
@@ -97,6 +106,9 @@
     pathAdded = ZkStateReader.SOLR_AUTOSCALING_NODE_ADDED_PATH + "/" + node1.getNodeName();
     assertTrue("Path " + pathAdded + " wasn't created", zkClient().exists(pathAdded, true));
 
+    listenerEventLatch.countDown(); // let the trigger thread continue
+
+    assertTrue(triggerFiredLatch.await(10, TimeUnit.SECONDS));
     Thread.sleep(5000);
     // nodeAdded marker should be consumed now by nodeAdded trigger
     assertFalse("Path " + pathAdded + " should have been deleted", zkClient().exists(pathAdded, true));

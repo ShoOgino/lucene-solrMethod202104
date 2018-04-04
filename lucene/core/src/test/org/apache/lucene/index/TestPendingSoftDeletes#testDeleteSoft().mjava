@@ -1,0 +1,50 @@
+  public void testDeleteSoft() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter writer = new IndexWriter(dir, newIndexWriterConfig()); // no soft delete field hier
+    Document doc = new Document();
+    doc.add(new StringField("id", "1", Field.Store.YES));
+    writer.softUpdateDocument(new Term("id", "1"), doc,
+        new NumericDocValuesField("_soft_deletes", 1));
+    doc = new Document();
+    doc.add(new StringField("id", "2", Field.Store.YES));
+    writer.softUpdateDocument(new Term("id", "2"), doc,
+        new NumericDocValuesField("_soft_deletes", 1));
+    doc = new Document();
+    doc.add(new StringField("id", "2", Field.Store.YES));
+    writer.softUpdateDocument(new Term("id", "2"), doc,
+        new NumericDocValuesField("_soft_deletes", 1));
+    writer.commit();
+    DirectoryReader reader = writer.getReader();
+    assertEquals(1, reader.leaves().size());
+    SegmentReader segmentReader = (SegmentReader) reader.leaves().get(0).reader();
+    SegmentCommitInfo segmentInfo = segmentReader.getSegmentInfo();
+    PendingSoftDeletes pendingSoftDeletes = newPendingDeletes(segmentInfo);
+    pendingSoftDeletes.onNewReader(segmentReader, segmentInfo);
+    assertEquals(1, pendingSoftDeletes.numPendingDeletes());
+    assertTrue(pendingSoftDeletes.getLiveDocs().get(0));
+    assertFalse(pendingSoftDeletes.getLiveDocs().get(1));
+    assertTrue(pendingSoftDeletes.getLiveDocs().get(2));
+    // pass reader again
+    Bits liveDocs = pendingSoftDeletes.getLiveDocs();
+    pendingSoftDeletes.liveDocsShared();
+    pendingSoftDeletes.onNewReader(segmentReader, segmentInfo);
+    assertEquals(1, pendingSoftDeletes.numPendingDeletes());
+    assertSame(liveDocs, pendingSoftDeletes.getLiveDocs());
+
+    // now apply a hard delete
+    writer.deleteDocuments(new Term("id", "1"));
+    writer.commit();
+    IOUtils.close(reader);
+    reader = DirectoryReader.open(dir);
+    assertEquals(1, reader.leaves().size());
+    segmentReader = (SegmentReader) reader.leaves().get(0).reader();
+    segmentInfo = segmentReader.getSegmentInfo();
+    pendingSoftDeletes = newPendingDeletes(segmentInfo);
+    pendingSoftDeletes.onNewReader(segmentReader, segmentInfo);
+    assertEquals(1, pendingSoftDeletes.numPendingDeletes());
+    assertFalse(pendingSoftDeletes.getLiveDocs().get(0));
+    assertFalse(pendingSoftDeletes.getLiveDocs().get(1));
+    assertTrue(pendingSoftDeletes.getLiveDocs().get(2));
+    IOUtils.close(reader, writer, dir);
+  }
+

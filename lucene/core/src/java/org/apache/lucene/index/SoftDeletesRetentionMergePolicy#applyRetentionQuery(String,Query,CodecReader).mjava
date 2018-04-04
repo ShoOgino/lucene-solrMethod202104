@@ -1,0 +1,45 @@
+  // pkg private for testing
+  static CodecReader applyRetentionQuery(String softDeleteField, Query retentionQuery, CodecReader reader) throws IOException {
+    Bits liveDocs = reader.getLiveDocs();
+    if (liveDocs == null) { // no deletes - just keep going
+      return reader;
+    }
+    CodecReader wrappedReader = wrapLiveDocs(reader, new Bits() { // only search deleted
+      @Override
+      public boolean get(int index) {
+        return liveDocs.get(index) == false;
+      }
+
+      @Override
+      public int length() {
+        return liveDocs.length();
+      }
+    }, reader.maxDoc() - reader.numDocs());
+    Scorer scorer = getScorer(softDeleteField, retentionQuery, wrappedReader);
+    if (scorer != null) {
+      FixedBitSet mutableBits;
+      if (liveDocs instanceof FixedBitSet) {
+        mutableBits = ((FixedBitSet) liveDocs).clone();
+      } else { // mainly if we have asserting codec
+        mutableBits = new FixedBitSet(liveDocs.length());
+        for (int i = 0; i < liveDocs.length(); i++) {
+          if (liveDocs.get(i)) {
+            mutableBits.set(i);
+          }
+        }
+      }
+      DocIdSetIterator iterator = scorer.iterator();
+      int numExtraLiveDocs = 0;
+      while (iterator.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
+        if (mutableBits.getAndSet(iterator.docID()) == false) {
+          // if we bring one back to live we need to account for it
+          numExtraLiveDocs++;
+        }
+      }
+      assert reader.numDocs() + numExtraLiveDocs <= reader.maxDoc() : "numDocs: " + reader.numDocs() + " numExtraLiveDocs: " + numExtraLiveDocs + " maxDoc: " + reader.maxDoc();
+      return wrapLiveDocs(reader, mutableBits, reader.numDocs() + numExtraLiveDocs);
+    } else {
+      return reader;
+    }
+  }
+

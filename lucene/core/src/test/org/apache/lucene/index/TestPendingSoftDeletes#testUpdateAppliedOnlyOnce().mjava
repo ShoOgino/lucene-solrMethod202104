@@ -1,0 +1,43 @@
+  public void testUpdateAppliedOnlyOnce() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter writer = new IndexWriter(dir, newIndexWriterConfig()); // no soft delete field hier
+    Document doc = new Document();
+    doc.add(new StringField("id", "1", Field.Store.YES));
+    writer.softUpdateDocument(new Term("id", "1"), doc,
+        new NumericDocValuesField("_soft_deletes", 1));
+    doc = new Document();
+    doc.add(new StringField("id", "2", Field.Store.YES));
+    writer.softUpdateDocument(new Term("id", "2"), doc,
+        new NumericDocValuesField("_soft_deletes", 1));
+    doc = new Document();
+    doc.add(new StringField("id", "2", Field.Store.YES));
+    writer.softUpdateDocument(new Term("id", "2"), doc,
+        new NumericDocValuesField("_soft_deletes", 1));
+    writer.commit();
+    DirectoryReader reader = writer.getReader();
+    assertEquals(1, reader.leaves().size());
+    SegmentReader segmentReader = (SegmentReader) reader.leaves().get(0).reader();
+    SegmentCommitInfo segmentInfo = segmentReader.getSegmentInfo();
+    SegmentInfo si = new SegmentInfo(dir, Version.LATEST, Version.LATEST, "test", 3, false, Codec.getDefault(),
+        Collections.emptyMap(), StringHelper.randomId(), new HashMap<>(), null);
+    PendingSoftDeletes deletes = newPendingDeletes(segmentInfo);
+    FieldInfo fieldInfo = new FieldInfo("_soft_deletes", 1, false, false, false, IndexOptions.NONE, DocValuesType.NUMERIC, segmentInfo.getDocValuesGen(), Collections.emptyMap(), 0, 0);
+    List<Integer> docsDeleted = Arrays.asList(1, DocIdSetIterator.NO_MORE_DOCS);
+    List<DocValuesFieldUpdates> updates = Arrays.asList(singleUpdate(docsDeleted, 3));
+    deletes.onDocValuesUpdate(fieldInfo, updates);
+    assertEquals(1, deletes.numPendingDeletes());
+    assertTrue(deletes.getLiveDocs().get(0));
+    assertFalse(deletes.getLiveDocs().get(1));
+    assertTrue(deletes.getLiveDocs().get(2));
+    deletes.liveDocsShared();
+    Bits liveDocs = deletes.getLiveDocs();
+    deletes.onNewReader(segmentReader, segmentInfo);
+    // no changes we don't apply updates twice
+    assertSame(liveDocs, deletes.getLiveDocs());
+    assertTrue(deletes.getLiveDocs().get(0));
+    assertFalse(deletes.getLiveDocs().get(1));
+    assertTrue(deletes.getLiveDocs().get(2));
+    assertEquals(1, deletes.numPendingDeletes());
+    IOUtils.close(reader, writer, dir);
+  }
+

@@ -1,13 +1,12 @@
-  ////////////////////////////////////////////
   @Test
-  public void testCommitStream() throws Exception {
+  public void testParallelCommitStream() throws Exception {
 
-    CollectionAdminRequest.createCollection("destinationCollection", "conf", 2, 1).process(cluster.getSolrClient());
-    AbstractDistribZkTestBase.waitForRecoveriesToFinish("destinationCollection", cluster.getSolrClient().getZkStateReader(),
+    CollectionAdminRequest.createCollection("parallelDestinationCollection", "conf", 2, 1).process(cluster.getSolrClient());
+    AbstractDistribZkTestBase.waitForRecoveriesToFinish("parallelDestinationCollection", cluster.getSolrClient().getZkStateReader(),
         false, true, TIMEOUT);
 
     new UpdateRequest()
-        .add(id, "0", "a_s", "hello0", "a_i", "0", "a_f", "0", "s_multi", "aaaa", "s_multi", "bbbb", "i_multi", "4", "i_multi", "7")
+        .add(id, "0", "a_s", "hello0", "a_i", "0", "a_f", "0", "s_multi", "aaaa",  "s_multi", "bbbb",  "i_multi", "4", "i_multi", "7")
         .add(id, "2", "a_s", "hello2", "a_i", "2", "a_f", "0", "s_multi", "aaaa1", "s_multi", "bbbb1", "i_multi", "44", "i_multi", "77")
         .add(id, "3", "a_s", "hello3", "a_i", "3", "a_f", "3", "s_multi", "aaaa2", "s_multi", "bbbb2", "i_multi", "444", "i_multi", "777")
         .add(id, "4", "a_s", "hello4", "a_i", "4", "a_f", "4", "s_multi", "aaaa3", "s_multi", "bbbb3", "i_multi", "4444", "i_multi", "7777")
@@ -21,28 +20,33 @@
     SolrClientCache solrClientCache = new SolrClientCache();
     streamContext.setSolrClientCache(solrClientCache);
     
+    String zkHost = cluster.getZkServer().getZkAddress();
     StreamFactory factory = new StreamFactory()
       .withCollectionZkHost("collection1", cluster.getZkServer().getZkAddress())
-      .withCollectionZkHost("destinationCollection", cluster.getZkServer().getZkAddress())
+      .withCollectionZkHost("parallelDestinationCollection", cluster.getZkServer().getZkAddress())
       .withFunctionName("search", CloudSolrStream.class)
       .withFunctionName("update", UpdateStream.class)
-      .withFunctionName("commit", CommitStream.class);
+      .withFunctionName("commit", CommitStream.class)
+      .withFunctionName("parallel", ParallelStream.class);
 
     try {
       //Copy all docs to destinationCollection
-      expression = StreamExpressionParser.parse("commit(destinationCollection, batchSize=2, update(destinationCollection, batchSize=5, search(collection1, q=*:*, fl=\"id,a_s,a_i,a_f,s_multi,i_multi\", sort=\"a_f asc, a_i asc\")))");
-      stream = factory.constructStream(expression);
-      stream.setStreamContext(streamContext);
-      List<Tuple> tuples = getTuples(stream);
+      String updateExpression = "commit(parallelDestinationCollection, batchSize=0, zkHost=\"" + cluster.getZkServer().getZkAddress() + "\", update(parallelDestinationCollection, batchSize=2, search(collection1, q=*:*, fl=\"id,a_s,a_i,a_f,s_multi,i_multi\", sort=\"a_f asc, a_i asc\", partitionKeys=\"a_f\")))";
+      TupleStream parallelUpdateStream = factory.constructStream("parallel(collection1, " + updateExpression + ", workers=\"2\", zkHost=\"" + zkHost + "\", sort=\"batchNumber asc\")");
+      parallelUpdateStream.setStreamContext(streamContext);
+      List<Tuple> tuples = getTuples(parallelUpdateStream);
 
-      //Ensure that all CommitStream tuples indicate the correct number of copied/indexed docs
-      assert (tuples.size() == 1);
-      t = tuples.get(0);
-      assert (t.EOF == false);
-      assertEquals(5, t.get("batchIndexed"));
+      //Ensure that all UpdateStream tuples indicate the correct number of copied/indexed docs
+      long count = 0;
+
+      for (Tuple tuple : tuples) {
+        count += tuple.getLong("batchIndexed");
+      }
+
+      assert (count == 5);
 
       //Ensure that destinationCollection actually has the new docs.
-      expression = StreamExpressionParser.parse("search(destinationCollection, q=*:*, fl=\"id,a_s,a_i,a_f,s_multi,i_multi\", sort=\"a_i asc\")");
+      expression = StreamExpressionParser.parse("search(parallelDestinationCollection, q=*:*, fl=\"id,a_s,a_i,a_f,s_multi,i_multi\", sort=\"a_i asc\")");
       stream = new CloudSolrStream(expression, factory);
       stream.setStreamContext(streamContext);
       tuples = getTuples(stream);
@@ -88,7 +92,7 @@
       assertList(tuple.getStrings("s_multi"), "aaaa3", "bbbb3");
       assertList(tuple.getLongs("i_multi"), Long.parseLong("4444"), Long.parseLong("7777"));
     } finally {
-      CollectionAdminRequest.deleteCollection("destinationCollection").process(cluster.getSolrClient());
+      CollectionAdminRequest.deleteCollection("parallelDestinationCollection").process(cluster.getSolrClient());
       solrClientCache.close();
     }
   }

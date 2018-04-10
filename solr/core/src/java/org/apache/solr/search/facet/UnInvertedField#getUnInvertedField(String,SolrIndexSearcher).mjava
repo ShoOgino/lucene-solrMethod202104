@@ -1,13 +1,14 @@
+  @SuppressWarnings("unchecked")
   public static UnInvertedField getUnInvertedField(String field, SolrIndexSearcher searcher) throws IOException {
-    SolrCache<String,UnInvertedField> cache = searcher.getFieldValueCache();
+    SolrCache cache = searcher.getFieldValueCache();
     if (cache == null) {
       return new UnInvertedField(field, searcher);
     }
-    UnInvertedField uif = null;
+
     Boolean doWait = false;
     synchronized (cache) {
-      uif = cache.get(field);
-      if (uif == null) {
+      final Object val = cache.get(field);
+      if (val == null || (val instanceof Throwable)) {
         /**
          * We use this place holder object to pull the UninvertedField construction out of the sync
          * so that if many fields are accessed in a short time, the UninvertedField can be
@@ -15,8 +16,8 @@
          */
         cache.put(field, uifPlaceholder);
       } else {
-        if (uif != uifPlaceholder) {
-          return uif;
+        if (val != uifPlaceholder) {
+          return (UnInvertedField) val;
         }
         doWait = true; // Someone else has put the place holder in, wait for that to complete.
       }
@@ -24,23 +25,35 @@
     while (doWait) {
       try {
         synchronized (cache) {
-          uif = cache.get(field); // Should at least return the placeholder, NPE if not is OK.
-          if (uif != uifPlaceholder) { // OK, another thread put this in the cache we should be good.
-            return uif;
+          final Object val = cache.get(field);
+          if (val != uifPlaceholder) { // OK, another thread put this in the cache we should be good.
+            if (val instanceof Throwable) {
+              rethrowAsSolrException(field, (Throwable) val);
+            } else {
+              return (UnInvertedField) val;
+            }
           }
           cache.wait();
         }
       } catch (InterruptedException e) {
-        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Thread interrupted in getUninvertedField.");
+        rethrowAsSolrException(field, e);
       }
     }
 
-    uif = new UnInvertedField(field, searcher);
+    UnInvertedField uif = null;
+    try {
+      uif = new UnInvertedField(field, searcher);
+    }catch(Throwable e) {
+      synchronized (cache) {
+        cache.put(field, e); // signaling the failure
+        cache.notifyAll();
+      }
+      rethrowAsSolrException(field, e);
+    }
     synchronized (cache) {
       cache.put(field, uif); // Note, this cleverly replaces the placeholder.
       cache.notifyAll();
     }
-
     return uif;
   }
 

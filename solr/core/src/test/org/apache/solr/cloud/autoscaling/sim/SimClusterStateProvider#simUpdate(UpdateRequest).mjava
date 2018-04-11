@@ -1,0 +1,116 @@
+  /**
+   * Simulate an update by modifying replica metrics.
+   * The following core metrics are updated:
+   * <ul>
+   *   <li><code>SEARCHER.searcher.numDocs</code> - increased by added docs, decreased by deleteById and deleteByQuery</li>
+   *   <li><code>SEARCHER.searcher.deletedDocs</code> - decreased by deleteById and deleteByQuery by up to <code>numDocs</code></li>
+   *   <li><code>SEARCHER.searcher.maxDoc</code> - always increased by the number of added docs.</li>
+   * </ul>
+   * <p>IMPORTANT limitations:</p>
+   * <ul>
+   *   <li>document replacements are always counted as new docs</li>
+   *   <li>delete by ID always succeeds (unless numDocs == 0)</li>
+   *   <li>deleteByQuery is not supported unless the query is <code>*:*</code></li>
+   * </ul>
+   * @param req update request. This request MUST have the <code>collection</code> param set.
+   * @return {@link UpdateResponse}
+   * @throws SolrException on errors, such as nonexistent collection or unsupported deleteByQuery
+   */
+  public UpdateResponse simUpdate(UpdateRequest req) throws SolrException, InterruptedException, IOException {
+    String collection = req.getCollection();
+    if (collection == null) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Collection not set");
+    }
+    if (!simListCollections().contains(collection)) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Collection '" + collection + "' doesn't exist");
+    }
+    // always reset first to get the current metrics - it's easier than to keep matching
+    // Replica with ReplicaInfo where the current real counts are stored
+    collectionsStatesRef.set(null);
+    DocCollection coll = getClusterState().getCollection(collection);
+    DocRouter router = coll.getRouter();
+
+    boolean modified = false;
+
+    lock.lockInterruptibly();
+    try {
+      List<String> deletes = req.getDeleteById();
+      if (deletes != null && !deletes.isEmpty()) {
+        for (String id : deletes) {
+          Slice s = router.getTargetSlice(id, null, null, req.getParams(), coll);
+          // NOTE: we don't use getProperty because it uses PROPERTY_PROP_PREFIX
+          String numDocsStr = s.getLeader().getStr("SEARCHER.searcher.numDocs");
+          if (numDocsStr == null) {
+            LOG.debug("-- no docs in " + s.getLeader());
+            continue;
+          }
+          long numDocs = Long.parseLong(numDocsStr);
+          if (numDocs == 0) {
+            LOG.debug("-- attempting to delete nonexistent doc " + id + " from " + s.getLeader());
+            continue;
+          }
+          if (numDocsStr != null) {
+            modified = true;
+            try {
+              simSetShardValue(collection, s.getName(), "SEARCHER.searcher.deletedDocs", 1, true, false);
+              simSetShardValue(collection, s.getName(), "SEARCHER.searcher.numDocs", -1, true, false);
+            } catch (Exception e) {
+              throw new IOException(e);
+            }
+          }
+        }
+      }
+      deletes = req.getDeleteQuery();
+      if (deletes != null && !deletes.isEmpty()) {
+        for (String q : deletes) {
+          if (!"*:*".equals(q)) {
+            throw new UnsupportedOperationException("Only '*:*' query is supported in deleteByQuery");
+          }
+          for (Slice s : coll.getSlices()) {
+            String numDocsStr = s.getLeader().getStr("SEARCHER.searcher.numDocs");
+            if (numDocsStr == null) {
+              continue;
+            }
+            long numDocs = Long.parseLong(numDocsStr);
+            if (numDocs == 0) {
+              continue;
+            }
+            modified = true;
+            try {
+              simSetShardValue(collection, s.getName(), "SEARCHER.searcher.deletedDocs", numDocs, false, false);
+              simSetShardValue(collection, s.getName(), "SEARCHER.searcher.numDocs", 0, false, false);
+            } catch (Exception e) {
+              throw new IOException(e);
+            }
+          }
+        }
+      }
+      List<SolrInputDocument> docs = req.getDocuments();
+      if (docs != null && !docs.isEmpty()) {
+        for (SolrInputDocument doc : docs) {
+          String id = (String) doc.getFieldValue("id");
+          if (id == null) {
+            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Document without id: " + doc);
+          }
+          Slice s = router.getTargetSlice(id, null, null, req.getParams(), coll);
+          modified = true;
+          try {
+            simSetShardValue(collection, s.getName(), "SEARCHER.searcher.numDocs", 1, true, false);
+            simSetShardValue(collection, s.getName(), "SEARCHER.searcher.maxDoc", 1, true, false);
+            // Policy reuses this value and expects it to be in GB units!!!
+            // the idea here is to increase the index size by 500 bytes with each doc
+            // simSetShardValue(collection, s.getName(), "INDEX.sizeInBytes", 500, true, false);
+          } catch (Exception e) {
+            throw new IOException(e);
+          }
+        }
+      }
+      if (modified) {
+        collectionsStatesRef.set(null);
+      }
+    } finally {
+      lock.unlock();
+    }
+    return new UpdateResponse();
+  }
+

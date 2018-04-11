@@ -12,6 +12,10 @@
     AtomicReference<String> sliceName = new AtomicReference<>();
     sliceName.set(message.getStr(SHARD_ID_PROP));
     String splitKey = message.getStr("split.key");
+
+    // always invalidate cached collection states to get up-to-date metrics
+    collectionsStatesRef.set(null);
+
     ClusterState clusterState = getClusterState();
     DocCollection collection = clusterState.getCollection(collectionName);
     Slice parentSlice = SplitShardCmd.getParentSlice(clusterState, collectionName, sliceName, splitKey);
@@ -34,6 +38,18 @@
     PolicyHelper.SessionWrapper sessionWrapper = PolicyHelper.getLastSessionWrapper(true);
     if (sessionWrapper != null) sessionWrapper.release();
 
+    // adjust numDocs / deletedDocs / maxDoc
+    Replica leader = parentSlice.getLeader();
+    // XXX leader election may not have happened yet - should we require it?
+    if (leader == null) {
+      leader = parentSlice.getReplicas().iterator().next();
+    }
+    String numDocsStr = leader.getStr("SEARCHER.searcher.numDocs", "0");
+    long numDocs = Long.parseLong(numDocsStr);
+    long newNumDocs = numDocs / subSlices.size();
+    long remainder = numDocs % subSlices.size();
+    String remainderSlice = null;
+
     for (ReplicaPosition replicaPosition : replicaPositions) {
       String subSliceName = replicaPosition.shard;
       String subShardNodeName = replicaPosition.node;
@@ -44,15 +60,32 @@
       replicaProps.put(ZkStateReader.REPLICA_TYPE, replicaPosition.type.toString());
       replicaProps.put(ZkStateReader.BASE_URL_PROP, Utils.getBaseUrlForNodeName(subShardNodeName, "http"));
 
+      long replicasNumDocs = newNumDocs;
+      if (remainderSlice == null) {
+        remainderSlice = subSliceName;
+      }
+      if (remainderSlice.equals(subSliceName)) { // only add to one sub slice
+        replicasNumDocs += remainder;
+      }
+      replicaProps.put("SEARCHER.searcher.numDocs", replicasNumDocs);
+      replicaProps.put("SEARCHER.searcher.maxDoc", replicasNumDocs);
+      replicaProps.put("SEARCHER.searcher.deletedDocs", 0);
+
       ReplicaInfo ri = new ReplicaInfo("core_node" + Assign.incAndGetId(stateManager, collectionName, 0),
           solrCoreName, collectionName, replicaPosition.shard, replicaPosition.type, subShardNodeName, replicaProps);
       simAddReplica(replicaPosition.node, ri, false);
     }
     // mark the old slice as inactive
-    Map<String, Object> props = sliceProperties.computeIfAbsent(collectionName, c -> new ConcurrentHashMap<>())
-        .computeIfAbsent(sliceName.get(), s -> new ConcurrentHashMap<>());
-    props.put(ZkStateReader.STATE_PROP, Slice.State.INACTIVE.toString());
-    props.put(ZkStateReader.STATE_TIMESTAMP_PROP, String.valueOf(cloudManager.getTimeSource().getEpochTimeNs()));
+    lock.lockInterruptibly();
+    try {
+      Map<String, Object> props = sliceProperties.computeIfAbsent(collectionName, c -> new ConcurrentHashMap<>())
+          .computeIfAbsent(sliceName.get(), s -> new ConcurrentHashMap<>());
+      props.put(ZkStateReader.STATE_PROP, Slice.State.INACTIVE.toString());
+      props.put(ZkStateReader.STATE_TIMESTAMP_PROP, String.valueOf(cloudManager.getTimeSource().getEpochTimeNs()));
+      // XXX also mark replicas as down? currently SplitShardCmd doesn't do this
+    } finally {
+      lock.unlock();
+    }
     // add slice props
     for (int i = 0; i < subRanges.size(); i++) {
       String subSlice = subSlices.get(i);
@@ -62,8 +95,9 @@
       sliceProps.put(Slice.RANGE, range);
       sliceProps.put(Slice.PARENT, sliceName.get());
       sliceProps.put(ZkStateReader.STATE_PROP, Slice.State.ACTIVE.toString());
-      props.put(ZkStateReader.STATE_TIMESTAMP_PROP, String.valueOf(cloudManager.getTimeSource().getEpochTimeNs()));
+      sliceProps.put(ZkStateReader.STATE_TIMESTAMP_PROP, String.valueOf(cloudManager.getTimeSource().getEpochTimeNs()));
     }
+    collectionsStatesRef.set(null);
     simRunLeaderElection(Collections.singleton(collectionName), true);
     results.add("success", "");
 

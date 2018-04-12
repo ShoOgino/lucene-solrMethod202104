@@ -39,7 +39,7 @@
         // may need to increase maxShardsPerNode (e.g. if it was shard split, then now we need more)
         restore.setMaxShardsPerNode((int)Math.ceil(backupCollection.getReplicas().size()/cluster.getJettySolrRunners().size()));
       }
-      
+
 
       if (rarely()) { // Try with createNodeSet configuration
         int nodeSetSize = cluster.getJettySolrRunners().size() / 2;
@@ -80,7 +80,7 @@
     //Re-index same docs (should be identical docs given same random seed) and test we have the same result.  Helps
     //  test we reconstituted the hash ranges / doc router.
     if (!(restoreCollection.getRouter() instanceof ImplicitDocRouter) && random().nextBoolean()) {
-      indexDocs(restoreCollectionName);
+      indexDocs(restoreCollectionName, false);
       assertEquals(origShardToDocCount, getShardToDocCountMap(client, restoreCollection));
     }
 
@@ -109,6 +109,18 @@
 
     assertEquals("Restore collection should use stateFormat=2", 2, restoreCollection.getStateFormat());
 
+    //SOLR-12605: Add more docs after restore is complete to see if they are getting added fine
+    //explicitly querying the leaders. If we use CloudSolrClient there is no guarantee that we'll hit a nrtReplica
+    {
+      Map<String, Integer> restoredCollectionPerShardCount =  getShardToDocCountMap(client, restoreCollection);
+      long restoredCollectionDocCount = restoredCollectionPerShardCount.values().stream().mapToInt(Number::intValue).sum();
+      int numberNewDocsIndexed = indexDocs(restoreCollectionName, true);
+      Map<String, Integer> restoredCollectionPerShardCountAfterIndexing = getShardToDocCountMap(client, restoreCollection);
+      int restoredCollectionFinalDocCount = restoredCollectionPerShardCountAfterIndexing.values().stream().mapToInt(Number::intValue).sum();
+
+      log.info("Original doc count in restored collection:" + restoredCollectionDocCount + ", number of newly added documents to the restored collection: " + numberNewDocsIndexed + ", after indexing: " + restoredCollectionFinalDocCount);
+      assertEquals((restoredCollectionDocCount + numberNewDocsIndexed), restoredCollectionFinalDocCount);
+    }
 
     // assert added core properties:
     // DWS: did via manual inspection.

@@ -5,26 +5,42 @@
       return;
     }
 
+    // collection, shard, list(replica + rate)
     Map<String, Map<String, List<ReplicaInfo>>> collectionRates = new HashMap<>();
+    // node, rate
     Map<String, AtomicDouble> nodeRates = new HashMap<>();
-    Map<String, Integer> replicationFactors = new HashMap<>();
+    // this replication factor only considers replica types that are searchable
+    // collection, shard, RF
+    Map<String, Map<String, AtomicInteger>> searchableReplicationFactors = new HashMap<>();
 
+    ClusterState clusterState = null;
+    try {
+      clusterState = cloudManager.getClusterStateProvider().getClusterState();
+    } catch (IOException e) {
+      log.warn("Error getting ClusterState", e);
+      return;
+    }
     for (String node : cloudManager.getClusterStateProvider().getLiveNodes()) {
       Map<String, ReplicaInfo> metricTags = new HashMap<>();
       // coll, shard, replica
       Map<String, Map<String, List<ReplicaInfo>>> infos = cloudManager.getNodeStateProvider().getReplicaInfo(node, Collections.emptyList());
       infos.forEach((coll, shards) -> {
-        replicationFactors.computeIfAbsent(coll, c -> shards.size());
+        Map<String, AtomicInteger> replPerShard = searchableReplicationFactors.computeIfAbsent(coll, c -> new HashMap<>());
         shards.forEach((sh, replicas) -> {
+          AtomicInteger repl = replPerShard.computeIfAbsent(sh, s -> new AtomicInteger());
           replicas.forEach(replica -> {
+            // skip non-active replicas
+            if (replica.getState() != Replica.State.ACTIVE) {
+              return;
+            }
+            repl.incrementAndGet();
             // we have to translate to the metrics registry name, which uses "_replica_nN" as suffix
             String replicaName = Utils.parseMetricsReplicaName(coll, replica.getCore());
             if (replicaName == null) { // should never happen???
               replicaName = replica.getName(); // which is actually coreNode name...
             }
             String registry = SolrCoreMetricManager.createRegistryName(true, coll, sh, replicaName, null);
-            String tag = "metrics:" + registry
-                + ":QUERY." + handler + ".requestTimes:1minRate";
+            String tag = "metrics:" + registry + ":" + metric;
             metricTags.put(tag, replica);
           });
         });
@@ -50,48 +66,100 @@
     }
 
     long now = cloudManager.getTimeSource().getTimeNs();
+    Map<String, Double> hotNodes = new HashMap<>();
+    Map<String, Double> coldNodes = new HashMap<>();
     // check for exceeded rates and filter out those with less than waitFor from previous events
-    Map<String, Double> hotNodes = nodeRates.entrySet().stream()
+    nodeRates.entrySet().stream()
         .filter(entry -> node.equals(Policy.ANY) || node.equals(entry.getKey()))
-        .filter(entry -> waitForElapsed(entry.getKey(), now, lastNodeEvent))
-        .filter(entry -> entry.getValue().get() > rate)
-        .collect(Collectors.toMap(entry -> entry.getKey(), entry -> entry.getValue().get()));
+        .forEach(entry -> {
+          if (entry.getValue().get() > aboveRate) {
+            if (waitForElapsed(entry.getKey(), now, lastNodeEvent)) {
+              hotNodes.put(entry.getKey(), entry.getValue().get());
+            }
+          } else if (entry.getValue().get() < belowRate) {
+            if (waitForElapsed(entry.getKey(), now, lastNodeEvent)) {
+              coldNodes.put(entry.getKey(), entry.getValue().get());
+            }
+          } else {
+            // no violation - clear waitForElapsed
+            // (violation is only valid if it persists throughout waitFor)
+            lastNodeEvent.remove(entry.getKey());
+          }
+        });
 
     Map<String, Map<String, Double>> hotShards = new HashMap<>();
+    Map<String, Map<String, Double>> coldShards = new HashMap<>();
     List<ReplicaInfo> hotReplicas = new ArrayList<>();
+    List<ReplicaInfo> coldReplicas = new ArrayList<>();
     collectionRates.forEach((coll, shardRates) -> {
       shardRates.forEach((sh, replicaRates) -> {
         double shardRate = replicaRates.stream()
             .map(r -> {
-              if (waitForElapsed(r.getCollection() + "." + r.getCore(), now, lastReplicaEvent) &&
-                  ((Double)r.getVariable(AutoScalingParams.RATE) > rate)) {
-                hotReplicas.add(r);
+              String elapsedKey = r.getCollection() + "." + r.getCore();
+              if ((Double)r.getVariable(AutoScalingParams.RATE) > aboveRate) {
+                if (waitForElapsed(elapsedKey, now, lastReplicaEvent)) {
+                  hotReplicas.add(r);
+                }
+              } else if ((Double)r.getVariable(AutoScalingParams.RATE) < belowRate) {
+                if (waitForElapsed(elapsedKey, now, lastReplicaEvent)) {
+                  coldReplicas.add(r);
+                }
+              } else {
+                // no violation - clear waitForElapsed
+                lastReplicaEvent.remove(elapsedKey);
               }
               return r;
             })
             .mapToDouble(r -> (Double)r.getVariable(AutoScalingParams.RATE)).sum();
-        if (waitForElapsed(coll + "." + sh, now, lastShardEvent) &&
-            (shardRate > rate) &&
-            (collection.equals(Policy.ANY) || collection.equals(coll)) &&
+        String elapsedKey = coll + "." + sh;
+        if ((collections.isEmpty() || collections.contains(coll)) &&
             (shard.equals(Policy.ANY) || shard.equals(sh))) {
-          hotShards.computeIfAbsent(coll, s -> new HashMap<>()).put(sh, shardRate);
+          if (shardRate > aboveRate) {
+            if (waitForElapsed(elapsedKey, now, lastShardEvent)) {
+              hotShards.computeIfAbsent(coll, s -> new HashMap<>()).put(sh, shardRate);
+            }
+          } else if (shardRate < belowRate) {
+            if (waitForElapsed(elapsedKey, now, lastShardEvent)) {
+              coldShards.computeIfAbsent(coll, s -> new HashMap<>()).put(sh, shardRate);
+            }
+          } else {
+            // no violation - clear waitForElapsed
+            lastShardEvent.remove(elapsedKey);
+          }
         }
       });
     });
 
     Map<String, Double> hotCollections = new HashMap<>();
+    Map<String, Double> coldCollections = new HashMap<>();
     collectionRates.forEach((coll, shardRates) -> {
       double total = shardRates.entrySet().stream()
           .mapToDouble(e -> e.getValue().stream()
               .mapToDouble(r -> (Double)r.getVariable(AutoScalingParams.RATE)).sum()).sum();
-      if (waitForElapsed(coll, now, lastCollectionEvent) &&
-          (total > rate) &&
-          (collection.equals(Policy.ANY) || collection.equals(coll))) {
-        hotCollections.put(coll, total);
+      if (collections.isEmpty() || collections.contains(coll)) {
+        if (total > aboveRate) {
+          if (waitForElapsed(coll, now, lastCollectionEvent)) {
+            hotCollections.put(coll, total);
+          }
+        } else if (total < belowRate) {
+          if (waitForElapsed(coll, now, lastCollectionEvent)) {
+            coldCollections.put(coll, total);
+          }
+        } else {
+          // no violation - clear waitForElapsed
+          lastCollectionEvent.remove(coll);
+        }
       }
     });
 
-    if (hotCollections.isEmpty() && hotShards.isEmpty() && hotReplicas.isEmpty() && hotNodes.isEmpty()) {
+    if (hotCollections.isEmpty() &&
+        hotShards.isEmpty() &&
+        hotReplicas.isEmpty() &&
+        hotNodes.isEmpty() &&
+        coldCollections.isEmpty() &&
+        coldShards.isEmpty() &&
+        coldReplicas.isEmpty() &&
+        coldNodes.isEmpty()) {
       return;
     }
 
@@ -105,7 +173,21 @@
         eventTime.set(time);
       }
     });
+    coldCollections.forEach((c, r) -> {
+      long time = lastCollectionEvent.get(c);
+      if (eventTime.get() > time) {
+        eventTime.set(time);
+      }
+    });
     hotShards.forEach((c, shards) -> {
+      shards.forEach((s, r) -> {
+        long time = lastShardEvent.get(c + "." + s);
+        if (eventTime.get() > time) {
+          eventTime.set(time);
+        }
+      });
+    });
+    coldShards.forEach((c, shards) -> {
       shards.forEach((s, r) -> {
         long time = lastShardEvent.get(c + "." + s);
         if (eventTime.get() > time) {
@@ -119,54 +201,48 @@
         eventTime.set(time);
       }
     });
+    coldReplicas.forEach(r -> {
+      long time = lastReplicaEvent.get(r.getCollection() + "." + r.getCore());
+      if (eventTime.get() > time) {
+        eventTime.set(time);
+      }
+    });
     hotNodes.forEach((n, r) -> {
       long time = lastNodeEvent.get(n);
       if (eventTime.get() > time) {
         eventTime.set(time);
       }
     });
+    coldNodes.forEach((n, r) -> {
+      long time = lastNodeEvent.get(n);
+      if (eventTime.get() > time) {
+        eventTime.set(time);
+      }
+    });
 
-    // calculate the number of replicas to add to each hot shard, based on how much the rate was
-    // exceeded - but within limits.
     final List<TriggerEvent.Op> ops = new ArrayList<>();
-    if (hotShards.isEmpty() && hotCollections.isEmpty() && hotReplicas.isEmpty()) {
-      // move replicas around
-      hotNodes.forEach((n, r) -> {
-        ops.add(new TriggerEvent.Op(CollectionParams.CollectionAction.MOVEREPLICA, Suggester.Hint.SRC_NODE, n));
-      });
-    } else {
-      // add replicas
-      Map<String, Map<String, List<Pair<String, String>>>> hints = new HashMap<>();
 
-      hotShards.forEach((coll, shards) -> shards.forEach((s, r) -> {
-        List<Pair<String, String>> perShard = hints
-            .computeIfAbsent(coll, c -> new HashMap<>())
-            .computeIfAbsent(s, sh -> new ArrayList<>());
-        addHints(coll, s, r, replicationFactors.get(coll), perShard);
-      }));
-      hotReplicas.forEach(ri -> {
-        double r = (Double)ri.getVariable(AutoScalingParams.RATE);
-        // add only if not already accounted for in hotShards
-        List<Pair<String, String>> perShard = hints
-            .computeIfAbsent(ri.getCollection(), c -> new HashMap<>())
-            .computeIfAbsent(ri.getShard(), sh -> new ArrayList<>());
-        if (perShard.isEmpty()) {
-          addHints(ri.getCollection(), ri.getShard(), r, replicationFactors.get(ri.getCollection()), perShard);
-        }
-      });
+    calculateHotOps(ops, searchableReplicationFactors, hotNodes, hotCollections, hotShards, hotReplicas);
+    calculateColdOps(ops, clusterState, searchableReplicationFactors, coldNodes, coldCollections, coldShards, coldReplicas);
 
-      hints.values().forEach(m -> m.values().forEach(lst -> lst.forEach(p -> {
-        ops.add(new TriggerEvent.Op(CollectionParams.CollectionAction.ADDREPLICA, Suggester.Hint.COLL_SHARD, p));
-      })));
+    if (ops.isEmpty()) {
+      return;
     }
 
-    if (processor.process(new SearchRateEvent(getName(), eventTime.get(), ops, hotNodes, hotCollections, hotShards, hotReplicas))) {
+    if (processor.process(new SearchRateEvent(getName(), eventTime.get(), ops,
+        hotNodes, hotCollections, hotShards, hotReplicas,
+        coldNodes, coldCollections, coldShards, coldReplicas))) {
       // update lastEvent times
       hotNodes.keySet().forEach(node -> lastNodeEvent.put(node, now));
+      coldNodes.keySet().forEach(node -> lastNodeEvent.put(node, now));
       hotCollections.keySet().forEach(coll -> lastCollectionEvent.put(coll, now));
+      coldCollections.keySet().forEach(coll -> lastCollectionEvent.put(coll, now));
       hotShards.entrySet().forEach(e -> e.getValue()
           .forEach((sh, rate) -> lastShardEvent.put(e.getKey() + "." + sh, now)));
+      coldShards.entrySet().forEach(e -> e.getValue()
+          .forEach((sh, rate) -> lastShardEvent.put(e.getKey() + "." + sh, now)));
       hotReplicas.forEach(r -> lastReplicaEvent.put(r.getCollection() + "." + r.getCore(), now));
+      coldReplicas.forEach(r -> lastReplicaEvent.put(r.getCollection() + "." + r.getCore(), now));
     }
   }
 

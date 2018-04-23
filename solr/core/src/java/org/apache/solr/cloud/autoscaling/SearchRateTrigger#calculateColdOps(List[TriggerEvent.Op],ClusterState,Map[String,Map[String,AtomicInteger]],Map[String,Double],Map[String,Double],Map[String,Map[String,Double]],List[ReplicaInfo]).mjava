@@ -1,0 +1,85 @@
+  private void calculateColdOps(List<TriggerEvent.Op> ops,
+                                ClusterState clusterState,
+                                Map<String, Map<String, AtomicInteger>> searchableReplicationFactors,
+                                Map<String, Double> coldNodes,
+                                Map<String, Double> coldCollections,
+                                Map<String, Map<String, Double>> coldShards,
+                                List<ReplicaInfo> coldReplicas) {
+    // COLD COLLECTIONS
+    // Probably can't do anything reasonable about whole cold collections
+    // because they may be needed even if not used.
+
+    // COLD SHARDS:
+    // Cold shards mean that there are too many replicas per shard - but it also
+    // means that all replicas in these shards are cold too, so we can simply
+    // address this by deleting cold replicas
+
+    // COLD REPLICAS:
+    // Remove cold replicas but only when there's at least a minimum number of searchable
+    // replicas still available (additional non-searchable replicas may exist, too)
+    // NOTE: do this before adding ops for DELETENODE because we don't want to attempt
+    // deleting replicas that have been already moved elsewhere
+    Map<String, Map<String, List<ReplicaInfo>>> byCollectionByShard = new HashMap<>();
+    coldReplicas.forEach(ri -> {
+      byCollectionByShard.computeIfAbsent(ri.getCollection(), c -> new HashMap<>())
+          .computeIfAbsent(ri.getShard(), s -> new ArrayList<>())
+          .add(ri);
+    });
+    byCollectionByShard.forEach((coll, shards) -> {
+      shards.forEach((shard, replicas) -> {
+        // only delete if there's at least minRF searchable replicas left
+        int rf = searchableReplicationFactors.get(coll).get(shard).get();
+        // we only really need a leader and we may be allowed to remove other replicas
+        int minRF = 1;
+        // but check the official RF and don't go below that
+        Integer RF = clusterState.getCollection(coll).getReplicationFactor();
+        if (RF != null) {
+          minRF = RF;
+        }
+        // unless minReplicas is set explicitly
+        if (minReplicas != null) {
+          minRF = minReplicas;
+        }
+        if (minRF < 1) {
+          minRF = 1;
+        }
+        if (rf > minRF) {
+          // delete at most maxOps replicas at a time
+          AtomicInteger limit = new AtomicInteger(Math.min(maxOps, rf - minRF));
+          replicas.forEach(ri -> {
+            if (limit.get() == 0) {
+              return;
+            }
+            // don't delete a leader
+            if (ri.getBool(ZkStateReader.LEADER_PROP, false)) {
+              return;
+            }
+            TriggerEvent.Op op = new TriggerEvent.Op(belowOp,
+                Suggester.Hint.COLL_SHARD, new Pair<>(ri.getCollection(), ri.getShard()));
+            op.addHint(Suggester.Hint.REPLICA, ri.getName());
+            ops.add(op);
+            limit.decrementAndGet();
+          });
+        }
+      });
+    });
+
+    // COLD NODES:
+    // Unlike the case of hot nodes, if a node is cold then any monitored
+    // collections / shards / replicas located on that node are cold, too.
+    // HOWEVER, we check only non-pull replicas and only from selected collections / shards,
+    // so deleting a cold node is dangerous because it may interfere with these
+    // non-monitored resources - this is the reason the default belowNodeOp is null / ignored.
+    //
+    // Also, note that due to the way activity is measured only nodes that contain any
+    // monitored resources are considered - there may be cold nodes in the cluster that don't
+    // belong to the monitored collections and they will be ignored.
+    if (belowNodeOp != null) {
+      coldNodes.forEach((node, rate) -> {
+        ops.add(new TriggerEvent.Op(belowNodeOp, Suggester.Hint.SRC_NODE, node));
+      });
+    }
+
+
+  }
+

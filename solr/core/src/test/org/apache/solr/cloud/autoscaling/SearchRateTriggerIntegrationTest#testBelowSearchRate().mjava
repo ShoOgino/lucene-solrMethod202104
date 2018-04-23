@@ -1,0 +1,238 @@
+  @Test
+  public void testBelowSearchRate() throws Exception {
+    CloudSolrClient solrClient = cluster.getSolrClient();
+    String COLL1 = "belowRate_collection";
+    // replicationFactor == 2
+    CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(COLL1,
+        "conf", 1, 2);
+    create.process(solrClient);
+    CloudTestUtils.waitForState(cloudManager, COLL1, 60, TimeUnit.SECONDS,
+        CloudTestUtils.clusterShape(1, 2));
+
+    // add a couple of spare replicas above RF. Use different types.
+    // these additional replicas will be placed on other nodes in the cluster
+    solrClient.request(CollectionAdminRequest.addReplicaToShard(COLL1, "shard1", Replica.Type.NRT));
+    solrClient.request(CollectionAdminRequest.addReplicaToShard(COLL1, "shard1", Replica.Type.TLOG));
+    solrClient.request(CollectionAdminRequest.addReplicaToShard(COLL1, "shard1", Replica.Type.PULL));
+
+    CloudTestUtils.waitForState(cloudManager, COLL1, 60, TimeUnit.SECONDS,
+        CloudTestUtils.clusterShape(1, 5));
+
+    String setTriggerCommand = "{" +
+        "'set-trigger' : {" +
+        "'name' : 'search_rate_trigger2'," +
+        "'event' : 'searchRate'," +
+        "'waitFor' : '" + waitForSeconds + "s'," +
+        "'enabled' : false," +
+        "'collections' : '" + COLL1 + "'," +
+        "'aboveRate' : 1.0," +
+        "'belowRate' : 0.1," +
+        // do nothing but generate an op
+        "'belowNodeOp' : 'none'," +
+        "'actions' : [" +
+        "{'name':'compute','class':'" + ComputePlanAction.class.getName() + "'}," +
+        "{'name':'execute','class':'" + ExecutePlanAction.class.getName() + "'}" +
+        "]" +
+        "}}";
+    SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, setTriggerCommand);
+    NamedList<Object> response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    String setListenerCommand = "{" +
+        "'set-listener' : " +
+        "{" +
+        "'name' : 'started'," +
+        "'trigger' : 'search_rate_trigger2'," +
+        "'stage' : ['STARTED']," +
+        "'class' : '" + StartedProcessingListener.class.getName() + "'" +
+        "}" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setListenerCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    setListenerCommand = "{" +
+        "'set-listener' : " +
+        "{" +
+        "'name' : 'srt'," +
+        "'trigger' : 'search_rate_trigger2'," +
+        "'stage' : ['FAILED','SUCCEEDED']," +
+        "'afterAction': ['compute', 'execute']," +
+        "'class' : '" + CapturingTriggerListener.class.getName() + "'" +
+        "}" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setListenerCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    setListenerCommand = "{" +
+        "'set-listener' : " +
+        "{" +
+        "'name' : 'finished'," +
+        "'trigger' : 'search_rate_trigger2'," +
+        "'stage' : ['SUCCEEDED']," +
+        "'class' : '" + FinishedProcessingListener.class.getName() + "'" +
+        "}" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setListenerCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    timeSource.sleep(TimeUnit.MILLISECONDS.convert(waitForSeconds + 1, TimeUnit.SECONDS));
+
+    // enable the trigger
+    String resumeTriggerCommand = "{" +
+        "'resume-trigger' : {" +
+        "'name' : 'search_rate_trigger2'" +
+        "}" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, resumeTriggerCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    timeSource.sleep(TimeUnit.MILLISECONDS.convert(waitForSeconds + 1, TimeUnit.SECONDS));
+
+    boolean await = started.await(20, TimeUnit.SECONDS);
+    assertTrue("The trigger did not fire at all", await);
+    await = finished.await(60, TimeUnit.SECONDS);
+    assertTrue("The trigger did not finish processing", await);
+
+    // suspend the trigger
+    String suspendTriggerCommand = "{" +
+        "'suspend-trigger' : {" +
+        "'name' : 'search_rate_trigger2'" +
+        "}" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, suspendTriggerCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    timeSource.sleep(5000);
+
+    List<CapturedEvent> events = listenerEvents.get("srt");
+    assertEquals(events.toString(), 3, events.size());
+    CapturedEvent ev = events.get(0);
+    assertEquals(ev.toString(), "compute", ev.actionName);
+    List<TriggerEvent.Op> ops = (List<TriggerEvent.Op>)ev.event.getProperty(TriggerEvent.REQUESTED_OPS);
+    assertNotNull("there should be some requestedOps: " + ev.toString(), ops);
+    // 4 cold nodes, 3 cold replicas
+    assertEquals(ops.toString(), 7, ops.size());
+    AtomicInteger coldNodes = new AtomicInteger();
+    AtomicInteger coldReplicas = new AtomicInteger();
+    ops.forEach(op -> {
+      if (op.getAction().equals(CollectionParams.CollectionAction.NONE)) {
+        coldNodes.incrementAndGet();
+      } else if (op.getAction().equals(CollectionParams.CollectionAction.DELETEREPLICA)) {
+        coldReplicas.incrementAndGet();
+      } else {
+        fail("unexpected op: " + op);
+      }
+    });
+    assertEquals("cold nodes", 4, coldNodes.get());
+    assertEquals("cold replicas", 3, coldReplicas.get());
+
+    // now the collection should be down to RF = 2
+    CloudTestUtils.waitForState(cloudManager, COLL1, 60, TimeUnit.SECONDS,
+        CloudTestUtils.clusterShape(1, 2));
+
+    listenerEvents.clear();
+    finished = new CountDownLatch(1);
+    started = new CountDownLatch(1);
+
+    // resume trigger
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, resumeTriggerCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    // there should be only coldNode ops now, and no coldReplica ops since searchable RF == collection RF
+    timeSource.sleep(TimeUnit.MILLISECONDS.convert(waitForSeconds + 1, TimeUnit.SECONDS));
+
+    await = started.await(20, TimeUnit.SECONDS);
+    assertTrue("The trigger did not fire at all", await);
+    await = finished.await(60, TimeUnit.SECONDS);
+    assertTrue("The trigger did not finish processing", await);
+
+    // suspend trigger
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, suspendTriggerCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    timeSource.sleep(5000);
+
+    events = listenerEvents.get("srt");
+    assertEquals(events.toString(), 3, events.size());
+
+    ev = events.get(0);
+    assertEquals(ev.toString(), "compute", ev.actionName);
+    ops = (List<TriggerEvent.Op>)ev.event.getProperty(TriggerEvent.REQUESTED_OPS);
+    assertNotNull("there should be some requestedOps: " + ev.toString(), ops);
+    assertEquals(ops.toString(), 1, ops.size());
+    assertEquals(ops.toString(), CollectionParams.CollectionAction.NONE, ops.get(0).getAction());
+
+    listenerEvents.clear();
+    finished = new CountDownLatch(1);
+    started = new CountDownLatch(1);
+
+    // now allow single replicas
+    setTriggerCommand = "{" +
+        "'set-trigger' : {" +
+        "'name' : 'search_rate_trigger2'," +
+        "'event' : 'searchRate'," +
+        "'waitFor' : '" + waitForSeconds + "s'," +
+        "'enabled' : true," +
+        "'collections' : '" + COLL1 + "'," +
+        "'aboveRate' : 1.0," +
+        "'belowRate' : 0.1," +
+        "'minReplicas' : 1," +
+        "'belowNodeOp' : 'none'," +
+        "'actions' : [" +
+        "{'name':'compute','class':'" + ComputePlanAction.class.getName() + "'}," +
+        "{'name':'execute','class':'" + ExecutePlanAction.class.getName() + "'}" +
+        "]" +
+        "}}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setTriggerCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    timeSource.sleep(TimeUnit.MILLISECONDS.convert(waitForSeconds + 1, TimeUnit.SECONDS));
+
+    await = started.await(20, TimeUnit.SECONDS);
+    assertTrue("The trigger did not fire at all", await);
+    await = finished.await(60, TimeUnit.SECONDS);
+    assertTrue("The trigger did not finish processing", await);
+
+    // suspend trigger
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, suspendTriggerCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    timeSource.sleep(5000);
+
+    events = listenerEvents.get("srt");
+    assertEquals(events.toString(), 3, events.size());
+
+    ev = events.get(0);
+    assertEquals(ev.toString(), "compute", ev.actionName);
+    ops = (List<TriggerEvent.Op>)ev.event.getProperty(TriggerEvent.REQUESTED_OPS);
+    assertNotNull("there should be some requestedOps: " + ev.toString(), ops);
+    assertEquals(ops.toString(), 2, ops.size());
+    AtomicInteger coldNodes2 = new AtomicInteger();
+    AtomicInteger coldReplicas2 = new AtomicInteger();
+    ops.forEach(op -> {
+      if (op.getAction().equals(CollectionParams.CollectionAction.NONE)) {
+        coldNodes2.incrementAndGet();
+      } else if (op.getAction().equals(CollectionParams.CollectionAction.DELETEREPLICA)) {
+        coldReplicas2.incrementAndGet();
+      } else {
+        fail("unexpected op: " + op);
+      }
+    });
+
+    assertEquals("coldNodes", 1, coldNodes2.get());
+    assertEquals("colReplicas", 1, coldReplicas2.get());
+
+    // now the collection should be at RF == 1, with one additional PULL replica
+    CloudTestUtils.waitForState(cloudManager, COLL1, 60, TimeUnit.SECONDS,
+        CloudTestUtils.clusterShape(1, 1));
+  }
+

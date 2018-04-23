@@ -1,0 +1,52 @@
+  void writeSomeDocValuesUpdates() throws IOException {
+    if (writeDocValuesLock.compareAndSet(false, true)) {
+      try {
+        final double ramBufferSizeMB = config.getRAMBufferSizeMB();
+        // If the reader pool is > 50% of our IW buffer, then write the updates:
+        if (ramBufferSizeMB != IndexWriterConfig.DISABLE_AUTO_FLUSH) {
+          long startNS = System.nanoTime();
+
+          long ramBytesUsed = getReaderPoolRamBytesUsed();
+          if (ramBytesUsed > 0.5 * ramBufferSizeMB * 1024 * 1024) {
+            if (infoStream.isEnabled("BD")) {
+              infoStream.message("BD", String.format(Locale.ROOT, "now write some pending DV updates: %.2f MB used vs IWC Buffer %.2f MB",
+                  ramBytesUsed/1024./1024., ramBufferSizeMB));
+            }
+
+            // Sort by largest ramBytesUsed:
+            PriorityQueue<ReadersAndUpdates> queue = readerPool.getReadersByRam();
+            int count = 0;
+            while (ramBytesUsed > 0.5 * ramBufferSizeMB * 1024 * 1024) {
+              ReadersAndUpdates rld = queue.poll();
+              if (rld == null) {
+                break;
+              }
+
+              // We need to do before/after because not all RAM in this RAU is used by DV updates, and
+              // not all of those bytes can be written here:
+              long bytesUsedBefore = rld.ramBytesUsed.get();
+
+              // Only acquire IW lock on each write, since this is a time consuming operation.  This way
+              // other threads get a chance to run in between our writes.
+              synchronized (this) {
+                if (rld.writeFieldUpdates(directory, globalFieldNumberMap, bufferedUpdatesStream.getCompletedDelGen(), infoStream)) {
+                  checkpointNoSIS();
+                }
+              }
+              long bytesUsedAfter = rld.ramBytesUsed.get();
+              ramBytesUsed -= bytesUsedBefore - bytesUsedAfter;
+              count++;
+            }
+
+            if (infoStream.isEnabled("BD")) {
+              infoStream.message("BD", String.format(Locale.ROOT, "done write some DV updates for %d segments: now %.2f MB used vs IWC Buffer %.2f MB; took %.2f sec",
+                  count, getReaderPoolRamBytesUsed()/1024./1024., ramBufferSizeMB, ((System.nanoTime() - startNS)/1000000000.)));
+            }
+          }
+        }
+      } finally {
+        writeDocValuesLock.set(false);
+      }
+    }
+  }
+

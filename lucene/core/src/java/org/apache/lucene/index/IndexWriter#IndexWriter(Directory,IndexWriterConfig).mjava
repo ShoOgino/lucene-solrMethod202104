@@ -43,7 +43,6 @@
       codec = config.getCodec();
 
       bufferedUpdatesStream = new BufferedUpdatesStream(this);
-      poolReaders = config.getReaderPooling();
 
       OpenMode mode = config.getOpenMode();
       boolean create;
@@ -99,7 +98,6 @@
         }
         
         segmentInfos = sis;
-
         rollbackSegments = segmentInfos.createBackupSegmentInfos();
 
         // Record that we have a change (zero out all
@@ -144,11 +142,6 @@
         }
 
         rollbackSegments = lastCommit.createBackupSegmentInfos();
-
-        if (infoStream.isEnabled("IW")) {
-          infoStream.message("IW", "init from reader " + reader);
-          messageState();
-        }
       } else {
         // Init from either the latest commit point, or an explicit prior commit point:
 
@@ -196,7 +189,11 @@
       config.getFlushPolicy().init(config);
       docWriter = new DocumentsWriter(this, config, directoryOrig, directory);
       eventQueue = docWriter.eventQueue();
-
+      readerPool = new ReaderPool(directory, directoryOrig, segmentInfos, globalFieldNumberMap,
+          bufferedUpdatesStream::getCompletedDelGen, infoStream, conf.getSoftDeletesField(), reader);
+      if (config.getReaderPooling()) {
+        readerPool.enableReaderPooling();
+      }
       // Default deleter (for backwards compatibility) is
       // KeepOnlyLastCommitDeleter:
 
@@ -220,26 +217,13 @@
       }
 
       if (reader != null) {
-        // Pre-enroll all segment readers into the reader pool; this is necessary so
-        // any in-memory NRT live docs are correctly carried over, and so NRT readers
-        // pulled from this IW share the same segment reader:
-        List<LeafReaderContext> leaves = reader.leaves();
-        assert segmentInfos.size() == leaves.size();
-
-        for (int i=0;i<leaves.size();i++) {
-          LeafReaderContext leaf = leaves.get(i);
-          SegmentReader segReader = (SegmentReader) leaf.reader();
-          SegmentReader newReader = new SegmentReader(segmentInfos.info(i), segReader, segReader.getLiveDocs(), segReader.numDocs());
-          readerPool.readerMap.put(newReader.getSegmentInfo(), new ReadersAndUpdates(segmentInfos.getIndexCreatedVersionMajor(), newReader, newPendingDeletes(newReader, newReader.getSegmentInfo())));
-        }
-
         // We always assume we are carrying over incoming changes when opening from reader:
         segmentInfos.changed();
         changed();
       }
 
       if (infoStream.isEnabled("IW")) {
-        infoStream.message("IW", "init: create=" + create);
+        infoStream.message("IW", "init: create=" + create + " reader=" + reader);
         messageState();
       }
 

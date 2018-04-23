@@ -30,17 +30,18 @@
           boolean dwptSuccess = false;
           try {
             // flush concurrently without locking
-            final FlushedSegment newSegment = flushingDWPT.flush();
+            final FlushedSegment newSegment = flushingDWPT.flush(flushNotifications);
             ticketQueue.addSegment(ticket, newSegment);
             dwptSuccess = true;
           } finally {
             subtractFlushedNumDocs(flushingDocsInRam);
             if (flushingDWPT.pendingFilesToDelete().isEmpty() == false) {
-              putEvent(new DeleteNewFilesEvent(flushingDWPT.pendingFilesToDelete()));
+              Set<String> files = flushingDWPT.pendingFilesToDelete();
+              flushNotifications.deleteUnusedFiles(files);
               hasEvents = true;
             }
             if (dwptSuccess == false) {
-              putEvent(new FlushFailedEvent(flushingDWPT.getSegmentInfo()));
+              flushNotifications.flushFailed(flushingDWPT.getSegmentInfo());
               hasEvents = true;
             }
           }
@@ -63,7 +64,7 @@
           // thread in innerPurge can't keep up with all
           // other threads flushing segments.  In this case
           // we forcefully stall the producers.
-          putEvent(ForcedPurgeEvent.INSTANCE);
+          flushNotifications.onTicketBacklog();
           break;
         }
       } finally {
@@ -74,7 +75,7 @@
     }
 
     if (hasEvents) {
-      writer.doAfterSegmentFlushed(false, false);
+      flushNotifications.afterSegmentsFlushed();
     }
 
     // If deletes alone are consuming > 1/2 our RAM
@@ -91,7 +92,7 @@
                                                  flushControl.getDeleteBytesUsed()/(1024.*1024.),
                                                  ramBufferSizeMB));
         }
-        putEvent(ApplyDeletesEvent.INSTANCE);
+        flushNotifications.onDeletesApplied();
       }
     }
 

@@ -1,6 +1,5 @@
-  private int innerPurge(IndexWriter writer) throws IOException {
+  private void innerPurge(IOUtils.IOConsumer<FlushTicket> consumer) throws IOException {
     assert purgeLock.isHeldByCurrentThread();
-    int numPurged = 0;
     while (true) {
       final FlushTicket head;
       final boolean canPublish;
@@ -9,25 +8,21 @@
         canPublish = head != null && head.canPublish(); // do this synced 
       }
       if (canPublish) {
-        numPurged++;
         try {
           /*
            * if we block on publish -> lock IW -> lock BufferedDeletes we don't block
            * concurrent segment flushes just because they want to append to the queue.
-           * the downside is that we need to force a purge on fullFlush since ther could
+           * the downside is that we need to force a purge on fullFlush since there could
            * be a ticket still in the queue. 
            */
-          head.publish(writer);
-          
+          consumer.accept(head);
+
         } finally {
           synchronized (this) {
             // finally remove the published ticket from the queue
             final FlushTicket poll = queue.poll();
-
+            decTickets();
             // we hold the purgeLock so no other thread should have polled:
-            assert poll == head;
-            
-            ticketCount.decrementAndGet();
             assert poll == head;
           }
         }
@@ -35,6 +30,5 @@
         break;
       }
     }
-    return numPurged;
   }
 

@@ -1,0 +1,42 @@
+  @Test
+  public void testFiltersCache() throws SyntaxError, IOException {
+    final String [] elFilterQuery = new String[] {"q", "{!filters param=$child.fq v=$gchq}",
+        "child.fq", "childparent_s:e",
+        "child.fq", "child_s:l",
+        "gchq", "child_s:[* TO *]"};
+    assertQ(req(elFilterQuery), elChild);
+    final Query query;
+    {
+      final SolrQueryRequest req = req(elFilterQuery);
+      try {
+        QParser parser = QParser.getParser(req.getParams().get("q"), null, req);
+        query = parser.getQuery();
+        final TopDocs topDocs = req.getSearcher().search(query, 10);
+        assertEquals(1, topDocs.totalHits);
+      }finally {
+        req.close();
+      }
+    }
+    assertU(adoc("id", "12275", 
+        "child_s", "l", "childparent_s", "e"));
+    assertU(commit());
+    try {
+      assertQ("here we rely on autowarming for cathing cache leak",  //cache=false
+          req(elFilterQuery), "//*[@numFound='2']");
+      final SolrQueryRequest req = req();
+      try {
+        final TopDocs topDocs = req.getSearcher().search(query, 10);
+        assertEquals("expecting new doc is visible to old query", 2, topDocs.totalHits);
+      }finally {
+        req.close();
+      }
+    }finally {
+      try {
+        assertU(delI("12275"));
+        assertU(commit());
+      } catch(Throwable t) {
+        log.error("ignoring exception occuring in compensation routine", t);
+      }
+    }
+  }
+

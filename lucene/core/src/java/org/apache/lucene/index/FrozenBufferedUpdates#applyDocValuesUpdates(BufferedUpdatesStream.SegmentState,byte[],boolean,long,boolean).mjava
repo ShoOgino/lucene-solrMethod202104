@@ -1,5 +1,6 @@
-  private long applyDocValuesUpdates(BufferedUpdatesStream.SegmentState segState,
-                                     byte[] updates, boolean isNumeric) throws IOException {
+  private static long applyDocValuesUpdates(BufferedUpdatesStream.SegmentState segState, byte[] updates,
+                                            boolean isNumeric, long delGen,
+                                            boolean segmentPrivateDeletes) throws IOException {
 
     TermsEnum termsEnum = null;
     PostingsEnum postingsEnum = null;
@@ -46,9 +47,9 @@
       }
       in.readBytes(term.bytes, 0, term.length);
 
-      int limit;
+      final int limit;
       if (delGen == segState.delGen) {
-        assert privateSegment != null;
+        assert segmentPrivateDeletes;
         limit = docIDUpto;
       } else {
         limit = Integer.MAX_VALUE;
@@ -76,17 +77,14 @@
         }
       }
 
-      // TODO: can we avoid boxing here w/o fully forking this method?
-      Object value;
+      final BytesRef binaryValue;
+      final long longValue;
       if (isNumeric) {
-        value = Long.valueOf(in.readZLong());
+        longValue = NumericDocValuesUpdate.readFrom(in);
+        binaryValue = null;
       } else {
-        value = scratch;
-        scratch.length = in.readVInt();
-        if (scratch.bytes.length < scratch.length) {
-          scratch.bytes = ArrayUtil.grow(scratch.bytes, scratch.length);
-        }
-        in.readBytes(scratch.bytes, 0, scratch.length);
+        longValue = -1;
+        binaryValue = BinaryDocValuesUpdate.readFrom(in, scratch);
       }
 
       if (termsEnum == null) {
@@ -95,10 +93,8 @@
       }
 
       if (termsEnum.seekExact(term)) {
-
         // we don't need term frequencies for this
         postingsEnum = termsEnum.postings(postingsEnum, PostingsEnum.NONE);
-
         DocValuesFieldUpdates dvUpdates = holder.get(updateField);
         if (dvUpdates == null) {
           if (isNumeric) {
@@ -106,38 +102,38 @@
           } else {
             dvUpdates = new BinaryDocValuesFieldUpdates(delGen, updateField, segState.reader.maxDoc());
           }
-
           holder.put(updateField, dvUpdates);
         }
-
-        if (segState.rld.sortMap != null && privateSegment != null) {
+        final IntConsumer docIdConsumer;
+        final DocValuesFieldUpdates update = dvUpdates;
+        if (isNumeric) {
+          docIdConsumer = doc -> update.add(doc, longValue);
+        } else {
+          docIdConsumer = doc -> update.add(doc, binaryValue);
+        }
+        final Bits acceptDocs = segState.rld.getLiveDocs();
+        if (segState.rld.sortMap != null && segmentPrivateDeletes) {
           // This segment was sorted on flush; we must apply seg-private deletes carefully in this case:
           int doc;
-          final Bits acceptDocs = segState.rld.getLiveDocs();
           while ((doc = postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-
-            if (acceptDocs != null && acceptDocs.get(doc) == false) {
-              continue;
-            }
-            
-            // The limit is in the pre-sorted doc space:
-            if (segState.rld.sortMap.newToOld(doc) < limit) {
-              dvUpdates.add(doc, value);
-              updateCount++;
+            if (acceptDocs == null || acceptDocs.get(doc)) {
+              // The limit is in the pre-sorted doc space:
+              if (segState.rld.sortMap.newToOld(doc) < limit) {
+                docIdConsumer.accept(doc);
+                updateCount++;
+              }
             }
           }
         } else {
           int doc;
-          final Bits acceptDocs = segState.rld.getLiveDocs();
           while ((doc = postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
             if (doc >= limit) {
               break; // no more docs that can be updated for this term
             }
-            if (acceptDocs != null && acceptDocs.get(doc) == false) {
-              continue;
+            if (acceptDocs == null || acceptDocs.get(doc)) {
+              docIdConsumer.accept(doc);
+              updateCount++;
             }
-            dvUpdates.add(doc, value);
-            updateCount++;
           }
         }
       }

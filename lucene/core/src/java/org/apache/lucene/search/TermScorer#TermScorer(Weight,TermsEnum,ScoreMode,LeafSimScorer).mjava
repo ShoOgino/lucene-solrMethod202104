@@ -12,7 +12,8 @@
     super(weight);
     this.docScorer = docScorer;
     if (scoreMode == ScoreMode.TOP_SCORES) {
-      impactsEnum = te.impacts(docScorer.getSimScorer(), PostingsEnum.FREQS);
+      impactsEnum = te.impacts(PostingsEnum.FREQS);
+      maxScoreCache = new MaxScoreCache(impactsEnum, docScorer.getSimScorer());
       postingsEnum = impactsEnum;
       iterator = new DocIdSetIterator() {
 
@@ -26,8 +27,10 @@
           }
 
           if (target > upTo) {
-            upTo = impactsEnum.advanceShallow(target);
-            maxScore = impactsEnum.getMaxScore(upTo);
+            impactsEnum.advanceShallow(target);
+            Impacts impacts = impactsEnum.getImpacts();
+            upTo = impacts.getDocIdUpTo(0);
+            maxScore = maxScoreCache.getMaxScoreForLevel(0);
           }
 
           while (true) {
@@ -41,10 +44,23 @@
               return NO_MORE_DOCS;
             }
 
-            target = upTo + 1;
-
-            upTo = impactsEnum.advanceShallow(target);
-            maxScore = impactsEnum.getMaxScore(upTo);
+            impactsEnum.advanceShallow(upTo + 1);
+            Impacts impacts = impactsEnum.getImpacts();
+            final int level = maxScoreCache.getSkipLevel(minCompetitiveScore);
+            if (level >= 0) {
+              // we can skip more docs
+              int newUpTo = impacts.getDocIdUpTo(level);
+              if (newUpTo == NO_MORE_DOCS) {
+                return NO_MORE_DOCS;
+              }
+              target = newUpTo + 1;
+              impactsEnum.advanceShallow(target);
+              impacts = impactsEnum.getImpacts();
+            } else {
+              target = upTo + 1;
+            }
+            upTo = impacts.getDocIdUpTo(0);
+            maxScore = maxScoreCache.getMaxScoreForLevel(0);
           }
         }
 
@@ -70,7 +86,8 @@
       };
     } else {
       postingsEnum = te.postings(null, scoreMode.needsScores() ? PostingsEnum.FREQS : PostingsEnum.NONE);
-      impactsEnum = new SlowImpactsEnum(postingsEnum, docScorer.getSimScorer().score(Float.MAX_VALUE, 1));
+      impactsEnum = new SlowImpactsEnum(postingsEnum);
+      maxScoreCache = new MaxScoreCache(impactsEnum, docScorer.getSimScorer());
       iterator = postingsEnum;
     }
   }

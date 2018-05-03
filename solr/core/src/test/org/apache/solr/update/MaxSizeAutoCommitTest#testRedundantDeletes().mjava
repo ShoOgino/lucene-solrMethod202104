@@ -1,0 +1,41 @@
+  @Test
+  public void testRedundantDeletes() throws Exception {
+    int maxFileSizeBound = 1000;
+    int maxFileSizeBoundWithBuffer = (int) (maxFileSizeBound * 1.25);
+
+    // Set max size bound
+    hardCommitTracker.setTLogFileSizeUpperBound(maxFileSizeBound);
+
+    // Add docs
+    int numDocsToAdd = 150;
+    SolrQueryResponse updateResp = new SolrQueryResponse();
+    updateRequestHandler.handleRequest(constructBatchAddDocRequest(0, numDocsToAdd), updateResp);
+    waitForCommit(200);
+
+    // Get the tlog file info
+    TreeMap<String, Long> tlogsInfoPreDeletes = getTlogFileSizes(tlogDirPath);
+
+    // Send a bunch of redundant deletes
+    int numDeletesToSend = 5000;
+    int docIdToDelete = 100;
+
+    SolrQueryRequestBase requestWithOneDelete = new SolrQueryRequestBase(core, new MapSolrParams(new HashMap<String, String>())) {};
+    List<String> docs = new ArrayList<>();
+    docs.add(delI(Integer.toString(docIdToDelete)));
+
+    requestWithOneDelete.setContentStreams(toContentStreams(docs));
+
+    for (int i = 0; i < numDeletesToSend; i++) {
+      if (i % 50 == 0) {
+        // Wait periodically to allow existing commits to finish before
+        // sending more delete requests
+        waitForCommit(200);
+      }
+      updateRequestHandler.handleRequest(requestWithOneDelete, updateResp);
+    }
+
+    // Verify that new tlogs have been created, and that their sizes are as expected
+    TreeMap<String, Long> tlogsInfoPostDeletes = getTlogFileSizes(tlogDirPath, maxFileSizeBoundWithBuffer);
+    Assert.assertTrue(parseTotalNumTlogs(tlogsInfoPreDeletes) < parseTotalNumTlogs(tlogsInfoPostDeletes));
+  }
+

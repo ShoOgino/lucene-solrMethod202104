@@ -1,0 +1,35 @@
+  @Test
+  public void deleteTest() throws Exception {
+    int maxFileSizeBound = 1000;
+    int maxFileSizeBoundWithBuffer = (int) (maxFileSizeBound * 1.25);
+
+    // Set max size bound
+    hardCommitTracker.setTLogFileSizeUpperBound(maxFileSizeBound);
+
+    // Add docs
+    int numDocsToAdd = 150;
+    SolrQueryResponse updateResp = new SolrQueryResponse();
+    updateRequestHandler.handleRequest(constructBatchAddDocRequest(0, numDocsToAdd), updateResp);
+    waitForCommit(200);
+
+    // Get the tlog file info
+    TreeMap<String, Long> tlogsInfoPreDeletes = getTlogFileSizes(tlogDirPath);
+
+    // Delete documents (in batches, so we can allow commits to finish and new tlog files to be created)
+    int batchSize = 15;
+    int numBatches = numDocsToAdd / batchSize;
+    for (int batchCounter = 0; batchCounter < numBatches; batchCounter++) {
+      int docStartId = batchSize * batchCounter;
+
+      // Send batch delete doc request
+      updateRequestHandler.handleRequest(constructBatchDeleteDocRequest(docStartId, batchSize), updateResp);
+
+      // The sleep is to allow existing commits to finish before deleting more documents
+      waitForCommit(200);
+    }
+
+    // Verify that the commit happened by seeing if a new tlog file was opened
+    TreeMap<String, Long> tlogsInfoPostDeletes = getTlogFileSizes(tlogDirPath, maxFileSizeBoundWithBuffer);
+    Assert.assertTrue(parseTotalNumTlogs(tlogsInfoPreDeletes) < parseTotalNumTlogs(tlogsInfoPostDeletes));
+  }
+

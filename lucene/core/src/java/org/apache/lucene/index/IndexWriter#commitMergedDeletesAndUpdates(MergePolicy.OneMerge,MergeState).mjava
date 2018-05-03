@@ -37,64 +37,19 @@
       SegmentCommitInfo info = sourceSegments.get(i);
       minGen = Math.min(info.getBufferedDeletesGen(), minGen);
       final int maxDoc = info.info.maxDoc();
-      final Bits prevLiveDocs = merge.readers.get(i).getLiveDocs();
       final ReadersAndUpdates rld = getPooledInstance(info, false);
       // We hold a ref, from when we opened the readers during mergeInit, so it better still be in the pool:
       assert rld != null: "seg=" + info.info.name;
-      final Bits currentLiveDocs = rld.getLiveDocs();
 
       MergeState.DocMap segDocMap = mergeState.docMaps[i];
       MergeState.DocMap segLeafDocMap = mergeState.leafDocMaps[i];
 
-      if (prevLiveDocs != null) {
-
-        // If we had deletions on starting the merge we must
-        // still have deletions now:
-        assert currentLiveDocs != null;
-        assert prevLiveDocs.length() == maxDoc;
-        assert currentLiveDocs.length() == maxDoc;
-
-        // There were deletes on this segment when the merge
-        // started.  The merge has collapsed away those
-        // deletes, but, if new deletes were flushed since
-        // the merge started, we must now carefully keep any
-        // newly flushed deletes but mapping them to the new
-        // docIDs.
-
-        // Since we copy-on-write, if any new deletes were
-        // applied after merging has started, we can just
-        // check if the before/after liveDocs have changed.
-        // If so, we must carefully merge the liveDocs one
-        // doc at a time:
-        if (currentLiveDocs != prevLiveDocs) {
-          // This means this segment received new deletes
-          // since we started the merge, so we
-          // must merge them:
-          for (int j = 0; j < maxDoc; j++) {
-            if (prevLiveDocs.get(j) == false) {
-              // if the document was deleted before, it better still be deleted!
-              assert currentLiveDocs.get(j) == false;
-            } else if (currentLiveDocs.get(j) == false) {
-              // the document was deleted while we were merging:
-              mergedDeletesAndUpdates.delete(segDocMap.get(segLeafDocMap.get(j)));
-            }
-          }
-        }
-      } else if (currentLiveDocs != null) {
-        assert currentLiveDocs.length() == maxDoc;
-        // This segment had no deletes before but now it
-        // does:
-        for (int j = 0; j < maxDoc; j++) {
-          if (currentLiveDocs.get(j) == false) {
-            mergedDeletesAndUpdates.delete(segDocMap.get(segLeafDocMap.get(j)));
-          }
-        }
-      }
+      carryOverHardDeletes(mergedDeletesAndUpdates, maxDoc, mergeState.liveDocs[i],  merge.hardLiveDocs.get(i), rld.getHardLiveDocs(),
+          segDocMap, segLeafDocMap);
 
       // Now carry over all doc values updates that were resolved while we were merging, remapping the docIDs to the newly merged docIDs.
       // We only carry over packets that finished resolving; if any are still running (concurrently) they will detect that our merge completed
       // and re-resolve against the newly merged segment:
-      
       Map<String,List<DocValuesFieldUpdates>> mergingDVUpdates = rld.getMergingDVUpdates();
       for (Map.Entry<String,List<DocValuesFieldUpdates>> ent : mergingDVUpdates.entrySet()) {
 

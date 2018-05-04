@@ -1,29 +1,32 @@
   /**
-   * Wrap the response's output stream with a close shield, as if by a {@link CloseShieldOutputStream}. If this is a
+   * Wrap the response's output stream with a close shield. If this is a
    * retry, we will assume that the stream has already been wrapped and do nothing.
+   *
+   * Only the container should ever actually close the servlet request stream.
    *
    * @param response The response to wrap.
    * @param retry If this response corresponds to an original request or a retry.
    * @return A response object with an {@link OutputStream} that will ignore calls to close.
    */
-  private HttpServletResponse closeShield(HttpServletResponse response, boolean retry) {
-    if (testMode && !retry) {
+  public static HttpServletResponse closeShield(HttpServletResponse response, boolean retry) {
+    if (!retry) {
       return new HttpServletResponseWrapper(response) {
-        ServletOutputStream stream;
-        
+
         @Override
         public ServletOutputStream getOutputStream() throws IOException {
-          // Lazy stream creation
-          if (stream == null) {
-            stream = new ServletOutputStreamWrapper(super.getOutputStream()) {
-              @Override
-              public void close() {
-                assert false : "Attempted close of response output stream.";
-              }
-            };
-          }
-          return stream;
+
+          return new ServletOutputStreamWrapper(super.getOutputStream()) {
+            @Override
+            public void close() {
+              // even though we skip closes, we let local tests know not to close so that a full understanding can take
+              // place
+              assert Thread.currentThread().getStackTrace()[2].getClassName().matches(
+                  "org\\.apache\\.(?:solr|lucene).*") ? false : true : "Attempted close of response output stream - never do this, you will spoil connection reuse and possibly disrupt a client";
+              stream = ClosedServletOutputStream.CLOSED_SERVLET_OUTPUT_STREAM;
+            }
+          };
         }
+
       };
     } else {
       return response;

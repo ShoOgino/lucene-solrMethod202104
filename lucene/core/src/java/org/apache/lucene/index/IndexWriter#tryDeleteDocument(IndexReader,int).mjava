@@ -12,51 +12,18 @@
    *  to delete documents indexed after opening the NRT
    *  reader you must use {@link #deleteDocuments(Term...)}). */
   public synchronized long tryDeleteDocument(IndexReader readerIn, int docID) throws IOException {
-
-    final LeafReader reader;
-    if (readerIn instanceof LeafReader) {
-      // Reader is already atomic: use the incoming docID:
-      reader = (LeafReader) readerIn;
-    } else {
-      // Composite reader: lookup sub-reader and re-base docID:
-      List<LeafReaderContext> leaves = readerIn.leaves();
-      int subIndex = ReaderUtil.subIndex(docID, leaves);
-      reader = leaves.get(subIndex).reader();
-      docID -= leaves.get(subIndex).docBase;
-      assert docID >= 0;
-      assert docID < reader.maxDoc();
-    }
-
-    if (!(reader instanceof SegmentReader)) {
-      throw new IllegalArgumentException("the reader must be a SegmentReader or composite reader containing only SegmentReaders");
-    }
-      
-    final SegmentCommitInfo info = ((SegmentReader) reader).getSegmentInfo();
-
-    // TODO: this is a slow linear search, but, number of
-    // segments should be contained unless something is
-    // seriously wrong w/ the index, so it should be a minor
-    // cost:
-
-    if (segmentInfos.indexOf(info) != -1) {
-      ReadersAndUpdates rld = getPooledInstance(info, false);
-      if (rld != null) {
-        synchronized(bufferedUpdatesStream) {
-          if (rld.delete(docID)) {
-            if (isFullyDeleted(rld)) {
-              dropDeletedSegment(rld.info);
-              checkpoint();
-            }
-
-            // Must bump changeCount so if no other changes
-            // happened, we still commit this change:
-            changed();
-          }
-          return docWriter.deleteQueue.getNextSequenceNumber();
+    // NOTE: DON'T use docID inside the closure
+    return tryModifyDocument(readerIn, docID, (leafDocId, rld) -> {
+      if (rld.delete(leafDocId)) {
+        if (isFullyDeleted(rld)) {
+          dropDeletedSegment(rld.info);
+          checkpoint();
         }
-      }
-    }
 
-    return -1;
+        // Must bump changeCount so if no other changes
+        // happened, we still commit this change:
+        changed();
+      }
+    });
   }
 

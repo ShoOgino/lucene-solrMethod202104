@@ -3,11 +3,12 @@
     IndexWriterConfig conf = newIndexWriterConfig();
     IndexWriter writer = new IndexWriter(dir, conf);
     ReentrantLock[] locks = new ReentrantLock[25 + random().nextInt(50)];
-    int[] values = new int[locks.length];
+    Long[] values = new Long[locks.length];
+
     for (int i = 0; i < locks.length; i++) {
       locks[i] = new ReentrantLock();
       Document doc = new Document();
-      values[i] = random().nextInt();
+      values[i] = random().nextLong();
       doc.add(new StringField("id", Integer.toString(i), Store.NO));
       doc.add(new NumericDocValuesField("value", values[i]));
       writer.addDocument(doc);
@@ -23,7 +24,7 @@
             int docId = random().nextInt(locks.length);
             locks[docId].lock();
             try {
-              int value = random().nextInt();
+              Long value = rarely() ? null : random().nextLong(); // sometimes reset it
               if (random().nextBoolean()) {
                 writer.updateDocValues(new Term("id", docId + ""), new NumericDocValuesField("value", value));
               } else {
@@ -35,7 +36,6 @@
             } finally {
               locks[docId].unlock();
             }
-
             if (rarely()) {
               writer.flush();
             }
@@ -55,7 +55,7 @@
       for (int i = 0; i < locks.length; i++) {
         locks[i].lock();
         try {
-          int value = values[i];
+          Long value = values[i];
           TopDocs topDocs = new IndexSearcher(reader).search(new TermQuery(new Term("id", "" + i)), 10);
           assertEquals(topDocs.totalHits, 1);
           int docID = topDocs.scoreDocs[0].doc;
@@ -64,12 +64,15 @@
           LeafReader leafReader = leaves.get(subIndex).reader();
           docID -= leaves.get(subIndex).docBase;
           NumericDocValues numericDocValues = leafReader.getNumericDocValues("value");
-          assertEquals(docID, numericDocValues.advance(docID));
-          assertEquals(numericDocValues.longValue(), value);
+          if (value == null) {
+            assertFalse("docID: " + docID, numericDocValues.advanceExact(docID));
+          } else {
+            assertTrue("docID: " + docID, numericDocValues.advanceExact(docID));
+            assertEquals(numericDocValues.longValue(), value.longValue());
+          }
         } finally {
           locks[i].unlock();
         }
-
       }
     }
 

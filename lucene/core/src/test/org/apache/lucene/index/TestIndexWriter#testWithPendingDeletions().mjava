@@ -7,27 +7,37 @@
     // Use WindowsFS to prevent open files from being deleted:
     FileSystem fs = new WindowsFS(path.getFileSystem()).getFileSystem(URI.create("file:///"));
     Path root = new FilterPath(path, fs);
-
+    IndexCommit indexCommit;
+    DirectoryReader reader;
     // MMapDirectory doesn't work because it closes its file handles after mapping!
     try (FSDirectory dir = new SimpleFSDirectory(root)) {
-      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random()));
+      IndexWriterConfig iwc = new IndexWriterConfig(new MockAnalyzer(random())).setIndexDeletionPolicy(NoDeletionPolicy.INSTANCE);
       IndexWriter w = new IndexWriter(dir, iwc);
       w.commit();
-      IndexInput in = dir.openInput("segments_1", IOContext.DEFAULT);
+      reader = w.getReader();
+      // we pull this commit to open it again later to check that we fail if a futur file delete is pending
+      indexCommit = reader.getIndexCommit();
+      w.close();
+      w = new IndexWriter(dir, new IndexWriterConfig(new MockAnalyzer(random())).setIndexDeletionPolicy(NoDeletionPolicy.INSTANCE));
       w.addDocument(new Document());
       w.close();
-      assertTrue(dir.checkPendingDeletions());
+      IndexInput in = dir.openInput("segments_2", IOContext.DEFAULT);
+      dir.deleteFile("segments_2");
+      assertTrue(dir.getPendingDeletions().size() > 0);
 
       // make sure we get NFSF if we try to delete and already-pending-delete file:
       expectThrows(NoSuchFileException.class, () -> {
-        dir.deleteFile("segments_1");
+        dir.deleteFile("segments_2");
       });
 
-      IllegalArgumentException expected = expectThrows(IllegalArgumentException.class, () -> {
-        new IndexWriter(dir, new IndexWriterConfig(new MockAnalyzer(random())));
-      });
-      assertTrue(expected.getMessage().contains("still has pending deleted files; cannot initialize IndexWriter"));
-
+      try (IndexWriter writer = new IndexWriter(dir, new IndexWriterConfig(new MockAnalyzer(random())).setIndexCommit(indexCommit))) {
+        writer.addDocument(new Document());
+        writer.commit();
+        assertEquals(1, writer.maxDoc());
+        // now check that we moved to 3
+        dir.openInput("segments_3", IOContext.READ).close();;
+      }
+      reader.close();
       in.close();
     }
   }

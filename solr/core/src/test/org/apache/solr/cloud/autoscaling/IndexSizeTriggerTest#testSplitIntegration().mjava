@@ -8,14 +8,15 @@
         CloudTestUtils.clusterShape(2, 2));
 
     long waitForSeconds = 3 + random().nextInt(5);
+    // add disabled trigger
     String setTriggerCommand = "{" +
         "'set-trigger' : {" +
-        "'name' : 'index_size_trigger'," +
+        "'name' : 'index_size_trigger2'," +
         "'event' : 'indexSize'," +
         "'waitFor' : '" + waitForSeconds + "s'," +
         "'aboveDocs' : 10," +
         "'belowDocs' : 4," +
-        "'enabled' : true," +
+        "'enabled' : false," +
         "'actions' : [{'name' : 'compute_plan', 'class' : 'solr.ComputePlanAction'}," +
         "{'name' : 'execute_plan', 'class' : '" + ExecutePlanAction.class.getName() + "'}]" +
         "}}";
@@ -27,7 +28,7 @@
         "'set-listener' : " +
         "{" +
         "'name' : 'capturing'," +
-        "'trigger' : 'index_size_trigger'," +
+        "'trigger' : 'index_size_trigger2'," +
         "'stage' : ['STARTED','ABORTED','SUCCEEDED','FAILED']," +
         "'beforeAction' : ['compute_plan','execute_plan']," +
         "'afterAction' : ['compute_plan','execute_plan']," +
@@ -42,7 +43,7 @@
         "'set-listener' : " +
         "{" +
         "'name' : 'finished'," +
-        "'trigger' : 'index_size_trigger'," +
+        "'trigger' : 'index_size_trigger2'," +
         "'stage' : ['SUCCEEDED']," +
         "'class' : '" + FinishedProcessingListener.class.getName() + "'" +
         "}" +
@@ -52,17 +53,27 @@
     assertEquals(response.get("result").toString(), "success");
 
 
-    for (int i = 0; i < 25; i++) {
+    for (int i = 0; i < 50; i++) {
       SolrInputDocument doc = new SolrInputDocument("id", "id-" + i);
       solrClient.add(collectionName, doc);
     }
     solrClient.commit(collectionName);
 
+    // enable the trigger
+    String resumeTriggerCommand = "{" +
+        "'resume-trigger' : {" +
+        "'name' : 'index_size_trigger2'" +
+        "}" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, resumeTriggerCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
     timeSource.sleep(TimeUnit.MILLISECONDS.convert(waitForSeconds + 1, TimeUnit.SECONDS));
 
     boolean await = finished.await(60000 / SPEED, TimeUnit.MILLISECONDS);
     assertTrue("did not finish processing in time", await);
-    CloudTestUtils.waitForState(cloudManager, collectionName, 10, TimeUnit.SECONDS, CloudTestUtils.clusterShape(4, 2));
+    CloudTestUtils.waitForState(cloudManager, collectionName, 20, TimeUnit.SECONDS, CloudTestUtils.clusterShape(6, 2, true));
     assertEquals(1, listenerEvents.size());
     List<CapturedEvent> events = listenerEvents.get("capturing");
     assertNotNull("'capturing' events not found", events);

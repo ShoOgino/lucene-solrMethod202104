@@ -1,0 +1,50 @@
+  /** 
+   * Recursive helper method that walks the actual facet response, comparing the SKG results to 
+   * the expected output based on the equivilent filters generated from the original TermFacet.
+   */
+  private void assertFacetSKGsAreCorrect(final AtomicInteger maxBucketsToCheck,
+                                         final Map<String,TermFacet> expected,
+                                         final SolrParams baseParams,
+                                         final NamedList actualFacetResponse) throws SolrServerException, IOException {
+
+    for (Map.Entry<String,TermFacet> entry : expected.entrySet()) {
+      final String facetKey = entry.getKey();
+      final TermFacet facet = entry.getValue();
+      final NamedList results = (NamedList) actualFacetResponse.get(facetKey);
+      assertNotNull(facetKey + " key missing from: " + actualFacetResponse, results);
+      final List<NamedList> buckets = (List<NamedList>) results.get("buckets");
+      assertNotNull(facetKey + " has null buckets: " + actualFacetResponse, buckets);
+
+      if (buckets.isEmpty()) {
+        // should only happen if the background query does not match any docs with field X
+        final long docsWithField = getNumFound(params("_trace", "noBuckets",
+                                                      "rows", "0",
+                                                      "q", facet.field+":[* TO *]",
+                                                      "fq", baseParams.get("back")));
+
+        assertEquals(facetKey + " has no buckets, but docs in background exist with field: " + facet.field,
+                     0, docsWithField);
+      }
+
+      // NOTE: it's important that we do this depth first -- not just because it's the easiest way to do it,
+      // but because it means that our maxBucketsToCheck will ensure we do a lot of deep sub-bucket checking,
+      // not just all the buckets of the top level(s) facet(s)
+      for (NamedList bucket : buckets) {
+        final String fieldVal = bucket.get("val").toString(); // int or stringified int
+
+        verifySKGResults(facetKey, facet, baseParams, fieldVal, bucket);
+        if (maxBucketsToCheck.decrementAndGet() <= 0) {
+          return;
+        }
+        
+        final SolrParams verifyParams = SolrParams.wrapAppended(baseParams,
+                                                                params("fq", facet.field + ":" + fieldVal));
+        
+        // recursively check subFacets
+        if (! facet.subFacets.isEmpty()) {
+          assertFacetSKGsAreCorrect(maxBucketsToCheck, facet.subFacets, verifyParams, bucket);
+        }
+      }
+    }
+  }
+

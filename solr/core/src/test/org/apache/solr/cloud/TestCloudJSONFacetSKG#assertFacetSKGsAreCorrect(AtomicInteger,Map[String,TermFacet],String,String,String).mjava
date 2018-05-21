@@ -1,0 +1,49 @@
+  /**
+   * Given a set of term facets, and top level query strings, asserts that 
+   * the SKG stats for each facet term returned when executing that query with those foreground/background
+   * queries match the expected results of executing the equivilent queries in isolation.
+   *
+   * @see #verifySKGResults
+   */
+  private void assertFacetSKGsAreCorrect(final AtomicInteger maxBucketsToCheck,
+                                         Map<String,TermFacet> expected,
+                                         final String query,
+                                         final String foreQ,
+                                         final String backQ) throws SolrServerException, IOException {
+    final SolrParams baseParams = params("rows","0", "fore", foreQ, "back", backQ);
+    
+    final SolrParams facetParams = params("q", query,
+                                          "json.facet", ""+TermFacet.toJSONFacetParamValue(expected,null));
+    final SolrParams initParams = SolrParams.wrapAppended(facetParams, baseParams);
+    
+    log.info("Doing full run: {}", initParams);
+
+    QueryResponse rsp = null;
+    // JSON Facets not (currently) available from QueryResponse...
+    NamedList topNamedList = null;
+    try {
+      rsp = (new QueryRequest(initParams)).process(getRandClient(random()));
+      assertNotNull(initParams + " is null rsp?", rsp);
+      topNamedList = rsp.getResponse();
+      assertNotNull(initParams + " is null topNamedList?", topNamedList);
+    } catch (Exception e) {
+      throw new RuntimeException("init query failed: " + initParams + ": " + 
+                                 e.getMessage(), e);
+    }
+    try {
+      final NamedList facetResponse = (NamedList) topNamedList.get("facets");
+      assertNotNull("null facet results?", facetResponse);
+      assertEquals("numFound mismatch with top count?",
+                   rsp.getResults().getNumFound(), ((Number)facetResponse.get("count")).longValue());
+      if (0 == rsp.getResults().getNumFound()) {
+        // when the query matches nothing, we should expect no top level facets
+        expected = Collections.emptyMap();
+      }
+      assertFacetSKGsAreCorrect(maxBucketsToCheck, expected, baseParams, facetResponse);
+    } catch (AssertionError e) {
+      throw new AssertionError(initParams + " ===> " + topNamedList + " --> " + e.getMessage(), e);
+    } finally {
+      log.info("Ending full run"); 
+    }
+  }
+

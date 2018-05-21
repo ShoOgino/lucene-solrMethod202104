@@ -1,0 +1,63 @@
+  @Test
+  public void testExplicitQueryDomain() throws Exception {
+    Client client = Client.localClient();
+    indexSimple(client);
+
+    { // simple 'query' domain
+      
+      // the facet buckets for all of the requests below should be identical
+      // only the numFound & top level facet count should differ
+      final String expectedFacets
+        = "facets/w=={ buckets:["
+        + "  { val:'NJ', count:2}, "
+        + "  { val:'NY', count:1} ] }";
+      
+      assertJQ(req("rows", "0", "q", "cat_s:B", "json.facet",
+                   "{w: {type:terms, field:'where_s'}}"),
+               "response/numFound==3",
+               "facets/count==3",
+               expectedFacets);
+      assertJQ(req("rows", "0", "q", "id:3", "json.facet",
+                   "{w: {type:terms, field:'where_s', domain: { query:'cat_s:B' }}}"),
+               "response/numFound==1",
+               "facets/count==1",
+               expectedFacets);
+      assertJQ(req("rows", "0", "q", "*:*", "fq", "-*:*", "json.facet",
+                   "{w: {type:terms, field:'where_s', domain: { query:'cat_s:B' }}}"),
+               "response/numFound==0",
+               "facets/count==0",
+               expectedFacets);
+      assertJQ(req("rows", "0", "q", "*:*", "fq", "-*:*", "domain_q", "cat_s:B", "json.facet",
+                   "{w: {type:terms, field:'where_s', domain: { query:{param:domain_q} }}}"),
+               "response/numFound==0",
+               "facets/count==0",
+               expectedFacets);
+    }
+    
+    { // a nested explicit query domain
+
+      // for all of the "top" buckets, the subfacet should have identical sub-buckets
+      final String expectedSubBuckets = "{ buckets:[ { val:'B', count:3}, { val:'A', count:2} ] }";
+      assertJQ(req("rows", "0", "q", "num_i:[0 TO *]", "json.facet",
+                   "{w: {type:terms, field:'where_s', " + 
+                   "     facet: { c: { type:terms, field:'cat_s', domain: { query:'*:*' }}}}}")
+               , "facets/w=={ buckets:["
+               + "  { val:'NJ', count:2, c: " + expectedSubBuckets + "}, "
+               + "  { val:'NY', count:1, c: " + expectedSubBuckets + "} "
+               + "] }"
+               );
+    }
+
+    { // an (effectively) empty query should produce an error
+      ignoreException("'query' domain can not be null");
+      ignoreException("'query' domain must not evaluate to an empty list");
+      for (String raw : Arrays.asList("null", "[ ]", "{param:bogus}")) {
+        expectThrows(SolrException.class, () -> {
+            assertJQ(req("rows", "0", "q", "num_i:[0 TO *]", "json.facet",
+                         "{w: {type:terms, field:'where_s', " + 
+                         "     facet: { c: { type:terms, field:'cat_s', domain: { query: "+raw+" }}}}}"));
+          });
+      }
+    }
+  }
+

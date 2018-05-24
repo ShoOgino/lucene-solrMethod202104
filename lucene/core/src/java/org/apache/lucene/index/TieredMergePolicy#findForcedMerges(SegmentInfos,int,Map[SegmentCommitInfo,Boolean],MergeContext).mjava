@@ -1,0 +1,77 @@
+  @Override
+  public MergeSpecification findForcedMerges(SegmentInfos infos, int maxSegmentCount, Map<SegmentCommitInfo,Boolean> segmentsToMerge, MergeContext mergeContext) throws IOException {
+    if (verbose(mergeContext)) {
+      message("findForcedMerges maxSegmentCount=" + maxSegmentCount + " infos=" + segString(mergeContext, infos) + " segmentsToMerge=" + segmentsToMerge, mergeContext);
+    }
+
+    List<SegmentCommitInfo> eligible = new ArrayList<>();
+    boolean forceMergeRunning = false;
+    final Set<SegmentCommitInfo> merging = mergeContext.getMergingSegments();
+    boolean segmentIsOriginal = false;
+    for(SegmentCommitInfo info : infos) {
+      final Boolean isOriginal = segmentsToMerge.get(info);
+      if (isOriginal != null) {
+        segmentIsOriginal = isOriginal;
+        if (merging.contains(info) == false) {
+          eligible.add(info);
+        } else {
+          forceMergeRunning = true;
+        }
+      }
+    }
+
+    if (eligible.size() == 0) {
+      return null;
+    }
+
+    // The size can change concurrently while we are running here, because deletes
+    // are now applied concurrently, and this can piss off TimSort!  So we
+    // call size() once per segment and sort by that:
+    Map<SegmentCommitInfo,Long> sizeInBytes = getSegmentSizes(mergeContext, eligible);
+
+    if ((maxSegmentCount > 1 && eligible.size() <= maxSegmentCount) ||
+        (maxSegmentCount == 1 && eligible.size() == 1 && (!segmentIsOriginal || isMerged(infos, eligible.get(0), mergeContext)))) {
+      if (verbose(mergeContext)) {
+        message("already merged", mergeContext);
+      }
+      return null;
+    }
+
+    eligible.sort(new SegmentByteSizeDescending(sizeInBytes));
+
+    if (verbose(mergeContext)) {
+      message("eligible=" + eligible, mergeContext);
+      message("forceMergeRunning=" + forceMergeRunning, mergeContext);
+    }
+
+    int end = eligible.size();
+    
+    MergeSpecification spec = null;
+
+    // Do full merges, first, backwards:
+    while(end >= maxMergeAtOnceExplicit + maxSegmentCount - 1) {
+      if (spec == null) {
+        spec = new MergeSpecification();
+      }
+      final OneMerge merge = new OneMerge(eligible.subList(end-maxMergeAtOnceExplicit, end));
+      if (verbose(mergeContext)) {
+        message("add merge=" + segString(mergeContext, merge.segments), mergeContext);
+      }
+      spec.add(merge);
+      end -= maxMergeAtOnceExplicit;
+    }
+
+    if (spec == null && !forceMergeRunning) {
+      // Do final merge
+      final int numToMerge = end - maxSegmentCount + 1;
+      final OneMerge merge = new OneMerge(eligible.subList(end-numToMerge, end));
+      if (verbose(mergeContext)) {
+        message("add final merge=" + merge.segString(), mergeContext);
+      }
+      spec = new MergeSpecification();
+      spec.add(merge);
+    }
+
+    return spec;
+  }
+

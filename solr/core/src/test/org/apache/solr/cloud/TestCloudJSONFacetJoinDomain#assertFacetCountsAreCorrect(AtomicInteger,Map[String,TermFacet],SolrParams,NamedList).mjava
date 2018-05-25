@@ -2,9 +2,10 @@
    * Recursive Helper method that walks the actual facet response, comparing the counts to the expected output 
    * based on the equivilent filters generated from the original TermFacet.
    */
-  private void assertFacetCountsAreCorrect(Map<String,TermFacet> expected,
-                                           SolrParams baseParams,
-                                           NamedList actualFacetResponse) throws SolrServerException, IOException {
+  private void assertFacetCountsAreCorrect(final AtomicInteger maxBucketsToCheck,
+                                           final Map<String,TermFacet> expected,
+                                           final SolrParams baseParams,
+                                           final NamedList actualFacetResponse) throws SolrServerException, IOException {
 
     for (Map.Entry<String,TermFacet> entry : expected.entrySet()) {
       final String facetKey = entry.getKey();
@@ -13,6 +14,15 @@
       assertNotNull(facetKey + " key missing from: " + actualFacetResponse, results);
       final List<NamedList> buckets = (List<NamedList>) results.get("buckets");
       assertNotNull(facetKey + " has null buckets: " + actualFacetResponse, buckets);
+
+      if (buckets.isEmpty()) {
+        // should only happen if the baseParams query does not match any docs with our field X
+        final long docsWithField = getRandClient(random()).query
+          (facet.applyValueConstraintAndDomain(baseParams, facetKey, "[* TO *]")).getResults().getNumFound();
+        assertEquals(facetKey + " has no buckets, but docs in query exist with field: " + facet.field,
+                     0, docsWithField);
+      }
+      
       for (NamedList bucket : buckets) {
         final long count = ((Number) bucket.get("count")).longValue();
         final String fieldVal = bucket.get("val").toString(); // int or stringified int
@@ -24,10 +34,13 @@
         assertEquals(facetKey + ": " + verifyParams,
                      count, getRandClient(random()).query(verifyParams).getResults().getNumFound());
 
+        if (maxBucketsToCheck.decrementAndGet() <= 0) {
+          return;
+        }
+        
         // recursively check subFacets
         if (! facet.subFacets.isEmpty()) {
-          assertFacetCountsAreCorrect(facet.subFacets,
-                                      verifyParams, bucket);
+          assertFacetCountsAreCorrect(maxBucketsToCheck, facet.subFacets, verifyParams, bucket);
         }
       }
     }

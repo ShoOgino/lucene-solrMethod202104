@@ -1,24 +1,55 @@
     @Override
     public Scorer scorer(LeafReaderContext context) throws IOException {
-      // we use termscorers + disjunction as an impl detail
-      List<Scorer> subScorers = new ArrayList<>();
+      List<PostingsEnum> iterators = new ArrayList<>();
+      List<ImpactsEnum> impacts = new ArrayList<>();
       for (int i = 0; i < terms.length; i++) {
         TermState state = termStates[i].get(context);
         if (state != null) {
           TermsEnum termsEnum = context.reader().terms(terms[i].field()).iterator();
           termsEnum.seekExact(terms[i].bytes(), state);
-          LeafSimScorer simScorer = new LeafSimScorer(simWeight, context.reader(), terms[0].field(), true);
-          subScorers.add(new TermScorer(this, termsEnum, ScoreMode.COMPLETE, simScorer));
+          if (scoreMode == ScoreMode.TOP_SCORES) {
+            ImpactsEnum impactsEnum = termsEnum.impacts(PostingsEnum.FREQS);
+            iterators.add(impactsEnum);
+            impacts.add(impactsEnum);
+          } else {
+            PostingsEnum postingsEnum = termsEnum.postings(null, PostingsEnum.FREQS);
+            iterators.add(postingsEnum);
+            impacts.add(new SlowImpactsEnum(postingsEnum));
+          }
         }
       }
-      if (subScorers.isEmpty()) {
+
+      if (iterators.isEmpty()) {
         return null;
-      } else if (subScorers.size() == 1) {
-        // we must optimize this case (term not in segment), disjunctionscorer requires >= 2 subs
-        return subScorers.get(0);
-      } else {
-        LeafSimScorer simScorer = new LeafSimScorer(simWeight, context.reader(), terms[0].field(), true);
-        return new SynonymScorer(simScorer, this, subScorers);
       }
+
+      LeafSimScorer simScorer = new LeafSimScorer(simWeight, context.reader(), terms[0].field(), true);
+
+      // we must optimize this case (term not in segment), disjunctions require >= 2 subs
+      if (iterators.size() == 1) {
+        if (scoreMode == ScoreMode.TOP_SCORES) {
+          return new TermScorer(this, impacts.get(0), simScorer);
+        } else {
+          return new TermScorer(this, iterators.get(0), simScorer);
+        }
+      }
+
+      // we use termscorers + disjunction as an impl detail
+      DisiPriorityQueue queue = new DisiPriorityQueue(iterators.size());
+      for (PostingsEnum postings : iterators) {
+        queue.add(new DisiWrapper(new TermScorer(this, postings, simScorer)));
+      }
+      // Even though it is called approximation, it is accurate since none of
+      // the sub iterators are two-phase iterators.
+      DocIdSetIterator iterator = new DisjunctionDISIApproximation(queue);
+
+      ImpactsSource impactsSource = mergeImpacts(impacts.toArray(new ImpactsEnum[0]));
+      ImpactsDISI impactsDisi = new ImpactsDISI(iterator, impactsSource, simScorer.getSimScorer());
+
+      if (scoreMode == ScoreMode.TOP_SCORES) {
+        iterator = impactsDisi;
+      }
+
+      return new SynonymScorer(this, queue, iterator, impactsDisi, simScorer);
     }
 

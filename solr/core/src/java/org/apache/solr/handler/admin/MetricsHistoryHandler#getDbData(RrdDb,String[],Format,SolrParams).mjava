@@ -1,0 +1,94 @@
+  private NamedList<Object> getDbData(RrdDb db, String[] dsNames, Format format, SolrParams params) throws IOException {
+    NamedList<Object> res = new SimpleOrderedMap<>();
+    if (dsNames == null || dsNames.length == 0) {
+      dsNames = db.getDsNames();
+    }
+    StringBuilder str = new StringBuilder();
+    RrdDef def = db.getRrdDef();
+    ArcDef[] arcDefs = def.getArcDefs();
+    for (ArcDef arcDef : arcDefs) {
+      SimpleOrderedMap map = new SimpleOrderedMap();
+      res.add(arcDef.dump(), map);
+      Archive a = db.getArchive(arcDef.getConsolFun(), arcDef.getSteps());
+      // startTime / endTime, arcStep are in seconds
+      FetchRequest fr = db.createFetchRequest(arcDef.getConsolFun(),
+          a.getStartTime() - a.getArcStep(),
+          a.getEndTime() + a.getArcStep());
+      FetchData fd = fr.fetchData();
+      if (format != Format.GRAPH) {
+        // add timestamps separately from values
+        long[] timestamps = fd.getTimestamps();
+        str.setLength(0);
+        for (int i = 0; i < timestamps.length; i++) {
+          if (format == Format.LIST) {
+            map.add("timestamps", timestamps[i]);
+          } else {
+            if (i > 0) {
+              str.append('\n');
+            }
+            str.append(String.valueOf(timestamps[i]));
+          }
+        }
+        if (format == Format.STRING) {
+          map.add("timestamps", str.toString());
+        }
+      }
+      SimpleOrderedMap values = new SimpleOrderedMap();
+      map.add("values", values);
+      for (String name : dsNames) {
+        double[] vals = fd.getValues(name);
+        switch (format) {
+          case GRAPH:
+            RrdGraphDef graphDef = new RrdGraphDef();
+            graphDef.setTitle(name);
+            graphDef.datasource(name, fd);
+            graphDef.setStartTime(a.getStartTime() - a.getArcStep());
+            graphDef.setEndTime(a.getEndTime() + a.getArcStep());
+            graphDef.setPoolUsed(false);
+            graphDef.setAltAutoscale(true);
+            graphDef.setAltYGrid(true);
+            graphDef.setAltYMrtg(true);
+            graphDef.setSignature("Apache Solr " + versionString);
+            graphDef.setNoLegend(true);
+            graphDef.setAntiAliasing(true);
+            graphDef.setTextAntiAliasing(true);
+            graphDef.setWidth(500);
+            graphDef.setHeight(175);
+            graphDef.setTimeZone(TimeZone.getDefault());
+            graphDef.setLocale(Locale.getDefault());
+            // redraw immediately
+            graphDef.setLazy(false);
+            // area with a border
+            graphDef.area(name, new Color(0xffb860), null);
+            graphDef.line(name, Color.RED, null, 1.0f);
+            RrdGraph graph = new RrdGraph(graphDef);
+            BufferedImage bi = new BufferedImage(
+                graph.getRrdGraphInfo().getWidth(),
+                graph.getRrdGraphInfo().getHeight(),
+                BufferedImage.TYPE_INT_RGB);
+            graph.render(bi.getGraphics());
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            ImageIO.write(bi, "png", baos);
+            values.add(name, Base64.byteArrayToBase64(baos.toByteArray()));
+            break;
+          case STRING:
+            str.setLength(0);
+            for (int i = 0; i < vals.length; i++) {
+              if (i > 0) {
+                str.append('\n');
+              }
+              str.append(String.valueOf(vals[i]));
+            }
+            values.add(name, str.toString());
+            break;
+          case LIST:
+            for (int i = 0; i < vals.length; i++) {
+              values.add(name, vals[i]);
+            }
+            break;
+        }
+      }
+    }
+    return res;
+  }
+

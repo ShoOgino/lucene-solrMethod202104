@@ -24,13 +24,72 @@
     stateManager.makePath(ZkStateReader.SOLR_AUTOSCALING_TRIGGER_STATE_PATH);
     stateManager.makePath(ZkStateReader.SOLR_AUTOSCALING_NODE_LOST_PATH);
     stateManager.makePath(ZkStateReader.SOLR_AUTOSCALING_NODE_ADDED_PATH);
+    stateManager.makePath(Overseer.OVERSEER_ELECT);
+
+    // register common metrics
+    metricTag = Integer.toHexString(hashCode());
+    String registryName = SolrMetricManager.getRegistryName(SolrInfoBean.Group.jvm);
+    metricManager.registerAll(registryName, new AltBufferPoolMetricSet(), true, "buffers");
+    metricManager.registerAll(registryName, new ClassLoadingGaugeSet(), true, "classes");
+    metricManager.registerAll(registryName, new OperatingSystemMetricSet(), true, "os");
+    metricManager.registerAll(registryName, new GarbageCollectorMetricSet(), true, "gc");
+    metricManager.registerAll(registryName, new MemoryUsageGaugeSet(), true, "memory");
+    metricManager.registerAll(registryName, new ThreadStatesGaugeSet(), true, "threads"); // todo should we use CachedThreadStatesGaugeSet instead?
+    MetricsMap sysprops = new MetricsMap((detailed, map) -> {
+      System.getProperties().forEach((k, v) -> {
+        map.put(String.valueOf(k), v);
+      });
+    });
+    metricManager.registerGauge(null, registryName, sysprops, metricTag, true, "properties", "system");
+
+    registryName = SolrMetricManager.getRegistryName(SolrInfoBean.Group.node);
+    metricManager.registerGauge(null, registryName, () -> new File("/").getUsableSpace(),
+        metricTag, true, "usableSpace", SolrInfoBean.Category.CONTAINER.toString(), "fs", "coreRoot");
+
+    solrClient = new MockSearchableSolrClient() {
+      @Override
+      public NamedList<Object> request(SolrRequest request, String collection) throws SolrServerException, IOException {
+        if (collection != null) {
+          if (request instanceof AbstractUpdateRequest) {
+            ((AbstractUpdateRequest)request).setParam("collection", collection);
+          } else if (request instanceof QueryRequest) {
+            if (request.getPath() != null && (
+                request.getPath().startsWith("/admin/autoscaling") ||
+                request.getPath().startsWith("/cluster/autoscaling") ||
+            request.getPath().startsWith("/admin/metrics/history") ||
+                request.getPath().startsWith("/cluster/metrics/history")
+            )) {
+              // forward it
+              ModifiableSolrParams params = new ModifiableSolrParams(request.getParams());
+              params.set("collection", collection);
+              request = new QueryRequest(params);
+            } else {
+              // search request
+              return super.request(request, collection);
+            }
+          } else {
+            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "when collection != null only UpdateRequest and QueryRequest are supported: request=" + request + ", collection=" + collection);
+          }
+        }
+        try {
+          SolrResponse rsp = SimCloudManager.this.request(request);
+          return rsp.getResponse();
+        } catch (UnsupportedOperationException e) {
+          throw new SolrServerException(e);
+        }
+      }
+    };
+
 
     this.timeSource = timeSource != null ? timeSource : TimeSource.NANO_TIME;
     this.clusterStateProvider = new SimClusterStateProvider(liveNodesSet, this);
     this.nodeStateProvider = new SimNodeStateProvider(liveNodesSet, this.stateManager, this.clusterStateProvider, null);
     this.queueFactory = new GenericDistributedQueueFactory(stateManager);
     this.simCloudManagerPool = ExecutorUtil.newMDCAwareFixedThreadPool(200, new DefaultSolrThreadFactory("simCloudManagerPool"));
+
     this.autoScalingHandler = new AutoScalingHandler(this, loader);
+
+
     triggerThreadGroup = new ThreadGroup("Simulated Overseer autoscaling triggers");
     OverseerTriggerThread trigger = new OverseerTriggerThread(loader, this,
         new CloudConfig.CloudConfigBuilder("nonexistent", 0, "sim").build());

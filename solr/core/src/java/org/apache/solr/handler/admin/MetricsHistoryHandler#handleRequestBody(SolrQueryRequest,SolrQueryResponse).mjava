@@ -1,0 +1,75 @@
+  @Override
+  public void handleRequestBody(SolrQueryRequest req, SolrQueryResponse rsp) throws Exception {
+    String actionStr = req.getParams().get(CommonParams.ACTION);
+    if (actionStr == null) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "'action' is a required param");
+    }
+    Cmd cmd = Cmd.get(actionStr);
+    if (cmd == null) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "unknown 'action' param '" + actionStr + "', supported actions: " + Cmd.actions);
+    }
+    Object res = null;
+    switch (cmd) {
+      case LIST:
+        int rows = req.getParams().getInt(CommonParams.ROWS, SolrRrdBackendFactory.DEFAULT_MAX_DBS);
+        res = factory.list(rows);
+        break;
+      case GET:
+        String name = req.getParams().get(CommonParams.NAME);
+        if (name == null) {
+          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "'name' is a required param");
+        }
+        String[] dsNames = req.getParams().getParams("ds");
+        String formatStr = req.getParams().get("format", Format.LIST.toString());
+        Format format = Format.get(formatStr);
+        if (format == null) {
+          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "unknown 'format' param '" + formatStr + "', supported formats: " + Format.formats);
+        }
+        if (!factory.exists(name)) {
+          rsp.add("error", "'" + name + "' doesn't exist");
+        } else {
+          // get a throwaway copy (safe to close and discard)
+          RrdDb db = new RrdDb(URI_PREFIX + name, true, factory);
+          res = new NamedList<>();
+          NamedList<Object> data = new NamedList<>();
+          data.add("data", getDbData(db, dsNames, format, req.getParams()));
+          ((NamedList)res).add(name, data);
+          db.close();
+        }
+        break;
+      case STATUS:
+        name = req.getParams().get(CommonParams.NAME);
+        if (name == null) {
+          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "'name' is a required param");
+        }
+        if (!factory.exists(name)) {
+          rsp.add("error", "'" + name + "' doesn't exist");
+        } else {
+          // get a throwaway copy (safe to close and discard)
+          RrdDb db = new RrdDb(URI_PREFIX + name, true, factory);
+          NamedList<Object> map = new NamedList<>();
+          NamedList<Object> status = new NamedList<>();
+          status.add("status", getDbStatus(db));
+          map.add(name, status);
+          db.close();
+          res = map;
+        }
+        break;
+      case DELETE:
+        name = req.getParams().get(CommonParams.NAME);
+        if (name == null) {
+          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "'name' is a required param");
+        }
+        if (name.equalsIgnoreCase("all") || name.equals("*")) {
+          factory.removeAll();
+        } else {
+          factory.remove(name);
+        }
+        rsp.add("success", "ok");
+        break;
+    }
+    if (res != null) {
+      rsp.add("metrics", res);
+    }
+  }
+

@@ -1,0 +1,55 @@
+  synchronized void maybeSyncBackends() {
+    if (closed) {
+      return;
+    }
+    if (!persistent) {
+      return;
+    }
+    if (Thread.interrupted()) {
+      return;
+    }
+    log.debug("-- maybe sync backends: " + backends.keySet());
+    Map<String, byte[]> syncData = new HashMap<>();
+    backends.forEach((path, backend) -> {
+      byte[] data = backend.getSyncData();
+      if (data != null) {
+        syncData.put(backend.getPath(), data);
+      }
+    });
+    if (syncData.isEmpty()) {
+      return;
+    }
+    log.debug("-- syncing " + syncData.keySet());
+    // write updates
+    try {
+      syncData.forEach((path, data) -> {
+        SolrInputDocument doc = new SolrInputDocument();
+        doc.setField("id", ID_PREFIX + ID_SEP + path);
+        doc.addField(CommonParams.TYPE, DOC_TYPE);
+        doc.addField(DATA_FIELD, data);
+        doc.setField("timestamp", new Date(TimeUnit.MILLISECONDS.convert(timeSource.getEpochTimeNs(), TimeUnit.NANOSECONDS)));
+        try {
+          solrClient.add(collection, doc);
+        } catch (SolrServerException | IOException e) {
+          log.warn("Error updating RRD data for " + path, e);
+        }
+      });
+      if (Thread.interrupted()) {
+        return;
+      }
+      try {
+        solrClient.commit(collection);
+      } catch (SolrServerException e) {
+        log.warn("Error committing RRD data updates", e);
+      }
+      syncData.forEach((path, data) -> {
+        SolrRrdBackend backend = backends.get(path);
+        if (backend != null) {
+          backend.markClean();
+        }
+      });
+    } catch (IOException e) {
+      log.warn("Error sending RRD data updates", e);
+    }
+  }
+

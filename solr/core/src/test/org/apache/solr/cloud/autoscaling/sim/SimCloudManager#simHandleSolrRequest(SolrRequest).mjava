@@ -10,50 +10,71 @@
 
     LOG.trace("--- got SolrRequest: " + req.getMethod() + " " + req.getPath() +
         (req.getParams() != null ? " " + req.getParams().toQueryString() : ""));
-    if (req.getPath() != null && req.getPath().startsWith("/admin/autoscaling") ||
-        req.getPath().startsWith("/cluster/autoscaling")) {
-      incrementCount("autoscaling");
-      ModifiableSolrParams params = new ModifiableSolrParams(req.getParams());
-      params.set(CommonParams.PATH, req.getPath());
-      LocalSolrQueryRequest queryRequest = new LocalSolrQueryRequest(null, params);
-      RequestWriter.ContentWriter cw = req.getContentWriter("application/json");
-      ByteArrayOutputStream baos = new ByteArrayOutputStream();
-      cw.write(baos);
-      String payload = baos.toString("UTF-8");
-      LOG.trace("-- payload: {}", payload);
-      queryRequest.setContentStreams(Collections.singletonList(new ContentStreamBase.StringStream(payload)));
-      queryRequest.getContext().put("httpMethod", req.getMethod().toString());
-      SolrQueryResponse queryResponse = new SolrQueryResponse();
-      autoScalingHandler.handleRequest(queryRequest, queryResponse);
-      if (queryResponse.getException() != null) {
-        LOG.debug("-- exception handling request", queryResponse.getException());
-        throw new IOException(queryResponse.getException());
+    if (req.getPath() != null) {
+      if (req.getPath().startsWith("/admin/autoscaling") ||
+          req.getPath().startsWith("/cluster/autoscaling") ||
+          req.getPath().startsWith("/admin/metrics/history") ||
+          req.getPath().startsWith("/cluster/metrics/history")
+          ) {
+        metricManager.registry("solr.node").counter("ADMIN." + req.getPath() + ".requests").inc();
+        boolean autoscaling = req.getPath().contains("autoscaling");
+        if (autoscaling) {
+          incrementCount("autoscaling");
+        } else {
+          incrementCount("metricsHistory");
+        }
+        ModifiableSolrParams params = new ModifiableSolrParams(req.getParams());
+        params.set(CommonParams.PATH, req.getPath());
+        LocalSolrQueryRequest queryRequest = new LocalSolrQueryRequest(null, params);
+        if (autoscaling) {
+          RequestWriter.ContentWriter cw = req.getContentWriter("application/json");
+          ByteArrayOutputStream baos = new ByteArrayOutputStream();
+          cw.write(baos);
+          String payload = baos.toString("UTF-8");
+          LOG.trace("-- payload: {}", payload);
+          queryRequest.setContentStreams(Collections.singletonList(new ContentStreamBase.StringStream(payload)));
+        }
+        queryRequest.getContext().put("httpMethod", req.getMethod().toString());
+        SolrQueryResponse queryResponse = new SolrQueryResponse();
+        if (autoscaling) {
+          autoScalingHandler.handleRequest(queryRequest, queryResponse);
+        } else {
+          if (historyHandler != null) {
+            historyHandler.handleRequest(queryRequest, queryResponse);
+          } else {
+            throw new UnsupportedOperationException("must add at least 1 node first");
+          }
+        }
+        if (queryResponse.getException() != null) {
+          LOG.debug("-- exception handling request", queryResponse.getException());
+          throw new IOException(queryResponse.getException());
+        }
+        SolrResponse rsp = new SolrResponseBase();
+        rsp.setResponse(queryResponse.getValues());
+        LOG.trace("-- response: {}", rsp);
+        return rsp;
       }
-      SolrResponse rsp = new SolrResponseBase();
-      rsp.setResponse(queryResponse.getValues());
-      LOG.trace("-- response: {}", rsp);
-      return rsp;
     }
     if (req instanceof UpdateRequest) {
       incrementCount("update");
-      // support only updates to the system collection
       UpdateRequest ureq = (UpdateRequest)req;
       String collection = ureq.getCollection();
-      if (collection != null && !collection.equals(CollectionAdminParams.SYSTEM_COLL)) {
-        // simulate an update
-        return clusterStateProvider.simUpdate(ureq);
-      } else {
+      UpdateResponse rsp = clusterStateProvider.simUpdate(ureq);
+      if (collection == null || collection.equals(CollectionAdminParams.SYSTEM_COLL)) {
         List<SolrInputDocument> docs = ureq.getDocuments();
         if (docs != null) {
           systemColl.addAll(docs);
         }
         return new UpdateResponse();
+      } else {
+        return rsp;
       }
     }
     // support only a specific subset of collection admin ops
     if (!(req instanceof CollectionAdminRequest)) {
       throw new UnsupportedOperationException("Only some CollectionAdminRequest-s are supported: " + req.getClass().getName());
     }
+    metricManager.registry("solr.node").counter("ADMIN." + req.getPath() + ".requests").inc();
     SolrParams params = req.getParams();
     String a = params.get(CoreAdminParams.ACTION);
     SolrResponse rsp = new SolrResponseBase();

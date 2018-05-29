@@ -1,0 +1,150 @@
+  private void collectGlobalMetrics() {
+    if (!isOverseerLeader()) {
+      return;
+    }
+    Set<String> nodes = new HashSet<>(cloudManager.getClusterStateProvider().getLiveNodes());
+    NodeStateProvider nodeStateProvider = cloudManager.getNodeStateProvider();
+    Set<String> collTags = new HashSet<>();
+    collTags.addAll(counters.get(Group.core.toString()));
+    collTags.addAll(gauges.get(Group.core.toString()));
+
+    Set<String> nodeTags = new HashSet<>();
+    String nodePrefix = "metrics:" + SolrMetricManager.getRegistryName(Group.node) + ":";
+    counters.get(Group.node.toString()).forEach(name -> {
+      nodeTags.add(nodePrefix + name);
+    });
+    gauges.get(Group.node.toString()).forEach(name -> {
+      nodeTags.add(nodePrefix + name);
+    });
+    String jvmPrefix = "metrics:" + SolrMetricManager.getRegistryName(Group.jvm) + ":";
+    counters.get(Group.jvm.toString()).forEach(name -> {
+      nodeTags.add(jvmPrefix + name);
+    });
+    gauges.get(Group.jvm.toString()).forEach(name -> {
+      nodeTags.add(jvmPrefix + name);
+    });
+
+    // per-registry totals
+    // XXX at the moment the type of metrics that we collect allows
+    // adding all partial values. At some point it may be necessary to implement
+    // other aggregation functions.
+    // group : registry : name : value
+    Map<Group, Map<String, Map<String, Number>>> totals = new HashMap<>();
+
+    // collect and aggregate per-collection totals
+    for (String node : nodes) {
+      if (cloudManager.isClosed() || Thread.interrupted()) {
+        return;
+      }
+      // add core-level stats
+      Map<String, Map<String, List<ReplicaInfo>>> infos = nodeStateProvider.getReplicaInfo(node, collTags);
+      infos.forEach((coll, shards) -> {
+        shards.forEach((sh, replicas) -> {
+          String registry = SolrMetricManager.getRegistryName(Group.collection, coll);
+          Map<String, Number> perReg = totals
+              .computeIfAbsent(Group.collection, g -> new HashMap<>())
+              .computeIfAbsent(registry, r -> new HashMap<>());
+          replicas.forEach(ri -> {
+            collTags.forEach(tag -> {
+              double value = ((Number)ri.getVariable(tag, 0.0)).doubleValue();
+              // TODO: fix this when Suggestion.Condition.DISK_IDX uses proper conversion
+              if (tag.contains(Suggestion.coreidxsize)) {
+                value = value * 1024.0 * 1024.0 * 1024.0;
+              }
+              DoubleAdder adder = (DoubleAdder)perReg.computeIfAbsent(tag, t -> new DoubleAdder());
+              adder.add(value);
+            });
+          });
+        });
+      });
+      // add node-level stats
+      Map<String, Object> nodeValues = nodeStateProvider.getNodeValues(node, nodeTags);
+      for (Group g : Arrays.asList(Group.node, Group.jvm)) {
+        String registry = SolrMetricManager.getRegistryName(g);
+        Map<String, Number> perReg = totals
+            .computeIfAbsent(g, gr -> new HashMap<>())
+            .computeIfAbsent(registry, r -> new HashMap<>());
+        Set<String> names = new HashSet<>();
+        names.addAll(counters.get(g.toString()));
+        names.addAll(gauges.get(g.toString()));
+        names.forEach(name -> {
+          String tag = "metrics:" + registry + ":" + name;
+          double value = ((Number)nodeValues.getOrDefault(tag, 0.0)).doubleValue();
+          DoubleAdder adder = (DoubleAdder)perReg.computeIfAbsent(name, t -> new DoubleAdder());
+          adder.add(value);
+        });
+      }
+    }
+
+    // add numNodes
+    String nodeReg = SolrMetricManager.getRegistryName(Group.node);
+    Map<String, Number> perNodeReg = totals
+        .computeIfAbsent(Group.node, gr -> new HashMap<>())
+        .computeIfAbsent(nodeReg, r -> new HashMap<>());
+    perNodeReg.put(NUM_NODES_KEY, nodes.size());
+
+    // add some global collection-level stats
+    try {
+      ClusterState state = cloudManager.getClusterStateProvider().getClusterState();
+      state.forEachCollection(coll -> {
+        String registry = SolrMetricManager.getRegistryName(Group.collection, coll.getName());
+        Map<String, Number> perReg = totals
+            .computeIfAbsent(Group.collection, g -> new HashMap<>())
+            .computeIfAbsent(registry, r -> new HashMap<>());
+        Collection<Slice> slices = coll.getActiveSlices();
+        perReg.put(NUM_SHARDS_KEY, slices.size());
+        DoubleAdder numActiveReplicas = new DoubleAdder();
+        slices.forEach(s -> {
+          s.forEach(r -> {
+            if (r.isActive(state.getLiveNodes())) {
+              numActiveReplicas.add(1.0);
+            }
+          });
+        });
+        perReg.put(NUM_REPLICAS_KEY, numActiveReplicas);
+      });
+    } catch (IOException e) {
+      log.warn("Exception getting cluster state", e);
+    }
+
+    // now update the db-s
+    totals.forEach((group, perGroup) -> {
+      perGroup.forEach((reg, perReg) -> {
+        RrdDb db = getOrCreateDb(reg, group);
+        if (db == null) {
+          return;
+        }
+        try {
+          // set the timestamp
+          Sample s = db.createSample(TimeUnit.SECONDS.convert(timeSource.getEpochTimeNs(), TimeUnit.NANOSECONDS));
+          AtomicBoolean dirty = new AtomicBoolean(false);
+          List<Group> groups = new ArrayList<>();
+          groups.add(group);
+          if (group == Group.collection) {
+            groups.add(Group.core);
+          }
+          for (Group g : groups) {
+            counters.get(g.toString()).forEach(c -> {
+              Number val = perReg.get(c);
+              if (val != null) {
+                dirty.set(true);
+                s.setValue(c, val.doubleValue());
+              }
+            });
+            gauges.get(g.toString()).forEach(c -> {
+              Number val = perReg.get(c);
+              if (val != null) {
+                dirty.set(true);
+                s.setValue(c, val.doubleValue());
+              }
+            });
+          }
+          if (dirty.get()) {
+            s.update();
+          }
+        } catch (Exception e) {
+        }
+      });
+    });
+  }
+

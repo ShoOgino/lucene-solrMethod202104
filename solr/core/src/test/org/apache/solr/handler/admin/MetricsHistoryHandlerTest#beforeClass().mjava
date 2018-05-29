@@ -1,0 +1,43 @@
+  @BeforeClass
+  public static void beforeClass() throws Exception {
+    simulated = random().nextBoolean();
+    Map<String, Object> args = new HashMap<>();
+    args.put(MetricsHistoryHandler.SYNC_PERIOD_PROP, 1);
+    args.put(MetricsHistoryHandler.COLLECT_PERIOD_PROP, 1);
+    if (simulated) {
+      SPEED = 50;
+      cloudManager = SimCloudManager.createCluster(1, TimeSource.get("simTime:" + SPEED));
+      // wait for defaults to be applied - due to accelerated time sometimes we may miss this
+      cloudManager.getTimeSource().sleep(10000);
+      AutoScalingConfig cfg = cloudManager.getDistribStateManager().getAutoScalingConfig();
+      assertFalse("autoscaling config is empty", cfg.isEmpty());
+      metricManager = ((SimCloudManager)cloudManager).getMetricManager();
+      solrClient = ((SimCloudManager)cloudManager).simGetSolrClient();
+      // need to register the factory here, before we start the real cluster
+      metricsHandler = new MetricsHandler(metricManager);
+      handler = new MetricsHistoryHandler(cloudManager.getClusterStateProvider().getLiveNodes().iterator().next(),
+          metricsHandler, solrClient, cloudManager, args);
+      handler.initializeMetrics(metricManager, SolrInfoBean.Group.node.toString(), "", CommonParams.METRICS_HISTORY_PATH);
+    }
+    configureCluster(1)
+        .addConfig("conf", configset("cloud-minimal"))
+        .configure();
+    if (!simulated) {
+      cloudManager = cluster.getJettySolrRunner(0).getCoreContainer().getZkController().getSolrCloudManager();
+      metricManager = cluster.getJettySolrRunner(0).getCoreContainer().getMetricManager();
+      solrClient = cluster.getSolrClient();
+      metricsHandler = new MetricsHandler(metricManager);
+      handler = new MetricsHistoryHandler(cluster.getJettySolrRunner(0).getNodeName(), metricsHandler, solrClient, cloudManager, args);
+      handler.initializeMetrics(metricManager, SolrInfoBean.Group.node.toString(), "", CommonParams.METRICS_HISTORY_PATH);
+      SPEED = 1;
+    }
+    timeSource = cloudManager.getTimeSource();
+
+    // create .system collection
+    CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(CollectionAdminParams.SYSTEM_COLL,
+        "conf", 1, 1);
+    create.process(solrClient);
+    CloudTestUtils.waitForState(cloudManager, "failed to create " + CollectionAdminParams.SYSTEM_COLL,
+        CollectionAdminParams.SYSTEM_COLL, CloudTestUtils.clusterShape(1, 1));
+  }
+

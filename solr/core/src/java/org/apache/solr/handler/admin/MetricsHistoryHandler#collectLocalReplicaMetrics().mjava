@@ -1,0 +1,68 @@
+  private void collectLocalReplicaMetrics() {
+    List<Group> groups = new ArrayList<>();
+    if (enableNodes) {
+      groups.add(Group.jvm);
+      groups.add(Group.node);
+    }
+    if (enableReplicas) {
+      groups.add(Group.core);
+    }
+    for (Group group : groups) {
+      if (Thread.interrupted()) {
+        return;
+      }
+      log.debug("--  collecting local " + group + "...");
+      ModifiableSolrParams params = new ModifiableSolrParams();
+      params.add(MetricsHandler.GROUP_PARAM, group.toString());
+      params.add(MetricsHandler.COMPACT_PARAM, "true");
+      counters.get(group.toString()).forEach(c -> params.add(MetricsHandler.PREFIX_PARAM, c));
+      gauges.get(group.toString()).forEach(c -> params.add(MetricsHandler.PREFIX_PARAM, c));
+      AtomicReference<Object> result = new AtomicReference<>();
+      try {
+        metricsHandler.handleRequest(params, (k, v) -> {
+          if (k.equals("metrics")) {
+            result.set(v);
+          }
+        });
+        NamedList nl = (NamedList)result.get();
+        if (nl != null) {
+          for (Iterator<Map.Entry<String, Object>> it = nl.iterator(); it.hasNext(); ) {
+            Map.Entry<String, Object> entry = it.next();
+            String registry = entry.getKey();
+            if (group != Group.core) { // add nodeName suffix
+              registry = registry + "." + nodeName;
+            }
+
+            RrdDb db = getOrCreateDb(registry, group);
+            if (db == null) {
+              continue;
+            }
+            // set the timestamp
+            Sample s = db.createSample(TimeUnit.SECONDS.convert(timeSource.getEpochTimeNs(), TimeUnit.NANOSECONDS));
+            NamedList<Object> values = (NamedList<Object>)entry.getValue();
+            AtomicBoolean dirty = new AtomicBoolean(false);
+            counters.get(group.toString()).forEach(c -> {
+              Number val = (Number)values.get(c);
+              if (val != null) {
+                dirty.set(true);
+                s.setValue(c, val.doubleValue());
+              }
+            });
+            gauges.get(group.toString()).forEach(c -> {
+              Number val = (Number)values.get(c);
+              if (val != null) {
+                dirty.set(true);
+                s.setValue(c, val.doubleValue());
+              }
+            });
+            if (dirty.get()) {
+              s.update();
+            }
+          }
+        }
+      } catch (Exception e) {
+        e.printStackTrace();
+      }
+    }
+  }
+

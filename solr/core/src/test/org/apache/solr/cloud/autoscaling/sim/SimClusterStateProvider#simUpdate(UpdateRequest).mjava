@@ -22,7 +22,12 @@
       throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Collection not set");
     }
     if (!simListCollections().contains(collection)) {
-      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Collection '" + collection + "' doesn't exist");
+      if (CollectionAdminParams.SYSTEM_COLL.equals(collection)) {
+        // auto-create
+        createSystemCollection();
+      } else {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Collection '" + collection + "' doesn't exist");
+      }
     }
     // always reset first to get the current metrics - it's easier than to keep matching
     // Replica with ReplicaInfo where the current real counts are stored
@@ -44,6 +49,7 @@
             LOG.debug("-- no leader in " + s);
             continue;
           }
+          cloudManager.getMetricManager().registry(createRegistryName(collection, s.getName(), leader)).counter("UPDATE./update.requests").inc();
           String numDocsStr = leader.getStr("SEARCHER.searcher.numDocs");
           if (numDocsStr == null) {
             LOG.debug("-- no docs in " + leader);
@@ -72,7 +78,14 @@
             throw new UnsupportedOperationException("Only '*:*' query is supported in deleteByQuery");
           }
           for (Slice s : coll.getSlices()) {
-            String numDocsStr = s.getLeader().getStr("SEARCHER.searcher.numDocs");
+            Replica leader = s.getLeader();
+            if (leader == null) {
+              LOG.debug("-- no leader in " + s);
+              continue;
+            }
+
+            cloudManager.getMetricManager().registry(createRegistryName(collection, s.getName(), leader)).counter("UPDATE./update.requests").inc();
+            String numDocsStr = leader.getStr("SEARCHER.searcher.numDocs");
             if (numDocsStr == null) {
               continue;
             }
@@ -98,6 +111,10 @@
             throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Document without id: " + doc);
           }
           Slice s = router.getTargetSlice(id, null, null, req.getParams(), coll);
+          Replica leader = s.getLeader();
+          if (leader != null) {
+            cloudManager.getMetricManager().registry(createRegistryName(collection, s.getName(), leader)).counter("UPDATE./update.requests").inc();
+          }
           modified = true;
           try {
             simSetShardValue(collection, s.getName(), "SEARCHER.searcher.numDocs", 1, true, false);

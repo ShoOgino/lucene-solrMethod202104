@@ -1,0 +1,53 @@
+    private void execute(UpdateCommand cmd, OrderedExecutor executor,
+                         AtomicInteger pendingTasks, UpdateRequestProcessor proc,
+                         AtomicReference<SolrException> exceptionHolder) {
+      assert cmd instanceof AddUpdateCommand || cmd instanceof DeleteUpdateCommand;
+
+      if (executor != null) {
+        // by using the same hash as DUP, independent updates can avoid waiting for same bucket
+        executor.execute(getBucketHash(cmd), () -> {
+          try {
+            // fail fast
+            if (exceptionHolder.get() != null) return;
+            if (cmd instanceof AddUpdateCommand) {
+              proc.processAdd((AddUpdateCommand) cmd);
+            } else {
+              proc.processDelete((DeleteUpdateCommand) cmd);
+            }
+          } catch (IOException e) {
+            recoveryInfo.errors++;
+            loglog.warn("REPLAY_ERR: IOException reading log", e);
+            // could be caused by an incomplete flush if recovering from log
+          } catch (SolrException e) {
+            if (e.code() == ErrorCode.SERVICE_UNAVAILABLE.code) {
+              exceptionHolder.compareAndSet(null, e);
+              return;
+            }
+            recoveryInfo.errors++;
+            loglog.warn("REPLAY_ERR: IOException reading log", e);
+          } finally {
+            pendingTasks.decrementAndGet();
+          }
+        });
+        pendingTasks.incrementAndGet();
+      } else {
+        try {
+          if (cmd instanceof AddUpdateCommand) {
+            proc.processAdd((AddUpdateCommand) cmd);
+          } else {
+            proc.processDelete((DeleteUpdateCommand) cmd);
+          }
+        } catch (IOException e) {
+          recoveryInfo.errors++;
+          loglog.warn("REPLAY_ERR: IOException replaying log", e);
+          // could be caused by an incomplete flush if recovering from log
+        } catch (SolrException e) {
+          if (e.code() == ErrorCode.SERVICE_UNAVAILABLE.code) {
+            throw e;
+          }
+          recoveryInfo.errors++;
+          loglog.warn("REPLAY_ERR: IOException replaying log", e);
+        }
+      }
+    }
+

@@ -13,6 +13,9 @@
 
         UpdateRequestProcessorChain processorChain = req.getCore().getUpdateProcessingChain(null);
         UpdateRequestProcessor proc = processorChain.createProcessor(req, rsp);
+        OrderedExecutor executor = inSortedOrder ? null : req.getCore().getCoreContainer().getReplayUpdatesExecutor();
+        AtomicInteger pendingTasks = new AtomicInteger(0);
+        AtomicReference<SolrException> exceptionOnExecuteUpdate = new AtomicReference<>();
 
         long commitVersion = 0;
         int operationAndFlags = 0;
@@ -41,6 +44,11 @@
             o = tlogReader.next();
             if (o == null && activeLog) {
               if (!finishing) {
+                // about to block all the updates including the tasks in the executor
+                // therefore we must wait for them to be finished
+                waitForAllUpdatesGetExecuted(pendingTasks);
+                // from this point, remain updates will be executed in a single thread
+                executor = null;
                 // block to prevent new adds, but don't immediately unlock since
                 // we could be starved from ever completing recovery.  Only unlock
                 // after we've finished this recovery.
@@ -65,6 +73,8 @@
           }
 
           if (o == null) break;
+          // fail fast
+          if (exceptionOnExecuteUpdate.get() != null) throw exceptionOnExecuteUpdate.get();
 
           try {
 
@@ -81,7 +91,7 @@
                 AddUpdateCommand cmd = convertTlogEntryToAddUpdateCommand(req, entry, oper, version);
                 cmd.setFlags(UpdateCommand.REPLAY | UpdateCommand.IGNORE_AUTOCOMMIT);
                 if (debug) log.debug("{} {}", oper == ADD ? "add" : "update", cmd);
-                proc.processAdd(cmd);
+                execute(cmd, executor, pendingTasks, proc, exceptionOnExecuteUpdate);
                 break;
               }
               case UpdateLog.DELETE: {
@@ -92,7 +102,7 @@
                 cmd.setVersion(version);
                 cmd.setFlags(UpdateCommand.REPLAY | UpdateCommand.IGNORE_AUTOCOMMIT);
                 if (debug) log.debug("delete " + cmd);
-                proc.processDelete(cmd);
+                execute(cmd, executor, pendingTasks, proc, exceptionOnExecuteUpdate);
                 break;
               }
 
@@ -104,7 +114,9 @@
                 cmd.setVersion(version);
                 cmd.setFlags(UpdateCommand.REPLAY | UpdateCommand.IGNORE_AUTOCOMMIT);
                 if (debug) log.debug("deleteByQuery " + cmd);
-                proc.processDelete(cmd);
+                waitForAllUpdatesGetExecuted(pendingTasks);
+                // DBQ will be executed in the same thread
+                execute(cmd, null, pendingTasks, proc, exceptionOnExecuteUpdate);
                 break;
               }
               case UpdateLog.COMMIT: {
@@ -127,29 +139,20 @@
             } else {
               // XXX should not happen?
             }
-          } catch (IOException ex) {
-            recoveryInfo.errors++;
-            loglog.warn("REPLAY_ERR: IOException reading log", ex);
-            // could be caused by an incomplete flush if recovering from log
           } catch (ClassCastException cl) {
             recoveryInfo.errors++;
             loglog.warn("REPLAY_ERR: Unexpected log entry or corrupt log.  Entry=" + o, cl);
             // would be caused by a corrupt transaction log
-          } catch (SolrException ex) {
-            if (ex.code() == ErrorCode.SERVICE_UNAVAILABLE.code) {
-              throw ex;
-            }
-            recoveryInfo.errors++;
-            loglog.warn("REPLAY_ERR: IOException reading log", ex);
-            // could be caused by an incomplete flush if recovering from log
           } catch (Exception ex) {
             recoveryInfo.errors++;
             loglog.warn("REPLAY_ERR: Exception replaying log", ex);
             // something wrong with the request?
           }
           assert TestInjection.injectUpdateLogReplayRandomPause();
-          
         }
+
+        waitForAllUpdatesGetExecuted(pendingTasks);
+        if (exceptionOnExecuteUpdate.get() != null) throw exceptionOnExecuteUpdate.get();
 
         CommitUpdateCommand cmd = new CommitUpdateCommand(req, false);
         cmd.setVersion(commitVersion);

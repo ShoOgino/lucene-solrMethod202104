@@ -1,15 +1,18 @@
   @Override
-  public long writeDeleteByQuery(DeleteUpdateCommand cmd, int flags) {
+  public long writeDelete(DeleteUpdateCommand cmd) {
     LogCodec codec = new LogCodec(resolver);
+
     try {
       checkWriteHeader(codec, null);
 
-      MemOutputStream out = new MemOutputStream(new byte[20 + (cmd.query.length())]);
+      BytesRef br = cmd.getIndexedId();
+
+      MemOutputStream out = new MemOutputStream(new byte[20 + br.length]);
       codec.init(out);
       codec.writeTag(JavaBinCodec.ARR, 4);
-      codec.writeInt(UpdateLog.DELETE_BY_QUERY | flags);  // should just take one byte
+      codec.writeInt(UpdateLog.DELETE);  // should just take one byte
       codec.writeLong(cmd.getVersion());
-      codec.writeStr(cmd.query);
+      codec.writeByteArray(br.bytes, br.offset, br.length);
       if (cmd.getReq().getParamString().contains(CdcrUpdateProcessor.CDCR_UPDATE)) {
         // if the update is received via cdcr source; add extra boolean entry
         // CdcrReplicator.isTargetCluster() checks that particular boolean to accept or discard the update
@@ -18,13 +21,16 @@
       } else {
         codec.writePrimitive(false);
       }
+
       synchronized (this) {
         long pos = fos.size();   // if we had flushed, this should be equal to channel.position()
+        assert pos != 0;
         out.writeAll(fos);
         endRecord(pos);
         // fos.flushBuffer();  // flush later
         return pos;
       }
+
     } catch (IOException e) {
       throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, e);
     }

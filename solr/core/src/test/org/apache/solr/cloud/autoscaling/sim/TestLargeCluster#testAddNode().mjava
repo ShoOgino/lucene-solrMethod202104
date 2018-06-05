@@ -3,14 +3,15 @@
     SolrClient solrClient = cluster.simGetSolrClient();
     String setTriggerCommand = "{" +
         "'set-trigger' : {" +
-        "'name' : 'node_added_trigger'," +
+        "'name' : 'node_added_trigger2'," +
         "'event' : 'nodeAdded'," +
         "'waitFor' : '" + waitForSeconds + "s'," +
         "'enabled' : true," +
         "'actions' : [" +
+        "{'name':'start','class':'" + StartTriggerAction.class.getName() + "'}," +
         "{'name':'compute','class':'" + ComputePlanAction.class.getName() + "'}," +
         "{'name':'execute','class':'" + ExecutePlanAction.class.getName() + "'}," +
-        "{'name':'test','class':'" + TestTriggerAction.class.getName() + "'}" +
+        "{'name':'test','class':'" + FinishTriggerAction.class.getName() + "'}" +
         "]" +
         "}}";
     SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, setTriggerCommand);
@@ -28,20 +29,34 @@
     log.info("Ready after " + CloudTestUtils.waitForState(cluster, collectionName, 20 * NUM_NODES, TimeUnit.SECONDS,
         CloudTestUtils.clusterShape(NUM_NODES / 10, NUM_NODES / 8 * 3)) + " ms");
 
+    // start adding nodes
     int numAddNode = NUM_NODES / 5;
     List<String> addNodesList = new ArrayList<>(numAddNode);
     for (int i = 0; i < numAddNode; i++) {
       addNodesList.add(cluster.simAddNode());
       cluster.getTimeSource().sleep(5000);
     }
-    boolean await = triggerFiredLatch.await(1000000 / SPEED, TimeUnit.MILLISECONDS);
+    // wait until at least one event is generated
+    boolean await = triggerFinishedLatch.await(10000 / SPEED, TimeUnit.MILLISECONDS);
     assertTrue("trigger did not fire", await);
+
+    // wait until started == finished
+    TimeOut timeOut = new TimeOut(20 * waitForSeconds * NUM_NODES, TimeUnit.SECONDS, cluster.getTimeSource());
+    while (!timeOut.hasTimedOut()) {
+      if (triggerStartedCount.get() == triggerFinishedCount.get()) {
+        break;
+      }
+      timeOut.sleep(1000);
+    }
+    if (timeOut.hasTimedOut()) {
+      fail("did not finish processing all events in time: started=" + triggerStartedCount.get() + ", finished=" + triggerFinishedCount.get());
+    }
 
     List<SolrInputDocument> systemColl = cluster.simGetSystemCollection();
     int startedEventPos = -1;
     for (int i = 0; i < systemColl.size(); i++) {
       SolrInputDocument d = systemColl.get(i);
-      if (!"node_added_trigger".equals(d.getFieldValue("event.source_s"))) {
+      if (!"node_added_trigger2".equals(d.getFieldValue("event.source_s"))) {
         continue;
       }
       if ("NODEADDED".equals(d.getFieldValue("event.type_s")) &&
@@ -63,13 +78,13 @@
     SolrInputDocument finishedEvent = null;
     long lastNumOps = cluster.simGetOpCount("MOVEREPLICA");
     while (count-- > 0) {
-      cluster.getTimeSource().sleep(150000);
+      cluster.getTimeSource().sleep(10000);
       long currentNumOps = cluster.simGetOpCount("MOVEREPLICA");
       if (currentNumOps == lastNumOps) {
         int size = systemColl.size() - 1;
         for (int i = size; i > lastIgnoredPos; i--) {
           SolrInputDocument d = systemColl.get(i);
-          if (!"node_added_trigger".equals(d.getFieldValue("event.source_s"))) {
+          if (!"node_added_trigger2".equals(d.getFieldValue("event.source_s"))) {
             continue;
           }
           if ("SUCCEEDED".equals(d.getFieldValue("stage_s"))) {

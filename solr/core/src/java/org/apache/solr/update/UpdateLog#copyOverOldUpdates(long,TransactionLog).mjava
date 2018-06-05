@@ -1,0 +1,68 @@
+  /**
+   * Copy over updates from prevTlog or last tlog (in tlog folder) to a new tlog
+   * @param commitVersion any updates that have version larger than the commitVersion will be copied over
+   */
+  public void copyOverOldUpdates(long commitVersion, TransactionLog oldTlog) {
+    copyOverOldUpdatesMeter.mark();
+
+    SolrQueryRequest req = new LocalSolrQueryRequest(uhandler.core,
+        new ModifiableSolrParams());
+    TransactionLog.LogReader logReader = oldTlog.getReader(0);
+    Object o = null;
+    try {
+      while ( (o = logReader.next()) != null ) {
+        try {
+          List entry = (List)o;
+          int operationAndFlags = (Integer) entry.get(0);
+          int oper = operationAndFlags & OPERATION_MASK;
+          long version = (Long) entry.get(1);
+          if (Math.abs(version) > commitVersion) {
+            switch (oper) {
+              case UpdateLog.UPDATE_INPLACE:
+              case UpdateLog.ADD: {
+                AddUpdateCommand cmd = convertTlogEntryToAddUpdateCommand(req, entry, oper, version);
+                cmd.setFlags(UpdateCommand.IGNORE_AUTOCOMMIT);
+                add(cmd);
+                break;
+              }
+              case UpdateLog.DELETE: {
+                byte[] idBytes = (byte[]) entry.get(2);
+                DeleteUpdateCommand cmd = new DeleteUpdateCommand(req);
+                cmd.setIndexedId(new BytesRef(idBytes));
+                cmd.setVersion(version);
+                cmd.setFlags(UpdateCommand.IGNORE_AUTOCOMMIT);
+                delete(cmd);
+                break;
+              }
+
+              case UpdateLog.DELETE_BY_QUERY: {
+                String query = (String) entry.get(2);
+                DeleteUpdateCommand cmd = new DeleteUpdateCommand(req);
+                cmd.query = query;
+                cmd.setVersion(version);
+                cmd.setFlags(UpdateCommand.IGNORE_AUTOCOMMIT);
+                deleteByQuery(cmd);
+                break;
+              }
+
+              default:
+                throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Unknown Operation! " + oper);
+            }
+          }
+        } catch (ClassCastException e) {
+          log.warn("Unexpected log entry or corrupt log.  Entry=" + o, e);
+        }
+      }
+      // Prev tlog will be closed, so nullify prevMap
+      if (prevTlog == oldTlog) {
+        prevMap = null;
+      }
+    } catch (IOException e) {
+      log.error("Exception reading versions from log",e);
+    } catch (InterruptedException e) {
+      log.warn("Exception reading log", e);
+    } finally {
+      if (logReader != null) logReader.close();
+    }
+  }
+

@@ -3,14 +3,15 @@
     SolrClient solrClient = cluster.simGetSolrClient();
     String setTriggerCommand = "{" +
         "'set-trigger' : {" +
-        "'name' : 'node_lost_trigger'," +
+        "'name' : 'node_lost_trigger1'," +
         "'event' : 'nodeLost'," +
         "'waitFor' : '" + waitForSeconds + "s'," +
         "'enabled' : true," +
         "'actions' : [" +
+        "{'name':'start','class':'" + StartTriggerAction.class.getName() + "'}," +
         "{'name':'compute','class':'" + ComputePlanAction.class.getName() + "'}," +
         "{'name':'execute','class':'" + ExecutePlanAction.class.getName() + "'}," +
-        "{'name':'test','class':'" + TestTriggerAction.class.getName() + "'}" +
+        "{'name':'test','class':'" + FinishTriggerAction.class.getName() + "'}" +
         "]" +
         "}}";
     SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, setTriggerCommand);
@@ -21,7 +22,7 @@
         "'set-listener' : " +
         "{" +
         "'name' : 'foo'," +
-        "'trigger' : 'node_lost_trigger'," +
+        "'trigger' : 'node_lost_trigger1'," +
         "'stage' : ['STARTED','ABORTED','SUCCEEDED', 'FAILED']," +
         "'beforeAction' : ['compute', 'execute']," +
         "'afterAction' : ['compute', 'execute']," +
@@ -83,6 +84,19 @@
         cluster.submit(() -> cluster.getSimClusterStateProvider().simRestoreNode(nodeId));
       }
     }
+
+    // wait until started == finished
+    TimeOut timeOut = new TimeOut(20 * waitForSeconds * NUM_NODES, TimeUnit.SECONDS, cluster.getTimeSource());
+    while (!timeOut.hasTimedOut()) {
+      if (triggerStartedCount.get() == triggerFinishedCount.get()) {
+        break;
+      }
+      timeOut.sleep(1000);
+    }
+    if (timeOut.hasTimedOut()) {
+      fail("did not finish processing all events in time: started=" + triggerStartedCount.get() + ", finished=" + triggerFinishedCount.get());
+    }
+
 
     log.info("Ready after " + CloudTestUtils.waitForState(cluster, collectionName, 30 * nodes.size(), TimeUnit.SECONDS,
         CloudTestUtils.clusterShape(5, 15)) + "ms");

@@ -2,22 +2,21 @@
     BytesRef br = cmd.getIndexedId();
 
     synchronized (this) {
-      long pos = -1;
+      if ((cmd.getFlags() & UpdateCommand.BUFFERING) != 0) {
+        ensureBufferTlog();
+        bufferTlog.writeDelete(cmd);
+        return;
+      }
 
-      // don't log if we are replaying from another log
-      if ((cmd.getFlags() & UpdateCommand.REPLAY) == 0) {
+      long pos = -1;
+      if (!updateFromOldTlogs(cmd)) {
         ensureLog();
-        pos = tlog.writeDelete(cmd, operationFlags);
+        pos = tlog.writeDelete(cmd);
       }
 
       LogPtr ptr = new LogPtr(pos, cmd.version);
-
-      // only update our map if we're not buffering
-      if ((cmd.getFlags() & UpdateCommand.BUFFERING) == 0) {
-        map.put(br, ptr);
-
-        oldDeletes.put(br, ptr);
-      }
+      map.put(br, ptr);
+      oldDeletes.put(br, ptr);
 
       if (trace) {
         log.trace("TLOG: added delete for id " + cmd.id + " to " + tlog + " " + ptr + " map=" + System.identityHashCode(map));

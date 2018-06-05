@@ -1,0 +1,43 @@
+  /**
+   * The set of documents matching the provided 'fq' (filter query). Don't include deleted docs
+   * either. If null is returned, then all docs are available.
+   */
+  private Bits computeDocCorpus(SolrQueryRequest req) throws SyntaxError, IOException {
+    final String[] corpusFilterQueries = req.getParams().getParams("fq");
+    final SolrIndexSearcher searcher = req.getSearcher();
+    final Bits docBits;
+    if (corpusFilterQueries != null && corpusFilterQueries.length > 0) {
+      List<Query> filterQueries = new ArrayList<Query>(corpusFilterQueries.length);
+      for (String corpusFilterQuery : corpusFilterQueries) {
+        QParser qParser = QParser.getParser(corpusFilterQuery, null, req);
+        try {
+          filterQueries.add(qParser.parse());
+        } catch (SyntaxError e) {
+          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e);
+        }
+      }
+
+      final DocSet docSet = searcher.getDocSet(filterQueries);//hopefully in the cache
+      //note: before Solr 4.7 we could call docSet.getBits() but no longer.
+      if (docSet instanceof BitDocSet) {
+        docBits = ((BitDocSet)docSet).getBits();
+      } else {
+        docBits = new Bits() {
+
+          @Override
+          public boolean get(int index) {
+            return docSet.exists(index);
+          }
+
+          @Override
+          public int length() {
+            return searcher.maxDoc();
+          }
+        };
+      }
+    } else {
+      docBits = searcher.getSlowAtomicReader().getLiveDocs();
+    }
+    return docBits;
+  }
+

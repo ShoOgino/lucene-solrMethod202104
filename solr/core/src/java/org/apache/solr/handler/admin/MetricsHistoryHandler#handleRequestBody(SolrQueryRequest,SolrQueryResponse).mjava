@@ -8,11 +8,19 @@
     if (cmd == null) {
       throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "unknown 'action' param '" + actionStr + "', supported actions: " + Cmd.actions);
     }
-    Object res = null;
+    final SimpleOrderedMap<Object> res = new SimpleOrderedMap<>();
+    rsp.add("metrics", res);
     switch (cmd) {
       case LIST:
         int rows = req.getParams().getInt(CommonParams.ROWS, SolrRrdBackendFactory.DEFAULT_MAX_DBS);
-        res = factory.list(rows);
+        List<Pair<String, Long>> lst = factory.list(rows);
+        lst.forEach(p -> {
+          SimpleOrderedMap<Object> data = new SimpleOrderedMap<>();
+          // RrdDb always uses seconds - convert here for compatibility
+          data.add("lastModified", TimeUnit.SECONDS.convert(p.second(), TimeUnit.MILLISECONDS));
+          data.add("node", nodeName);
+          res.add(p.first(), data);
+        });
         break;
       case GET:
         String name = req.getParams().get(CommonParams.NAME);
@@ -25,15 +33,14 @@
         if (format == null) {
           throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "unknown 'format' param '" + formatStr + "', supported formats: " + Format.formats);
         }
-        if (!factory.exists(name)) {
-          rsp.add("error", "'" + name + "' doesn't exist");
-        } else {
+        if (factory.exists(name)) {
           // get a throwaway copy (safe to close and discard)
           RrdDb db = new RrdDb(URI_PREFIX + name, true, factory);
-          res = new NamedList<>();
-          NamedList<Object> data = new NamedList<>();
+          SimpleOrderedMap<Object> data = new SimpleOrderedMap<>();
           data.add("data", getDbData(db, dsNames, format, req.getParams()));
-          ((NamedList)res).add(name, data);
+          data.add("lastModified", db.getLastUpdateTime());
+          data.add("node", nodeName);
+          res.add(name, data);
           db.close();
         }
         break;
@@ -42,17 +49,14 @@
         if (name == null) {
           throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "'name' is a required param");
         }
-        if (!factory.exists(name)) {
-          rsp.add("error", "'" + name + "' doesn't exist");
-        } else {
+        if (factory.exists(name)) {
           // get a throwaway copy (safe to close and discard)
           RrdDb db = new RrdDb(URI_PREFIX + name, true, factory);
-          NamedList<Object> map = new NamedList<>();
-          NamedList<Object> status = new NamedList<>();
+          SimpleOrderedMap<Object> status = new SimpleOrderedMap<>();
           status.add("status", getDbStatus(db));
-          map.add(name, status);
+          status.add("node", nodeName);
+          res.add(name, status);
           db.close();
-          res = map;
         }
         break;
       case DELETE:
@@ -68,8 +72,24 @@
         rsp.add("success", "ok");
         break;
     }
-    if (res != null) {
-      rsp.add("metrics", res);
+    // when using in-memory DBs non-overseer node has no access to overseer DBs - in this case
+    // forward the request to Overseer leader if available
+    if (!factory.isPersistent()) {
+      String leader = getOverseerLeader();
+      if (leader != null && !amIOverseerLeader(leader)) {
+        // get & merge remote response
+        NamedList<Object> remoteRes = handleRemoteRequest(leader, req);
+        mergeRemoteRes(rsp, remoteRes);
+      }
     }
+    SimpleOrderedMap<Object> apiState = new SimpleOrderedMap<>();
+    apiState.add("enableReplicas", enableReplicas);
+    apiState.add("enableNodes", enableNodes);
+    apiState.add("mode", enable ? (factory.isPersistent() ? "index" : "memory") : "inactive");
+    if (!factory.isPersistent()) {
+      apiState.add("message", "WARNING: metrics history is not being persisted. Create .system collection to start persisting history.");
+    }
+    rsp.add("state", apiState);
+    rsp.getResponseHeader().add("zkConnected", cloudManager != null);
   }
 

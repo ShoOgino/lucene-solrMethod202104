@@ -1,31 +1,46 @@
   /**
    * List all available databases created by this node name
    * @param maxLength maximum number of results to return
-   * @return list of database names, or empty
+   * @return list of database names and their last update times, or empty
    * @throws IOException on server errors
    */
-  public List<String> list(int maxLength) throws IOException {
-    Set<String> names = new HashSet<>();
+  public List<Pair<String, Long>> list(int maxLength) throws IOException {
+    Map<String, Pair<String, Long>> byName = new HashMap<>();
     if (persistent) {
       try {
         ModifiableSolrParams params = new ModifiableSolrParams();
         params.add(CommonParams.Q, "*:*");
         params.add(CommonParams.FQ, CommonParams.TYPE + ":" + DOC_TYPE);
-        params.add(CommonParams.FL, "id");
+        params.add(CommonParams.FL, "id,timestamp_l");
         params.add(CommonParams.ROWS, String.valueOf(maxLength));
         QueryResponse rsp = solrClient.query(collection, params);
         SolrDocumentList docs = rsp.getResults();
         if (docs != null) {
-          docs.forEach(d -> names.add(((String)d.getFieldValue("id")).substring(idPrefixLength)));
+          docs.forEach(d -> {
+            Long time = (Long)d.getFieldValue("timestamp_l");
+            Pair<String, Long> p = new Pair<>(((String)d.getFieldValue("id")).substring(idPrefixLength), time);
+            byName.put(p.first(), p);
+          });
         }
       } catch (SolrServerException e) {
         log.warn("Error retrieving RRD list", e);
       }
     }
-    // add in-memory backends not yet stored
-    names.addAll(backends.keySet());
-    ArrayList<String> list = new ArrayList<>(names);
-    Collections.sort(list);
+    // add in-memory backends not yet stored, or replace with more recent versions
+    backends.forEach((name, db) -> {
+      long lastModifiedTime = db.getLastModifiedTime();
+      Pair<String, Long> stored = byName.get(name);
+      Pair<String, Long> inMemory = new Pair(name, lastModifiedTime);
+      if (stored != null) {
+        if (stored.second() < lastModifiedTime) {
+          byName.put(name, inMemory);
+        }
+      } else {
+        byName.put(name, inMemory);
+      }
+    });
+    ArrayList<Pair<String, Long>> list = new ArrayList<>(byName.values());
+    Collections.sort(list, DbComparator.INSTANCE);
     return list;
   }
 

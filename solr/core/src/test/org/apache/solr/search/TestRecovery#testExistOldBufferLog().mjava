@@ -1,0 +1,77 @@
+    @Test
+  public void testExistOldBufferLog() throws Exception {
+
+    DirectUpdateHandler2.commitOnClose = false;
+
+    SolrQueryRequest req = req();
+    UpdateHandler uhandler = req.getCore().getUpdateHandler();
+    UpdateLog ulog = uhandler.getUpdateLog();
+
+    try {
+      String v101 = getNextVersion();
+      String v102 = getNextVersion();
+      String v103 = getNextVersion();
+      String v117 = getNextVersion();
+      
+      clearIndex();
+      assertU(commit());
+
+      assertEquals(UpdateLog.State.ACTIVE, ulog.getState());
+      ulog.bufferUpdates();
+
+      // simulate updates from a leader
+      updateJ(jsonAdd(sdoc("id","Q1", "_version_",v101)), params(DISTRIB_UPDATE_PARAM,FROM_LEADER));
+      updateJ(jsonAdd(sdoc("id","Q2", "_version_",v102)), params(DISTRIB_UPDATE_PARAM,FROM_LEADER));
+      updateJ(jsonAdd(sdoc("id","Q3", "_version_",v103)), params(DISTRIB_UPDATE_PARAM,FROM_LEADER));
+      assertEquals(UpdateLog.State.BUFFERING, ulog.getState());
+
+      req.close();
+      h.close();
+      createCore();
+
+      req = req();
+      uhandler = req.getCore().getUpdateHandler();
+      ulog = uhandler.getUpdateLog();
+
+      // the core does not replay updates from buffer tlog on startup
+      assertTrue(ulog.existOldBufferLog());   // since we died while buffering, we should see this last
+
+      // buffer tlog won't be removed on restart
+      req.close();
+      h.close();
+      createCore();
+
+      req = req();
+      uhandler = req.getCore().getUpdateHandler();
+      ulog = uhandler.getUpdateLog();
+
+      assertTrue(ulog.existOldBufferLog());
+
+      ulog.bufferUpdates();
+      ulog.applyBufferedUpdates();
+      updateJ(jsonAdd(sdoc("id","Q7", "_version_",v117)), params(DISTRIB_UPDATE_PARAM,FROM_LEADER)); // do another add to make sure flags are back to normal
+
+      req.close();
+      h.close();
+      createCore();
+
+      req = req();
+      uhandler = req.getCore().getUpdateHandler();
+      ulog = uhandler.getUpdateLog();
+
+      assertFalse(ulog.existOldBufferLog());
+      // Timeout for Q7 get replayed, because it was added on tlog, therefore it will be replayed on restart
+      TimeOut timeout = new TimeOut(10, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+      timeout.waitFor("Timeout waiting for finish replay updates",
+          () -> h.getCore().getUpdateHandler().getUpdateLog().getState() == UpdateLog.State.ACTIVE);
+      assertJQ(req("qt","/get", "id", "Q7") ,"/doc/id==Q7");
+    } finally {
+      DirectUpdateHandler2.commitOnClose = true;
+      UpdateLog.testing_logReplayHook = null;
+      UpdateLog.testing_logReplayFinishHook = null;
+
+      req().close();
+    }
+
+  }
+

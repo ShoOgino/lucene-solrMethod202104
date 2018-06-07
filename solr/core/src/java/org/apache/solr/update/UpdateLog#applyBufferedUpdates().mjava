@@ -10,26 +10,29 @@
     try {
       cancelApplyBufferUpdate = false;
       if (state != State.BUFFERING) return null;
-      operationFlags &= ~FLAG_GAP;
 
-      // handle case when no log was even created because no updates
-      // were received.
-      if (tlog == null) {
-        state = State.ACTIVE;
-        return null;
+      synchronized (this) {
+        // handle case when no updates were received.
+        if (bufferTlog == null) {
+          state = State.ACTIVE;
+          return null;
+        }
+        bufferTlog.incref();
       }
-      tlog.incref();
+
       state = State.APPLYING_BUFFERED;
     } finally {
       versionInfo.unblockUpdates();
     }
 
     if (recoveryExecutor.isShutdown()) {
-      tlog.decref();
       throw new RuntimeException("executor is not running...");
     }
     ExecutorCompletionService<RecoveryInfo> cs = new ExecutorCompletionService<>(recoveryExecutor);
-    LogReplayer replayer = new LogReplayer(Arrays.asList(new TransactionLog[]{tlog}), true);
-    return cs.submit(replayer, recoveryInfo);
+    LogReplayer replayer = new LogReplayer(Collections.singletonList(bufferTlog), true);
+    return cs.submit(() -> {
+      replayer.run();
+      dropBufferTlog();
+    }, recoveryInfo);
   }
 

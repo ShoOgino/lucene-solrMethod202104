@@ -2,14 +2,15 @@
     SolrClient solrClient = cluster.simGetSolrClient();
     String setTriggerCommand = "{" +
         "'set-trigger' : {" +
-        "'name' : 'node_lost_trigger'," +
+        "'name' : 'node_lost_trigger3'," +
         "'event' : 'nodeLost'," +
         "'waitFor' : '" + waitFor + "s'," +
         "'enabled' : true," +
         "'actions' : [" +
+        "{'name':'start','class':'" + StartTriggerAction.class.getName() + "'}," +
         "{'name':'compute','class':'" + ComputePlanAction.class.getName() + "'}," +
         "{'name':'execute','class':'" + ExecutePlanAction.class.getName() + "'}," +
-        "{'name':'test','class':'" + TestTriggerAction.class.getName() + "'}" +
+        "{'name':'test','class':'" + FinishTriggerAction.class.getName() + "'}" +
         "]" +
         "}}";
     SolrRequest req = createAutoScalingRequest(SolrRequest.METHOD.POST, setTriggerCommand);
@@ -36,8 +37,8 @@
       cluster.simRemoveNode(nodes.get(i), false);
       cluster.getTimeSource().sleep(killDelay);
     }
-    // wait for the trigger to fire
-    boolean await = triggerFiredLatch.await(20 * waitFor * 1000 / SPEED, TimeUnit.MILLISECONDS);
+    // wait for the trigger to fire at least once
+    boolean await = triggerFinishedLatch.await(20 * waitFor * 1000 / SPEED, TimeUnit.MILLISECONDS);
     assertTrue("trigger did not fire within timeout, " +
         "waitFor=" + waitFor + ", killDelay=" + killDelay + ", minIgnored=" + minIgnored,
         await);
@@ -45,7 +46,7 @@
     int startedEventPos = -1;
     for (int i = 0; i < systemColl.size(); i++) {
       SolrInputDocument d = systemColl.get(i);
-      if (!"node_lost_trigger".equals(d.getFieldValue("event.source_s"))) {
+      if (!"node_lost_trigger3".equals(d.getFieldValue("event.source_s"))) {
         continue;
       }
       if ("NODELOST".equals(d.getFieldValue("event.type_s")) &&
@@ -58,11 +59,22 @@
             "waitFor=" + waitFor + ", killDelay=" + killDelay + ", minIgnored=" + minIgnored,
           startedEventPos > -1);
     SolrInputDocument startedEvent = systemColl.get(startedEventPos);
+    // wait until started == finished
+    TimeOut timeOut = new TimeOut(20 * waitFor * NUM_NODES, TimeUnit.SECONDS, cluster.getTimeSource());
+    while (!timeOut.hasTimedOut()) {
+      if (triggerStartedCount.get() == triggerFinishedCount.get()) {
+        break;
+      }
+      timeOut.sleep(1000);
+    }
+    if (timeOut.hasTimedOut()) {
+      fail("did not finish processing all events in time: started=" + triggerStartedCount.get() + ", finished=" + triggerFinishedCount.get());
+    }
     int ignored = 0;
     int lastIgnoredPos = startedEventPos;
     for (int i = startedEventPos + 1; i < systemColl.size(); i++) {
       SolrInputDocument d = systemColl.get(i);
-      if (!"node_lost_trigger".equals(d.getFieldValue("event.source_s"))) {
+      if (!"node_lost_trigger3".equals(d.getFieldValue("event.source_s"))) {
         continue;
       }
       if ("NODELOST".equals(d.getFieldValue("event.type_s"))) {
@@ -87,13 +99,13 @@
     SolrInputDocument finishedEvent = null;
     long lastNumOps = cluster.simGetOpCount("MOVEREPLICA");
     while (count-- > 0) {
-      cluster.getTimeSource().sleep(150000);
+      cluster.getTimeSource().sleep(waitFor * 10000);
       long currentNumOps = cluster.simGetOpCount("MOVEREPLICA");
       if (currentNumOps == lastNumOps) {
         int size = systemColl.size() - 1;
         for (int i = size; i > lastIgnoredPos; i--) {
           SolrInputDocument d = systemColl.get(i);
-          if (!"node_lost_trigger".equals(d.getFieldValue("event.source_s"))) {
+          if (!"node_lost_trigger3".equals(d.getFieldValue("event.source_s"))) {
             continue;
           }
           if ("SUCCEEDED".equals(d.getFieldValue("stage_s"))) {

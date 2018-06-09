@@ -1,82 +1,21 @@
   @Override
   public void inform(SolrCore core) {
-    IndexSchema schema = core.getLatestSchema();
-    String a = initArgs.get(FIELD_TYPE);
-    if (a != null) {
-      FieldType ft = schema.getFieldTypes().get(a);
-      if (ft == null) {
-        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
-            "Unknown FieldType: '" + a + "' used in QueryElevationComponent");
-      }
-      analyzer = ft.getQueryAnalyzer();
-    }
-
-    SchemaField sf = schema.getUniqueKeyField();
-    if( sf == null) {
-      throw new SolrException( SolrException.ErrorCode.SERVER_ERROR, 
-          "QueryElevationComponent requires the schema to have a uniqueKeyField." );
-    }
-    idSchemaFT = sf.getType();
-    idField = sf.getName();
-    //register the EditorialMarkerFactory
-    String excludeName = initArgs.get(QueryElevationParams.EXCLUDE_MARKER_FIELD_NAME, "excluded");
-    if (excludeName == null || excludeName.equals("") == true){
-      excludeName = "excluded";
-    }
-    ExcludedMarkerFactory excludedMarkerFactory = new ExcludedMarkerFactory();
-    core.addTransformerFactory(excludeName, excludedMarkerFactory);
-    ElevatedMarkerFactory elevatedMarkerFactory = new ElevatedMarkerFactory();
-    String markerName = initArgs.get(QueryElevationParams.EDITORIAL_MARKER_FIELD_NAME, "elevated");
-    if (markerName == null || markerName.equals("") == true) {
-      markerName = "elevated";
-    }
-    core.addTransformerFactory(markerName, elevatedMarkerFactory);
-    forceElevation = initArgs.getBool(QueryElevationParams.FORCE_ELEVATION, forceElevation);
-
-    String f = initArgs.get(CONFIG_FILE);
-    if (f != null) {
-      try {
-        synchronized (elevationCache) {
-          elevationCache.clear();
-          boolean exists = false;
-
-          // check if using ZooKeeper
-          ZkController zkController = core.getCoreContainer().getZkController();
-          if (zkController != null) {
-            // TODO : shouldn't have to keep reading the config name when it has been read before
-            exists = zkController.configFileExists(zkController.getZkStateReader().readConfigName(core.getCoreDescriptor().getCloudDescriptor().getCollectionName()), f);
-          } else {
-            File fC = new File(core.getResourceLoader().getConfigDir(), f);
-            File fD = new File(core.getDataDir(), f);
-            if (fC.exists() == fD.exists()) {
-              throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
-                  "QueryElevationComponent missing config file: '" + f + "\n"
-                      + "either: " + fC.getAbsolutePath() + " or " + fD.getAbsolutePath() + " must exist, but not both.");
-            }
-            if (fC.exists()) {
-              exists = true;
-              log.info("Loading QueryElevation from: " + fC.getAbsolutePath());
-              Config cfg = new Config(core.getResourceLoader(), f);
-              elevationCache.put(null, loadElevationMap(cfg));
-            }
-          }
-          //in other words, we think this is in the data dir, not the conf dir
-          if (!exists) {
-            // preload the first data
-            RefCounted<SolrIndexSearcher> searchHolder = null;
-            try {
-              searchHolder = core.getNewestSearcher(false);
-              IndexReader reader = searchHolder.get().getIndexReader();
-              getElevationMap(reader, core);
-            } finally {
-              if (searchHolder != null) searchHolder.decref();
-            }
-          }
-        }
-      } catch (Exception ex) {
-        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
-            "Error initializing QueryElevationComponent.", ex);
-      }
+    initialized = false;
+    try {
+      parseFieldType(core);
+      setUniqueKeyField(core);
+      parseExcludedMarkerFieldName(core);
+      parseEditorialMarkerFieldName(core);
+      parseForceElevation();
+      parseUseConfiguredOrderForElevations();
+      loadElevationConfiguration(core);
+      initialized = true;
+    } catch (InitializationException e) {
+      assert !initialized;
+      handleInitializationException(e, e.exceptionCause);
+    } catch (Exception e) {
+      assert !initialized;
+      handleInitializationException(e, InitializationExceptionCause.OTHER);
     }
   }
 

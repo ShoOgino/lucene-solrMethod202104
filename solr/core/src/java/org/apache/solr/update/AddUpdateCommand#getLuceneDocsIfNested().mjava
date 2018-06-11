@@ -1,0 +1,33 @@
+  /**
+   * Computes the final flattened Solr docs that are ready to be converted to Lucene docs.  If no flattening is
+   * performed then we return null, and the caller ought to use {@link #getLuceneDocument()} instead.
+   * This should only be called once.
+   * Any changes made to the returned Document(s) will not be reflected in the SolrInputDocument,
+   * or future calls to this method.
+   */
+  public Iterable<Document> getLuceneDocsIfNested() {
+    assert ! isInPlaceUpdate() : "We don't expect this to happen."; // but should "work"?
+    if (!req.getSchema().isUsableForChildDocs()) {
+      // note if the doc is nested despite this, we'll throw an exception elsewhere
+      return null;
+    }
+
+    List<SolrInputDocument> all = flatten(solrDoc);
+    if (all.size() <= 1) {
+      return null; // caller should call getLuceneDocument() instead
+    }
+
+    String rootId = getHashableId();
+
+    boolean isVersion = version != 0;
+
+    for (SolrInputDocument sdoc : all) {
+      sdoc.setField(IndexSchema.ROOT_FIELD_NAME, rootId);
+      if(isVersion) sdoc.setField(CommonParams.VERSION_FIELD, version);
+      // TODO: if possible concurrent modification exception (if SolrInputDocument not cloned and is being forwarded to replicas)
+      // then we could add this field to the generated lucene document instead.
+    }
+
+    return () -> all.stream().map(sdoc -> DocumentBuilder.toDocument(sdoc, req.getSchema())).iterator();
+  }
+

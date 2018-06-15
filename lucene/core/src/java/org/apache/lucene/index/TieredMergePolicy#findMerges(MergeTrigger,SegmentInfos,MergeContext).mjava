@@ -1,62 +1,45 @@
   @Override
   public MergeSpecification findMerges(MergeTrigger mergeTrigger, SegmentInfos infos, MergeContext mergeContext) throws IOException {
-    if (verbose(mergeContext)) {
-      message("findMerges: " + infos.size() + " segments", mergeContext);
-    }
-    if (infos.size() == 0) {
-      return null;
-    }
     final Set<SegmentCommitInfo> merging = mergeContext.getMergingSegments();
-    final Set<SegmentCommitInfo> toBeMerged = new HashSet<>();
-
-    final List<SegmentCommitInfo> infosSorted = new ArrayList<>(infos.asList());
-
-    // The size can change concurrently while we are running here, because deletes
-    // are now applied concurrently, and this can piss off TimSort!  So we
-    // call size() once per segment and sort by that:
-    Map<SegmentCommitInfo,Long> sizeInBytes = getSegmentSizes(mergeContext, infos.asList());
-    
-    infosSorted.sort(new SegmentByteSizeDescending(sizeInBytes));
-
     // Compute total index bytes & print details about the index
     long totIndexBytes = 0;
     long minSegmentBytes = Long.MAX_VALUE;
-    for(SegmentCommitInfo info : infosSorted) {
-      final long segBytes = sizeInBytes.get(info);
+
+    int totalDelDocs = 0;
+    int totalMaxDoc = 0;
+
+    List<SegmentSizeAndDocs> sortedInfos = getSortedBySegmentSize(infos, mergeContext);
+    Iterator<SegmentSizeAndDocs> iter = sortedInfos.iterator();
+    while (iter.hasNext()) {
+      SegmentSizeAndDocs segSizeDocs = iter.next();
+      final long segBytes = segSizeDocs.sizeInBytes;
       if (verbose(mergeContext)) {
-        String extra = merging.contains(info) ? " [merging]" : "";
-        if (segBytes >= maxMergedSegmentBytes/2.0) {
+        String extra = merging.contains(segSizeDocs.segInfo) ? " [merging]" : "";
+        if (segBytes >= maxMergedSegmentBytes) {
           extra += " [skip: too large]";
         } else if (segBytes < floorSegmentBytes) {
           extra += " [floored]";
         }
-        message("  seg=" + segString(mergeContext, Collections.singleton(info)) + " size=" + String.format(Locale.ROOT, "%.3f", segBytes/1024/1024.) + " MB" + extra, mergeContext);
+        message("  seg=" + segString(mergeContext, Collections.singleton(segSizeDocs.segInfo)) + " size=" + String.format(Locale.ROOT, "%.3f", segBytes / 1024 / 1024.) + " MB" + extra, mergeContext);
+      }
+      if (merging.contains(segSizeDocs.segInfo)) {
+        iter.remove();
+      } else {
+        totalDelDocs += segSizeDocs.delCount;
+        totalMaxDoc += segSizeDocs.maxDoc;
       }
 
       minSegmentBytes = Math.min(segBytes, minSegmentBytes);
-      // Accum total byte size
       totIndexBytes += segBytes;
     }
+    assert totalMaxDoc >= 0;
+    assert totalDelDocs >= 0;
 
-    // If we have too-large segments, grace them out
-    // of the maxSegmentCount:
-    int tooBigCount = 0;
-    while (tooBigCount < infosSorted.size()) {
-      long segBytes = sizeInBytes.get(infosSorted.get(tooBigCount));
-      if (segBytes < maxMergedSegmentBytes/2.0) {
-        break;
-      }
-      totIndexBytes -= segBytes;
-      tooBigCount++;
-    }
-
-    minSegmentBytes = floorSize(minSegmentBytes);
-
-    // Compute max allowed segs in the index
-    long levelSize = minSegmentBytes;
+    // Compute max allowed segments in the index
+    long levelSize = Math.max(minSegmentBytes, floorSegmentBytes);
     long bytesLeft = totIndexBytes;
     double allowedSegCount = 0;
-    while(true) {
+    while (true) {
       final double segCountLevel = bytesLeft / (double) levelSize;
       if (segCountLevel < segsPerTier) {
         allowedSegCount += Math.ceil(segCountLevel);
@@ -66,108 +49,37 @@
       bytesLeft -= segsPerTier * levelSize;
       levelSize *= maxMergeAtOnce;
     }
-    int allowedSegCountInt = (int) allowedSegCount;
 
-    MergeSpecification spec = null;
+    // If we're above certain thresholds, we can merge very large segments.
+    double totalDelPct = (double) totalDelDocs / (double) totalMaxDoc;
+    //TODO: See LUCENE-8263
+    //double targetAsPct = indexPctDeletedTarget / 100.0;
+    double targetAsPct = 0.5;
+    int tooBigCount = 0;
+    iter = sortedInfos.iterator();
 
-    // Cycle to possibly select more than one merge:
-    while(true) {
+    // remove large segments from consideration under two conditions.
+    // 1> Overall percent deleted docs relatively small and this segment is larger than 50% maxSegSize
+    // 2> overall percent deleted docs large and this segment is large and has few deleted docs
 
-      long mergingBytes = 0;
+    long mergingBytes = 0L;
 
-      // Gather eligible segments for merging, ie segments
-      // not already being merged and not already picked (by
-      // prior iteration of this loop) for merging:
-      final List<SegmentCommitInfo> eligible = new ArrayList<>();
-      for(int idx = tooBigCount; idx<infosSorted.size(); idx++) {
-        final SegmentCommitInfo info = infosSorted.get(idx);
-        if (merging.contains(info)) {
-          mergingBytes += sizeInBytes.get(info);
-        } else if (!toBeMerged.contains(info)) {
-          eligible.add(info);
-        }
-      }
-
-      final boolean maxMergeIsRunning = mergingBytes >= maxMergedSegmentBytes;
-
-      if (verbose(mergeContext)) {
-        message("  allowedSegmentCount=" + allowedSegCountInt + " vs count=" + infosSorted.size() + " (eligible count=" + eligible.size() + ") tooBigCount=" + tooBigCount, mergeContext);
-      }
-
-      if (eligible.size() == 0) {
-        return spec;
-      }
-
-      if (eligible.size() > allowedSegCountInt) {
-
-        // OK we are over budget -- find best merge!
-        MergeScore bestScore = null;
-        List<SegmentCommitInfo> best = null;
-        boolean bestTooLarge = false;
-        long bestMergeBytes = 0;
-
-        // Consider all merge starts:
-        for(int startIdx = 0;startIdx <= eligible.size()-maxMergeAtOnce; startIdx++) {
-
-          long totAfterMergeBytes = 0;
-
-          final List<SegmentCommitInfo> candidate = new ArrayList<>();
-          boolean hitTooLarge = false;
-          for(int idx = startIdx;idx<eligible.size() && candidate.size() < maxMergeAtOnce;idx++) {
-            final SegmentCommitInfo info = eligible.get(idx);
-            final long segBytes = sizeInBytes.get(info);
-
-            if (totAfterMergeBytes + segBytes > maxMergedSegmentBytes) {
-              hitTooLarge = true;
-              // NOTE: we continue, so that we can try
-              // "packing" smaller segments into this merge
-              // to see if we can get closer to the max
-              // size; this in general is not perfect since
-              // this is really "bin packing" and we'd have
-              // to try different permutations.
-              continue;
-            }
-            candidate.add(info);
-            totAfterMergeBytes += segBytes;
-          }
-
-          // We should never see an empty candidate: we iterated over maxMergeAtOnce
-          // segments, and already pre-excluded the too-large segments:
-          assert candidate.size() > 0;
-
-          final MergeScore score = score(candidate, hitTooLarge, sizeInBytes);
-          if (verbose(mergeContext)) {
-            message("  maybe=" + segString(mergeContext, candidate) + " score=" + score.getScore() + " " + score.getExplanation() + " tooLarge=" + hitTooLarge + " size=" + String.format(Locale.ROOT, "%.3f MB", totAfterMergeBytes/1024./1024.), mergeContext);
-          }
-
-          // If we are already running a max sized merge
-          // (maxMergeIsRunning), don't allow another max
-          // sized merge to kick off:
-          if ((bestScore == null || score.getScore() < bestScore.getScore()) && (!hitTooLarge || !maxMergeIsRunning)) {
-            best = candidate;
-            bestScore = score;
-            bestTooLarge = hitTooLarge;
-            bestMergeBytes = totAfterMergeBytes;
-          }
-        }
-        
-        if (best != null) {
-          if (spec == null) {
-            spec = new MergeSpecification();
-          }
-          final OneMerge merge = new OneMerge(best);
-          spec.add(merge);
-          toBeMerged.addAll(merge.segments);
-
-          if (verbose(mergeContext)) {
-            message("  add merge=" + segString(mergeContext, merge.segments) + " size=" + String.format(Locale.ROOT, "%.3f MB", bestMergeBytes/1024./1024.) + " score=" + String.format(Locale.ROOT, "%.3f", bestScore.getScore()) + " " + bestScore.getExplanation() + (bestTooLarge ? " [max merge]" : ""), mergeContext);
-          }
-        } else {
-          return spec;
-        }
+    while (iter.hasNext()) {
+      SegmentSizeAndDocs segSizeDocs = iter.next();
+      double segDelPct = (double) segSizeDocs.delCount / (double) segSizeDocs.maxDoc;
+      if (segSizeDocs.sizeInBytes > maxMergedSegmentBytes / 2 && (totalDelPct < targetAsPct || segDelPct < targetAsPct)) {
+        iter.remove();
+        tooBigCount++; // Just for reporting purposes.
       } else {
-        return spec;
+        mergingBytes += segSizeDocs.sizeInBytes;
       }
+
     }
+    if (verbose(mergeContext) && tooBigCount > 0) {
+      message("  allowedSegmentCount=" + allowedSegCount + " vs count=" + infos.size() +
+          " (eligible count=" + sortedInfos.size() + ") tooBigCount= " + tooBigCount, mergeContext);
+    }
+    return doFindMerges(sortedInfos, maxMergedSegmentBytes, maxMergeAtOnce, (int) allowedSegCount, MERGE_TYPE.NATURAL,
+        mergeContext, mergingBytes >= maxMergedSegmentBytes);
   }
 

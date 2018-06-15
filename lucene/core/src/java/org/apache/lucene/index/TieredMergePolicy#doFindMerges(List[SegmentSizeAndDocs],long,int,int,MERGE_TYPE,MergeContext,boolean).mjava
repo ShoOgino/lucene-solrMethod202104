@@ -1,0 +1,157 @@
+  private MergeSpecification doFindMerges(List<SegmentSizeAndDocs> sortedEligibleInfos,
+                                          final long maxMergedSegmentBytes,
+                                          final int maxMergeAtOnce, final int allowedSegCount,
+                                          final MERGE_TYPE mergeType,
+                                          MergeContext mergeContext,
+                                          boolean maxMergeIsRunning) throws IOException {
+
+    List<SegmentSizeAndDocs> sortedEligible = new ArrayList<>(sortedEligibleInfos);
+
+    Map<SegmentCommitInfo, SegmentSizeAndDocs> segInfosSizes = new HashMap<>();
+    for (SegmentSizeAndDocs segSizeDocs : sortedEligible) {
+      segInfosSizes.put(segSizeDocs.segInfo, segSizeDocs);
+    }
+
+    int originalSortedSize = sortedEligible.size();
+    if (verbose(mergeContext)) {
+      message("findMerges: " + originalSortedSize + " segments", mergeContext);
+    }
+    if (originalSortedSize == 0) {
+      return null;
+    }
+
+    final Set<SegmentCommitInfo> toBeMerged = new HashSet<>();
+
+    MergeSpecification spec = null;
+
+    // Cycle to possibly select more than one merge:
+    // The trigger point for total deleted documents in the index leads to a bunch of large segment
+    // merges at the same time. So only put one large merge in the list of merges per cycle. We'll pick up another
+    // merge next time around.
+    boolean haveOneLargeMerge = false;
+
+    while (true) {
+
+      // Gather eligible segments for merging, ie segments
+      // not already being merged and not already picked (by
+      // prior iteration of this loop) for merging:
+
+      // Remove ineligible segments. These are either already being merged or already picked by prior iterations
+      Iterator<SegmentSizeAndDocs> iter = sortedEligible.iterator();
+      while (iter.hasNext()) {
+        SegmentSizeAndDocs segSizeDocs = iter.next();
+        if (toBeMerged.contains(segSizeDocs.segInfo)) {
+          iter.remove();
+        }
+      }
+
+      if (verbose(mergeContext)) {
+        message("  allowedSegmentCount=" + allowedSegCount + " vs count=" + originalSortedSize + " (eligible count=" + sortedEligible.size() + ")", mergeContext);
+      }
+
+      if (sortedEligible.size() == 0) {
+        return spec;
+      }
+
+      if (allowedSegCount != Integer.MAX_VALUE && sortedEligible.size() <= allowedSegCount && mergeType == MERGE_TYPE.NATURAL) {
+        return spec;
+      }
+
+      // OK we are over budget -- find best merge!
+      MergeScore bestScore = null;
+      List<SegmentCommitInfo> best = null;
+      boolean bestTooLarge = false;
+      long bestMergeBytes = 0;
+
+    // Consider all merge starts.
+    int lim = sortedEligible.size() - maxMergeAtOnce; // assume the usual case of background merging.
+
+    if (mergeType != MERGE_TYPE.NATURAL) { // The unusual case of forceMerge or expungeDeletes.
+      // The incoming eligible list will have only segments with > forceMergeDeletesPctAllowed in the case of
+      // findForcedDeletesMerges and segments with < max allowed size in the case of optimize.
+      // If forcing, we must allow singleton merges.
+      lim = sortedEligible.size() - 1;
+    }
+
+    for (int startIdx = 0; startIdx <= lim; startIdx++) {
+
+        long totAfterMergeBytes = 0;
+
+        final List<SegmentCommitInfo> candidate = new ArrayList<>();
+        boolean hitTooLarge = false;
+      long bytesThisMerge = 0;
+      for (int idx = startIdx; idx < sortedEligible.size() && candidate.size() < maxMergeAtOnce && bytesThisMerge < maxMergedSegmentBytes; idx++) {
+        final SegmentSizeAndDocs segSizeDocs = sortedEligible.get(idx);
+        final long segBytes = segSizeDocs.sizeInBytes;
+
+          if (totAfterMergeBytes + segBytes > maxMergedSegmentBytes) {
+            hitTooLarge = true;
+            if (candidate.size() == 0) {
+              // We should never have something coming in that _cannot_ be merged, so handle singleton merges
+              candidate.add(segSizeDocs.segInfo);
+              bytesThisMerge += segBytes;
+            }
+            // NOTE: we continue, so that we can try
+            // "packing" smaller segments into this merge
+            // to see if we can get closer to the max
+            // size; this in general is not perfect since
+            // this is really "bin packing" and we'd have
+            // to try different permutations.
+            continue;
+          }
+        candidate.add(segSizeDocs.segInfo);
+        bytesThisMerge += segBytes;
+          totAfterMergeBytes += segBytes;
+        }
+
+        // We should never see an empty candidate: we iterated over maxMergeAtOnce
+        // segments, and already pre-excluded the too-large segments:
+        assert candidate.size() > 0;
+
+      // A singleton merge with no deletes makes no sense. We can get here when forceMerge is looping around...
+      if (candidate.size() == 1) {
+        SegmentSizeAndDocs segSizeDocs = segInfosSizes.get(candidate.get(0));
+        if (segSizeDocs.delCount == 0) {
+          continue;
+        }
+      }
+
+      final MergeScore score = score(candidate, hitTooLarge, segInfosSizes);
+        if (verbose(mergeContext)) {
+          message("  maybe=" + segString(mergeContext, candidate) + " score=" + score.getScore() + " " + score.getExplanation() + " tooLarge=" + hitTooLarge + " size=" + String.format(Locale.ROOT, "%.3f MB", totAfterMergeBytes/1024./1024.), mergeContext);
+        }
+
+        if ((bestScore == null || score.getScore() < bestScore.getScore()) && (!hitTooLarge || !maxMergeIsRunning)) {
+          best = candidate;
+          bestScore = score;
+          bestTooLarge = hitTooLarge;
+          bestMergeBytes = totAfterMergeBytes;
+        }
+      }
+
+      if (best == null) {
+        return spec;
+      }
+      // The mergeType == FORCE_MERGE_DELETES behaves as the code does currently and can create a large number of
+      // concurrent big merges. If we make findForcedDeletesMerges behave as findForcedMerges and cycle through
+      // we should remove this.
+      if (haveOneLargeMerge == false || bestTooLarge == false || mergeType == MERGE_TYPE.FORCE_MERGE_DELETES) {
+
+        haveOneLargeMerge |= bestTooLarge;
+
+        if (spec == null) {
+          spec = new MergeSpecification();
+        }
+        final OneMerge merge = new OneMerge(best);
+        spec.add(merge);
+
+        if (verbose(mergeContext)) {
+          message("  add merge=" + segString(mergeContext, merge.segments) + " size=" + String.format(Locale.ROOT, "%.3f MB", bestMergeBytes / 1024. / 1024.) + " score=" + String.format(Locale.ROOT, "%.3f", bestScore.getScore()) + " " + bestScore.getExplanation() + (bestTooLarge ? " [max merge]" : ""), mergeContext);
+        }
+      }
+      // whether we're going to return this list in the spec of not, we need to remove it from
+      // consideration on the next loop.
+      toBeMerged.addAll(best);
+    }
+  }
+

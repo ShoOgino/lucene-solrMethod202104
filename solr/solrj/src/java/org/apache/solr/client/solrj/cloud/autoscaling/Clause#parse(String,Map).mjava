@@ -1,6 +1,8 @@
   Condition parse(String s, Map m) {
     Object expectedVal = null;
+    ComputationType computationType = null;
     Object val = m.get(s);
+    Suggestion.ConditionType varType = Suggestion.getTagType(s);
     try {
       String conditionName = s.trim();
       Operand operand = null;
@@ -13,14 +15,31 @@
         else if (strVal.startsWith(NOT_EQUAL.operand)) operand = NOT_EQUAL;
         else if (strVal.startsWith(GREATER_THAN.operand)) operand = GREATER_THAN;
         else if (strVal.startsWith(LESS_THAN.operand)) operand = LESS_THAN;
-        else operand = EQUAL;
-        expectedVal = validate(s, strVal.substring(EQUAL == operand || WILDCARD == operand ? 0 : 1), true);
-      } else if (val instanceof Number) {
-        operand = EQUAL;
-        expectedVal = validate(s, val, true);
-      }
-      return new Condition(conditionName, expectedVal, operand);
+        else operand = Operand.EQUAL;
+        strVal = strVal.substring(Operand.EQUAL == operand || WILDCARD == operand ? 0 : 1);
+        for (ComputationType t : ComputationType.values()) {
+          String changedVal = t.match(strVal);
+          if (changedVal != null) {
+            computationType = t;
+            strVal = changedVal;
+            if (varType == null || !varType.supportComputed(computationType, this)) {
+              throw new IllegalArgumentException(StrUtils.formatString("''{0}'' is not allowed for variable :  ''{1}'' , in condition : ''{2}'' ",
+                  t, conditionName, Utils.toJSONString(m)));
+            }
+          }
+        }
+        operand = varType == null ? operand : varType.getOperand(operand, strVal, computationType);
+        expectedVal = validate(s, new Condition(s, strVal, operand, computationType, null), true);
 
+      } else if (val instanceof Number) {
+        operand = Operand.EQUAL;
+        operand = varType.getOperand(operand, val, null);
+        expectedVal = validate(s, new Condition(s, val, operand, null, null), true);
+      }
+      return new Condition(conditionName, expectedVal, operand, computationType, this);
+
+    } catch (IllegalArgumentException iae) {
+      throw iae;
     } catch (Exception e) {
       throw new IllegalArgumentException("Invalid tag : " + s + ":" + val, e);
     }

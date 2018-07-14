@@ -1,0 +1,55 @@
+  /**
+   * Loads the {@link ElevationProvider}.
+   *
+   * @throws java.io.IOException      If an I/O error occurs while analyzing the triggering queries.
+   * @throws RuntimeException If the config does not provide an XML content of the expected format
+   *                          (either {@link RuntimeException} or {@link org.apache.solr.common.SolrException}).
+   */
+  @SuppressWarnings("WeakerAccess")
+  protected ElevationProvider loadElevationProvider(Config config) throws IOException {
+    Map<ElevatingQuery, ElevationBuilder> elevationBuilderMap = new LinkedHashMap<>();
+    XPath xpath = XPathFactory.newInstance().newXPath();
+    NodeList nodes = (NodeList) config.evaluate("elevate/query", XPathConstants.NODESET);
+    for (int i = 0; i < nodes.getLength(); i++) {
+      Node node = nodes.item(i);
+      String queryString = DOMUtil.getAttr(node, "text", "missing query 'text'");
+      String matchString = DOMUtil.getAttr(node, "match");
+      ElevatingQuery elevatingQuery = new ElevatingQuery(queryString, parseMatchPolicy(matchString));
+
+      NodeList children;
+      try {
+        children = (NodeList) xpath.evaluate("doc", node, XPathConstants.NODESET);
+      } catch (XPathExpressionException e) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
+            "query requires '<doc .../>' child");
+      }
+
+      if (children.getLength() == 0) { // weird
+        continue;
+      }
+      ElevationBuilder elevationBuilder = new ElevationBuilder();
+      for (int j = 0; j < children.getLength(); j++) {
+        Node child = children.item(j);
+        String id = DOMUtil.getAttr(child, "id", "missing 'id'");
+        String e = DOMUtil.getAttr(child, EXCLUDE, null);
+        if (e != null) {
+          if (Boolean.valueOf(e)) {
+            elevationBuilder.addExcludedIds(Collections.singleton(id));
+            continue;
+          }
+        }
+        elevationBuilder.addElevatedIds(Collections.singletonList(id));
+      }
+
+      // It is allowed to define multiple times different elevations for the same query. In this case the elevations
+      // are merged in the ElevationBuilder (they will be triggered at the same time).
+      ElevationBuilder previousElevationBuilder = elevationBuilderMap.get(elevatingQuery);
+      if (previousElevationBuilder == null) {
+        elevationBuilderMap.put(elevatingQuery, elevationBuilder);
+      } else {
+        previousElevationBuilder.merge(elevationBuilder);
+      }
+    }
+    return createElevationProvider(queryAnalyzer, elevationBuilderMap);
+  }
+

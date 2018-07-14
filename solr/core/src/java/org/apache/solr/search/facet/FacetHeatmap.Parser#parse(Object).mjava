@@ -1,0 +1,81 @@
+    public FacetHeatmap parse(Object argsObj) {
+      assert facet == null;
+
+      if (!(argsObj instanceof Map)) {
+        throw err("Missing heatmap arguments");
+      }
+
+      @SuppressWarnings("unchecked")
+      Map<String, Object> argsMap = (Map<String, Object>) argsObj;
+      String fieldName = getField(argsMap);
+
+      //get the strategy from the field type
+      final SchemaField schemaField = getSchema().getField(fieldName);
+      final FieldType type = schemaField.getType();
+
+      final PrefixTreeStrategy strategy;
+      final DistanceUnits distanceUnits;
+      // note: the two instanceof conditions is not ideal, versus one. If we start needing to add more then refactor.
+      if ((type instanceof AbstractSpatialPrefixTreeFieldType)) {
+        AbstractSpatialPrefixTreeFieldType rptType = (AbstractSpatialPrefixTreeFieldType) type;
+        strategy = (PrefixTreeStrategy) rptType.getStrategy(fieldName);
+        distanceUnits = rptType.getDistanceUnits();
+      } else if (type instanceof RptWithGeometrySpatialField) {
+        RptWithGeometrySpatialField rptSdvType  = (RptWithGeometrySpatialField) type;
+        strategy = rptSdvType.getStrategy(fieldName).getIndexStrategy();
+        distanceUnits = rptSdvType.getDistanceUnits();
+      } else {
+        //FYI we support the term query one too but few people use that one
+        throw err("heatmap field needs to be of type " + SpatialRecursivePrefixTreeFieldType.class + " or " + RptWithGeometrySpatialField.class);
+      }
+
+      final SpatialContext ctx = strategy.getSpatialContext();
+
+      //get the bbox (query Rectangle)
+      String geomStr = getString(argsMap, GEOM_PARAM, null);
+      final Shape boundsShape = geomStr == null ? ctx.getWorldBounds() : SpatialUtils.parseGeomSolrException(geomStr, ctx);
+
+      //get the grid level (possibly indirectly via distErr or distErrPct)
+      final int gridLevel;
+      final Long gridLevelObj = getLongOrNull(argsMap, LEVEL_PARAM, false);
+      final int maxGridLevel = strategy.getGrid().getMaxLevels();
+      if (gridLevelObj != null) {
+        gridLevel = gridLevelObj.intValue();
+        if (gridLevel <= 0 || gridLevel > maxGridLevel) {
+          throw err(LEVEL_PARAM +" should be > 0 and <= " + maxGridLevel);
+        }
+      } else {
+        //SpatialArgs has utility methods to resolve a 'distErr' from optionally set distErr & distErrPct. Arguably that
+        // should be refactored to feel less weird than using it like this.
+        SpatialArgs spatialArgs = new SpatialArgs(SpatialOperation.Intersects/*ignored*/,
+            boundsShape == null ? ctx.getWorldBounds() : boundsShape);
+        final Double distErrObj = getDoubleOrNull(argsMap, DIST_ERR_PARAM, false);
+        if (distErrObj != null) {
+          // convert distErr units based on configured units
+          spatialArgs.setDistErr(distErrObj * distanceUnits.multiplierFromThisUnitToDegrees());
+        }
+        spatialArgs.setDistErrPct(getDoubleOrNull(argsMap, DIST_ERR_PCT_PARAM, false));
+        double distErr = spatialArgs.resolveDistErr(ctx, DEFAULT_DIST_ERR_PCT);
+        if (distErr <= 0) {
+          throw err(DIST_ERR_PCT_PARAM + " or " + DIST_ERR_PARAM
+                  + " should be > 0 or instead provide " + LEVEL_PARAM + "=" + maxGridLevel
+                  + " if you insist on maximum detail");
+        }
+        //The SPT (grid) can lookup a grid level satisfying an error distance constraint
+        gridLevel = strategy.getGrid().getLevelForDistance(distErr);
+      }
+
+      final int maxCells = (int) getLong(argsMap, MAX_CELLS_PARAM, 100_000);// will throw later if exceeded
+
+      final String format = getString(argsMap, FORMAT_PARAM, FORMAT_INTS2D);
+      if (!format.equals(FORMAT_INTS2D) && !format.equals(FORMAT_PNG)) {
+        throw err("format should be " + FORMAT_INTS2D + " or " + FORMAT_PNG);
+      }
+
+      this.facet = new FacetHeatmap(argsMap, strategy, boundsShape, gridLevel, maxCells, format);
+
+      parseCommonParams(argsObj); // e.g. domain change
+
+      return this.facet;
+    }
+

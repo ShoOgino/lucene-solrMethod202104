@@ -1,0 +1,31 @@
+  private Replica corruptLeader(List<String> addedIds) throws IOException {
+    DocCollection dc = getCollectionState(COLLECTION);
+    Replica oldLeader = dc.getLeader("shard1");
+    CoreContainer leaderCC = cluster.getReplicaJetty(oldLeader).getCoreContainer();
+    SolrCore leaderCore = leaderCC.getCores().iterator().next();
+    MockDirectoryWrapper dir = (MockDirectoryWrapper) leaderCore.getDirectoryFactory().get(leaderCore.getIndexDir(), DirectoryFactory.DirContext.DEFAULT, leaderCore.getSolrConfig().indexConfig.lockType);
+    leaderCore.getDirectoryFactory().release(dir);
+
+    try (HttpSolrClient solrClient = new HttpSolrClient.Builder(dc.getLeader("shard1").getCoreUrl()).build()) {
+      for (int i = 0; i < 100; i++) {
+        new UpdateRequest()
+            .add("id", i + "")
+            .process(solrClient);
+        solrClient.commit();
+        addedIds.add(i + "");
+
+        for (String file : dir.listAll()) {
+          if (file.contains("segments_")) continue;
+          if (file.endsWith("si")) continue;
+          if (file.endsWith("fnm")) continue;
+          if (random().nextBoolean()) continue;
+
+          dir.corruptFiles(Collections.singleton(file));
+        }
+      }
+    } catch (Exception e) {
+      // Expected
+    }
+    return oldLeader;
+  }
+

@@ -1,120 +1,17 @@
   @Override
   public void prepare(ResponseBuilder rb) throws IOException {
-    SolrQueryRequest req = rb.req;
-    SolrParams params = req.getParams();
-    // A runtime param can skip 
-    if (!params.getBool(QueryElevationParams.ENABLE, true)) {
+    if (!initialized || !rb.req.getParams().getBool(QueryElevationParams.ENABLE, true)) {
       return;
     }
 
-    boolean exclusive = params.getBool(QueryElevationParams.EXCLUSIVE, false);
-    // A runtime parameter can alter the config value for forceElevation
-    boolean force = params.getBool(QueryElevationParams.FORCE_ELEVATION, forceElevation);
-    boolean markExcludes = params.getBool(QueryElevationParams.MARK_EXCLUDES, false);
-    String boostStr = params.get(QueryElevationParams.IDS);
-    String exStr = params.get(QueryElevationParams.EXCLUDE);
-
-    Query query = rb.getQuery();
-    SolrParams localParams = rb.getQparser().getLocalParams();
-    String qstr = localParams == null ? rb.getQueryString() : localParams.get(QueryParsing.V);
-    if (query == null || qstr == null) {
-      return;
+    Elevation elevation = getElevation(rb);
+    if (elevation != null) {
+      setQuery(rb, elevation);
+      setSort(rb, elevation);
     }
 
-    ElevationObj booster = null;
-    try {
-      if(boostStr != null || exStr != null) {
-        List<String> boosts = (boostStr != null) ? StrUtils.splitSmart(boostStr,",", true) : new ArrayList<String>(0);
-        List<String> excludes = (exStr != null) ? StrUtils.splitSmart(exStr, ",", true) : new ArrayList<String>(0);
-        booster = new ElevationObj(qstr, boosts, excludes);
-      } else {
-        IndexReader reader = req.getSearcher().getIndexReader();
-        qstr = getAnalyzedQuery(qstr);
-        booster = getElevationMap(reader, req.getCore()).get(qstr);
-      }
-    } catch (Exception ex) {
-      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
-          "Error loading elevation", ex);
-    }
-
-    if (booster != null) {
-      rb.req.getContext().put(BOOSTED, booster.ids);
-      rb.req.getContext().put(BOOSTED_PRIORITY, booster.priority);
-
-      // Change the query to insert forced documents
-      if (exclusive == true) {
-        //we only want these results
-        rb.setQuery(new BoostQuery(booster.include, 0f));
-      } else {
-        BooleanQuery.Builder newq = new BooleanQuery.Builder();
-        newq.add(query, BooleanClause.Occur.SHOULD);
-        newq.add(new BoostQuery(booster.include, 0f), BooleanClause.Occur.SHOULD);
-        if (booster.exclude != null) {
-          if (markExcludes == false) {
-            for (TermQuery tq : booster.exclude) {
-              newq.add(new BooleanClause(tq, BooleanClause.Occur.MUST_NOT));
-            }
-          } else {
-            //we are only going to mark items as excluded, not actually exclude them.  This works
-            //with the EditorialMarkerFactory
-            rb.req.getContext().put(EXCLUDED, booster.excludeIds);
-          }
-        }
-        rb.setQuery(newq.build());
-      }
-
-      ElevationComparatorSource comparator = new ElevationComparatorSource(booster);
-      // if the sort is 'score desc' use a custom sorting method to 
-      // insert documents in their proper place 
-      SortSpec sortSpec = rb.getSortSpec();
-      if (sortSpec.getSort() == null) {
-        sortSpec.setSortAndFields(new Sort(new SortField[]{
-              new SortField("_elevate_", comparator, true),
-              new SortField(null, SortField.Type.SCORE, false)
-            }),
-          Arrays.asList(new SchemaField[2]));
-      } else {
-        // Check if the sort is based on score
-        SortSpec modSortSpec = this.modifySortSpec(sortSpec, force, comparator);
-        if (null != modSortSpec) {
-          rb.setSortSpec(modSortSpec);
-        }
-      }
-
-      // alter the sorting in the grouping specification if there is one
-      GroupingSpecification groupingSpec = rb.getGroupingSpec();
-      if(groupingSpec != null) {
-        SortSpec groupSortSpec = groupingSpec.getGroupSortSpec();
-        SortSpec modGroupSortSpec = this.modifySortSpec(groupSortSpec, force, comparator);
-        if (modGroupSortSpec != null) {
-          groupingSpec.setGroupSortSpec(modGroupSortSpec);
-        }
-        SortSpec withinGroupSortSpec = groupingSpec.getWithinGroupSortSpec();
-        SortSpec modWithinGroupSortSpec = this.modifySortSpec(withinGroupSortSpec, force, comparator);
-        if (modWithinGroupSortSpec != null) {
-          groupingSpec.setWithinGroupSortSpec(modWithinGroupSortSpec);
-        }
-      }
-    }
-
-    // Add debugging information
-    if (rb.isDebug()) {
-      List<String> match = null;
-      if (booster != null) {
-        // Extract the elevated terms into a list
-        match = new ArrayList<>(booster.priority.size());
-        for (Object o : booster.include.clauses()) {
-          TermQuery tq = (TermQuery) ((BooleanClause) o).getQuery();
-          match.add(tq.getTerm().text());
-        }
-      }
-
-      SimpleOrderedMap<Object> dbg = new SimpleOrderedMap<>();
-      dbg.add("q", qstr);
-      dbg.add("match", match);
-      if (rb.isDebugQuery()) {
-        rb.addDebugInfo("queryBoosting", dbg);
-      }
+    if (rb.isDebug() && rb.isDebugQuery()) {
+      addDebugInfo(rb, elevation);
     }
   }
 

@@ -1,30 +1,27 @@
-  // this refineFacets method is patterned after FacetFieldProcessor.refineFacets and should
-  // probably be merged when range facet becomes more like field facet in it's ability to sort and limit
   protected SimpleOrderedMap<Object> refineFacets() throws IOException {
+    // this refineFacets method is patterned after FacetFieldProcessor.refineFacets such that
+    // the same "_s" skip bucket syntax is used and FacetRangeMerger can subclass FacetRequestSortedMerger
+    // for dealing with them & the refinement requests.
+    // 
+    // But range faceting does *NOT* use the "leaves" and "partial" syntax
+    // 
+    // If/When range facet becomes more like field facet in it's ability to sort and limit the "range buckets"
+    // FacetRangeProcessor and FacetFieldProcessor should prbably be refactored to share more code.
+    
     boolean skipThisFacet = (fcontext.flags & SKIP_FACET) != 0;
 
-    List leaves = FacetFieldProcessor.asList(fcontext.facetInfo.get("_l"));        // We have not seen this bucket: do full faceting for this bucket, including all sub-facets
     List<List> skip = FacetFieldProcessor.asList(fcontext.facetInfo.get("_s"));    // We have seen this bucket, so skip stats on it, and skip sub-facets except for the specified sub-facets that should calculate specified buckets.
-    List<List> partial = FacetFieldProcessor.asList(fcontext.facetInfo.get("_p")); // We have not seen this bucket, do full faceting for this bucket, and most sub-facets... but some sub-facets are partial and should only visit specified buckets.
 
-    // currently, only _s should be present for range facets.  In the future, range facets will
-    // be more like field facets and will have the same refinement cases.  When that happens, we should try to unify the refinement code more
-    assert leaves.size() == 0;
-    assert partial.size() == 0;
-
-    // For leaf refinements, we do full faceting for each leaf bucket.  Any sub-facets of these buckets will be fully evaluated.  Because of this, we should never
-    // encounter leaf refinements that have sub-facets that return partial results.
+    // sanity check our merger's super class didn't send us something we can't handle ...
+    assert 0 == FacetFieldProcessor.asList(fcontext.facetInfo.get("_l")).size();
+    assert 0 == FacetFieldProcessor.asList(fcontext.facetInfo.get("_p")).size();
 
     SimpleOrderedMap<Object> res = new SimpleOrderedMap<>();
-    List<SimpleOrderedMap> bucketList = new ArrayList<>( leaves.size() + skip.size() + partial.size() );
+    List<SimpleOrderedMap> bucketList = new ArrayList<>( skip.size() );
     res.add("buckets", bucketList);
 
     // TODO: an alternate implementations can fill all accs at once
     createAccs(-1, 1);
-
-    for (Object bucketVal : leaves) {
-      bucketList.add( refineBucket(bucketVal, false, null) );
-    }
 
     for (List bucketAndFacetInfo : skip) {
       assert bucketAndFacetInfo.size() == 2;
@@ -34,33 +31,30 @@
       bucketList.add( refineBucket(bucketVal, true, facetInfo ) );
     }
 
-    // The only difference between skip and missing is the value of "skip" passed to refineBucket
-    for (List bucketAndFacetInfo : partial) {
-      assert bucketAndFacetInfo.size() == 2;
-      Object bucketVal = bucketAndFacetInfo.get(0);
-      Map<String,Object> facetInfo = (Map<String, Object>) bucketAndFacetInfo.get(1);
+    { // refine the special "other" buckets
+      
+      // NOTE: we're re-useing this variable for each special we look for...
+      Map<String,Object> specialFacetInfo;
 
-      bucketList.add( refineBucket(bucketVal, false, facetInfo ) );
-    }
-
-    /*** special buckets
-    if (freq.missing) {
-      Map<String,Object> bucketFacetInfo = (Map<String,Object>)fcontext.facetInfo.get("missing");
-
-      if (bucketFacetInfo != null || !skipThisFacet) {
-        SimpleOrderedMap<Object> missingBucket = new SimpleOrderedMap<>();
-        fillBucket(missingBucket, getFieldMissingQuery(fcontext.searcher, freq.field), null, skipThisFacet, bucketFacetInfo);
-        res.add("missing", missingBucket);
+      specialFacetInfo = (Map<String, Object>) fcontext.facetInfo.get(FacetRangeOther.BEFORE.toString());
+      if (null != specialFacetInfo) {
+        res.add(FacetRangeOther.BEFORE.toString(),
+                refineRange(buildBeforeRange(), skipThisFacet, specialFacetInfo));
+      }
+      
+      specialFacetInfo = (Map<String, Object>) fcontext.facetInfo.get(FacetRangeOther.AFTER.toString());
+      if (null != specialFacetInfo) {
+        res.add(FacetRangeOther.AFTER.toString(),
+                refineRange(buildAfterRange(), skipThisFacet, specialFacetInfo));
+      }
+      
+      specialFacetInfo = (Map<String, Object>) fcontext.facetInfo.get(FacetRangeOther.BETWEEN.toString());
+      if (null != specialFacetInfo) {
+        res.add(FacetRangeOther.BETWEEN.toString(),
+                refineRange(buildBetweenRange(), skipThisFacet, specialFacetInfo));
       }
     }
-     **********/
-
-
-    // If there are just a couple of leaves, and if the domain is large, then
-    // going by term is likely the most efficient?
-    // If the domain is small, or if the number of leaves is large, then doing
-    // the normal collection method may be best.
-
+      
     return res;
   }
 

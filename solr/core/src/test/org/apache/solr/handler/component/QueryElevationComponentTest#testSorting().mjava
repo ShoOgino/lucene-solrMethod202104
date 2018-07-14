@@ -2,28 +2,27 @@
   public void testSorting() throws Exception {
     try {
       init("schema12.xml");
-      assertU(adoc("id", "a", "title", "ipod trash trash", "str_s1", "a"));
-      assertU(adoc("id", "b", "title", "ipod ipod  trash", "str_s1", "b"));
-      assertU(adoc("id", "c", "title", "ipod ipod  ipod ", "str_s1", "c"));
+      assertU(adoc("id", "a", "title", "ipod trash trash", "str_s1", "group1"));
+      assertU(adoc("id", "b", "title", "ipod ipod  trash", "str_s1", "group2"));
+      assertU(adoc("id", "c", "title", "ipod ipod  ipod ", "str_s1", "group2"));
 
-      assertU(adoc("id", "x", "title", "boosted", "str_s1", "x"));
-      assertU(adoc("id", "y", "title", "boosted boosted", "str_s1", "y"));
-      assertU(adoc("id", "z", "title", "boosted boosted boosted", "str_s1", "z"));
+      assertU(adoc("id", "x", "title", "boosted",                 "str_s1", "group1"));
+      assertU(adoc("id", "y", "title", "boosted boosted",         "str_s1", "group2"));
+      assertU(adoc("id", "z", "title", "boosted boosted boosted", "str_s1", "group2"));
       assertU(commit());
 
-      String query = "title:ipod";
+      final String query = "title:ipod";
 
-      Map<String, String> args = new HashMap<>();  // reusing args & requests this way is a solr-test-antipattern.  PLEASE DO NOT COPY THIS CODE
-      args.put(CommonParams.Q, query);
-      args.put(CommonParams.QT, "/elevate");
-      args.put(CommonParams.FL, "id,score");
-      args.put("indent", "true");
-      //args.put( CommonParams.FL, "id,title,score" );
-      SolrQueryRequest req = new LocalSolrQueryRequest(h.getCore(), new MapSolrParams(args));
-      IndexReader reader = req.getSearcher().getIndexReader();
-      QueryElevationComponent booster = (QueryElevationComponent) req.getCore().getSearchComponent("elevate");
+      final SolrParams baseParams = params(
+          "qt", "/elevate",
+          "q", query,
+          "fl", "id,score",
+          "indent", "true");
 
-      assertQ("Make sure standard sort works as expected", req
+      QueryElevationComponent booster = (QueryElevationComponent) h.getCore().getSearchComponent("elevate");
+      IndexReader reader = h.getCore().withSearcher(SolrIndexSearcher::getIndexReader);
+
+      assertQ("Make sure standard sort works as expected", req(baseParams)
           , "//*[@numFound='3']"
           , "//result/doc[1]/str[@name='id'][.='c']"
           , "//result/doc[2]/str[@name='id'][.='b']"
@@ -31,12 +30,9 @@
       );
 
       // Explicitly set what gets boosted
-      booster.elevationCache.clear();
-      booster.setTopQueryResults(reader, query, new String[]{"x", "y", "z"}, null);
+      booster.setTopQueryResults(reader, query, false, new String[]{"x", "y", "z"}, null);
 
-
-      req.close(); req = new LocalSolrQueryRequest(h.getCore(), new MapSolrParams(args));
-      assertQ("All six should make it", req
+      assertQ("All six should make it", req(baseParams)
           , "//*[@numFound='6']"
           , "//result/doc[1]/str[@name='id'][.='x']"
           , "//result/doc[2]/str[@name='id'][.='y']"
@@ -46,12 +42,9 @@
           , "//result/doc[6]/str[@name='id'][.='a']"
       );
 
-      booster.elevationCache.clear();
-
       // now switch the order:
-      req.close(); req = new LocalSolrQueryRequest(h.getCore(), new MapSolrParams(args));
-      booster.setTopQueryResults(reader, query, new String[]{"a", "x"}, null);
-      assertQ("All four should make it", req
+      booster.setTopQueryResults(reader, query, false, new String[]{"a", "x"}, null);
+      assertQ(req(baseParams)
           , "//*[@numFound='4']"
           , "//result/doc[1]/str[@name='id'][.='a']"
           , "//result/doc[2]/str[@name='id'][.='x']"
@@ -59,33 +52,10 @@
           , "//result/doc[4]/str[@name='id'][.='b']"
       );
 
-      // Test reverse sort
-      args.put(CommonParams.SORT, "score asc");
-      req.close(); req = new LocalSolrQueryRequest(h.getCore(), new MapSolrParams(args));
-      assertQ("All four should make it", req
-          , "//*[@numFound='4']"
-          // NOTE REVERSED doc[X] indices
-          , "//result/doc[4]/str[@name='id'][.='a']"
-          , "//result/doc[3]/str[@name='id'][.='x']"
-          , "//result/doc[2]/str[@name='id'][.='c']"
-          , "//result/doc[1]/str[@name='id'][.='b']"
-      );
-
       // Try normal sort by 'id'
       // default 'forceBoost' should be false
       assertEquals(false, booster.forceElevation);
-      args.put(CommonParams.SORT, "str_s1 asc");
-      req.close(); req = new LocalSolrQueryRequest(h.getCore(), new MapSolrParams(args));
-      assertQ(null, req
-          , "//*[@numFound='4']"
-          , "//result/doc[1]/str[@name='id'][.='a']"
-          , "//result/doc[2]/str[@name='id'][.='b']"
-          , "//result/doc[3]/str[@name='id'][.='c']"
-          , "//result/doc[4]/str[@name='id'][.='x']"
-      );
-      args.put(CommonParams.SORT, "id asc");
-      req.close(); req = new LocalSolrQueryRequest(h.getCore(), new MapSolrParams(args));
-      assertQ(null, req
+      assertQ(req(baseParams, "sort", "id asc")
           , "//*[@numFound='4']"
           , "//result/doc[1]/str[@name='id'][.='a']"
           , "//result/doc[2]/str[@name='id'][.='b']"
@@ -93,10 +63,17 @@
           , "//result/doc[4]/str[@name='id'][.='x']"
       );
 
+      assertQ("useConfiguredElevatedOrder=false",
+          req(baseParams, "sort", "str_s1 asc,id desc", "useConfiguredElevatedOrder", "false")
+          , "//*[@numFound='4']"
+          , "//result/doc[1]/str[@name='id'][.='x']"//group1
+          , "//result/doc[2]/str[@name='id'][.='a']"//group1
+          , "//result/doc[3]/str[@name='id'][.='c']"
+          , "//result/doc[4]/str[@name='id'][.='b']"
+      );
+
       booster.forceElevation = true;
-      args.put(CommonParams.SORT, "id asc");
-      req.close(); req = new LocalSolrQueryRequest(h.getCore(), new MapSolrParams(args));
-      assertQ(null, req
+      assertQ(req(baseParams, "sort", "id asc")
           , "//*[@numFound='4']"
           , "//result/doc[1]/str[@name='id'][.='a']"
           , "//result/doc[2]/str[@name='id'][.='x']"
@@ -104,23 +81,27 @@
           , "//result/doc[4]/str[@name='id'][.='c']"
       );
 
+      booster.forceElevation = true;
+      assertQ("useConfiguredElevatedOrder=false and forceElevation",
+          req(baseParams, "sort", "id desc", "useConfiguredElevatedOrder", "false")
+          , "//*[@numFound='4']"
+          , "//result/doc[1]/str[@name='id'][.='x']" // force elevated
+          , "//result/doc[2]/str[@name='id'][.='a']" // force elevated
+          , "//result/doc[3]/str[@name='id'][.='c']"
+          , "//result/doc[4]/str[@name='id'][.='b']"
+      );
+
       //Test exclusive (not to be confused with exclusion)
-      args.put(QueryElevationParams.EXCLUSIVE, "true");
-      req.close(); req = new LocalSolrQueryRequest(h.getCore(), new MapSolrParams(args));
-      booster.setTopQueryResults(reader, query, new String[]{"x", "a"}, new String[]{});
-      assertQ(null, req
+      booster.setTopQueryResults(reader, query, false, new String[]{"x", "a"}, new String[]{});
+      assertQ(req(baseParams, "exclusive", "true")
           , "//*[@numFound='2']"
           , "//result/doc[1]/str[@name='id'][.='x']"
           , "//result/doc[2]/str[@name='id'][.='a']"
       );
 
       // Test exclusion
-      booster.elevationCache.clear();
-      args.remove(CommonParams.SORT);
-      args.remove(QueryElevationParams.EXCLUSIVE);
-      req.close(); req = new LocalSolrQueryRequest(h.getCore(), new MapSolrParams(args));
-      booster.setTopQueryResults(reader, query, new String[]{"x"}, new String[]{"a"});
-      assertQ(null, req
+      booster.setTopQueryResults(reader, query, false, new String[]{"x"}, new String[]{"a"});
+      assertQ(req(baseParams)
           , "//*[@numFound='3']"
           , "//result/doc[1]/str[@name='id'][.='x']"
           , "//result/doc[2]/str[@name='id'][.='c']"
@@ -130,11 +111,8 @@
 
       // Test setting ids and excludes from http parameters
 
-      booster.elevationCache.clear();
-      args.put(QueryElevationParams.IDS, "x,y,z");
-      args.put(QueryElevationParams.EXCLUDE, "b");
-      req.close(); req = new LocalSolrQueryRequest(h.getCore(), new MapSolrParams(args));
-      assertQ("All five should make it", req
+      booster.clearElevationProviderCache();
+      assertQ("All five should make it", req(baseParams, "elevateIds", "x,y,z", "excludeIds", "b")
           , "//*[@numFound='5']"
           , "//result/doc[1]/str[@name='id'][.='x']"
           , "//result/doc[2]/str[@name='id'][.='y']"
@@ -143,10 +121,7 @@
           , "//result/doc[5]/str[@name='id'][.='a']"
       );
 
-      args.put(QueryElevationParams.IDS, "x,z,y");
-      args.put(QueryElevationParams.EXCLUDE, "b,c");
-      req.close(); req = new LocalSolrQueryRequest(h.getCore(), new MapSolrParams(args));
-      assertQ("All four should make it", req
+      assertQ("All four should make it", req(baseParams, "elevateIds", "x,z,y", "excludeIds", "b,c")
           , "//*[@numFound='4']"
           , "//result/doc[1]/str[@name='id'][.='x']"
           , "//result/doc[2]/str[@name='id'][.='z']"
@@ -154,7 +129,6 @@
           , "//result/doc[4]/str[@name='id'][.='a']"
       );
 
-      req.close();
     } finally {
       delete();
     }

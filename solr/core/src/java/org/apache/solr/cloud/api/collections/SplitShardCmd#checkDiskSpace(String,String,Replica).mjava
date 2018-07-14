@@ -1,0 +1,37 @@
+  private void checkDiskSpace(String collection, String shard, Replica parentShardLeader) throws SolrException {
+    // check that enough disk space is available on the parent leader node
+    // otherwise the actual index splitting will always fail
+    NodeStateProvider nodeStateProvider = ocmh.cloudManager.getNodeStateProvider();
+    Map<String, Object> nodeValues = nodeStateProvider.getNodeValues(parentShardLeader.getNodeName(),
+        Collections.singletonList(ImplicitSnitch.DISK));
+    Map<String, Map<String, List<ReplicaInfo>>> infos = nodeStateProvider.getReplicaInfo(parentShardLeader.getNodeName(),
+        Collections.singletonList(Suggestion.ConditionType.CORE_IDX.metricsAttribute));
+    if (infos.get(collection) == null || infos.get(collection).get(shard) == null) {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "missing replica information for parent shard leader");
+    }
+    // find the leader
+    List<ReplicaInfo> lst = infos.get(collection).get(shard);
+    Double indexSize = null;
+    for (ReplicaInfo info : lst) {
+      if (info.getCore().equals(parentShardLeader.getCoreName())) {
+        Number size = (Number)info.getVariable(Suggestion.ConditionType.CORE_IDX.metricsAttribute);
+        if (size == null) {
+          throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "missing index size information for parent shard leader");
+        }
+        indexSize = (Double)Suggestion.ConditionType.CORE_IDX.convertVal(size);
+        break;
+      }
+    }
+    if (indexSize == null) {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "missing replica information for parent shard leader");
+    }
+    Number freeSize = (Number)nodeValues.get(ImplicitSnitch.DISK);
+    if (freeSize == null) {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "missing node disk space information for parent shard leader");
+    }
+    if (freeSize.doubleValue() < 2.0 * indexSize) {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "not enough free disk space to perform index split on node " +
+          parentShardLeader.getNodeName() + ", required: " + (2 * indexSize) + ", available: " + freeSize);
+    }
+  }
+

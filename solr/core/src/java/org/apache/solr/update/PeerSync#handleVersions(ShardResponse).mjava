@@ -4,8 +4,6 @@
     // TODO: how to handle short lists?
 
     SyncShardRequest sreq = (SyncShardRequest) srsp.getShardRequest();
-    sreq.reportedVersions =  otherVersions;
-
     Object fingerprint = srsp.getSolrResponse().getResponse().get("fingerprint");
 
     log.info(msg() + " Received " + otherVersions.size() + " versions from " + sreq.shards[0] + " fingerprint:" + fingerprint );
@@ -14,45 +12,27 @@
     }
 
     if (otherVersions.size() == 0) {
-      return getNoVersionsIsSuccess; 
-    }
-    
-    boolean completeList = otherVersions.size() < nUpdates;  // do we have their complete list of updates?
-
-    Collections.sort(otherVersions, absComparator);
-
-    if (debug) {
-      log.debug(msg() + " sorted versions from " + sreq.shards[0] + " = " + otherVersions);
-    }
-    
-    long otherHigh = percentile(otherVersions, .2f);
-    long otherLow = percentile(otherVersions, .8f);
-    long otherHighest = otherVersions.get(0);
-
-    if (ourHighThreshold < otherLow) {
-      // Small overlap between version windows and ours is older
-      // This means that we might miss updates if we attempted to use this method.
-      // Since there exists just one replica that is so much newer, we must
-      // fail the sync.
-      log.info(msg() + " Our versions are too old. ourHighThreshold="+ourHighThreshold + " otherLowThreshold="+otherLow + " ourHighest=" + ourHighest + " otherHighest=" + otherHighest);
-      return false;
-    }
-
-    if (ourLowThreshold > otherHigh) {
-      // Small overlap between windows and ours is newer.
-      // Using this list to sync would result in requesting/replaying results we don't need
-      // and possibly bringing deleted docs back to life.
-      log.info(msg() + " Our versions are newer. ourLowThreshold="+ourLowThreshold + " otherHigh="+otherHigh+ " ourHighest=" + ourHighest + " otherHighest=" + otherHighest);
-
-      // Because our versions are newer, IndexFingerprint with the remote would not match us.
-      // We return true on our side, but the remote peersync with us should fail.
+      // when sync with other replicas, they may not contains any updates
       return true;
     }
     
-    if(core.getSolrConfig().useRangeVersionsForPeerSync && canHandleVersionRanges(sreq.shards[0])) {
-      return handleVersionsWithRanges(srsp, otherVersions, sreq, completeList, otherHigh, otherHighest);
-    } else {
-      return handleIndividualVersions(srsp, otherVersions, sreq, completeList, otherHigh, otherHighest);
+    MissedUpdatesRequest updatesRequest = missedUpdatesFinder.find(
+        otherVersions, sreq.shards[0],
+        () -> core.getSolrConfig().useRangeVersionsForPeerSync && canHandleVersionRanges(sreq.shards[0]));
+
+    if (updatesRequest == MissedUpdatesRequest.ALREADY_IN_SYNC) {
+      return true;
+    } else if (updatesRequest == MissedUpdatesRequest.UNABLE_TO_SYNC) {
+      return false;
+    } else if (updatesRequest == MissedUpdatesRequest.EMPTY) {
+      // If we requested updates from another replica, we can't compare fingerprints yet with this replica, we need to defer
+      if (doFingerprint) {
+        sreq.doFingerprintComparison = true;
+      }
+      return true;
     }
+
+    sreq.totalRequestedUpdates = updatesRequest.totalRequestedUpdates;
+    return requestUpdates(srsp, updatesRequest.versionsAndRanges, updatesRequest.totalRequestedUpdates);
   }
 

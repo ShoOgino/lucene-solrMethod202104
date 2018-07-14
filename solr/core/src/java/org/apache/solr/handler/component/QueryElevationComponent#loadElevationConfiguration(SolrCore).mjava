@@ -1,0 +1,64 @@
+  /**
+   * (Re)Loads elevation configuration.
+   *
+   * @param core The core holding this component.
+   * @return The number of elevation rules parsed.
+   */
+  @SuppressWarnings("WeakerAccess")
+  protected int loadElevationConfiguration(SolrCore core) throws Exception {
+    synchronized (elevationProviderCache) {
+      elevationProviderCache.clear();
+      String configFileName = initArgs.get(CONFIG_FILE);
+      if (configFileName == null) {
+        // Throw an exception which is handled by handleInitializationException().
+        // If not overridden handleInitializationException() simply skips this exception.
+        throw new InitializationException("Missing component parameter " + CONFIG_FILE + " - it has to define the path to the elevation configuration file", InitializationExceptionCause.NO_CONFIG_FILE_DEFINED);
+      }
+      boolean configFileExists = false;
+      ElevationProvider elevationProvider = NO_OP_ELEVATION_PROVIDER;
+
+      // check if using ZooKeeper
+      ZkController zkController = core.getCoreContainer().getZkController();
+      if (zkController != null) {
+        // TODO : shouldn't have to keep reading the config name when it has been read before
+        configFileExists = zkController.configFileExists(zkController.getZkStateReader().readConfigName(core.getCoreDescriptor().getCloudDescriptor().getCollectionName()), configFileName);
+      } else {
+        File fC = new File(core.getResourceLoader().getConfigDir(), configFileName);
+        File fD = new File(core.getDataDir(), configFileName);
+        if (fC.exists() == fD.exists()) {
+          InitializationException e = new InitializationException("Missing config file \"" + configFileName + "\" - either " + fC.getAbsolutePath() + " or " + fD.getAbsolutePath() + " must exist, but not both", InitializationExceptionCause.MISSING_CONFIG_FILE);
+          elevationProvider = handleConfigLoadingException(e, true);
+          elevationProviderCache.put(null, elevationProvider);
+        } else if (fC.exists()) {
+          if (fC.length() == 0) {
+            InitializationException e = new InitializationException("Empty config file \"" + configFileName + "\" - " + fC.getAbsolutePath(), InitializationExceptionCause.EMPTY_CONFIG_FILE);
+            elevationProvider = handleConfigLoadingException(e, true);
+          } else {
+            configFileExists = true;
+            log.info("Loading QueryElevation from: " + fC.getAbsolutePath());
+            Config cfg = new Config(core.getResourceLoader(), configFileName);
+            elevationProvider = loadElevationProvider(cfg);
+          }
+          elevationProviderCache.put(null, elevationProvider);
+        }
+      }
+      //in other words, we think this is in the data dir, not the conf dir
+      if (!configFileExists) {
+        // preload the first data
+        RefCounted<SolrIndexSearcher> searchHolder = null;
+        try {
+          searchHolder = core.getNewestSearcher(false);
+          if (searchHolder == null) {
+            elevationProvider = NO_OP_ELEVATION_PROVIDER;
+          } else {
+            IndexReader reader = searchHolder.get().getIndexReader();
+            elevationProvider = getElevationProvider(reader, core);
+          }
+        } finally {
+          if (searchHolder != null) searchHolder.decref();
+        }
+      }
+      return elevationProvider.size();
+    }
+  }
+

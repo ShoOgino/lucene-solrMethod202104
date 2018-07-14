@@ -1,0 +1,40 @@
+  public List<Violation> test(Policy.Session session) {
+    ComputedValueEvaluator computedValueEvaluator = new ComputedValueEvaluator(session);
+    Suggestion.ViolationCtx ctx = new Suggestion.ViolationCtx(this, session.matrix, computedValueEvaluator);
+    if (isPerCollectiontag()) {
+      Map<String, Map<String, Map<String, ReplicaCount>>> replicaCounts = computeReplicaCounts(session.matrix, computedValueEvaluator);
+      for (Map.Entry<String, Map<String, Map<String, ReplicaCount>>> e : replicaCounts.entrySet()) {
+        computedValueEvaluator.collName = e.getKey();
+        if (!collection.isPass(computedValueEvaluator.collName)) continue;
+        for (Map.Entry<String, Map<String, ReplicaCount>> shardVsCount : e.getValue().entrySet()) {
+          computedValueEvaluator.shardName = shardVsCount.getKey();
+          if (!shard.isPass(computedValueEvaluator.shardName)) continue;
+          for (Map.Entry<String, ReplicaCount> counts : shardVsCount.getValue().entrySet()) {
+            SealedClause sealedClause = getSealedClause(computedValueEvaluator);
+            ReplicaCount replicas = counts.getValue();
+            if (!sealedClause.replica.isPass(replicas)) {
+              Violation violation = new Violation(sealedClause,
+                  computedValueEvaluator.collName,
+                  computedValueEvaluator.shardName,
+                  tag.name.equals("node") ? counts.getKey() : null,
+                  counts.getValue(),
+                  sealedClause.getReplica().delta(replicas),
+                  counts.getKey());
+              tag.varType.addViolatingReplicas(ctx.reset(counts.getKey(), replicas, violation));
+            }
+          }
+        }
+      }
+    } else {
+      for (Row r : session.matrix) {
+        SealedClause sealedClause = getSealedClause(computedValueEvaluator);
+        if (!sealedClause.getGlobalTag().isPass(r)) {
+          Suggestion.ConditionType.CORES.addViolatingReplicas(ctx.reset(null, null,
+              new Violation(sealedClause, null, null, r.node, r.getVal(sealedClause.globalTag.name), sealedClause.globalTag.delta(r.getVal(globalTag.name)), null)));
+        }
+      }
+    }
+    return ctx.allViolations;
+
+  }
+

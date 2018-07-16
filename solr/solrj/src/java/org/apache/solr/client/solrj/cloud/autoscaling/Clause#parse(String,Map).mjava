@@ -1,8 +1,11 @@
   Condition parse(String s, Map m) {
     Object expectedVal = null;
-    ComputationType computationType = null;
+    ComputedType computedType = null;
     Object val = m.get(s);
-    Suggestion.ConditionType varType = Suggestion.getTagType(s);
+    ConditionType varType = Suggestion.getTagType(s);
+    if (varType.isHidden) {
+      throw new IllegalArgumentException(StrUtils.formatString("''{0}'' is not allowed in a policy rule :  ''{1}''  ", varType.tagName, Utils.toJSONString(m)));
+    }
     try {
       String conditionName = s.trim();
       Operand operand = null;
@@ -11,32 +14,39 @@
         expectedVal = Policy.ANY;
       } else if (val instanceof String) {
         String strVal = ((String) val).trim();
+        val = strVal;
         if (Policy.ANY.equals(strVal) || Policy.EACH.equals(strVal)) operand = WILDCARD;
         else if (strVal.startsWith(NOT_EQUAL.operand)) operand = NOT_EQUAL;
         else if (strVal.startsWith(GREATER_THAN.operand)) operand = GREATER_THAN;
         else if (strVal.startsWith(LESS_THAN.operand)) operand = LESS_THAN;
         else operand = Operand.EQUAL;
         strVal = strVal.substring(Operand.EQUAL == operand || WILDCARD == operand ? 0 : 1);
-        for (ComputationType t : ComputationType.values()) {
+        for (ComputedType t : ComputedType.values()) {
           String changedVal = t.match(strVal);
           if (changedVal != null) {
-            computationType = t;
+            computedType = t;
             strVal = changedVal;
-            if (varType == null || !varType.supportComputed(computationType, this)) {
-              throw new IllegalArgumentException(StrUtils.formatString("''{0}'' is not allowed for variable :  ''{1}'' , in condition : ''{2}'' ",
+            if (varType == null || !varType.supportedComputedTypes.contains(computedType)) {
+              throw new IllegalArgumentException(StrUtils.formatString("''{0}'' is not allowed for variable :  ''{1}'' , in clause : ''{2}'' ",
                   t, conditionName, Utils.toJSONString(m)));
             }
           }
         }
-        operand = varType == null ? operand : varType.getOperand(operand, strVal, computationType);
-        expectedVal = validate(s, new Condition(s, strVal, operand, computationType, null), true);
+        if (computedType == null && ((String) val).charAt(0) == '#' && !varType.wildCards.contains(val)) {
+          throw new IllegalArgumentException(StrUtils.formatString("''{0}'' is not an allowed value for ''{1}'' , in clause : ''{2}'' . Supported value is : {3}",
+              val, conditionName, Utils.toJSONString(m), varType.wildCards));
+
+
+        }
+        operand = varType == null ? operand : varType.getOperand(operand, strVal, computedType);
+        expectedVal = validate(s, new Condition(s, strVal, operand, computedType, null), true);
 
       } else if (val instanceof Number) {
         operand = Operand.EQUAL;
         operand = varType.getOperand(operand, val, null);
         expectedVal = validate(s, new Condition(s, val, operand, null, null), true);
       }
-      return new Condition(conditionName, expectedVal, operand, computationType, this);
+      return new Condition(conditionName, expectedVal, operand, computedType, this);
 
     } catch (IllegalArgumentException iae) {
       throw iae;

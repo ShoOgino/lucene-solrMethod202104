@@ -1,10 +1,13 @@
-  private Replica corruptLeader(List<String> addedIds) throws IOException {
-    DocCollection dc = getCollectionState(COLLECTION);
+  private Replica corruptLeader(String collection, List<String> addedIds) throws IOException {
+    DocCollection dc = getCollectionState(collection);
     Replica oldLeader = dc.getLeader("shard1");
+    log.info("Corrupt leader : {}", oldLeader);
+
     CoreContainer leaderCC = cluster.getReplicaJetty(oldLeader).getCoreContainer();
     SolrCore leaderCore = leaderCC.getCores().iterator().next();
-    MockDirectoryWrapper dir = (MockDirectoryWrapper) leaderCore.getDirectoryFactory().get(leaderCore.getIndexDir(), DirectoryFactory.DirContext.DEFAULT, leaderCore.getSolrConfig().indexConfig.lockType);
-    leaderCore.getDirectoryFactory().release(dir);
+    MockDirectoryWrapper mockDir = (MockDirectoryWrapper) leaderCore.getDirectoryFactory()
+        .get(leaderCore.getIndexDir(), DirectoryFactory.DirContext.DEFAULT, leaderCore.getSolrConfig().indexConfig.lockType);
+    leaderCore.getDirectoryFactory().release(mockDir);
 
     try (HttpSolrClient solrClient = new HttpSolrClient.Builder(dc.getLeader("shard1").getCoreUrl()).build()) {
       for (int i = 0; i < 100; i++) {
@@ -14,16 +17,21 @@
         solrClient.commit();
         addedIds.add(i + "");
 
-        for (String file : dir.listAll()) {
+        for (String file : mockDir.listAll()) {
           if (file.contains("segments_")) continue;
           if (file.endsWith("si")) continue;
           if (file.endsWith("fnm")) continue;
           if (random().nextBoolean()) continue;
 
-          dir.corruptFiles(Collections.singleton(file));
+          try {
+            mockDir.corruptFiles(Collections.singleton(file));
+          } catch (RuntimeException | FileNotFoundException e) {
+            // merges can lead to this exception
+          }
         }
       }
     } catch (Exception e) {
+      log.info("Corrupt leader ex: ",e);
       // Expected
     }
     return oldLeader;

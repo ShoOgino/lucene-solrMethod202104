@@ -1,7 +1,7 @@
   private MergeSpecification doFindMerges(List<SegmentSizeAndDocs> sortedEligibleInfos,
                                           final long maxMergedSegmentBytes,
                                           final int mergeFactor, final int allowedSegCount,
-                                          final MERGE_TYPE mergeType,
+                                          final int allowedDelCount, final MERGE_TYPE mergeType,
                                           MergeContext mergeContext,
                                           boolean maxMergeIsRunning) throws IOException {
 
@@ -53,7 +53,10 @@
         return spec;
       }
 
-      if (allowedSegCount != Integer.MAX_VALUE && sortedEligible.size() <= allowedSegCount && mergeType == MERGE_TYPE.NATURAL) {
+      final int remainingDelCount = sortedEligible.stream().mapToInt(c -> c.delCount).sum();
+      if (mergeType == MERGE_TYPE.NATURAL &&
+          sortedEligible.size() <= allowedSegCount &&
+          remainingDelCount <= allowedDelCount) {
         return spec;
       }
 
@@ -63,17 +66,7 @@
       boolean bestTooLarge = false;
       long bestMergeBytes = 0;
 
-      // Consider all merge starts.
-      int lim = sortedEligible.size() - mergeFactor; // assume the usual case of background merging.
-
-      if (mergeType != MERGE_TYPE.NATURAL) { // The unusual case of forceMerge or expungeDeletes.
-        // The incoming eligible list will have only segments with > forceMergeDeletesPctAllowed in the case of
-        // findForcedDeletesMerges and segments with < max allowed size in the case of optimize.
-        // If forcing, we must allow singleton merges.
-        lim = sortedEligible.size() - 1;
-      }
-
-      for (int startIdx = 0; startIdx <= lim; startIdx++) {
+      for (int startIdx = 0; startIdx < sortedEligible.size(); startIdx++) {
 
         long totAfterMergeBytes = 0;
 
@@ -114,6 +107,16 @@
           if (segSizeDocs.delCount == 0) {
             continue;
           }
+        }
+
+        // If we didn't find a too-large merge and have a list of candidates
+        // whose length is less than the merge factor, it means we are reaching
+        // the tail of the list of segments and will only find smaller merges.
+        // Stop here.
+        if (bestScore != null &&
+            hitTooLarge == false &&
+            candidate.size() < mergeFactor) {
+          break;
         }
 
         final MergeScore score = score(candidate, hitTooLarge, segInfosSizes);

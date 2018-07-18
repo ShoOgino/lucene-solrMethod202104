@@ -9,15 +9,33 @@
     int groupIDX = 0;
     float maxScore = Float.MIN_VALUE;
     for(SearchGroup<T> group : groups) {
-      TopDocsCollector<?> collector = (TopDocsCollector<?>) groupReducer.getCollector(group.groupValue);
-      final TopDocs topDocs = collector.topDocs(withinGroupOffset, maxDocsPerGroup);
+      TopDocsAndMaxScoreCollector collector = (TopDocsAndMaxScoreCollector) groupReducer.getCollector(group.groupValue);
+      final TopDocs topDocs;
+      final float groupMaxScore;
+      if (collector.sortedByScore) {
+        TopDocs allTopDocs = collector.topDocsCollector.topDocs();
+        groupMaxScore = allTopDocs.scoreDocs.length == 0 ? Float.NaN : allTopDocs.scoreDocs[0].score;
+        if (allTopDocs.scoreDocs.length <= withinGroupOffset) {
+          topDocs = new TopDocs(allTopDocs.totalHits, new ScoreDoc[0]);
+        } else {
+          topDocs = new TopDocs(allTopDocs.totalHits, ArrayUtil.copyOfSubArray(allTopDocs.scoreDocs, withinGroupOffset, Math.min(allTopDocs.scoreDocs.length, withinGroupOffset + maxDocsPerGroup)));
+        }
+      } else {
+        topDocs = collector.topDocsCollector.topDocs(withinGroupOffset, maxDocsPerGroup);
+        if (collector.maxScoreCollector == null) {
+          groupMaxScore = Float.NaN;
+        } else {
+          groupMaxScore = collector.maxScoreCollector.getMaxScore();
+        }
+      }
+      
       groupDocsResult[groupIDX++] = new GroupDocs<>(Float.NaN,
-          topDocs.getMaxScore(),
+          groupMaxScore,
           topDocs.totalHits,
           topDocs.scoreDocs,
           group.groupValue,
           group.sortValues);
-      maxScore = Math.max(maxScore, topDocs.getMaxScore());
+      maxScore = Math.max(maxScore, groupMaxScore);
     }
 
     return new TopGroups<>(groupSort.getSort(),

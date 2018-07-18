@@ -1,0 +1,141 @@
+  /**
+   * Find points on the boundary of the intersection of a plane and the unit sphere,
+   * given a starting point, and ending point, and a list of proportions of the arc (e.g. 0.25, 0.5, 0.75).
+   * The angle between the starting point and ending point is assumed to be less than pi.
+   * @param planetModel is the planet model.
+   * @param start is the start point.
+   * @param end is the end point.
+   * @param proportions is an array of fractional proportions measured between start and end.
+   * @return an array of points corresponding to the proportions passed in.
+   */
+  public GeoPoint[] interpolate(final PlanetModel planetModel, final GeoPoint start, final GeoPoint end, final double[] proportions) {
+    // Steps:
+    // (1) Translate (x0,y0,z0) of endpoints into origin-centered place:
+    // x1 = x0 + D*A
+    // y1 = y0 + D*B
+    // z1 = z0 + D*C
+    // (2) Rotate counterclockwise in x-y:
+    // ra = -atan2(B,A)
+    // x2 = x1 cos ra - y1 sin ra
+    // y2 = x1 sin ra + y1 cos ra
+    // z2 = z1
+    // Faster:
+    // cos ra = A/sqrt(A^2+B^2+C^2)
+    // sin ra = -B/sqrt(A^2+B^2+C^2)
+    // cos (-ra) = A/sqrt(A^2+B^2+C^2)
+    // sin (-ra) = B/sqrt(A^2+B^2+C^2)
+    // (3) Rotate clockwise in x-z:
+    // ha = pi/2 - asin(C/sqrt(A^2+B^2+C^2))
+    // x3 = x2 cos ha - z2 sin ha
+    // y3 = y2
+    // z3 = x2 sin ha + z2 cos ha
+    // At this point, z3 should be zero.
+    // Faster:
+    // sin(ha) = cos(asin(C/sqrt(A^2+B^2+C^2))) = sqrt(1 - C^2/(A^2+B^2+C^2)) = sqrt(A^2+B^2)/sqrt(A^2+B^2+C^2)
+    // cos(ha) = sin(asin(C/sqrt(A^2+B^2+C^2))) = C/sqrt(A^2+B^2+C^2)
+    // (4) Compute interpolations by getting longitudes of original points
+    // la = atan2(y3,x3)
+    // (5) Rotate new points (xN0, yN0, zN0) counter-clockwise in x-z:
+    // ha = -(pi - asin(C/sqrt(A^2+B^2+C^2)))
+    // xN1 = xN0 cos ha - zN0 sin ha
+    // yN1 = yN0
+    // zN1 = xN0 sin ha + zN0 cos ha
+    // (6) Rotate new points clockwise in x-y:
+    // ra = atan2(B,A)
+    // xN2 = xN1 cos ra - yN1 sin ra
+    // yN2 = xN1 sin ra + yN1 cos ra
+    // zN2 = zN1
+    // (7) Translate new points:
+    // xN3 = xN2 - D*A
+    // yN3 = yN2 - D*B
+    // zN3 = zN2 - D*C
+
+    // First, calculate the angles and their sin/cos values
+    double A = x;
+    double B = y;
+    double C = z;
+
+    // Translation amounts
+    final double transX = -D * A;
+    final double transY = -D * B;
+    final double transZ = -D * C;
+
+    double cosRA;
+    double sinRA;
+    double cosHA;
+    double sinHA;
+
+    double magnitude = magnitude();
+    if (magnitude >= MINIMUM_RESOLUTION) {
+      final double denom = 1.0 / magnitude;
+      A *= denom;
+      B *= denom;
+      C *= denom;
+
+      // cos ra = A/sqrt(A^2+B^2+C^2)
+      // sin ra = -B/sqrt(A^2+B^2+C^2)
+      // cos (-ra) = A/sqrt(A^2+B^2+C^2)
+      // sin (-ra) = B/sqrt(A^2+B^2+C^2)
+      final double xyMagnitude = Math.sqrt(A * A + B * B);
+      if (xyMagnitude >= MINIMUM_RESOLUTION) {
+        final double xyDenom = 1.0 / xyMagnitude;
+        cosRA = A * xyDenom;
+        sinRA = -B * xyDenom;
+      } else {
+        cosRA = 1.0;
+        sinRA = 0.0;
+      }
+
+      // sin(ha) = cos(asin(C/sqrt(A^2+B^2+C^2))) = sqrt(1 - C^2/(A^2+B^2+C^2)) = sqrt(A^2+B^2)/sqrt(A^2+B^2+C^2)
+      // cos(ha) = sin(asin(C/sqrt(A^2+B^2+C^2))) = C/sqrt(A^2+B^2+C^2)
+      sinHA = xyMagnitude;
+      cosHA = C;
+    } else {
+      cosRA = 1.0;
+      sinRA = 0.0;
+      cosHA = 1.0;
+      sinHA = 0.0;
+    }
+
+    // Forward-translate the start and end points
+    final Vector modifiedStart = modify(start, transX, transY, transZ, sinRA, cosRA, sinHA, cosHA);
+    final Vector modifiedEnd = modify(end, transX, transY, transZ, sinRA, cosRA, sinHA, cosHA);
+    if (Math.abs(modifiedStart.z) >= MINIMUM_RESOLUTION)
+      throw new IllegalArgumentException("Start point was not on plane: " + modifiedStart.z);
+    if (Math.abs(modifiedEnd.z) >= MINIMUM_RESOLUTION)
+      throw new IllegalArgumentException("End point was not on plane: " + modifiedEnd.z);
+
+    // Compute the angular distance between start and end point
+    final double startAngle = Math.atan2(modifiedStart.y, modifiedStart.x);
+    final double endAngle = Math.atan2(modifiedEnd.y, modifiedEnd.x);
+
+    final double startMagnitude = Math.sqrt(modifiedStart.x * modifiedStart.x + modifiedStart.y * modifiedStart.y);
+    double delta;
+
+    double newEndAngle = endAngle;
+    while (newEndAngle < startAngle) {
+      newEndAngle += Math.PI * 2.0;
+    }
+
+    if (newEndAngle - startAngle <= Math.PI) {
+      delta = newEndAngle - startAngle;
+    } else {
+      double newStartAngle = startAngle;
+      while (newStartAngle < endAngle) {
+        newStartAngle += Math.PI * 2.0;
+      }
+      delta = newStartAngle - endAngle;
+    }
+
+    final GeoPoint[] returnValues = new GeoPoint[proportions.length];
+    for (int i = 0; i < returnValues.length; i++) {
+      final double newAngle = startAngle + proportions[i] * delta;
+      final double sinNewAngle = Math.sin(newAngle);
+      final double cosNewAngle = Math.cos(newAngle);
+      final Vector newVector = new Vector(cosNewAngle * startMagnitude, sinNewAngle * startMagnitude, 0.0);
+      returnValues[i] = reverseModify(planetModel, newVector, transX, transY, transZ, sinRA, cosRA, sinHA, cosHA);
+    }
+
+    return returnValues;
+  }
+

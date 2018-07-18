@@ -13,15 +13,18 @@
     if (req.getPath() != null) {
       if (req.getPath().startsWith("/admin/autoscaling") ||
           req.getPath().startsWith("/cluster/autoscaling") ||
-          req.getPath().startsWith("/admin/metrics/history") ||
-          req.getPath().startsWith("/cluster/metrics/history")
+          req.getPath().startsWith("/admin/metrics") ||
+          req.getPath().startsWith("/cluster/metrics")
           ) {
         metricManager.registry("solr.node").counter("ADMIN." + req.getPath() + ".requests").inc();
         boolean autoscaling = req.getPath().contains("autoscaling");
+        boolean history = req.getPath().contains("history");
         if (autoscaling) {
           incrementCount("autoscaling");
-        } else {
+        } else if (history) {
           incrementCount("metricsHistory");
+        } else {
+          incrementCount("metrics");
         }
         ModifiableSolrParams params = new ModifiableSolrParams(req.getParams());
         params.set(CommonParams.PATH, req.getPath());
@@ -36,13 +39,22 @@
         }
         queryRequest.getContext().put("httpMethod", req.getMethod().toString());
         SolrQueryResponse queryResponse = new SolrQueryResponse();
+        queryResponse.addResponseHeader(new SimpleOrderedMap<>());
         if (autoscaling) {
           autoScalingHandler.handleRequest(queryRequest, queryResponse);
         } else {
-          if (historyHandler != null) {
-            historyHandler.handleRequest(queryRequest, queryResponse);
+          if (history) {
+            if (metricsHistoryHandler != null) {
+              metricsHistoryHandler.handleRequest(queryRequest, queryResponse);
+            } else {
+              throw new UnsupportedOperationException("must add at least 1 node first");
+            }
           } else {
-            throw new UnsupportedOperationException("must add at least 1 node first");
+            if (metricsHandler != null) {
+              metricsHandler.handleRequest(queryRequest, queryResponse);
+            } else {
+              throw new UnsupportedOperationException("must add at least 1 node first");
+            }
           }
         }
         if (queryResponse.getException() != null) {

@@ -1,0 +1,84 @@
+  /**
+   * Sync with leader
+   * @param startingVersions : recent versions on startup
+   * @return result of PeerSync with leader
+   */
+  public PeerSync.PeerSyncResult sync(List<Long> startingVersions){
+    if (ulog == null) {
+      syncErrors.inc();
+      return PeerSync.PeerSyncResult.failure();
+    }
+
+    if (startingVersions.isEmpty()) {
+      log.warn("no frame of reference to tell if we've missed updates");
+      syncErrors.inc();
+      return PeerSync.PeerSyncResult.failure();
+    }
+
+    MDCLoggingContext.setCore(core);
+    Timer.Context timerContext = null;
+    try {
+      log.info(msg() + "START leader=" + leaderUrl + " nUpdates=" + nUpdates);
+
+      if (debug) {
+        log.debug(msg() + "startingVersions=" + startingVersions.size() + " " + startingVersions);
+      }
+      // check if we already in sync to begin with
+      if(doFingerprint && alreadyInSync()) {
+        syncSkipped.inc();
+        return PeerSync.PeerSyncResult.success();
+      }
+
+      // measure only when actual sync is performed
+      timerContext = syncTime.time();
+
+      List<Long> ourUpdates;
+      try (UpdateLog.RecentUpdates recentUpdates = ulog.getRecentUpdates()) {
+        ourUpdates = recentUpdates.getVersions(nUpdates);
+        bufferedUpdates = recentUpdates.getBufferUpdates();
+      }
+
+      ourUpdates.sort(absComparator);
+      startingVersions.sort(absComparator);
+
+      long ourLowThreshold = percentile(startingVersions, 0.8f);
+      long ourHighThreshold = percentile(startingVersions, 0.2f);
+
+      // now make sure that the starting updates overlap our updates
+      // there shouldn't be reorders, so any overlap will do.
+      long smallestNewUpdate = Math.abs(ourUpdates.get(ourUpdates.size() - 1));
+
+      if (Math.abs(startingVersions.get(0)) < smallestNewUpdate) {
+        log.warn(msg()
+            + "too many updates received since start - startingUpdates no longer overlaps with our currentUpdates");
+        syncErrors.inc();
+        return PeerSync.PeerSyncResult.failure();
+      }
+
+      // let's merge the lists
+      for (Long ver : startingVersions) {
+        if (Math.abs(ver) < smallestNewUpdate) {
+          ourUpdates.add(ver);
+        }
+      }
+
+      boolean success = doSync(ourUpdates, ourLowThreshold, ourHighThreshold);
+
+      log.info(msg() + "DONE. sync " + (success ? "succeeded" : "failed"));
+      if (!success) {
+        syncErrors.inc();
+      }
+      return success ?  PeerSync.PeerSyncResult.success() : PeerSync.PeerSyncResult.failure();
+    } finally {
+      if (timerContext != null) {
+        timerContext.close();
+      }
+      try {
+        clientToLeader.close();
+      } catch (IOException e) {
+        log.warn("{} unable to close client to leader", msg(), e);
+      }
+      MDCLoggingContext.clear();
+    }
+  }
+

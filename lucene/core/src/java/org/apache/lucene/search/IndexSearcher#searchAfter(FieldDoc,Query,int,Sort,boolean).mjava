@@ -1,0 +1,34 @@
+  private TopFieldDocs searchAfter(FieldDoc after, Query query, int numHits, Sort sort,
+      boolean doDocScores) throws IOException {
+    final int limit = Math.max(1, reader.maxDoc());
+    if (after != null && after.doc >= limit) {
+      throw new IllegalArgumentException("after.doc exceeds the number of documents in the reader: after.doc="
+          + after.doc + " limit=" + limit);
+    }
+    final int cappedNumHits = Math.min(numHits, limit);
+    final Sort rewrittenSort = sort.rewrite(this);
+
+    final CollectorManager<TopFieldCollector, TopFieldDocs> manager = new CollectorManager<TopFieldCollector, TopFieldDocs>() {
+
+      @Override
+      public TopFieldCollector newCollector() throws IOException {
+        final boolean fillFields = true;
+        // TODO: don't pay the price for accurate hit counts by default
+        return TopFieldCollector.create(rewrittenSort, cappedNumHits, after, fillFields, doDocScores, true);
+      }
+
+      @Override
+      public TopFieldDocs reduce(Collection<TopFieldCollector> collectors) throws IOException {
+        final TopFieldDocs[] topDocs = new TopFieldDocs[collectors.size()];
+        int i = 0;
+        for (TopFieldCollector collector : collectors) {
+          topDocs[i++] = collector.topDocs();
+        }
+        return TopDocs.merge(rewrittenSort, 0, cappedNumHits, topDocs, true);
+      }
+
+    };
+
+    return search(query, manager);
+  }
+

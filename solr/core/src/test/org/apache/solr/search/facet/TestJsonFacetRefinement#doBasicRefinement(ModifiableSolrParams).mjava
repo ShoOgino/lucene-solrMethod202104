@@ -107,17 +107,34 @@
       );
 
       // basic refining test through/under a range facet
-      client.testJQ(params(p, "q", "*:*",
-          "json.facet", "{" +
-              "r1 : { type:range, field:${num_d} start:-20, end:20, gap:40   , facet:{" +
-              "cat0:{${terms} type:terms, field:${cat_s}, sort:'count desc', limit:1, overrequest:0, refine:true}" +
-              "}}" +
-              "}"
-          )
-          , "facets=={ count:8" +
-              ", r1:{ buckets:[{val:-20.0,count:8,  cat0:{buckets:[{val:A,count:4}]}  }]   }" +
-              "}"
-      );
+      for (String end : Arrays.asList(// all of these end+hardened options should produce the same buckets
+                                      "end:20, hardend:true", // evenly divisible so shouldn't matter
+                                      "end:20, hardend:false", "end:20", // defaults to hardened:false
+                                      "end:5, hardend:false", "end:5")) {
+        // since the gap divides the start/end divide eveningly, 
+        // all of these hardend params should we should produce identical results
+        String sub = "cat0:{${terms} type:terms, field:${cat_s}, sort:'count desc', limit:1, overrequest:0, refine:true}";
+
+        // single bucket, all 'other' buckets
+        client.testJQ(params(p, "q", "*:*", "json.facet"
+                             , "{ r1 : { type:range, field:${num_d} other:all, start:-20, gap:40, " + end
+                             + "         , facet:{" + sub + "}}}")
+                      , "facets=={ count:8"
+                      + ", r1:{ buckets:[{val:-20.0,count:8,  cat0:{buckets:[{val:A,count:4}]}  }],"
+                      + "       before:{count:0}, after:{count:0}"
+                      + "       between:{count:8, cat0:{buckets:[{val:A,count:4}]}}"
+                      + "}}");
+        // multiple buckets, only one 'other' buckets
+        client.testJQ(params(p, "q", "*:*", "json.facet"
+                             , "{ r1 : { type:range, field:${num_d} other:between, start:-20, gap:20, " + end
+                             + "         , facet:{" + sub + "}}}")
+                      , "facets=={ count:8"
+                      // NOTE: in both buckets A & B are tied, but index order should break tie
+                      + ", r1:{ buckets:[{val:-20.0, count:4,  cat0:{buckets:[{val:A,count:2}]} },"
+                      + "                {val:  0.0, count:4,  cat0:{buckets:[{val:A,count:2}]} } ],"
+                      + "       between:{count:8, cat0:{buckets:[{val:A,count:4}]}}"
+                      + "}}");
+      }
 
       // test that basic stats work for refinement
       client.testJQ(params(p, "q", "*:*",

@@ -3,52 +3,42 @@
     if (verbose(mergeContext)) {
       message("findForcedDeletesMerges infos=" + segString(mergeContext, infos) + " forceMergeDeletesPctAllowed=" + forceMergeDeletesPctAllowed, mergeContext);
     }
-    final List<SegmentCommitInfo> eligible = new ArrayList<>();
+
+    // First do a quick check that there's any work to do.
+    // NOTE: this makes BaseMergePOlicyTestCase.testFindForcedDeletesMerges work
     final Set<SegmentCommitInfo> merging = mergeContext.getMergingSegments();
+
+    boolean haveWork = false;
     for(SegmentCommitInfo info : infos) {
       int delCount = mergeContext.numDeletesToMerge(info);
       assert assertDelCount(delCount, info);
       double pctDeletes = 100.*((double) delCount)/info.info.maxDoc();
       if (pctDeletes > forceMergeDeletesPctAllowed && !merging.contains(info)) {
-        eligible.add(info);
+        haveWork = true;
+        break;
       }
     }
 
-    if (eligible.size() == 0) {
+    if (haveWork == false) {
       return null;
     }
 
-    // The size can change concurrently while we are running here, because deletes
-    // are now applied concurrently, and this can piss off TimSort!  So we
-    // call size() once per segment and sort by that:
-    Map<SegmentCommitInfo,Long> sizeInBytes = getSegmentSizes(mergeContext, infos.asList());
+    List<SegmentSizeAndDocs> sortedInfos = getSortedBySegmentSize(infos, mergeContext);
 
-    eligible.sort(new SegmentByteSizeDescending(sizeInBytes));
+    Iterator<SegmentSizeAndDocs> iter = sortedInfos.iterator();
+    while (iter.hasNext()) {
+      SegmentSizeAndDocs segSizeDocs = iter.next();
+      double pctDeletes = 100. * ((double) segSizeDocs.delCount / (double) segSizeDocs.maxDoc);
+      if (merging.contains(segSizeDocs.segInfo) || pctDeletes <= forceMergeDeletesPctAllowed) {
+        iter.remove();
+      }
+    }
 
     if (verbose(mergeContext)) {
-      message("eligible=" + eligible, mergeContext);
+      message("eligible=" + sortedInfos, mergeContext);
     }
+    return doFindMerges(sortedInfos, maxMergedSegmentBytes,
+        maxMergeAtOnceExplicit, Integer.MAX_VALUE, 0, MERGE_TYPE.FORCE_MERGE_DELETES, mergeContext, false);
 
-    int start = 0;
-    MergeSpecification spec = null;
-
-    while(start < eligible.size()) {
-      // Don't enforce max merged size here: app is explicitly
-      // calling forceMergeDeletes, and knows this may take a
-      // long time / produce big segments (like forceMerge):
-      final int end = Math.min(start + maxMergeAtOnceExplicit, eligible.size());
-      if (spec == null) {
-        spec = new MergeSpecification();
-      }
-
-      final OneMerge merge = new OneMerge(eligible.subList(start, end));
-      if (verbose(mergeContext)) {
-        message("add merge=" + segString(mergeContext, merge.segments), mergeContext);
-      }
-      spec.add(merge);
-      start = end;
-    }
-
-    return spec;
   }
 

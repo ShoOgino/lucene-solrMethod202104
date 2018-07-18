@@ -1,0 +1,46 @@
+  @Override
+  protected void assertSegmentInfos(MergePolicy policy, SegmentInfos infos) throws IOException {
+    TieredMergePolicy tmp = (TieredMergePolicy) policy;
+
+    final long maxMergedSegmentBytes = (long) (tmp.getMaxMergedSegmentMB() * 1024 * 1024);
+
+    long minSegmentBytes = Long.MAX_VALUE;
+    int totalDelCount = 0;
+    int totalMaxDoc = 0;
+    long totalBytes = 0;
+    for (SegmentCommitInfo sci : infos) {
+      totalDelCount += sci.getDelCount();
+      totalMaxDoc += sci.info.maxDoc();
+      long byteSize = sci.sizeInBytes();
+      double liveRatio = 1 - (double) sci.getDelCount() / sci.info.maxDoc();
+      long weightedByteSize = (long) Math.round(liveRatio * byteSize);
+      totalBytes += weightedByteSize;
+      minSegmentBytes = Math.min(minSegmentBytes, weightedByteSize);
+    }
+
+    final double delPercentage = 100.0 * totalDelCount / totalMaxDoc;
+    assertTrue("Percentage of deleted docs " + delPercentage + " is larger than the target: " + tmp.getDeletesPctAllowed(),
+        delPercentage <= tmp.getDeletesPctAllowed());
+
+    long levelSize = Math.max(minSegmentBytes, (long) (tmp.getFloorSegmentMB() * 1024 * 1024));
+    long bytesLeft = totalBytes;
+    double allowedSegCount = 0;
+    // below we make the assumption that segments that reached the max segment
+    // size divided by 2 don't need merging anymore
+    int mergeFactor = (int) Math.min(tmp.getSegmentsPerTier(), tmp.getMaxMergeAtOnce());
+    while (true) {
+      final double segCountLevel = bytesLeft / (double) levelSize;
+      if (segCountLevel < tmp.getSegmentsPerTier() || levelSize >= maxMergedSegmentBytes / 2) {
+        allowedSegCount += Math.ceil(segCountLevel);
+        break;
+      }
+      allowedSegCount += tmp.getSegmentsPerTier();
+      bytesLeft -= tmp.getSegmentsPerTier() * levelSize;
+      levelSize = Math.min(levelSize * mergeFactor, maxMergedSegmentBytes / 2);
+    }
+    allowedSegCount = Math.max(allowedSegCount, tmp.getSegmentsPerTier());
+
+    int numSegments = infos.asList().size();
+    assertTrue("numSegments=" + numSegments + ", allowed=" + allowedSegCount, numSegments <= allowedSegCount);
+  }
+

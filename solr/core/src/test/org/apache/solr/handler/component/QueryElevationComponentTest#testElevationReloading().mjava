@@ -3,8 +3,8 @@
     try {
       init("schema12.xml");
       String testfile = "data-elevation.xml";
-      File f = new File(h.getCore().getDataDir(), testfile);
-      writeFile(f, "aaa", "A");
+      File configFile = new File(h.getCore().getDataDir(), testfile);
+      writeFile(configFile, "aaa", "A");
 
       QueryElevationComponent comp = (QueryElevationComponent) h.getCore().getSearchComponent("elevate");
       NamedList<String> args = new NamedList<>();
@@ -12,24 +12,47 @@
       comp.init(args);
       comp.inform(h.getCore());
 
-      SolrQueryRequest req = req();
-      IndexReader reader = req.getSearcher().getIndexReader();
-      Map<String, ElevationObj> map = comp.getElevationMap(reader, h.getCore());
-      assertTrue(map.get("aaa").priority.containsKey(new BytesRef("A")));
-      assertNull(map.get("bbb"));
-      req.close();
+      QueryElevationComponent.ElevationProvider elevationProvider = null;
+
+      try (SolrQueryRequest req = req()) {
+        elevationProvider = comp.getElevationProvider(req.getSearcher().getIndexReader(), req.getCore());
+        assertTrue(elevationProvider.getElevationForQuery("aaa").elevatedIds.contains(new BytesRef("A")));
+        assertNull(elevationProvider.getElevationForQuery("bbb"));
+      }
 
       // now change the file
-      writeFile(f, "bbb", "B");
-      assertU(adoc("id", "10000")); // will get same reader if no index change
+      writeFile(configFile, "bbb", "B");
+
+      // With no index change, we get the same index reader, so the elevationProviderCache returns the previous ElevationProvider without the change.
+      try (SolrQueryRequest req = req()) {
+        elevationProvider = comp.getElevationProvider(req.getSearcher().getIndexReader(), req.getCore());
+        assertTrue(elevationProvider.getElevationForQuery("aaa").elevatedIds.contains(new BytesRef("A")));
+        assertNull(elevationProvider.getElevationForQuery("bbb"));
+      }
+
+      // Index a new doc to get a new index reader.
+      assertU(adoc("id", "10000"));
       assertU(commit());
 
-      req = req();
-      reader = req.getSearcher().getIndexReader();
-      map = comp.getElevationMap(reader, h.getCore());
-      assertNull(map.get("aaa"));
-      assertTrue(map.get("bbb").priority.containsKey(new BytesRef("B")));
-      req.close();
+      // Check that we effectively reload a new ElevationProvider for a different index reader (so two entries in elevationProviderCache).
+      try (SolrQueryRequest req = req()) {
+        elevationProvider = comp.getElevationProvider(req.getSearcher().getIndexReader(), req.getCore());
+        assertNull(elevationProvider.getElevationForQuery("aaa"));
+        assertTrue(elevationProvider.getElevationForQuery("bbb").elevatedIds.contains(new BytesRef("B")));
+      }
+
+      // Now change the config file again.
+      writeFile(configFile, "ccc", "C");
+
+      // Without index change, but calling a different method that clears the elevationProviderCache, so we should load a new ElevationProvider.
+      int elevationRuleNumber = comp.loadElevationConfiguration(h.getCore());
+      assertEquals(1, elevationRuleNumber);
+      try (SolrQueryRequest req = req()) {
+        elevationProvider = comp.getElevationProvider(req.getSearcher().getIndexReader(), req.getCore());
+        assertNull(elevationProvider.getElevationForQuery("aaa"));
+        assertNull(elevationProvider.getElevationForQuery("bbb"));
+        assertTrue(elevationProvider.getElevationForQuery("ccc").elevatedIds.contains(new BytesRef("C")));
+      }
     } finally {
       delete();
     }

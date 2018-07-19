@@ -1,0 +1,44 @@
+  /** @see #testSortedSubFacetRefinementWhenParentOnlyReturnedByOneShardProcessEmpty */
+  @Test
+  public void testSortedSubFacetRefinementWhenParentOnlyReturnedByOneShard() throws Exception {
+    final int numDocs = initSomeDocsWhere1ShardHasOnlyParentFacetField();
+    final Client client = servers.getClient(random().nextInt());
+    final List<SolrClient> clients = client.getClientProvider().all();
+    
+    assertTrue(clients.size() >= 3); // we only use 2, but assert at least 3 to also test empty shard
+    final SolrClient c0 = clients.get(0);
+    final SolrClient c1 = clients.get(1);
+    
+    // during the initial request...
+    // - shard1 should return "high" count pX & pY w/o any child buckets (no "more" child)
+    // - shard2 should return "lower" count pA & pB w/some child buckets
+    // - any other shards should indicate they have no parent buckets (no "more" parent)
+    // during refinement:
+    // - shard2 should be asked to backfill any known children of pX&pY
+    // - these children from shard2 will be the only (possibly) contributors to the child buckets
+    //
+    // - the numShards for all parent buckets should be 2, but for the child buckets it should be 1
+    client.testJQ(params("q", "*:*", "rows", "0", "json.facet", "{"
+                         + "parent:{ type:terms, field:parent_s, limit:2, overrequest:0, refine:true, facet:{"
+                         + "  debug:'debug(numShards)',"
+                         + "  child:{ type:terms, field:child_s, limit:2, overrequest:0, refine: true,"
+                         + "          facet:{ debug:'debug(numShards)' } }"
+                         + "} } }")
+                  , "facets=={ count: "+numDocs+","
+                  + "  parent:{ buckets:[ "
+                  + "    { val:pY, count: 24,"
+                  + "      debug:2, "
+                  + "      child:{ buckets:[ "
+                  + "                   {val:c1,count:3, debug:1},"
+                  + "                   {val:c0,count:1, debug:1},"
+                  + "      ] } },"
+                  + "    { val:pX, count: 13,"
+                  + "      debug:2, "
+                  + "      child:{ buckets:[ "
+                  + "                   {val:c0,count:2, debug:1},"
+                  + "                   {val:c1,count:1, debug:1},"
+                  + "      ] } },"
+                  + "  ] } }"
+                  );
+  }
+

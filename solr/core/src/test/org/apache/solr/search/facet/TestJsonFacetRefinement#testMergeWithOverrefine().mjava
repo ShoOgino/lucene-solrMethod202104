@@ -1,0 +1,114 @@
+  @Test
+  public void testMergeWithOverrefine() throws Exception {
+    // overrefine hueristic should use explicit overrequest as default
+    doTestRefine("{x : {type:terms, field:X, limit:1, overrequest:1, sort:'count asc', refine:true} }",
+                 //
+                 "{x: {buckets:[{val:x1, count:3}, {val:x2, count:5}, {val:x9, count:42}, {val:x0, count:42}], more:true } }",
+                 "{x: {buckets:[{val:x2, count:2}, {val:x3, count:4}, {val:x7, count:66}, {val:x8, count:66}], more:true } }",
+                 //
+                 "=={x:{_l:[x3]}}",
+                 "=={x:{_l:[x1]}}");
+    doTestRefine("{x : {type:terms, field:X, limit:1, overrequest:0, sort:'count asc', refine:true} }",
+                 //
+                 "{x: {buckets:[{val:x1, count:3}, {val:x2, count:5}, {val:x9, count:42}, {val:x0, count:42}], more:true } }",
+                 "{x: {buckets:[{val:x2, count:2}, {val:x3, count:4}, {val:x7, count:66}, {val:x8, count:66}], more:true } }",
+                 //
+                 null,
+                 "=={x:{_l:[x1]}}");
+    
+    // completely implicit hueristic when no explicit overrequest
+    // limit=1 + 10% + 4 =~ 5 total, but x2 is fully populated so only the other 4 "lowest" should be refined
+    doTestRefine("{x : {type:terms, field:X, limit:1, sort:'count asc', refine:true} }",
+                 //
+                 "{x: {buckets:[{val:x1, count:3}, {val:x2, count:5}, {val:x9, count:42}, {val:x0, count:42}], more:true } }",
+                 "{x: {buckets:[{val:x2, count:2}, {val:x3, count:4}, {val:x7, count:66}, {val:x8, count:66}], more:true } }",
+                 //
+                 "=={x:{_l:[x3]}}",
+                 "=={x:{_l:[x1,x0,x9]}}");
+
+    // when using (default) mincount (or mincount=0) sort="count desc" should eliminate need for overrefine
+    // (regardless of whether any explicit overrequest is specified)
+    for (String extra : Arrays.asList("", ", mincount:0", ", mincount:1",
+                                      ", overrequest:3", ", overrequest:3, mincount:0")) {
+      // w/o any overrefinement, we should only need to backfill x1 & x3 (x2 already fully populated)
+      doTestRefine("{x : {type:terms, field:X, limit:3, sort:'count desc', refine:true"+extra+" } }",
+                   //
+                   "{x: {buckets:[{val:x1, count:29}, {val:x2, count:15}, {val:x9, count:7}, {val:x0, count:7}], more:true } }",
+                   "{x: {buckets:[{val:x2, count:20}, {val:x3, count:12}, {val:x7, count:7}, {val:x8, count:7}], more:true } }",
+                   //
+                   "=={x:{_l:[x3]}}",
+                   "=={x:{_l:[x1]}}");
+    }
+
+    // with 1<mincount, even sort="count desc" should trigger hueristic overrefinement
+    // limit=1 + 10% + 4 =~ 5 total, but x2 is fully populated so only the other 4 "highest" should be refined
+    doTestRefine("{x : {type:terms, field:X, limit:1, mincount:5, sort:'count desc', refine:true } }",
+                 //
+                 "{x: {buckets:[{val:x1, count:29}, {val:x2, count:15}, {val:x9, count:5}, {val:x0, count:3}], more:true } }",
+                 "{x: {buckets:[{val:x2, count:20}, {val:x3, count:12}, {val:x7, count:7}, {val:x8, count:4}], more:true } }",
+                 //
+                 "=={x:{_l:[x3,x7]}}",
+                 "=={x:{_l:[x1,x9]}}");
+    
+    // explicit overrefine
+    // limit=1 + overrefine=2 == 3 total, but x2 is fully populated, so only x1 & x3 need refined
+    doTestRefine("{x : {type:terms, field:X, limit:1, overrequest:1, overrefine:2, sort:'count asc', refine:true} }",
+                 //
+                 "{x: {buckets:[{val:x1, count:3}, {val:x2, count:5}, {val:x9, count:42}, {val:x0, count:42}], more:true } }",
+                 "{x: {buckets:[{val:x2, count:2}, {val:x3, count:9}, {val:x7, count:66}, {val:x8, count:66}], more:true } }",
+                 //
+                 "=={x:{_l:[x3]}}",
+                 "=={x:{_l:[x1]}}");
+    
+    // explicit overrefine with 0<offset
+    // offset=1 + limit=1 + overrefine=2 == 4 total, but x2 is fully populated, so only x1,x3,x9 need refined
+    doTestRefine("{x : {type:terms, field:X, limit:1, offset:1, overrequest:1, overrefine:2, sort:'count asc', refine:true} }",
+                 //
+                 "{x: {buckets:[{val:x1, count:3}, {val:x2, count:5}, {val:x9, count:42}, {val:x0, count:43}], more:true } }",
+                 "{x: {buckets:[{val:x2, count:2}, {val:x3, count:9}, {val:x7, count:66}, {val:x8, count:67}], more:true } }",
+                 //
+                 "=={x:{_l:[x3]}}",
+                 "=={x:{_l:[x1,x9]}}");
+
+    // hueristic refinement of nested facets
+    // limit=1 + 10% + 4 =~ 5 total (at each level)
+    // -> x2 is fully populated and child buckets are consistent - no refinement needed at all
+    // -> x4 has counts from both shards, but child buckets don't align perfectly
+    //
+    // For (test) simplicity, only x3 and x4 have enough (total) y buckets to prove that the sub-facet
+    // overrefine hueristic is finite...
+    // -> x3 has 6 total sub-facet buckets, only "lowest 5" should be refined on missing shard
+    // -> x4 also has 6 total sub-facet buckets, but only 3 need refined since 2 already fully populated
+    doTestRefine("{x:{type:terms, field:X, limit:1, sort:'count asc', refine:true, " +
+                 "    facet:{y : {type:terms, field:X, limit:1, sort:'count asc', refine:true} } } }",
+                 //
+                 "{x: {buckets:[" +
+                 "       {val:'x1', count:1, y:{buckets:[{val:y11, count:1},{val:y12, count:3}], more:true} }, "+
+                 "       {val:'x2', count:2, y:{buckets:[{val:y21, count:1},{val:y22, count:3}], more:true} }, "+
+                 "       {val:'x4', count:3, y:{buckets:[{val:y41, count:1},{val:y4a, count:3},     "+
+                 "                                       {val:y42, count:4},{val:y4d, count:5}], more:true} }, "+
+                 "       {val:'x5', count:4, y:{buckets:[{val:y51, count:1},{val:y52, count:3}], more:true} }, "+
+                 "    ], more:true } }",
+                 "{x: {buckets:[" +
+                 "       {val:'x3', count:1, y:{buckets:[{val:y31, count:1},{val:y32, count:2},     "+
+                 "                                       {val:y33, count:3},{val:y34, count:4}, "+
+                 "                                       {val:y35, count:5},{val:y36, count:6}], more:true} }, "+
+                 "       {val:'x2', count:2, y:{buckets:[{val:y21, count:1},{val:y22, count:3}], more:true} }, "+
+                 "       {val:'x4', count:3, y:{buckets:[{val:y41, count:1},{val:y4b, count:3},     "+
+                 "                                       {val:y42, count:4},{val:y4c, count:9}], more:true} }, "+
+                 "       {val:'x9', count:9, y:{buckets:[{val:y91, count:1},{val:y92, count:3}], more:true} }, "+
+                 "    ], more:true } }",
+                 // 
+                 "=={x: {" +
+                 "        _p:[  ['x3' , {y:{_l:[y31,y32,y33,y34,y35]}} ]  ]," +
+                 "        _s:[  ['x4' , {y:{_l:[y4b]}} ]  ]," +
+                 "    } }",
+                 "=={x: {" +
+                 "        _p:[  ['x1' , {y:{_l:[y11,y12]}} ],   " +
+                 "              ['x5' , {y:{_l:[y51,y52]}} ]  ]," +
+                 "        _s:[  ['x4' , {y:{_l:[y4a,y4d]}} ]  ]," +
+                 "    } }");
+                 
+    
+  }
+

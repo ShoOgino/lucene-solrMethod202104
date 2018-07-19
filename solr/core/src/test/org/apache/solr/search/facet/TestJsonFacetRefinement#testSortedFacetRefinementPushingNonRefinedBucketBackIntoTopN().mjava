@@ -1,0 +1,231 @@
+  @Test
+  public void testSortedFacetRefinementPushingNonRefinedBucketBackIntoTopN() throws Exception {
+    initServers();
+    final Client client = servers.getClient(random().nextInt());
+    client.queryDefaults().set("shards", servers.getShards(), "debugQuery", Boolean.toString(random().nextBoolean()));
+
+    List<SolrClient> clients = client.getClientProvider().all();
+    assertTrue(clients.size() >= 3); // we only use 2, but assert 3 to also test empty shard
+    final SolrClient c0 = clients.get(0);
+    final SolrClient c1 = clients.get(1);
+
+    client.deleteByQuery("*:*", null);
+    int id = 0;
+
+    // all_ss is only used for sub-faceting...
+    // every doc will be in all_ss:z_all, (most c1 docs will be in all_ss:some
+    // (with index order tie breaker, c1 should return "some" when limit:1
+    //  but "z_all" should have a higher count from c0)
+    
+    // client 0 // shard1: A=1,B=1,C=2 ...
+    c0.add(sdoc("id", id++, "cat_s","A", "price_i","1", "all_ss","z_all"));
+    c0.add(sdoc("id", id++, "cat_s","B", "price_i","1", "all_ss","z_all"));
+    c0.add(sdoc("id", id++, "cat_s","C", "price_i","1", "all_ss","z_all"));
+    c0.add(sdoc("id", id++, "cat_s","C", "price_i","1", "all_ss","z_all"));
+    // ... X=3,Y=3
+    c0.add(sdoc("id", id++, "cat_s","X", "price_i","1", "all_ss","z_all"));
+    c0.add(sdoc("id", id++, "cat_s","X", "price_i","1", "all_ss","z_all"));
+    c0.add(sdoc("id", id++, "cat_s","X", "price_i","1", "all_ss","z_all"));
+    c0.add(sdoc("id", id++, "cat_s","Y", "price_i","1", "all_ss","z_all"));
+    c0.add(sdoc("id", id++, "cat_s","Y", "price_i","1", "all_ss","z_all"));
+    c0.add(sdoc("id", id++, "cat_s","Y", "price_i","1", "all_ss","z_all"));
+    
+    // client 1 // shard2: X=1,Y=2,Z=2 ...
+    c1.add(sdoc("id", id++, "cat_s","X", "price_i","1", "all_ss","z_all","all_ss","some"));
+    c1.add(sdoc("id", id++, "cat_s","Y", "price_i","1", "all_ss","z_all","all_ss","some"));
+    c1.add(sdoc("id", id++, "cat_s","Y", "price_i","1", "all_ss","z_all","all_ss","some"));
+    c1.add(sdoc("id", id++, "cat_s","Z", "price_i","1", "all_ss","z_all","all_ss","some"));
+    c1.add(sdoc("id", id++, "cat_s","Z", "price_i","1", "all_ss","z_all","all_ss","some"));
+    // ... C=4
+    c1.add(sdoc("id", id++, "cat_s","C", "price_i","1", "all_ss","z_all","all_ss","some"));
+    c1.add(sdoc("id", id++, "cat_s","C", "price_i","1", "all_ss","z_all","all_ss","some"));
+    c1.add(sdoc("id", id++, "cat_s","C", "price_i","1", "all_ss","z_all","all_ss","some"));
+    c1.add(sdoc("id", id++, "cat_s","C", "price_i","1", "all_ss","z_all","all_ss","some"));
+
+    // the amount of overrequest shouldn't matter for demonstrating the issue...
+    // it only changes how many C_fillerN & Z_fillerN terms are needed on each shard
+    final int overreq = TestUtil.nextInt(random(),0,20);
+    
+    // for overreq=n: C_n:(x2 on client0 + x4 on client1); Z_n:(x2 on client1)
+    for (int i = 0; i < overreq; i++) {
+      for (int t = 0; t < 2; t++) {
+        c0.add(sdoc("id", id++, "cat_s","C_filler"+i, "price_i","1", "all_ss","z_all"));
+        c1.add(sdoc("id", id++, "cat_s","Z_filler"+i, "price_i","1", "all_ss","z_all","all_ss","some"));
+      }
+      for (int t = 0; t < 4; t++) {
+        c1.add(sdoc("id", id++, "cat_s","C_filler"+i, "price_i","1", "all_ss","z_all","all_ss","some"));
+        // extra c0 docs that don't contribute to the cat_s facet,...
+        // just so "z_all" will win overall on parent facet
+        c0.add(sdoc("id", id++, "all_ss","z_all"));
+      }
+    }
+
+    
+    // Whole Collection: A=1,B=1,Z=2,X=4,Y=5,C=6
+    client.commit();
+    
+    // In an ideal world, 'Z:2' would be returned as the 3rd value,
+    // but neither C or Z make the topN cut in phase#1, so only A,B,X get refined.
+    // After refinement, X's increased values should *NOT* push it out of the (original) topN
+    // to let "C" bubble back up into the topN, with incomplete/inaccurate count/stats
+    // (NOTE: hueristic for num buckets refined is based on 'overrequest' unless explicit 'overrefine')
+    client.testJQ(params("q", "*:*", "rows", "0", "json.facet", "{"
+                         + " cat_count:{ type:terms, field:cat_s, limit:3, overrequest:"+overreq
+                         + "             , refine:true, sort:'count asc' },"
+                         + " cat_price:{ type:terms, field:cat_s, limit:3, overrequest:"+overreq
+                         + "             , refine:true, sort:'sum_p asc' "
+                         + "             , facet: { sum_p: 'sum(price_i)' } }"
+                         + "}")
+                  , "facets=={ count: "+id+","
+                  + "  cat_count:{ buckets:[ "
+                  + "               {val:A,count:1},"
+                  + "               {val:B,count:1},"
+                  + "               {val:X,count:4},"
+                  + "  ] },"
+                  + "  cat_price:{ buckets:[ "
+                  + "               {val:A,count:1,sum_p:1.0},"
+                  + "               {val:B,count:1,sum_p:1.0},"
+                  + "               {val:X,count:4,sum_p:4.0},"
+                  + "  ] }"
+                  + "}"
+                  );
+    
+    // if we do the same query but explicitly request enough overrefinement to get past the filler
+    // terms, we should get accurate counts for (C and) Z which should push X out
+    client.testJQ(params("q", "*:*", "rows", "0", "json.facet", "{"
+                         + " cat_count:{ type:terms, field:cat_s, limit:3, overrequest:"+overreq
+                         + "             , overrefine:"+((1+overreq)*3)+", refine:true, sort:'count asc' },"
+                         + " cat_price:{ type:terms, field:cat_s, limit:3, overrequest:"+overreq
+                         + "             , overrefine:"+((1+overreq)*3)+", refine:true, sort:'sum_p asc' "
+                         + "             , facet: { sum_p: 'sum(price_i)' } }"
+                         + "}")
+                  , "facets=={ count: "+id+","
+                  + "  cat_count:{ buckets:[ "
+                  + "               {val:A,count:1},"
+                  + "               {val:B,count:1},"
+                  + "               {val:Z,count:2},"
+                  + "  ] },"
+                  + "  cat_price:{ buckets:[ "
+                  + "               {val:A,count:1,sum_p:1.0},"
+                  + "               {val:B,count:1,sum_p:1.0},"
+                  + "               {val:Z,count:2,sum_p:2.0},"
+                  + "  ] }"
+                  + "}"
+                  );
+    
+    // if we use mincount=2, such that A & B get filtered out, then we should have buckets.size() < limit
+    // rather then buckets w/inaccurate counts/stats.
+    // (explicitly disabling overrefine & overrequest to prevent filler terms)
+    client.testJQ(params("q", "*:*", "rows", "0", "json.facet", "{"
+                         + " cat_count:{ type:terms, field:cat_s, limit:3, overrequest: 0, overrefine: 0"
+                         + "             , mincount: 2, refine:true, sort:'count asc' },"
+                         + " cat_price:{ type:terms, field:cat_s, limit:3, overrequest: 0, overrefine: 0"
+                         + "             , mincount: 2, refine:true, sort:'sum_p asc' "
+                         + "             , facet: { sum_p: 'sum(price_i)' } }"
+                         + "}")
+                  , "facets=={ count: "+id+","
+                  + "  cat_count:{ buckets:[ "
+                  + "               {val:X,count:4},"
+                  + "  ] },"
+                  + "  cat_price:{ buckets:[ "
+                  + "               {val:X,count:4,sum_p:4.0},"
+                  + "  ] }"
+                  + "}"
+                  );
+
+    // When our 'cat_s' facets are nested under an 'all_ss' facet, we should likewise not get
+    // any (sub) buckets with incomplete/inaccurate counts
+    //
+    // NOTE: parent facet limit is 1, testing with various top level overrequest/refine params to see
+    // how different refinement code paths of parent effect the child refinement
+    for (String top_refine : Arrays.asList("true", "false")) {
+      // if our top level facet does *NO* overrequesting, then our shard1 will return "some" as it's
+      // (only) top term, which will lose to "z_all" from shard0, and the (single pass) refinement
+      // logic will have no choice but to choose & refine the child facet terms from shard0: A,B,C
+      client.testJQ(params("q", "*:*", "rows", "0", "json.facet", "{"
+                           + " all:{ type:terms, field:all_ss, limit:1, refine:"+top_refine
+                           +        ", overrequest:0"
+                           + "       , facet:{"
+                           + "   cat_count:{ type:terms, field:cat_s, limit:3, overrequest:"+overreq
+                           + "               , refine:true, sort:'count asc' },"
+                           + "   cat_price:{ type:terms, field:cat_s, limit:3, overrequest:"+overreq
+                           + "               , refine:true, sort:'sum_p asc' "
+                           + "               , facet: { sum_p: 'sum(price_i)' } }"
+                           + "} } }")
+                    , "facets=={ count: "+id+","
+                    + "all:{ buckets:[ "
+                    + "  { val:z_all, count: "+id+","
+                    + "    cat_count:{ buckets:[ "
+                    + "                 {val:A,count:1},"
+                    + "                 {val:B,count:1},"
+                    + "                 {val:C,count:6},"
+                    + "    ] },"
+                    + "    cat_price:{ buckets:[ "
+                    + "                 {val:A,count:1,sum_p:1.0},"
+                    + "                 {val:B,count:1,sum_p:1.0},"
+                    + "                 {val:C,count:6,sum_p:6.0},"
+                    + "    ] }"
+                    + "} ] } }"
+                    );
+
+      // With any overrequest param > 0 on the parent facet, both shards will return "z_all" as a
+      // viable candidate and the merge logic should recoginize that X is a better choice,
+      // even though the (single shard) stats for "C" will be lower
+      final int top_over = TestUtil.nextInt(random(), 1, 999);
+      client.testJQ(params("q", "*:*", "rows", "0", "json.facet", "{"
+                           + " all:{ type:terms, field:all_ss, limit:1, refine:"+top_refine
+                           +        ", overrequest:" + top_over
+                           + "       , facet:{"
+                           + "   cat_count:{ type:terms, field:cat_s, limit:3, overrequest:"+overreq
+                           + "               , refine:true, sort:'count asc' },"
+                           + "   cat_price:{ type:terms, field:cat_s, limit:3, overrequest:"+overreq
+                           + "               , refine:true, sort:'sum_p asc' "
+                           + "               , facet: { sum_p: 'sum(price_i)' } }"
+                           + "} } }")
+                    , "facets=={ count: "+id+","
+                    + "all:{ buckets:[ "
+                    + "  { val:z_all, count: "+id+","
+                    + "    cat_count:{ buckets:[ "
+                    + "                 {val:A,count:1},"
+                    + "                 {val:B,count:1},"
+                    + "                 {val:X,count:4},"
+                    + "    ] },"
+                    + "    cat_price:{ buckets:[ "
+                    + "                 {val:A,count:1,sum_p:1.0},"
+                    + "                 {val:B,count:1,sum_p:1.0},"
+                    + "                 {val:X,count:4,sum_p:4.0},"
+                    + "    ] }"
+                    + "} ] } }"
+                    );
+
+      // if we do the same query but explicitly request enough overrefinement on the child facet
+      // to get past the filler terms, we should get accurate counts for (C and) Z which should push X out
+      client.testJQ(params("q", "*:*", "rows", "0", "json.facet", "{"
+                           + " all:{ type:terms, field:all_ss, limit:1, refine:"+top_refine
+                           +        ", overrequest:" + top_over
+                           + "       , facet:{"
+                           + "   cat_count:{ type:terms, field:cat_s, limit:3, overrequest:"+((1+overreq)*3)
+                           + "               , refine:true, sort:'count asc' },"
+                           + "   cat_price:{ type:terms, field:cat_s, limit:3, overrequest:"+((1+overreq)*3)
+                           + "               , refine:true, sort:'sum_p asc' "
+                           + "               , facet: { sum_p: 'sum(price_i)' } }"
+                           + "} } }")
+                    , "facets=={ count: "+id+","
+                    + "all:{ buckets:[ "
+                    + "  { val:z_all, count: "+id+","
+                    + "    cat_count:{ buckets:[ "
+                    + "                 {val:A,count:1},"
+                    + "                 {val:B,count:1},"
+                    + "                 {val:Z,count:2},"
+                    + "    ] },"
+                    + "    cat_price:{ buckets:[ "
+                    + "                 {val:A,count:1,sum_p:1.0},"
+                    + "                 {val:B,count:1,sum_p:1.0},"
+                    + "                 {val:Z,count:2,sum_p:2.0},"
+                    + "    ] }"
+                    + "} ] } }"
+                    );
+
+    }
+  }
+

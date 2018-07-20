@@ -1,0 +1,69 @@
+  protected void writeDocs(SolrQueryRequest req, IteratorWriter.ItemWriter writer, Sort sort) throws IOException {
+    //Write the data.
+    List<LeafReaderContext> leaves = req.getSearcher().getTopReaderContext().leaves();
+    SortDoc sortDoc = getSortDoc(req.getSearcher(), sort.getSort());
+    int count = 0;
+    int queueSize = 30000;
+    if (totalHits < 30000) {
+      queueSize = totalHits;
+    }
+    SortQueue queue = new SortQueue(queueSize, sortDoc);
+    SortDoc[] outDocs = new SortDoc[queueSize];
+
+    while (count < totalHits) {
+      //long begin = System.nanoTime();
+      queue.reset();
+      SortDoc top = queue.top();
+      for (int i = 0; i < leaves.size(); i++) {
+        sortDoc.setNextReader(leaves.get(i));
+        DocIdSetIterator it = new BitSetIterator(sets[i], 0); // cost is not useful here
+        int docId;
+        while ((docId = it.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+          sortDoc.setValues(docId);
+          if (top.lessThan(sortDoc)) {
+            top.setValues(sortDoc);
+            top = queue.updateTop();
+          }
+        }
+      }
+
+      int outDocsIndex = -1;
+
+      for (int i = 0; i < queueSize; i++) {
+        SortDoc s = queue.pop();
+        if (s.docId > -1) {
+          outDocs[++outDocsIndex] = s;
+        }
+      }
+
+      //long end = System.nanoTime();
+
+      count += (outDocsIndex + 1);
+
+      try {
+        for (int i = outDocsIndex; i >= 0; --i) {
+          SortDoc s = outDocs[i];
+          writer.add((MapWriter) ew -> {
+            writeDoc(s, leaves, ew);
+            s.reset();
+          });
+        }
+      } catch (Throwable e) {
+        Throwable ex = e;
+        while (ex != null) {
+          String m = ex.getMessage();
+          if (m != null && m.contains("Broken pipe")) {
+            throw new IgnoreException();
+          }
+          ex = ex.getCause();
+        }
+
+        if (e instanceof IOException) {
+          throw ((IOException) e);
+        } else {
+          throw new IOException(e);
+        }
+      }
+    }
+  }
+

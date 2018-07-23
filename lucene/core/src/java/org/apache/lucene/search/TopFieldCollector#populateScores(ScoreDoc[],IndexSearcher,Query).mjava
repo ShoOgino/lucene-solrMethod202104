@@ -1,0 +1,39 @@
+  /**
+   * Populate {@link ScoreDoc#score scores} of the given {@code topDocs}.
+   * @param topDocs   the top docs to populate
+   * @param searcher  the index searcher that has been used to compute {@code topDocs}
+   * @param query     the query that has been used to compute {@code topDocs}
+   * @throws IllegalArgumentException if there is evidence that {@code topDocs}
+   *             have been computed against a different searcher or a different query.
+   * @lucene.experimental
+   */
+  public static void populateScores(ScoreDoc[] topDocs, IndexSearcher searcher, Query query) throws IOException {
+    // Get the score docs sorted in doc id order
+    topDocs = topDocs.clone();
+    Arrays.sort(topDocs, Comparator.comparingInt(scoreDoc -> scoreDoc.doc));
+
+    final Weight weight = searcher.createWeight(searcher.rewrite(query), ScoreMode.COMPLETE, 1);
+    List<LeafReaderContext> contexts = searcher.getIndexReader().leaves();
+    LeafReaderContext currentContext = null;
+    Scorer currentScorer = null;
+    for (ScoreDoc scoreDoc : topDocs) {
+      if (currentContext == null || scoreDoc.doc >= currentContext.docBase + currentContext.reader().maxDoc()) {
+        FutureObjects.checkIndex(scoreDoc.doc, searcher.getIndexReader().maxDoc());
+        int newContextIndex = ReaderUtil.subIndex(scoreDoc.doc, contexts);
+        currentContext = contexts.get(newContextIndex);
+        final ScorerSupplier scorerSupplier = weight.scorerSupplier(currentContext);
+        if (scorerSupplier == null) {
+          throw new IllegalArgumentException("Doc id " + scoreDoc.doc + " doesn't match the query");
+        }
+        currentScorer = scorerSupplier.get(1); // random-access
+      }
+      final int leafDoc = scoreDoc.doc - currentContext.docBase;
+      assert leafDoc >= 0;
+      final int advanced = currentScorer.iterator().advance(leafDoc);
+      if (leafDoc != advanced) {
+        throw new IllegalArgumentException("Doc id " + scoreDoc.doc + " doesn't match the query");
+      }
+      scoreDoc.score = currentScorer.score();
+    }
+  }
+

@@ -1,0 +1,46 @@
+  public void testEquality() throws IOException {
+    try (SolrQueryRequest req = req("custom_req_param","foo_i",
+                                    "overridden_param","xxxxx_i")) {
+      
+      // NOTE: we don't bother trying to test 'min(foo_i)' because of SOLR-12559
+      // ...once that bug is fixed, several assertions below will need to change
+      final FacetRequest fr = FacetRequest.parse
+        (req, (Map<String,Object>) ObjectBuilder.fromJSON
+         ("{ " +
+          "  s1:'min(field(\"foo_i\"))', " +
+          "  s2:'min($custom_req_param)', " +
+          "  s3:'min(field($custom_req_param))', " +
+          "  s4:{ func:'min($custom_req_param)' }, " +
+          "  s5:{ type:func, func:'min($custom_req_param)' }, " +
+          "  s6:{ type:func, func:'min($custom_local_param)', custom_local_param:foo_i }, " +
+          "  s7:{ type:func, func:'min($overridden_param)', overridden_param:foo_i }, " +
+          // test the test...
+          "  diff:'min(field(\"bar_i\"))'," +
+          "}"));
+         
+      final Map<String, AggValueSource> stats = fr.getFacetStats();
+      assertEquals(8, stats.size());
+      
+      for (Map.Entry<String,AggValueSource> entry : stats.entrySet()) {
+        final String key = entry.getKey();
+        final AggValueSource agg = entry.getValue();
+        
+        assertEquals("name of " + key, "min", agg.name());
+        assertThat("type of " + key, agg, instanceOf(SimpleAggValueSource.class));
+        SimpleAggValueSource sagg = (SimpleAggValueSource) agg;
+        assertThat("vs of " + key, sagg.getArg(), instanceOf(IntFieldSource.class));
+        
+        if ("diff".equals(key)) {
+          assertEquals("field of " + key, "bar_i", ((IntFieldSource)sagg.getArg()).getField());
+          assertFalse("diff.equals(s1) ?!?!", agg.equals(stats.get("s1")));
+          
+        } else {
+          assertEquals("field of " + key, "foo_i", ((IntFieldSource)sagg.getArg()).getField());
+          
+          assertEquals(key + ".equals(s1)", agg, stats.get("s1"));
+          assertEquals("s1.equals("+key+")", stats.get("s1"), agg);
+        }
+      }
+    }
+  }
+

@@ -1,0 +1,76 @@
+  static SolrCloudManager createCloudManager(String clusterStateStr, String metadata) {
+    Map m = (Map) Utils.fromJSONString(clusterStateStr);
+    Map meta = (Map) Utils.fromJSONString(metadata);
+    Map nodeVals = (Map) meta.get("nodeValues");
+    List<Map> replicaVals = (List<Map>) meta.get("replicaValues");
+    ClusterState clusterState = ClusterState.load(0, m, Collections.emptySet(), null);
+    Map<String, AtomicInteger> coreCount = new LinkedHashMap<>();
+    Set<String> nodes = new HashSet<>(nodeVals.keySet());
+    clusterState.getCollectionStates().forEach((s, collectionRef) -> collectionRef.get()
+        .forEachReplica((s12, replica) -> {
+          nodes.add(replica.getNodeName());
+          coreCount.computeIfAbsent(replica.getNodeName(), s1 -> new AtomicInteger(0))
+              .incrementAndGet();
+        }));
+
+    DelegatingClusterStateProvider delegatingClusterStateProvider = new DelegatingClusterStateProvider(null) {
+      @Override
+      public ClusterState getClusterState() throws IOException {
+        return clusterState;
+      }
+
+      @Override
+      public Set<String> getLiveNodes() {
+        return nodes;
+      }
+    };
+
+    return new DelegatingCloudManager(null) {
+
+      @Override
+      public ClusterStateProvider getClusterStateProvider() {
+        return delegatingClusterStateProvider;
+      }
+
+      @Override
+      public NodeStateProvider getNodeStateProvider() {
+
+        return new SolrClientNodeStateProvider(null) {
+          @Override
+          protected ClusterStateProvider getClusterStateProvider() {
+            return delegatingClusterStateProvider;
+          }
+
+          @Override
+          protected Map<String, Object> fetchTagValues(String node, Collection<String> tags) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            for (String tag : tags) {
+              if (tag.equals(CORES.tagName))
+                result.put(CORES.tagName, coreCount.getOrDefault(node, new AtomicInteger(0)).get());
+              result.put(tag, Utils.getObjectByPath(nodeVals, true, Arrays.asList(node, tag)));
+            }
+            return result;
+          }
+
+          @Override
+          public Map<String, Map<String, List<ReplicaInfo>>> getReplicaInfo(String node, Collection<String> keys) {
+            Map<String, Map<String, List<ReplicaInfo>>> result = nodeVsCollectionVsShardVsReplicaInfo.computeIfAbsent(node, s -> emptyMap());
+            if (!keys.isEmpty()) {
+              Row.forEachReplica(result, replicaInfo -> {
+                for (String key : keys) {
+                  if (!replicaInfo.getVariables().containsKey(key)) {
+                    replicaVals.stream()
+                        .filter(it -> replicaInfo.getCore().equals(it.get("core")))
+                        .findFirst()
+                        .ifPresent(map -> replicaInfo.getVariables().put(key, map.get(key)));
+                  }
+                }
+              });
+            }
+            return result;
+          }
+        };
+      }
+    };
+  }
+

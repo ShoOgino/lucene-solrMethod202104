@@ -1,0 +1,97 @@
+  protected void verifyRandomPolygonQueries(IndexReader reader, List<Polygon2D> poly2d, Polygon... polygons) throws Exception {
+    IndexSearcher s = newSearcher(reader);
+
+    final int iters = atLeast(75);
+
+    Bits liveDocs = MultiFields.getLiveDocs(s.getIndexReader());
+    int maxDoc = s.getIndexReader().maxDoc();
+
+    for (int iter = 0; iter < iters; ++iter) {
+      if (VERBOSE) {
+        System.out.println("\nTEST: iter=" + (iter+1) + " of " + iters + " s=" + s);
+      }
+
+      // Polygon
+      Polygon queryPolygon = GeoTestUtil.nextPolygon();
+      Polygon2D queryPoly2D = Polygon2D.create(queryPolygon);
+      Query query = newPolygonQuery(FIELD_NAME, queryPolygon);
+
+      if (VERBOSE) {
+        System.out.println("  query=" + query);
+      }
+
+      final FixedBitSet hits = new FixedBitSet(maxDoc);
+      s.search(query, new SimpleCollector() {
+
+        private int docBase;
+
+        @Override
+        public ScoreMode scoreMode() {
+          return ScoreMode.COMPLETE_NO_SCORES;
+        }
+
+        @Override
+        protected void doSetNextReader(LeafReaderContext context) throws IOException {
+          docBase = context.docBase;
+        }
+
+        @Override
+        public void collect(int doc) throws IOException {
+          hits.set(docBase+doc);
+        }
+      });
+
+      boolean fail = false;
+      NumericDocValues docIDToID = MultiDocValues.getNumericValues(reader, "id");
+      for (int docID = 0; docID < maxDoc; ++docID) {
+        assertEquals(docID, docIDToID.nextDoc());
+        int id = (int) docIDToID.longValue();
+        boolean expected;
+        if (liveDocs != null && liveDocs.get(docID) == false) {
+          // document is deleted
+          expected = false;
+        } else if (polygons[id] == null) {
+          expected = false;
+        } else {
+          expected = false;
+          try {
+            // check poly (quantized the same way as indexed) against query polygon
+            List<Tessellator.Triangle> tesselation = Tessellator.tessellate(quantizePolygon(polygons[id]));
+            for (Tessellator.Triangle t : tesselation) {
+              if (queryPoly2D.relateTriangle(t.getLon(0), t.getLat(0),
+                  t.getLon(1), t.getLat(1), t.getLon(2), t.getLat(2)) != Relation.CELL_OUTSIDE_QUERY) {
+                expected = true;
+                break;
+              }
+            }
+          } catch (IllegalArgumentException e) {
+            continue;
+          }
+        }
+
+        if (hits.get(docID) != expected) {
+          StringBuilder b = new StringBuilder();
+
+          if (expected) {
+            b.append("FAIL: id=" + id + " should match but did not\n");
+          } else {
+            b.append("FAIL: id=" + id + " should not match but did\n");
+          }
+          b.append("  query=" + query + " docID=" + docID + "\n");
+          b.append("  polygon=" + quantizePolygon(polygons[id]).toGeoJSON() + "\n");
+          b.append("  deleted?=" + (liveDocs != null && liveDocs.get(docID) == false));
+          b.append("  queryPolygon=" + queryPolygon.toGeoJSON());
+          if (true) {
+            fail("wrong hit (first of possibly more):\n\n" + b);
+          } else {
+            System.out.println(b.toString());
+            fail = true;
+          }
+        }
+      }
+      if (fail) {
+        fail("some hits were wrong");
+      }
+    }
+  }
+

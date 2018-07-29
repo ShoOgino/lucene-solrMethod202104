@@ -1,0 +1,41 @@
+  /**
+   * this simulates adding a replica of a certain coll+shard to node. as a result of adding a replica ,
+   * values of certain attributes will be modified, in this node as well as other nodes. Please note that
+   * the state of the current session is kept intact while this operation is being performed
+   *
+   * @param coll  collection name
+   * @param shard shard name
+   * @param type  replica type
+   * @param recursionCount the number of times we have recursed to add more replicas
+   * @param strictMode whether suggester is operating in strict mode or not
+   */
+  Row addReplica(String coll, String shard, Replica.Type type, int recursionCount, boolean strictMode) {
+    if (recursionCount > 3) {
+      log.error("more than 3 levels of recursion ", new RuntimeException());
+      return this;
+    }
+    List<OperationInfo> furtherOps = new LinkedList<>();
+    Consumer<OperationInfo> opCollector = it -> furtherOps.add(it);
+    Row row = null;
+    row = session.copy().getNode(this.node);
+    if (row == null) throw new RuntimeException("couldn't get a row");
+    Map<String, List<ReplicaInfo>> c = row.collectionVsShardVsReplicas.computeIfAbsent(coll, k -> new HashMap<>());
+    List<ReplicaInfo> replicas = c.computeIfAbsent(shard, k -> new ArrayList<>());
+    String replicaname = "" + new Random().nextInt(1000) + 1000;
+    ReplicaInfo ri = new ReplicaInfo(replicaname, replicaname, coll, shard, type, this.node,
+        Utils.makeMap(ZkStateReader.REPLICA_TYPE, type != null ? type.toString() : Replica.Type.NRT.toString()));
+    replicas.add(ri);
+    for (Cell cell : row.cells) {
+      cell.type.projectAddReplica(cell, ri, opCollector, strictMode);
+    }
+    for (OperationInfo op : furtherOps) {
+      if (op.isAdd) {
+        row = row.session.getNode(op.node).addReplica(op.coll, op.shard, op.type, recursionCount + 1, strictMode);
+      } else {
+        row.session.getNode(op.node).removeReplica(op.coll, op.shard, op.type, recursionCount+1);
+      }
+    }
+
+    return row;
+  }
+

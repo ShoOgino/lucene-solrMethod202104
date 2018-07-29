@@ -1,30 +1,37 @@
+  @SuppressWarnings("unchecked")
   public SolrRequest getSuggestion() {
     if (!isInitialized) {
       Set<String> collections = (Set<String>) hints.getOrDefault(Hint.COLL, Collections.emptySet());
       Set<Pair<String, String>> s = (Set<Pair<String, String>>) hints.getOrDefault(Hint.COLL_SHARD, Collections.emptySet());
       if (!collections.isEmpty() || !s.isEmpty()) {
-        HashSet<Pair<String, String>> shards = new HashSet<>(s);
-        collections.stream().forEach(c -> shards.add(new Pair<>(c, null)));
-        ClusterStateProvider stateProvider = session.cloudManager.getClusterStateProvider();
-        for (Pair<String, String> shard : shards) {
-          // if this is not a known collection from the existing clusterstate,
-          // then add it
-          if (session.matrix.stream().noneMatch(row -> row.collectionVsShardVsReplicas.containsKey(shard.first()))) {
-            session.addClausesForCollection(stateProvider, shard.first());
+        HashSet<Pair<String, String>> collectionShardPairs = new HashSet<>(s);
+        collections.forEach(c -> collectionShardPairs.add(new Pair<>(c, null)));
+        collections.forEach(c -> {
+          try {
+            getWithCollection(c).ifPresent(withCollection -> collectionShardPairs.add(new Pair<>(withCollection, null)));
+          } catch (IOException e) {
+            throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
+                "Exception while fetching 'withCollection' attribute for collection: " + c, e);
           }
-          for (Row row : session.matrix) {
-            Map<String, List<ReplicaInfo>> shardInfo = row.collectionVsShardVsReplicas.computeIfAbsent(shard.first(), it -> new HashMap<>());
-            if (shard.second() != null) shardInfo.computeIfAbsent(shard.second(), it -> new ArrayList<>());
+        });
+        s.forEach(kv -> {
+          try {
+            getWithCollection(kv.first()).ifPresent(withCollection -> collectionShardPairs.add(new Pair<>(withCollection, null)));
+          } catch (IOException e) {
+            throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
+                "Exception while fetching 'withCollection' attribute for collection: " + kv.first(), e);
           }
-        }
+        });
+        setupCollection(collectionShardPairs);
         Collections.sort(session.expandedClauses);
       }
       Set<String> srcNodes = (Set<String>) hints.get(Hint.SRC_NODE);
       if (srcNodes != null && !srcNodes.isEmpty()) {
         // the source node is dead so live nodes may not have it
         for (String srcNode : srcNodes) {
-          if (session.matrix.stream().noneMatch(row -> row.node.equals(srcNode)))
+          if (session.matrix.stream().noneMatch(row -> row.node.equals(srcNode))) {
             session.matrix.add(new Row(srcNode, session.getPolicy().params, session.getPolicy().perReplicaAttributes, session));
+          }
         }
       }
       session.applyRules();

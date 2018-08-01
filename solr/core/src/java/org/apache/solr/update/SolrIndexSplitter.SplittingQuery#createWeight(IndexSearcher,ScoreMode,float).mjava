@@ -1,0 +1,37 @@
+    @Override
+    public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
+      return new ConstantScoreWeight(this, boost) {
+
+        @Override
+        public Scorer scorer(LeafReaderContext context) throws IOException {
+          RTimerTree t = timings.sub("findDocsToDelete");
+          t.resume();
+          FixedBitSet set = findDocsToDelete(context);
+          t.pause();
+          log.info("### partition=" + partition + ", leaf=" + context + ", maxDoc=" + context.reader().maxDoc() +
+          ", numDels=" + context.reader().numDeletedDocs() + ", setLen=" + set.length() + ", setCard=" + set.cardinality());
+          Bits liveDocs = context.reader().getLiveDocs();
+          if (liveDocs != null) {
+            // check that we don't delete already deleted docs
+            FixedBitSet dels = FixedBitSet.copyOf(liveDocs);
+            dels.flip(0, dels.length());
+            dels.and(set);
+            if (dels.cardinality() > 0) {
+              log.error("### INVALID DELS " + dels.cardinality());
+            }
+          }
+          return new ConstantScoreScorer(this, score(), new BitSetIterator(set, set.length()));
+        }
+
+        @Override
+        public boolean isCacheable(LeafReaderContext ctx) {
+          return false;
+        }
+
+        @Override
+        public String toString() {
+          return "weight(shardSplittingQuery,part" + partition + ")";
+        }
+      };
+    }
+

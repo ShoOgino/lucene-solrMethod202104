@@ -1,0 +1,74 @@
+  private void cleanupAfterFailure(ZkStateReader zkStateReader, String collectionName, String parentShard,
+                                   List<String> subSlices, Set<String> offlineSlices) {
+    log.info("Cleaning up after a failed split of " + collectionName + "/" + parentShard);
+    // get the latest state
+    try {
+      zkStateReader.forceUpdateCollection(collectionName);
+    } catch (KeeperException | InterruptedException e) {
+      log.warn("Cleanup failed after failed split of " + collectionName + "/" + parentShard + ": (force update collection)", e);
+      return;
+    }
+    ClusterState clusterState = zkStateReader.getClusterState();
+    DocCollection coll = clusterState.getCollectionOrNull(collectionName);
+
+    if (coll == null) { // may have been deleted
+      return;
+    }
+
+    // set already created sub shards states to CONSTRUCTION - this prevents them
+    // from entering into RECOVERY or ACTIVE (SOLR-9455)
+    DistributedQueue inQueue = Overseer.getStateUpdateQueue(zkStateReader.getZkClient());
+    final Map<String, Object> propMap = new HashMap<>();
+    boolean sendUpdateState = false;
+    propMap.put(Overseer.QUEUE_OPERATION, OverseerAction.UPDATESHARDSTATE.toLower());
+    propMap.put(ZkStateReader.COLLECTION_PROP, collectionName);
+    for (Slice s : coll.getSlices()) {
+      if (!subSlices.contains(s.getName())) {
+        continue;
+      }
+      propMap.put(s.getName(), Slice.State.CONSTRUCTION.toString());
+      sendUpdateState = true;
+    }
+
+    // if parent is inactive activate it again
+    Slice parentSlice = coll.getSlice(parentShard);
+    if (parentSlice.getState() == Slice.State.INACTIVE) {
+      sendUpdateState = true;
+      propMap.put(parentShard, Slice.State.ACTIVE.toString());
+    }
+    // plus any other previously deactivated slices
+    for (String sliceName : offlineSlices) {
+      propMap.put(sliceName, Slice.State.ACTIVE.toString());
+      sendUpdateState = true;
+    }
+
+    if (sendUpdateState) {
+      try {
+        ZkNodeProps m = new ZkNodeProps(propMap);
+        inQueue.offer(Utils.toJSON(m));
+      } catch (Exception e) {
+        // don't give up yet - just log the error, we may still be able to clean up
+        log.warn("Cleanup failed after failed split of " + collectionName + "/" + parentShard + ": (slice state changes)", e);
+      }
+    }
+
+    // delete existing subShards
+    for (String subSlice : subSlices) {
+      Slice s = coll.getSlice(subSlice);
+      if (s == null) {
+        continue;
+      }
+      log.debug("- sub-shard: {} exists therefore requesting its deletion", subSlice);
+      HashMap<String, Object> props = new HashMap<>();
+      props.put(Overseer.QUEUE_OPERATION, "deleteshard");
+      props.put(COLLECTION_PROP, collectionName);
+      props.put(SHARD_ID_PROP, subSlice);
+      ZkNodeProps m = new ZkNodeProps(props);
+      try {
+        ocmh.commandMap.get(DELETESHARD).call(clusterState, m, new NamedList());
+      } catch (Exception e) {
+        log.warn("Cleanup failed after failed split of " + collectionName + "/" + parentShard + ": (deleting existing sub shard " + subSlice + ")", e);
+      }
+    }
+  }
+

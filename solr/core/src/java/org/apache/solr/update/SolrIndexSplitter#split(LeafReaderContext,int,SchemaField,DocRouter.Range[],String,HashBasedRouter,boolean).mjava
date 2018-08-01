@@ -1,10 +1,20 @@
-  FixedBitSet[] split(LeafReaderContext readerContext) throws IOException {
+  static FixedBitSet[] split(LeafReaderContext readerContext, int numPieces, SchemaField field, DocRouter.Range[] rangesArr,
+                             String splitKey, HashBasedRouter hashRouter, boolean delete) throws IOException {
     LeafReader reader = readerContext.reader();
     FixedBitSet[] docSets = new FixedBitSet[numPieces];
     for (int i=0; i<docSets.length; i++) {
       docSets[i] = new FixedBitSet(reader.maxDoc());
+      if (delete) {
+        docSets[i].set(0, reader.maxDoc());
+      }
     }
     Bits liveDocs = reader.getLiveDocs();
+    if (liveDocs != null && delete) {
+      FixedBitSet liveDocsSet = FixedBitSet.copyOf(liveDocs);
+      for (FixedBitSet set : docSets) {
+        set.and(liveDocsSet);
+      }
+    }
 
     Terms terms = reader.terms(field.getName());
     TermsEnum termsEnum = terms==null ? null : terms.iterator();
@@ -14,11 +24,12 @@
     PostingsEnum postingsEnum = null;
 
     int[] docsMatchingRanges = null;
-    if (ranges != null) {
+    if (rangesArr != null) {
       // +1 because documents can belong to *zero*, one, several or all ranges in rangesArr
       docsMatchingRanges = new int[rangesArr.length+1];
     }
 
+    int partition = 0;
     CharsRefBuilder idRef = new CharsRefBuilder();
     for (;;) {
       term = termsEnum.next();
@@ -51,14 +62,22 @@
       for (;;) {
         int doc = postingsEnum.nextDoc();
         if (doc == DocIdSetIterator.NO_MORE_DOCS) break;
-        if (ranges == null) {
-          docSets[currPartition].set(doc);
-          currPartition = (currPartition + 1) % numPieces;
+        if (rangesArr == null) {
+          if (delete) {
+            docSets[partition].clear(doc);
+          } else {
+            docSets[partition].set(doc);
+          }
+          partition = (partition + 1) % numPieces;
         } else  {
           int matchingRangesCount = 0;
           for (int i=0; i<rangesArr.length; i++) {      // inner-loop: use array here for extra speed.
             if (rangesArr[i].includes(hash)) {
-              docSets[i].set(doc);
+              if (delete) {
+                docSets[i].clear(doc);
+              } else {
+                docSets[i].set(doc);
+              }
               ++matchingRangesCount;
             }
           }

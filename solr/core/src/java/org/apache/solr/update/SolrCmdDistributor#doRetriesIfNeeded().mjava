@@ -4,55 +4,63 @@
     List<Error> errors = new ArrayList<>(this.errors);
     errors.addAll(clients.getErrors());
     List<Error> resubmitList = new ArrayList<>();
+    
+    if (log.isInfoEnabled() && errors.size() > 0) {
+      log.info("SolrCmdDistributor found {} errors", errors.size());
+    }
+    
+    if (log.isDebugEnabled() && errors.size() > 0) {
+      StringBuilder builder = new StringBuilder("SolrCmdDistributor found:");
+      int maxErrorsToShow = 10;
+      for (Error e:errors) {
+        if (maxErrorsToShow-- <= 0) break;
+        builder.append("\n" + e);
+      }
+      if (errors.size() > 10) {
+        builder.append("\n... and ");
+        builder.append(errors.size() - 10);
+        builder.append(" more");
+      }
+      log.debug(builder.toString());
+    }
 
     for (Error err : errors) {
       try {
         String oldNodeUrl = err.req.node.getUrl();
         
-        // if there is a retry url, we want to retry...
-        boolean isRetry = err.req.node.checkRetry();
-        
-        boolean doRetry = false;
-        int rspCode = err.statusCode;
+        /*
+         * if this is a retryable request we may want to retry, depending on the error we received and
+         * the number of times we have already retried
+         */
+        boolean isRetry = err.req.shouldRetry(err);
         
         if (testing_errorHook != null) Diagnostics.call(testing_errorHook,
             err.e);
         
         // this can happen in certain situations such as close
         if (isRetry) {
-          if (rspCode == 404 || rspCode == 403 || rspCode == 503) {
-            doRetry = true;
-          }
-          
-          // if it's a connect exception, lets try again
-          if (err.e instanceof SolrServerException) {
-            if (((SolrServerException) err.e).getRootCause() instanceof ConnectException) {
-              doRetry = true;
-            }
-          }
-          
-          if (err.e instanceof ConnectException) {
-            doRetry = true;
-          }
-          
-          if (err.req.retries < maxRetriesOnForward && doRetry) {
-            err.req.retries++;
-            
+          err.req.retries++;
+
+          if (err.req.node instanceof ForwardNode) {
             SolrException.log(SolrCmdDistributor.log, "forwarding update to "
                 + oldNodeUrl + " failed - retrying ... retries: "
-                + err.req.retries + " " + err.req.cmd.toString() + " params:"
-                + err.req.uReq.getParams() + " rsp:" + rspCode, err.e);
-            try {
-              Thread.sleep(retryPause);
-            } catch (InterruptedException e) {
-              Thread.currentThread().interrupt();
-              log.warn(null, e);
-            }
-            
-            resubmitList.add(err);
+                + err.req.retries + "/" + err.req.node.getMaxRetries() + ". "
+                + err.req.cmd.toString() + " params:"
+                + err.req.uReq.getParams() + " rsp:" + err.statusCode, err.e);
           } else {
-            allErrors.add(err);
+            SolrException.log(SolrCmdDistributor.log, "FROMLEADER request to "
+                + oldNodeUrl + " failed - retrying ... retries: "
+                + err.req.retries + "/" + err.req.node.getMaxRetries() + ". "
+                + err.req.cmd.toString() + " params:"
+                + err.req.uReq.getParams() + " rsp:" + err.statusCode, err.e);
           }
+          try {
+            Thread.sleep(retryPause); //TODO: Do we want this wait for every error?
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn(null, e);
+          }
+          resubmitList.add(err);
         } else {
           allErrors.add(err);
         }

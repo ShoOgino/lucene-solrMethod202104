@@ -1,0 +1,44 @@
+  private void testMaxRetries(NodeType nodeType) throws IOException {
+    final MockStreamingSolrClients streamingClients = new MockStreamingSolrClients(updateShardHandler);
+    try (SolrCmdDistributor cmdDistrib = new SolrCmdDistributor(streamingClients, 0)) {
+      streamingClients.setExp(Exp.CONNECT_EXCEPTION);
+      ArrayList<Node> nodes = new ArrayList<>();
+      final HttpSolrClient solrclient1 = (HttpSolrClient) clients.get(0);
+
+      final AtomicInteger retries = new AtomicInteger();
+      ZkNodeProps nodeProps = new ZkNodeProps(ZkStateReader.BASE_URL_PROP, solrclient1.getBaseURL(), ZkStateReader.CORE_NAME_PROP, "");
+      Node retryNode;
+      if (nodeType == NodeType.FORWARD) {
+        retryNode = new ForwardNode(new ZkCoreNodeProps(nodeProps), null, "collection1", "shard1", 6) {
+          @Override
+          public boolean checkRetry(Error err) {
+            retries.incrementAndGet();
+            return super.checkRetry(err);
+          }
+        };
+      } else {
+        retryNode = new StdNode(new ZkCoreNodeProps(nodeProps), "collection1", "shard1", 6) {
+          @Override
+          public boolean checkRetry(Error err) {
+            retries.incrementAndGet();
+            return super.checkRetry(err);
+          }
+        };
+      }
+      
+
+      nodes.add(retryNode);
+
+      AddUpdateCommand cmd = new AddUpdateCommand(null);
+      cmd.solrDoc = sdoc("id", id.incrementAndGet());
+      ModifiableSolrParams params = new ModifiableSolrParams();
+
+      cmdDistrib.distribAdd(cmd, nodes, params);
+      cmdDistrib.finish();
+
+      assertEquals(7, retries.get());
+
+      assertEquals(1, cmdDistrib.getErrors().size());
+    }
+  }
+

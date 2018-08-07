@@ -127,54 +127,49 @@
 
     //Only load the id field to get the uniqueKey of that
     //field
-
-    final String finalUniqFieldName = uniqFieldName;
-
-    final List<String> uniqValues = new ArrayList<>();
-    
-    // TODO: is this required to be single-valued? if so, we should STOP
-    // once we find it...
-    final StoredFieldVisitor getUniqValue = new StoredFieldVisitor() {
-      @Override 
-      public void stringField(FieldInfo fieldInfo, byte[] bytes) {
-        uniqValues.add(new String(bytes, StandardCharsets.UTF_8));
-      }
-
-      @Override 
-      public void intField(FieldInfo fieldInfo, int value) {
-        uniqValues.add(Integer.toString(value));
-      }
-
-      @Override 
-      public void longField(FieldInfo fieldInfo, long value) {
-        uniqValues.add(Long.toString(value));
-      }
-
-      @Override
-      public Status needsField(FieldInfo fieldInfo) {
-        return (fieldInfo.name.equals(finalUniqFieldName)) ? Status.YES : Status.NO;
-      }
-    };
+    SolrDocumentFetcher docFetcher = searcher.getDocFetcher();
+    SolrReturnFields srf = new SolrReturnFields(uniqFieldName, rb.req);
+    RetrieveFieldsOptimizer retrieveFieldsOptimizer = RetrieveFieldsOptimizer.create(docFetcher, srf);
 
     while (iter.hasNext()) {
       Integer docId = iter.next();
       NamedList<Object> docNL = new NamedList<>();
 
       if (keyField != null) {
-        reader.document(docId, getUniqValue);
-        String uniqVal = null;
-        if (uniqValues.size() != 0) {
-          uniqVal = uniqValues.get(0);
-          uniqValues.clear();
-          docNL.add("uniqueKey", uniqVal);
-          termVectors.add(uniqVal, docNL);
+        SolrDocument sdoc = null;
+        try {
+          if (retrieveFieldsOptimizer.returnStoredFields()) {
+            Document doc = docFetcher.doc(docId, retrieveFieldsOptimizer.getStoredFields());
+            // make sure to use the schema from the searcher and not the request (cross-core)
+            sdoc = DocsStreamer.convertLuceneDocToSolrDoc(doc, searcher.getSchema(), srf);
+          } else {
+            // no need to get stored fields of the document, see SOLR-5968
+            sdoc = new SolrDocument();
+          }
+
+          // decorate the document with non-stored docValues fields
+          if (retrieveFieldsOptimizer.returnDVFields()) {
+            docFetcher.decorateDocValueFields(sdoc, docId, retrieveFieldsOptimizer.getDvFields());
+          }
+        } catch (IOException e) {
+          throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Error reading document with docId " + docId, e);
         }
+        Object val = sdoc.getFieldValue(uniqFieldName);
+        String uniqVal = "";
+        if (val instanceof StoredField) {
+          uniqVal = ((StoredField) val).stringValue();
+        } else {
+          uniqVal = val.toString();
+        }
+
+        docNL.add("uniqueKey", uniqVal);
+        termVectors.add(uniqVal, docNL);
       } else {
         // support for schemas w/o a unique key,
         termVectors.add("doc-" + docId, docNL);
       }
 
-      if ( null != fields ) {
+      if (null != fields) {
         for (Map.Entry<String, FieldOptions> entry : fieldOptions.entrySet()) {
           final String field = entry.getKey();
           final Terms vector = reader.getTermVector(docId, field);
@@ -186,11 +181,14 @@
       } else {
         // extract all fields
         final Fields vectors = reader.getTermVectors(docId);
-        for (String field : vectors) {
-          Terms terms = vectors.terms(field);
-          if (terms != null) {
-            TermsEnum termsEnum = terms.iterator();
-            mapOneVector(docNL, allFields, reader, docId, termsEnum, field);
+        // There can be no documents with vectors
+        if (vectors != null) {
+          for (String field : vectors) {
+            Terms terms = vectors.terms(field);
+            if (terms != null) {
+              TermsEnum termsEnum = terms.iterator();
+              mapOneVector(docNL, allFields, reader, docId, termsEnum, field);
+            }
           }
         }
       }

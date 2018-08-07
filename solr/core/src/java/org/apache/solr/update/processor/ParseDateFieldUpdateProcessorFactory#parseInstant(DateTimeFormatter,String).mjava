@@ -1,0 +1,38 @@
+  // see https://bugs.java.com/bugdatabase/view_bug.do?bug_id=8177021 which is fixed in Java 9.
+  //  The upshot is that trying to use parse(Instant::from) is unreliable in the event that
+  //  the input string contains a timezone/offset that differs from the "override zone"
+  //  (which we configure in DEFAULT_TIME_ZONE).  Besides, we need the code below which handles
+  //  the optionality of time.  Were it not for that, we truly could do formatter.parse(Instant::from).
+  private static Instant parseInstant(DateTimeFormatter formatter, String dateStr) {
+    final TemporalAccessor temporal = formatter.parse(dateStr);
+    // Get Date; mandatory
+    LocalDate date = temporal.query(TemporalQueries.localDate());//mandatory
+    if (date == null) {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
+          "Date (year, month, day) is mandatory: " + formatter.toFormat().toString());
+    }
+    // Get Time; optional
+    LocalTime time = temporal.query(TemporalQueries.localTime());
+    if (time == null) {
+      time = LocalTime.MIN;
+    }
+
+    final LocalDateTime localDateTime = LocalDateTime.of(date, time);
+
+    // Get Zone Offset; optional
+    ZoneOffset offset = temporal.query(TemporalQueries.offset());
+    if (offset == null) {
+      // no Zone offset; get Zone ID
+      ZoneId zoneId = temporal.query(TemporalQueries.zone());
+      if (zoneId == null) {
+        zoneId = formatter.getZone();
+        if (zoneId == null) {
+          zoneId = ZoneOffset.UTC;
+        }
+      }
+      return localDateTime.atZone(zoneId).toInstant();
+    } else {
+      return localDateTime.toInstant(offset);
+    }
+  }
+

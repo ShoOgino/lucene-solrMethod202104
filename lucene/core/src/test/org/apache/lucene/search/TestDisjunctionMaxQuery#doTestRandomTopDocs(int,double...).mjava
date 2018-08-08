@@ -1,0 +1,63 @@
+  private void doTestRandomTopDocs(int numFields, double... freqs) throws IOException {
+    assert numFields == freqs.length;
+    Directory dir = newDirectory();
+    IndexWriterConfig config = new IndexWriterConfig(new StandardAnalyzer());
+    IndexWriter w = new IndexWriter(dir, config);
+
+    int numDocs = atLeast(1000); // make sure some terms have skip data
+    for (int i = 0; i < numDocs; i++) {
+      Document doc = new Document();
+      for (int j = 0; j < numFields; j++) {
+        StringBuilder builder = new StringBuilder();
+        int numAs = random().nextDouble() < freqs[j] ? 0 : 1 + random().nextInt(5);
+        for (int k = 0; k < numAs; k++) {
+          if (builder.length() > 0) {
+            builder.append(' ');
+          }
+          builder.append('a');
+        }
+        if (random().nextBoolean()) {
+          doc.add(new StringField("field", "c", Field.Store.NO));
+        }
+        int numOthers = random().nextBoolean() ? 0 : 1 + random().nextInt(5);
+        for (int k = 0; k < numOthers; k++) {
+          if (builder.length() > 0) {
+            builder.append(' ');
+          }
+          builder.append(Integer.toString(random().nextInt()));
+        }
+        doc.add(new TextField(Integer.toString(j), new StringReader(builder.toString())));
+      }
+      w.addDocument(doc);
+    }
+    IndexReader reader = DirectoryReader.open(w);
+    w.close();
+    IndexSearcher searcher = newSearcher(reader);
+    for (int i = 0; i < 4; i++) {
+      List<Query> clauses = new ArrayList<>();
+      for (int j = 0; j < numFields; j++) {
+        if (i % 2 == 1) {
+          clauses.add(tq(Integer.toString(j), "a"));
+        } else {
+          float boost = random().nextBoolean() ? 0 : random().nextFloat();
+          if (boost > 0) {
+            clauses.add(tq(Integer.toString(j), "a", boost));
+          } else {
+            clauses.add(tq(Integer.toString(j), "a"));
+          }
+        }
+      }
+      float tieBreaker = random().nextFloat();
+      Query query = new DisjunctionMaxQuery(clauses, tieBreaker);
+      CheckHits.checkTopScores(random(), query, searcher);
+
+      query = new BooleanQuery.Builder()
+          .add(new DisjunctionMaxQuery(clauses, tieBreaker), BooleanClause.Occur.MUST)
+          .add(tq("field", "c"), BooleanClause.Occur.FILTER)
+          .build();
+      CheckHits.checkTopScores(random(), query, searcher);
+    }
+    reader.close();
+    dir.close();
+  }
+

@@ -1,0 +1,53 @@
+  static SolrCloudManager createCloudManagerFromDiagnostics(Map<String, Object> m) {
+    List<Map> sortedNodes = (List<Map>) Utils.getObjectByPath(m, false, "diagnostics/sortedNodes");
+    Set<String> liveNodes = new HashSet<>();
+    SolrClientNodeStateProvider nodeStateProvider = new SolrClientNodeStateProvider(null) {
+      @Override
+      protected void readReplicaDetails() {
+        for (Object o : sortedNodes) {
+          String node = (String) ((Map) o).get("node");
+          liveNodes.add(node);
+          Map nodeDetails = nodeVsCollectionVsShardVsReplicaInfo.computeIfAbsent(node, s -> new LinkedHashMap<>());
+          Map<String, Map<String, List<Map>>> replicas = (Map<String, Map<String, List<Map>>>) ((Map) o).get("replicas");
+          replicas.forEach((coll, shardVsReplicas) -> shardVsReplicas
+              .forEach((shard, repDetails) -> {
+                List<ReplicaInfo> reps = (List) ((Map) nodeDetails
+                    .computeIfAbsent(coll, o1 -> new LinkedHashMap<>()))
+                    .computeIfAbsent(shard, o12 -> new ArrayList<ReplicaInfo>());
+                for (Map map : repDetails) reps.add(new ReplicaInfo(map));
+              }));
+        }
+
+      }
+
+      @Override
+      public Map<String, Map<String, List<ReplicaInfo>>> getReplicaInfo(String node, Collection<String> keys) {
+        return nodeVsCollectionVsShardVsReplicaInfo.get(node) == null ?
+            Collections.emptyMap() :
+            nodeVsCollectionVsShardVsReplicaInfo.get(node);
+      }
+
+      @Override
+      public Map<String, Object> getNodeValues(String node, Collection<String> tags) {
+        for (Map n : sortedNodes) if (n.get("node").equals(node)) return n;
+        return Collections.emptyMap();
+      }
+    };
+    return new DelegatingCloudManager(null) {
+      @Override
+      public NodeStateProvider getNodeStateProvider() {
+        return nodeStateProvider;
+      }
+
+      @Override
+      public ClusterStateProvider getClusterStateProvider() {
+        return new DelegatingClusterStateProvider(null) {
+          @Override
+          public Set<String> getLiveNodes() {
+            return liveNodes;
+          }
+        };
+      }
+    };
+  }
+

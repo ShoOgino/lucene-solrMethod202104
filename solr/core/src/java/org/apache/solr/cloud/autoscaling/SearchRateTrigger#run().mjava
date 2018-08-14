@@ -49,6 +49,10 @@
         continue;
       }
       Map<String, Object> rates = cloudManager.getNodeStateProvider().getNodeValues(node, metricTags.keySet());
+      if (log.isDebugEnabled()) {
+        log.debug("### rates for node " + node);
+        rates.forEach((tag, rate) -> log.debug("###  " + tag + "\t" + rate));
+      }
       rates.forEach((tag, rate) -> {
         ReplicaInfo info = metricTags.get(tag);
         if (info == null) {
@@ -65,18 +69,28 @@
       });
     }
 
+    if (log.isDebugEnabled()) {
+      collectionRates.forEach((coll, collRates) -> {
+        log.debug("## Collection: {}", coll);
+        collRates.forEach((s, replicas) -> {
+          log.debug("##  - {}", s);
+          replicas.forEach(ri -> log.debug("##     {}  {}", ri.getCore(), ri.getVariable(AutoScalingParams.RATE)));
+        });
+      });
+    }
     long now = cloudManager.getTimeSource().getTimeNs();
     Map<String, Double> hotNodes = new HashMap<>();
     Map<String, Double> coldNodes = new HashMap<>();
+
     // check for exceeded rates and filter out those with less than waitFor from previous events
     nodeRates.entrySet().stream()
         .filter(entry -> node.equals(Policy.ANY) || node.equals(entry.getKey()))
         .forEach(entry -> {
-          if (entry.getValue().get() > aboveRate) {
+          if (entry.getValue().get() > aboveNodeRate) {
             if (waitForElapsed(entry.getKey(), now, lastNodeEvent)) {
               hotNodes.put(entry.getKey(), entry.getValue().get());
             }
-          } else if (entry.getValue().get() < belowRate) {
+          } else if (entry.getValue().get() < belowNodeRate) {
             if (waitForElapsed(entry.getKey(), now, lastNodeEvent)) {
               coldNodes.put(entry.getKey(), entry.getValue().get());
             }
@@ -93,7 +107,7 @@
     List<ReplicaInfo> coldReplicas = new ArrayList<>();
     collectionRates.forEach((coll, shardRates) -> {
       shardRates.forEach((sh, replicaRates) -> {
-        double shardRate = replicaRates.stream()
+        double totalShardRate = replicaRates.stream()
             .map(r -> {
               String elapsedKey = r.getCollection() + "." + r.getCore();
               if ((Double)r.getVariable(AutoScalingParams.RATE) > aboveRate) {
@@ -111,7 +125,10 @@
               return r;
             })
             .mapToDouble(r -> (Double)r.getVariable(AutoScalingParams.RATE)).sum();
+        // calculate average shard rate over all searchable replicas (see SOLR-12470)
+        double shardRate = totalShardRate / searchableReplicationFactors.get(coll).get(sh).doubleValue();
         String elapsedKey = coll + "." + sh;
+        log.debug("-- {}: totalShardRate={}, shardRate={}", elapsedKey, totalShardRate, shardRate);
         if ((collections.isEmpty() || collections.contains(coll)) &&
             (shard.equals(Policy.ANY) || shard.equals(sh))) {
           if (shardRate > aboveRate) {
@@ -121,6 +138,13 @@
           } else if (shardRate < belowRate) {
             if (waitForElapsed(elapsedKey, now, lastShardEvent)) {
               coldShards.computeIfAbsent(coll, s -> new HashMap<>()).put(sh, shardRate);
+              log.debug("-- coldShard waitFor elapsed {}", elapsedKey);
+            } else {
+              if (log.isDebugEnabled()) {
+                Long lastTime = lastShardEvent.computeIfAbsent(elapsedKey, s -> now);
+                long elapsed = TimeUnit.SECONDS.convert(now - lastTime, TimeUnit.NANOSECONDS);
+                log.debug("-- waitFor didn't elapse for {}, waitFor={}, elapsed={}", elapsedKey, getWaitForSecond(), elapsed);
+              }
             }
           } else {
             // no violation - clear waitForElapsed
@@ -221,9 +245,10 @@
     });
 
     final List<TriggerEvent.Op> ops = new ArrayList<>();
+    final Set<String> violations = new HashSet<>();
 
-    calculateHotOps(ops, searchableReplicationFactors, hotNodes, hotCollections, hotShards, hotReplicas);
-    calculateColdOps(ops, clusterState, searchableReplicationFactors, coldNodes, coldCollections, coldShards, coldReplicas);
+    calculateHotOps(ops, violations, searchableReplicationFactors, hotNodes, hotCollections, hotShards, hotReplicas);
+    calculateColdOps(ops, violations, clusterState, searchableReplicationFactors, coldNodes, coldCollections, coldShards, coldReplicas);
 
     if (ops.isEmpty()) {
       return;
@@ -231,7 +256,7 @@
 
     if (processor.process(new SearchRateEvent(getName(), eventTime.get(), ops,
         hotNodes, hotCollections, hotShards, hotReplicas,
-        coldNodes, coldCollections, coldShards, coldReplicas))) {
+        coldNodes, coldCollections, coldShards, coldReplicas, violations))) {
       // update lastEvent times
       hotNodes.keySet().forEach(node -> lastNodeEvent.put(node, now));
       coldNodes.keySet().forEach(node -> lastNodeEvent.put(node, now));

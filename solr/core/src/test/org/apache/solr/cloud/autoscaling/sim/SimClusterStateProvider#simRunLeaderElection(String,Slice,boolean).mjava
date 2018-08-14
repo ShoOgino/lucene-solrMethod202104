@@ -2,59 +2,73 @@
     AtomicBoolean stateChanged = new AtomicBoolean(Boolean.FALSE);
     Replica leader = s.getLeader();
     if (leader == null || !liveNodes.contains(leader.getNodeName())) {
-      LOG.trace("Running leader election for " + collection + " / " + s.getName());
+      LOG.debug("Running leader election for {} / {}", collection, s.getName());
       if (s.getReplicas().isEmpty()) { // no replicas - punt
+        LOG.debug("-- no replicas in {} / {}", collection, s.getName());
         return;
       }
       ActionThrottle lt = getThrottle(collection, s.getName());
-      lt.minimumWaitBetweenActions();
-      lt.markAttemptingAction();
-
-      // mark all replicas as non-leader (probably not necessary) and collect all active and live
-      List<ReplicaInfo> active = new ArrayList<>();
-      s.getReplicas().forEach(r -> {
-        // find our ReplicaInfo for this replica
-        ReplicaInfo ri = getReplicaInfo(r);
-        if (ri == null) {
-          throw new IllegalStateException("-- could not find ReplicaInfo for replica " + r);
-        }
-        synchronized (ri) {
-          if (ri.getVariables().remove(ZkStateReader.LEADER_PROP) != null) {
-            stateChanged.set(true);
+      synchronized (lt) {
+        // collect all active and live
+        List<ReplicaInfo> active = new ArrayList<>();
+        AtomicBoolean alreadyHasLeader = new AtomicBoolean(false);
+        s.getReplicas().forEach(r -> {
+          // find our ReplicaInfo for this replica
+          ReplicaInfo ri = getReplicaInfo(r);
+          if (ri == null) {
+            throw new IllegalStateException("-- could not find ReplicaInfo for replica " + r);
           }
-          if (r.isActive(liveNodes.get())) {
-            active.add(ri);
-          } else { // if it's on a node that is not live mark it down
-            if (!liveNodes.contains(r.getNodeName())) {
-              ri.getVariables().put(ZkStateReader.STATE_PROP, Replica.State.DOWN.toString());
-              stateChanged.set(true);
+          synchronized (ri) {
+            if (r.isActive(liveNodes.get())) {
+              if (ri.getVariables().get(ZkStateReader.LEADER_PROP) != null) {
+                LOG.trace("-- found existing leader {} / {}: {}, {}", collection, s.getName(), ri, r);
+                alreadyHasLeader.set(true);
+                return;
+              } else {
+                active.add(ri);
+              }
+            } else { // if it's on a node that is not live mark it down
+              LOG.trace("-- replica not active on live nodes: {}, {}", liveNodes.get(), r);
+              if (!liveNodes.contains(r.getNodeName())) {
+                ri.getVariables().put(ZkStateReader.STATE_PROP, Replica.State.DOWN.toString());
+                ri.getVariables().remove(ZkStateReader.LEADER_PROP);
+                stateChanged.set(true);
+              }
             }
           }
+        });
+        if (alreadyHasLeader.get()) {
+          LOG.debug("-- already has leader {} / {}: {}", collection, s.getName(), s);
+          return;
         }
-      });
-      if (active.isEmpty()) {
-        LOG.warn("-- can't find any active replicas for " + collection + " / " + s.getName());
-        return;
-      }
-      // pick first active one
-      ReplicaInfo ri = null;
-      for (ReplicaInfo a : active) {
-        if (!a.getType().equals(Replica.Type.PULL)) {
-          ri = a;
-          break;
+        if (active.isEmpty()) {
+          LOG.warn("Can't find any active replicas for {} / {}: {}", collection, s.getName(), s);
+          LOG.debug("-- liveNodes: {}", liveNodes.get());
+          return;
         }
+        // pick first active one
+        ReplicaInfo ri = null;
+        for (ReplicaInfo a : active) {
+          if (!a.getType().equals(Replica.Type.PULL)) {
+            ri = a;
+            break;
+          }
+        }
+        if (ri == null) {
+          LOG.warn("-- can't find any suitable replica type for {} / {}: {}", collection, s.getName(), s);
+          return;
+        }
+        // now mark the leader election throttle
+        lt.minimumWaitBetweenActions();
+        lt.markAttemptingAction();
+        synchronized (ri) {
+          ri.getVariables().put(ZkStateReader.LEADER_PROP, "true");
+        }
+        stateChanged.set(true);
+        LOG.debug("-- elected new leader for " + collection + " / " + s.getName() + ": " + ri.getName());
       }
-      if (ri == null) {
-        LOG.warn("-- can't find any suitable replica type for " + collection + " / " + s.getName());
-        return;
-      }
-      synchronized (ri) {
-        ri.getVariables().put(ZkStateReader.LEADER_PROP, "true");
-      }
-      stateChanged.set(true);
-      LOG.debug("-- elected new leader for " + collection + " / " + s.getName() + ": " + ri);
     } else {
-      LOG.trace("-- already has leader for {} / {}", collection, s.getName());
+      LOG.debug("-- already has leader for {} / {}", collection, s.getName());
     }
     if (stateChanged.get() || saveState) {
       collectionsStatesRef.set(null);

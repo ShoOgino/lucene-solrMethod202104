@@ -17,6 +17,20 @@
     NamedList<Object> response = solrClient.request(req);
     assertEquals(response.get("result").toString(), "success");
 
+    String setListenerCommand = "{" +
+        "'set-listener' : " +
+        "{" +
+        "'name' : 'failures'," +
+        "'trigger' : 'node_lost_trigger3'," +
+        "'stage' : ['FAILED']," +
+        "'class' : '" + TestTriggerListener.class.getName() + "'" +
+        "}" +
+        "}";
+    req = createAutoScalingRequest(SolrRequest.METHOD.POST, setListenerCommand);
+    response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+
     // create a collection with 1 replica per node
     String collectionName = "testNodeLost";
     CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(collectionName,
@@ -26,7 +40,7 @@
     create.process(solrClient);
 
     log.info("Ready after " + CloudTestUtils.waitForState(cluster, collectionName, 20 * NUM_NODES, TimeUnit.SECONDS,
-        CloudTestUtils.clusterShape(NUM_NODES / 5, NUM_NODES / 10)) + " ms");
+        CloudTestUtils.clusterShape(NUM_NODES / 5, NUM_NODES / 10, false, true)) + " ms");
 
     // start killing nodes
     int numNodes = NUM_NODES / 5;
@@ -37,7 +51,7 @@
       cluster.simRemoveNode(nodes.get(i), false);
       cluster.getTimeSource().sleep(killDelay);
     }
-    // wait for the trigger to fire at least once
+    // wait for the trigger to fire and complete at least once
     boolean await = triggerFinishedLatch.await(20 * waitFor * 1000 / SPEED, TimeUnit.MILLISECONDS);
     assertTrue("trigger did not fire within timeout, " +
         "waitFor=" + waitFor + ", killDelay=" + killDelay + ", minIgnored=" + minIgnored,
@@ -59,16 +73,23 @@
             "waitFor=" + waitFor + ", killDelay=" + killDelay + ", minIgnored=" + minIgnored,
           startedEventPos > -1);
     SolrInputDocument startedEvent = systemColl.get(startedEventPos);
-    // wait until started == finished
+    // we can expect some failures when target node in MOVEREPLICA has been killed
+    // between when the event processing started and the actual moment of MOVEREPLICA execution
+    // wait until started == (finished + failed)
     TimeOut timeOut = new TimeOut(20 * waitFor * NUM_NODES, TimeUnit.SECONDS, cluster.getTimeSource());
     while (!timeOut.hasTimedOut()) {
       if (triggerStartedCount.get() == triggerFinishedCount.get()) {
         break;
       }
+      log.debug("started=" + triggerStartedCount.get() + ", finished=" + triggerFinishedCount.get() +
+          ", failed=" + listenerEvents.size());
       timeOut.sleep(1000);
     }
     if (timeOut.hasTimedOut()) {
-      fail("did not finish processing all events in time: started=" + triggerStartedCount.get() + ", finished=" + triggerFinishedCount.get());
+      if (triggerStartedCount.get() > triggerFinishedCount.get() + listenerEvents.size()) {
+        fail("did not finish processing all events in time: started=" + triggerStartedCount.get() + ", finished=" + triggerFinishedCount.get() +
+            ", failed=" + listenerEvents.size());
+      }
     }
     int ignored = 0;
     int lastIgnoredPos = startedEventPos;
@@ -92,8 +113,13 @@
             "waitFor=" + waitFor + ", killDelay=" + killDelay + ", minIgnored=" + minIgnored,
             cluster.simGetOpCount("MOVEREPLICA") > 0);
 
-    log.info("Ready after " + CloudTestUtils.waitForState(cluster, collectionName, 20 * NUM_NODES, TimeUnit.SECONDS,
-        CloudTestUtils.clusterShape(NUM_NODES / 5, NUM_NODES / 10)) + " ms");
+    if (listenerEvents.isEmpty()) {
+      // no failed movements - verify collection shape
+      log.info("Ready after " + CloudTestUtils.waitForState(cluster, collectionName, 20 * NUM_NODES, TimeUnit.SECONDS,
+          CloudTestUtils.clusterShape(NUM_NODES / 5, NUM_NODES / 10, false, true)) + " ms");
+    } else {
+      cluster.getTimeSource().sleep(NUM_NODES * 100);
+    }
 
     int count = 50;
     SolrInputDocument finishedEvent = null;
@@ -126,9 +152,13 @@
     delta = TimeUnit.NANOSECONDS.toMillis(delta);
     log.info("#### System stabilized after " + delta + " ms");
     long ops = cluster.simGetOpCount("MOVEREPLICA");
-    assertTrue("unexpected number of MOVEREPLICA ops: " + ops + ", " +
+    long expectedMinOps = 40;
+    if (!listenerEvents.isEmpty()) {
+      expectedMinOps = 20;
+    }
+    assertTrue("unexpected number (" + expectedMinOps + ") of MOVEREPLICA ops: " + ops + ", " +
             "waitFor=" + waitFor + ", killDelay=" + killDelay + ", minIgnored=" + minIgnored,
-            ops >= 40);
+            ops >= expectedMinOps);
     return delta;
   }
 

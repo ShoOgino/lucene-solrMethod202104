@@ -30,21 +30,18 @@
           waitForRecoveriesToFinish(collectionName, true);
           // let's wait to see parent shard become inactive
           CountDownLatch latch = new CountDownLatch(1);
-          client.getZkStateReader().registerCollectionStateWatcher(collectionName, new CollectionStateWatcher() {
-            @Override
-            public boolean onStateChanged(Set<String> liveNodes, DocCollection collectionState) {
-              Slice parent = collectionState.getSlice(SHARD1);
-              Slice slice10 = collectionState.getSlice(SHARD1_0);
-              Slice slice11 = collectionState.getSlice(SHARD1_1);
-              if (slice10 != null && slice11 != null &&
-                  parent.getState() == Slice.State.INACTIVE &&
-                  slice10.getState() == Slice.State.ACTIVE &&
-                  slice11.getState() == Slice.State.ACTIVE) {
-                latch.countDown();
-                return true; // removes the watch
-              }
-              return false;
+          client.getZkStateReader().registerCollectionStateWatcher(collectionName, (liveNodes, collectionState) -> {
+            Slice parent = collectionState.getSlice(SHARD1);
+            Slice slice10 = collectionState.getSlice(SHARD1_0);
+            Slice slice11 = collectionState.getSlice(SHARD1_1);
+            if (slice10 != null && slice11 != null &&
+                parent.getState() == Slice.State.INACTIVE &&
+                slice10.getState() == Slice.State.ACTIVE &&
+                slice11.getState() == Slice.State.ACTIVE) {
+              latch.countDown();
+              return true; // removes the watch
             }
+            return false;
           });
           latch.await(1, TimeUnit.MINUTES);
           if (latch.getCount() != 0)  {
@@ -80,22 +77,19 @@
           }
           if (state == RequestStatusState.COMPLETED)  {
             CountDownLatch newReplicaLatch = new CountDownLatch(1);
-            client.getZkStateReader().registerCollectionStateWatcher(collectionName, new CollectionStateWatcher() {
-              @Override
-              public boolean onStateChanged(Set<String> liveNodes, DocCollection collectionState) {
-                if (liveNodes.size() != liveNodeCount)  {
-                  return false;
-                }
-                Slice slice = collectionState.getSlice(SHARD1_0);
-                if (slice.getReplicas().size() == 2)  {
-                  if (!slice.getReplicas().stream().anyMatch(r -> r.getState() == Replica.State.RECOVERING)) {
-                    // we see replicas and none of them are recovering
-                    newReplicaLatch.countDown();
-                    return true;
-                  }
-                }
+            client.getZkStateReader().registerCollectionStateWatcher(collectionName, (liveNodes, collectionState) -> {
+              if (liveNodes.size() != liveNodeCount)  {
                 return false;
               }
+              Slice slice = collectionState.getSlice(SHARD1_0);
+              if (slice.getReplicas().size() == 2)  {
+                if (slice.getReplicas().stream().noneMatch(r -> r.getState() == Replica.State.RECOVERING)) {
+                  // we see replicas and none of them are recovering
+                  newReplicaLatch.countDown();
+                  return true;
+                }
+              }
+              return false;
             });
             newReplicaLatch.await(30, TimeUnit.SECONDS);
             // check consistency of sub-shard replica explicitly because checkShardConsistency methods doesn't

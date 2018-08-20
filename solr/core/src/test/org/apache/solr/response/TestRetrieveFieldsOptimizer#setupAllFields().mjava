@@ -1,0 +1,71 @@
+  private static void setupAllFields() throws IOException {
+
+    IndexSchema schema = h.getCore().getLatestSchema();
+
+    // Add all the types before the fields.
+    Map<String, Map<String, String>> fieldsToAdd = new HashMap<>();
+
+    // We need our special id fields to find the docs later.
+    typesHolder.addFieldType(schema, idNotStoredDv, RetrieveFieldType.TEST_TYPE.STRING);
+    fieldsToAdd.put(idNotStoredDv, map("stored", "false", "docValues", "true", "multiValued", "false"));
+
+    typesHolder.addFieldType(schema, idStoredNotDv, RetrieveFieldType.TEST_TYPE.STRING);
+    fieldsToAdd.put(idStoredNotDv, map("stored", "true", "docValues", "false", "multiValued", "false"));
+
+    for (RetrieveFieldType.TEST_TYPE type : RetrieveFieldType.solrClassMap.keySet()) {
+      // We happen to be naming the fields and types identically.
+      String myName = type.toString() + storedNotDvSv;
+      typesHolder.addFieldType(schema, myName, type);
+      fieldsToAdd.put(myName, map("stored", "true", "docValues", "false", "multiValued", "false"));
+
+      myName = type.toString() + storedAndDvSv;
+      typesHolder.addFieldType(schema, myName, type);
+      fieldsToAdd.put(myName, map("stored", "true", "docValues", "true", "multiValued", "false"));
+
+      myName = type.toString() + notStoredDvSv;
+      typesHolder.addFieldType(schema, myName, type);
+      fieldsToAdd.put(myName, map("stored", "false", "docValues", "true", "multiValued", "false"));
+
+      myName = type.toString() + storedNotDvMv;
+      typesHolder.addFieldType(schema, myName, type);
+      fieldsToAdd.put(myName, map("stored", "true", "docValues", "false", "multiValued", "true"));
+
+      myName = type.toString() + storedAndDvMv;
+      typesHolder.addFieldType(schema, myName, type);
+      fieldsToAdd.put(myName, map("stored", "true", "docValues", "true", "multiValued", "true"));
+
+      myName = type.toString() + notStoredDvMv;
+      typesHolder.addFieldType(schema, myName, type);
+      fieldsToAdd.put(myName, map("stored", "false", "docValues", "true", "multiValued", "true"));
+    }
+
+    schema = typesHolder.addFieldTypes(schema);
+
+    for (Map.Entry<String, Map<String, String>> ent : fieldsToAdd.entrySet()) {
+      fieldsHolder.addField(schema, ent.getKey(), ent.getKey(), ent.getValue());
+    }
+    schema = fieldsHolder.addFields(schema);
+
+    h.getCore().setLatestSchema(schema);
+
+    // All that setup work and we're only going to add a very few docs!
+    for (int idx = 0; idx < 10; ++idx) {
+      addDocWithAllFields(idx);
+    }
+    assertU(commit());
+    // Now we need to massage the expected values returned based on the docValues type 'cause it's weird.
+    final RefCounted<SolrIndexSearcher> refCounted = h.getCore().getNewestSearcher(true);
+    try {
+      //static Map<String, Map<String, List<String>>>
+      for (Map<String, List<String>> docFieldsEnt : allFieldValuesInput.values()) {
+        for (Map.Entry<String, List<String>> oneField : docFieldsEnt.entrySet()) {
+          RetrieveField field = fieldsHolder.getTestField(oneField.getKey());
+          field.expectedValsAsStrings(refCounted.get().getSlowAtomicReader().getFieldInfos().fieldInfo(field.name),
+              oneField.getValue());
+        }
+      }
+    } finally {
+      refCounted.decref();
+    }
+   }
+

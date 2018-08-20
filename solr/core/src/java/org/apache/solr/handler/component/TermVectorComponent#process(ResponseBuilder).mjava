@@ -129,41 +129,27 @@
     //field
     SolrDocumentFetcher docFetcher = searcher.getDocFetcher();
     SolrReturnFields srf = new SolrReturnFields(uniqFieldName, rb.req);
-    RetrieveFieldsOptimizer retrieveFieldsOptimizer = RetrieveFieldsOptimizer.create(docFetcher, srf);
 
     while (iter.hasNext()) {
       Integer docId = iter.next();
       NamedList<Object> docNL = new NamedList<>();
 
       if (keyField != null) {
-        SolrDocument sdoc = null;
-        try {
-          if (retrieveFieldsOptimizer.returnStoredFields()) {
-            Document doc = docFetcher.doc(docId, retrieveFieldsOptimizer.getStoredFields());
-            // make sure to use the schema from the searcher and not the request (cross-core)
-            sdoc = DocsStreamer.convertLuceneDocToSolrDoc(doc, searcher.getSchema(), srf);
+        // guaranteed to be one and only one since this is uniqueKey!
+        SolrDocument solrDoc = docFetcher.solrDoc(docId, srf);
+
+        String uKey = null;
+        Object val = solrDoc.getFieldValue(uniqFieldName);
+        if (val != null) {
+          if (val instanceof StoredField) {
+            uKey = ((StoredField) val).stringValue();
           } else {
-            // no need to get stored fields of the document, see SOLR-5968
-            sdoc = new SolrDocument();
+            uKey = val.toString();
           }
-
-          // decorate the document with non-stored docValues fields
-          if (retrieveFieldsOptimizer.returnDVFields()) {
-            docFetcher.decorateDocValueFields(sdoc, docId, retrieveFieldsOptimizer.getDvFields());
-          }
-        } catch (IOException e) {
-          throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Error reading document with docId " + docId, e);
         }
-        Object val = sdoc.getFieldValue(uniqFieldName);
-        String uniqVal = "";
-        if (val instanceof StoredField) {
-          uniqVal = ((StoredField) val).stringValue();
-        } else {
-          uniqVal = val.toString();
-        }
-
-        docNL.add("uniqueKey", uniqVal);
-        termVectors.add(uniqVal, docNL);
+        assert null != uKey;
+        docNL.add("uniqueKey", uKey);
+        termVectors.add(uKey, docNL);
       } else {
         // support for schemas w/o a unique key,
         termVectors.add("doc-" + docId, docNL);

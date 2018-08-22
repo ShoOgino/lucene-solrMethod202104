@@ -5,7 +5,7 @@
     UpdateLog ulog;
     ulog = core.getUpdateHandler().getUpdateLog();
     if (ulog == null) {
-      SolrException.log(LOG, "No UpdateLog found - cannot recover.");
+      SolrException.log(log, "No UpdateLog found - cannot recover.");
       recoveryFailed(core, zkController, baseUrl, coreZkNodeName,
           core.getCoreDescriptor());
       return;
@@ -18,7 +18,7 @@
     try (UpdateLog.RecentUpdates recentUpdates = ulog.getRecentUpdates()) {
       recentVersions = recentUpdates.getVersions(ulog.getNumRecordsToKeep());
     } catch (Exception e) {
-      SolrException.log(LOG, "Corrupt tlog - ignoring.", e);
+      SolrException.log(log, "Corrupt tlog - ignoring.", e);
       recentVersions = new ArrayList<>(0);
     }
 
@@ -34,13 +34,13 @@
         }
         
         if (oldIdx > 0) {
-          LOG.info("####### Found new versions added after startup: num=[{}]", oldIdx);
-          LOG.info("###### currentVersions=[{}]",recentVersions);
+          log.info("####### Found new versions added after startup: num=[{}]", oldIdx);
+          log.info("###### currentVersions=[{}]",recentVersions);
         }
         
-        LOG.info("###### startupVersions=[{}]", startingVersions);
+        log.info("###### startupVersions=[{}]", startingVersions);
       } catch (Exception e) {
-        SolrException.log(LOG, "Error getting recent versions.", e);
+        SolrException.log(log, "Error getting recent versions.", e);
         recentVersions = new ArrayList<>(0);
       }
     }
@@ -54,11 +54,11 @@
           // this means we were previously doing a full index replication
           // that probably didn't complete and buffering updates in the
           // meantime.
-          LOG.info("Looks like a previous replication recovery did not complete - skipping peer sync.");
+          log.info("Looks like a previous replication recovery did not complete - skipping peer sync.");
           firstTime = false; // skip peersync
         }
       } catch (Exception e) {
-        SolrException.log(LOG, "Error trying to get ulog starting operation.", e);
+        SolrException.log(log, "Error trying to get ulog starting operation.", e);
         firstTime = false; // skip peersync
       }
     }
@@ -74,7 +74,7 @@
         CloudDescriptor cloudDesc = core.getCoreDescriptor().getCloudDescriptor();
         final Replica leader = pingLeader(ourUrl, core.getCoreDescriptor(), true);
         if (isClosed()) {
-          LOG.info("RecoveryStrategy has been closed");
+          log.info("RecoveryStrategy has been closed");
           break;
         }
 
@@ -84,17 +84,17 @@
         }
         if (cloudDesc.isLeader()) {
           // we are now the leader - no one else must have been suitable
-          LOG.warn("We have not yet recovered - but we are now the leader!");
-          LOG.info("Finished recovery process.");
+          log.warn("We have not yet recovered - but we are now the leader!");
+          log.info("Finished recovery process.");
           zkController.publish(core.getCoreDescriptor(), Replica.State.ACTIVE);
           return;
         }
 
-        LOG.info("Begin buffering updates. core=[{}]", coreName);
+        log.info("Begin buffering updates. core=[{}]", coreName);
         // recalling buffer updates will drop the old buffer tlog
         ulog.bufferUpdates();
 
-        LOG.info("Publishing state of core [{}] as recovering, leader is [{}] and I am [{}]", core.getName(), leader.getCoreUrl(),
+        log.info("Publishing state of core [{}] as recovering, leader is [{}] and I am [{}]", core.getName(), leader.getCoreUrl(),
             ourUrl);
         zkController.publish(core.getCoreDescriptor(), Replica.State.RECOVERING);
         
@@ -109,14 +109,14 @@
         }
         
         if (isClosed()) {
-          LOG.info("RecoveryStrategy has been closed");
+          log.info("RecoveryStrategy has been closed");
           break;
         }
 
         sendPrepRecoveryCmd(leader.getBaseUrl(), leader.getCoreName(), slice);
         
         if (isClosed()) {
-          LOG.info("RecoveryStrategy has been closed");
+          log.info("RecoveryStrategy has been closed");
           break;
         }
         
@@ -134,7 +134,7 @@
         // first thing we just try to sync
         if (firstTime) {
           firstTime = false; // only try sync the first time through the loop
-          LOG.info("Attempting to PeerSync from [{}] - recoveringAfterStartup=[{}]", leader.getCoreUrl(), recoveringAfterStartup);
+          log.info("Attempting to PeerSync from [{}] - recoveringAfterStartup=[{}]", leader.getCoreUrl(), recoveringAfterStartup);
           // System.out.println("Attempting to PeerSync from " + leaderUrl
           // + " i am:" + zkController.getNodeName());
           PeerSyncWithLeader peerSyncWithLeader = new PeerSyncWithLeader(core,
@@ -146,12 +146,12 @@
             // force open a new searcher
             core.getUpdateHandler().commit(new CommitUpdateCommand(req, false));
             req.close();
-            LOG.info("PeerSync stage of recovery was successful.");
+            log.info("PeerSync stage of recovery was successful.");
 
             // solrcloud_debug
             cloudDebugLog(core, "synced");
             
-            LOG.info("Replaying updates buffered during PeerSync.");
+            log.info("Replaying updates buffered during PeerSync.");
             replay(core);
 
             // sync success
@@ -159,54 +159,54 @@
             return;
           }
 
-          LOG.info("PeerSync Recovery was not successful - trying replication.");
+          log.info("PeerSync Recovery was not successful - trying replication.");
         }
 
         if (isClosed()) {
-          LOG.info("RecoveryStrategy has been closed");
+          log.info("RecoveryStrategy has been closed");
           break;
         }
         
-        LOG.info("Starting Replication Recovery.");
+        log.info("Starting Replication Recovery.");
 
         try {
 
           replicate(zkController.getNodeName(), core, leader);
 
           if (isClosed()) {
-            LOG.info("RecoveryStrategy has been closed");
+            log.info("RecoveryStrategy has been closed");
             break;
           }
 
           replayFuture = replay(core);
 
           if (isClosed()) {
-            LOG.info("RecoveryStrategy has been closed");
+            log.info("RecoveryStrategy has been closed");
             break;
           }
 
-          LOG.info("Replication Recovery was successful.");
+          log.info("Replication Recovery was successful.");
           successfulRecovery = true;
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
-          LOG.warn("Recovery was interrupted", e);
+          log.warn("Recovery was interrupted", e);
           close = true;
         } catch (Exception e) {
-          SolrException.log(LOG, "Error while trying to recover", e);
+          SolrException.log(log, "Error while trying to recover", e);
         }
 
       } catch (Exception e) {
-        SolrException.log(LOG, "Error while trying to recover. core=" + coreName, e);
+        SolrException.log(log, "Error while trying to recover. core=" + coreName, e);
       } finally {
         if (successfulRecovery) {
-          LOG.info("Registering as Active after recovery.");
+          log.info("Registering as Active after recovery.");
           try {
             if (replicaType == Replica.Type.TLOG) {
               zkController.startReplicationFromLeader(coreName, true);
             }
             zkController.publish(core.getCoreDescriptor(), Replica.State.ACTIVE);
           } catch (Exception e) {
-            LOG.error("Could not publish as ACTIVE after succesful recovery", e);
+            log.error("Could not publish as ACTIVE after succesful recovery", e);
             successfulRecovery = false;
           }
           
@@ -224,24 +224,24 @@
         try {
 
           if (isClosed()) {
-            LOG.info("RecoveryStrategy has been closed");
+            log.info("RecoveryStrategy has been closed");
             break;
           }
           
-          LOG.error("Recovery failed - trying again... (" + retries + ")");
+          log.error("Recovery failed - trying again... (" + retries + ")");
           
           retries++;
           if (retries >= maxRetries) {
-            SolrException.log(LOG, "Recovery failed - max retries exceeded (" + retries + ").");
+            SolrException.log(log, "Recovery failed - max retries exceeded (" + retries + ").");
             try {
               recoveryFailed(core, zkController, baseUrl, coreZkNodeName, core.getCoreDescriptor());
             } catch (Exception e) {
-              SolrException.log(LOG, "Could not publish that recovery failed", e);
+              SolrException.log(log, "Could not publish that recovery failed", e);
             }
             break;
           }
         } catch (Exception e) {
-          SolrException.log(LOG, "An error has occurred during recovery", e);
+          SolrException.log(log, "An error has occurred during recovery", e);
         }
 
         try {
@@ -250,17 +250,17 @@
           // will always be the minimum of the two (12). Since we sleep at 5 seconds sub-intervals in
           // order to check if we were closed, 12 is chosen as the maximum loopCount (5s * 12 = 1m).
           double loopCount = retries < 4 ? Math.min(Math.pow(2, retries), 12) : 12;
-          LOG.info("Wait [{}] seconds before trying to recover again (attempt={})", loopCount, retries);
+          log.info("Wait [{}] seconds before trying to recover again (attempt={})", loopCount, retries);
           for (int i = 0; i < loopCount; i++) {
             if (isClosed()) {
-              LOG.info("RecoveryStrategy has been closed");
+              log.info("RecoveryStrategy has been closed");
               break; // check if someone closed us
             }
             Thread.sleep(startingRecoveryDelayMilliSeconds);
           }
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
-          LOG.warn("Recovery was interrupted.", e);
+          log.warn("Recovery was interrupted.", e);
           close = true;
         }
       }
@@ -270,10 +270,10 @@
     // if replay was skipped (possibly to due pulling a full index from the leader),
     // then we still need to update version bucket seeds after recovery
     if (successfulRecovery && replayFuture == null) {
-      LOG.info("Updating version bucket highest from index after successful recovery.");
+      log.info("Updating version bucket highest from index after successful recovery.");
       core.seedVersionBuckets();
     }
 
-    LOG.info("Finished recovery process, successful=[{}]", Boolean.toString(successfulRecovery));
+    log.info("Finished recovery process, successful=[{}]", Boolean.toString(successfulRecovery));
   }
 

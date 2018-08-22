@@ -24,7 +24,7 @@
       // when we are a bit more confident we may want to try a partial replication
       // if the error is connection related or something, but we have to be careful
       forceReplication = true;
-      LOG.info("Last replication failed, so I'll force replication");
+      log.info("Last replication failed, so I'll force replication");
     }
 
     try {
@@ -36,19 +36,19 @@
           return IndexFetchResult.EXPECTING_NON_LEADER;
         }
         if (replica.getState() != Replica.State.ACTIVE) {
-          LOG.info("Replica {} is leader but it's state is {}, skipping replication", replica.getName(), replica.getState());
+          log.info("Replica {} is leader but it's state is {}, skipping replication", replica.getName(), replica.getState());
           return IndexFetchResult.LEADER_IS_NOT_ACTIVE;
         }
         if (!solrCore.getCoreContainer().getZkController().getClusterState().liveNodesContain(replica.getNodeName())) {
-          LOG.info("Replica {} is leader but it's not hosted on a live node, skipping replication", replica.getName());
+          log.info("Replica {} is leader but it's not hosted on a live node, skipping replication", replica.getName());
           return IndexFetchResult.LEADER_IS_NOT_ACTIVE;
         }
         if (!replica.getCoreUrl().equals(masterUrl)) {
           masterUrl = replica.getCoreUrl();
-          LOG.info("Updated masterUrl to {}", masterUrl);
+          log.info("Updated masterUrl to {}", masterUrl);
           // TODO: Do we need to set forceReplication = true?
         } else {
-          LOG.debug("masterUrl didn't change");
+          log.debug("masterUrl didn't change");
         }
       }
       //get the current 'replicateable' index version in the master
@@ -58,10 +58,10 @@
       } catch (Exception e) {
         final String errorMsg = e.toString();
         if (!Strings.isNullOrEmpty(errorMsg) && errorMsg.contains(INTERRUPT_RESPONSE_MESSAGE)) {
-            LOG.warn("Master at: " + masterUrl + " is not available. Index fetch failed by interrupt. Exception: " + errorMsg);
+            log.warn("Master at: " + masterUrl + " is not available. Index fetch failed by interrupt. Exception: " + errorMsg);
             return new IndexFetchResult(IndexFetchResult.FAILED_BY_INTERRUPT_MESSAGE, false, e);
         } else {
-            LOG.warn("Master at: " + masterUrl + " is not available. Index fetch failed by exception: " + errorMsg);
+            log.warn("Master at: " + masterUrl + " is not available. Index fetch failed by exception: " + errorMsg);
             return new IndexFetchResult(IndexFetchResult.FAILED_BY_EXCEPTION_MESSAGE, false, e);
         }
     }
@@ -69,8 +69,8 @@
       long latestVersion = (Long) response.get(CMD_INDEX_VERSION);
       long latestGeneration = (Long) response.get(GENERATION);
 
-      LOG.info("Master's generation: " + latestGeneration);
-      LOG.info("Master's version: " + latestVersion);
+      log.info("Master's generation: " + latestGeneration);
+      log.info("Master's version: " + latestVersion);
 
       // TODO: make sure that getLatestCommit only returns commit points for the main index (i.e. no side-car indexes)
       IndexCommit commit = solrCore.getDeletionPolicy().getLatestCommit();
@@ -80,7 +80,7 @@
         try {
           searcherRefCounted = solrCore.getNewestSearcher(false);
           if (searcherRefCounted == null) {
-            LOG.warn("No open searcher found - fetch aborted");
+            log.warn("No open searcher found - fetch aborted");
             return IndexFetchResult.NO_INDEX_COMMIT_EXIST;
           }
           commit = searcherRefCounted.get().getIndexReader().getIndexCommit();
@@ -90,14 +90,14 @@
         }
       }
 
-      LOG.info("Slave's generation: " + commit.getGeneration());
-      LOG.info("Slave's version: " + IndexDeletionPolicyWrapper.getCommitTimestamp(commit));
+      log.info("Slave's generation: " + commit.getGeneration());
+      log.info("Slave's version: " + IndexDeletionPolicyWrapper.getCommitTimestamp(commit));
 
       if (latestVersion == 0L) {
         if (commit.getGeneration() != 0) {
           // since we won't get the files for an empty index,
           // we just clear ours and commit
-          LOG.info("New index in Master. Deleting mine...");
+          log.info("New index in Master. Deleting mine...");
           RefCounted<IndexWriter> iw = solrCore.getUpdateHandler().getSolrCoreState().getIndexWriter(solrCore);
           try {
             iw.get().deleteAll();
@@ -115,27 +115,27 @@
 
         //there is nothing to be replicated
         successfulInstall = true;
-        LOG.debug("Nothing to replicate, master's version is 0");
+        log.debug("Nothing to replicate, master's version is 0");
         return IndexFetchResult.MASTER_VERSION_ZERO;
       }
 
       // TODO: Should we be comparing timestamps (across machines) here?
       if (!forceReplication && IndexDeletionPolicyWrapper.getCommitTimestamp(commit) == latestVersion) {
         //master and slave are already in sync just return
-        LOG.info("Slave in sync with master.");
+        log.info("Slave in sync with master.");
         successfulInstall = true;
         return IndexFetchResult.ALREADY_IN_SYNC;
       }
-      LOG.info("Starting replication process");
+      log.info("Starting replication process");
       // get the list of files first
       fetchFileList(latestGeneration);
       // this can happen if the commit point is deleted before we fetch the file list.
       if (filesToDownload.isEmpty()) {
         return IndexFetchResult.PEER_INDEX_COMMIT_DELETED;
       }
-      LOG.info("Number of files in latest index in master: " + filesToDownload.size());
+      log.info("Number of files in latest index in master: " + filesToDownload.size());
       if (tlogFilesToDownload != null) {
-        LOG.info("Number of tlog files in master: " + tlogFilesToDownload.size());
+        log.info("Number of tlog files in master: " + tlogFilesToDownload.size());
       }
 
       // Create the sync service
@@ -191,17 +191,17 @@
             indexWriter.deleteUnusedFiles();
             while (hasUnusedFiles(indexDir, commit)) {
               indexWriter.deleteUnusedFiles();
-              LOG.info("Sleeping for 1000ms to wait for unused lucene index files to be delete-able");
+              log.info("Sleeping for 1000ms to wait for unused lucene index files to be delete-able");
               Thread.sleep(1000);
               c++;
               if (c >= 30)  {
-                LOG.warn("IndexFetcher unable to cleanup unused lucene index files so we must do a full copy instead");
+                log.warn("IndexFetcher unable to cleanup unused lucene index files so we must do a full copy instead");
                 isFullCopyNeeded = true;
                 break;
               }
             }
             if (c > 0)  {
-              LOG.info("IndexFetcher slept for " + (c * 1000) + "ms for unused lucene index files to be delete-able");
+              log.info("IndexFetcher slept for " + (c * 1000) + "ms for unused lucene index files to be delete-able");
             }
           } finally {
             writer.decref();
@@ -215,7 +215,7 @@
             solrCore.getUpdateHandler().getSolrCoreState().closeIndexWriter(solrCore, true);
           }
 
-          LOG.info("Starting download (fullCopy={}) to {}", isFullCopyNeeded, tmpIndexDir);
+          log.info("Starting download (fullCopy={}) to {}", isFullCopyNeeded, tmpIndexDir);
           successfulInstall = false;
 
           long bytesDownloaded = downloadIndexFiles(isFullCopyNeeded, indexDir,
@@ -226,7 +226,7 @@
           }
           final long timeTakenSeconds = getReplicationTimeElapsed();
           final Long bytesDownloadedPerSecond = (timeTakenSeconds != 0 ? Long.valueOf(bytesDownloaded / timeTakenSeconds) : null);
-          LOG.info("Total time taken for download (fullCopy={},bytesDownloaded={}) : {} secs ({} bytes/sec) to {}",
+          log.info("Total time taken for download (fullCopy={},bytesDownloaded={}) : {} secs ({} bytes/sec) to {}",
               isFullCopyNeeded, bytesDownloaded, timeTakenSeconds, bytesDownloadedPerSecond, tmpIndexDir);
 
           Collection<Map<String,Object>> modifiedConfFiles = getModifiedConfFiles(confFilesToDownload);
@@ -254,7 +254,7 @@
                 }
               }
 
-              LOG.info("Configuration files are modified, core will be reloaded");
+              log.info("Configuration files are modified, core will be reloaded");
               logReplicationTimeAndConfFiles(modifiedConfFiles,
                   successfulInstall);// write to a file time of replication and
                                      // conf files.
@@ -284,7 +284,7 @@
 
         // we must reload the core after we open the IW back up
        if (successfulInstall && (reloadCore || forceCoreReload)) {
-         LOG.info("Reloading SolrCore {}", solrCore.getName());
+         log.info("Reloading SolrCore {}", solrCore.getName());
           reloadCore();
         }
 
@@ -293,7 +293,7 @@
             // let the system know we are changing dir's and the old one
             // may be closed
             if (indexDir != null) {
-              LOG.info("removing old index directory " + indexDir);
+              log.info("removing old index directory " + indexDir);
               solrCore.getDirectoryFactory().doneWithDirectory(indexDir);
               solrCore.getDirectoryFactory().remove(indexDir);
             }
@@ -309,7 +309,7 @@
           cleanup(solrCore, tmpIndexDir, indexDir, deleteTmpIdxDir, tmpTlogDir, successfulInstall);
           cleanupDone = true;
           // we try with a full copy of the index
-          LOG.warn(
+          log.warn(
               "Replication attempt was not successful - trying a full index replication reloadCore={}",
               reloadCore);
           successfulInstall = fetchLatestIndex(true, reloadCore).getSuccessful();
@@ -318,7 +318,7 @@
         markReplicationStop();
         return successfulInstall ? IndexFetchResult.INDEX_FETCH_SUCCESS : IndexFetchResult.INDEX_FETCH_FAILURE;
       } catch (ReplicationHandlerException e) {
-        LOG.error("User aborted Replication");
+        log.error("User aborted Replication");
         return new IndexFetchResult(IndexFetchResult.FAILED_BY_EXCEPTION_MESSAGE, false, e);
       } catch (SolrException e) {
         throw e;

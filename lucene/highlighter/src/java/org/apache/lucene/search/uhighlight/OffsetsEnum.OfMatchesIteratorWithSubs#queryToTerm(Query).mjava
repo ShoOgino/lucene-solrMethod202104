@@ -1,0 +1,33 @@
+    /** Maps a Query from {@link MatchesIterator#getQuery()} to {@link OffsetsEnum#getTerm()}.
+     * See {@link Passage#getMatchTerms()}. */
+    private BytesRef queryToTerm(Query query) {
+      // compute an approximate BytesRef term of a Query.  We cache this since we're likely to see the same query again.
+      // Our approach is to call extractTerms and visit each term in order, concatenating them with an adjoining space.
+      //  If we don't have any (perhaps due to an MTQ like a wildcard) then we fall back on the toString() of the query.
+      return queryToTermMap.computeIfAbsent(query, (Query q) -> {
+        try {
+          BytesRefBuilder bytesRefBuilder = new BytesRefBuilder();
+          UnifiedHighlighter.EMPTY_INDEXSEARCHER
+              .createWeight(UnifiedHighlighter.EMPTY_INDEXSEARCHER.rewrite(q), ScoreMode.COMPLETE_NO_SCORES, 1f)
+              .extractTerms(new TreeSet<Term>() {
+            @Override
+            public boolean add(Term term) {
+              if (bytesRefBuilder.length() > 0) {
+                bytesRefBuilder.append((byte) ' ');
+              }
+              bytesRefBuilder.append(term.bytes());
+              return true;
+            }
+          });
+          if (bytesRefBuilder.length() > 0) {
+            return bytesRefBuilder.get();
+          }
+        } catch (IOException e) {//ignore
+          // go to fallback...
+        }
+
+        // fallback:  (likely a MultiTermQuery)
+        return new BytesRef(q.toString());
+      });
+    }
+

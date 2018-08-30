@@ -1,0 +1,54 @@
+  @Override
+  public Terms terms(String field) throws IOException {
+    if (!in2Field.equals(field)) {
+      return in.terms(field);
+    }
+
+    // Shifts leafReader in2 with only doc ID 0 to a target doc ID
+    final Terms terms = in2.terms(field);
+    if (terms == null) {
+      return null;
+    }
+    if (in2TargetDocId == 0) { // no doc ID remapping to do
+      return terms;
+    }
+    return new FilterTerms(terms) {
+      @Override
+      public TermsEnum iterator() throws IOException {
+        return filterTermsEnum(super.iterator());
+      }
+
+      @Override
+      public TermsEnum intersect(CompiledAutomaton compiled, BytesRef startTerm) throws IOException {
+        return filterTermsEnum(super.intersect(compiled, startTerm));
+      }
+
+      private TermsEnum filterTermsEnum(TermsEnum termsEnum) throws IOException {
+        return new FilterTermsEnum(termsEnum) {
+          @Override
+          public PostingsEnum postings(PostingsEnum reuse, int flags) throws IOException {
+            //TODO 'reuse' will always fail to reuse unless we unwrap it
+            return new FilterPostingsEnum(super.postings(reuse, flags)) {
+              @Override
+              public int nextDoc() throws IOException {
+                final int doc = super.nextDoc();
+                return doc == 0 ? in2TargetDocId : doc;
+              }
+
+              @Override
+              public int advance(int target) throws IOException {
+                return slowAdvance(target);
+              }
+
+              @Override
+              public int docID() {
+                final int doc = super.docID();
+                return doc == 0 ? in2TargetDocId : doc;
+              }
+            };
+          }
+        };
+      }
+    };
+  }
+

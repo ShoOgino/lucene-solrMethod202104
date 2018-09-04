@@ -1,0 +1,33 @@
+  private Suggester getNodeAddedSuggester(SolrCloudManager cloudManager, Policy.Session session, TriggerEvent event) throws IOException {
+    String preferredOp = (String) event.getProperty(AutoScalingParams.PREFERRED_OP, CollectionParams.CollectionAction.MOVEREPLICA.toLower());
+    CollectionParams.CollectionAction action = CollectionParams.CollectionAction.get(preferredOp);
+
+    Suggester suggester = session.getSuggester(action)
+        .hint(Suggester.Hint.TARGET_NODE, event.getProperty(TriggerEvent.NODE_NAMES));
+    switch (action) {
+      case ADDREPLICA:
+        // add all collection/shard pairs and let policy engine figure out which one
+        // to place on the target node
+        // todo in future we can prune ineligible collection/shard pairs
+        ClusterState clusterState = cloudManager.getClusterStateProvider().getClusterState();
+        Set<Pair<String, String>> collShards = new HashSet<>();
+        clusterState.getCollectionStates().forEach((collectionName, collectionRef) -> {
+          DocCollection docCollection = collectionRef.get();
+          if (docCollection != null)  {
+            docCollection.getActiveSlices().stream()
+                .map(slice -> new Pair<>(collectionName, slice.getName()))
+                .forEach(collShards::add);
+          }
+        });
+        suggester.hint(Suggester.Hint.COLL_SHARD, collShards);
+        break;
+      case MOVEREPLICA:
+      case NONE:
+        break;
+      default:
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
+            "Unsupported preferredOperation=" + preferredOp + " for node added event");
+    }
+    return suggester;
+  }
+

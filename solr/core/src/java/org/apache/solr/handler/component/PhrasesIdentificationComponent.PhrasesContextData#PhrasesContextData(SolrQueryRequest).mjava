@@ -1,0 +1,99 @@
+    private PhrasesContextData(final SolrQueryRequest req) throws SolrException {
+      final SolrParams params = req.getParams();
+
+      this.rawInput = params.get(PHRASE_INPUT, params.get(CommonParams.Q));
+      if (null == this.rawInput) {
+        throw new SolrException(ErrorCode.BAD_REQUEST, "phrase identification requires a query string or "
+                                + PHRASE_INPUT + " param override");
+      }
+
+      { // field weights & analysis field...
+        
+        SchemaField tmpAnalysisField = null;
+        Map<String,Double> tmpWeights = new TreeMap<>();
+        
+        final String analysisFieldName = params.get(PHRASE_ANALYSIS_FIELD);
+        if (null != analysisFieldName) {
+          tmpAnalysisField = req.getSchema().getFieldOrNull(analysisFieldName);
+          if (null == tmpAnalysisField) {
+            throw new SolrException(ErrorCode.BAD_REQUEST,
+                                    PHRASE_ANALYSIS_FIELD + " param specifies a field name that does not exist: " +
+                                    analysisFieldName);
+          }
+        }
+        
+        final Map<String,Float> rawFields = SolrPluginUtils.parseFieldBoosts(params.getParams(PHRASE_FIELDS));
+        if (rawFields.isEmpty()) {
+          throw new SolrException(ErrorCode.BAD_REQUEST,
+                                  PHRASE_FIELDS + " param must specify a (weighted) list of fields " +
+                                  "to evaluate for phrase identification");
+        }
+        
+        for (Map.Entry<String,Float> entry : rawFields.entrySet()) {
+          final SchemaField field = req.getSchema().getFieldOrNull(entry.getKey());
+          if (null == field) {
+          throw new SolrException(ErrorCode.BAD_REQUEST,
+                                  PHRASE_FIELDS + " param contains a field name that does not exist: " +
+                                  entry.getKey());
+          }
+          if (null == tmpAnalysisField) {
+            tmpAnalysisField = field;
+          }
+          if ( null == analysisFieldName ) {
+            if (! field.getType().equals(tmpAnalysisField.getType())) {
+              throw new SolrException
+                (ErrorCode.BAD_REQUEST,
+                 "All fields specified in " + PHRASE_FIELDS + " must have the same fieldType, " +
+                 "or the advanced " + PHRASE_ANALYSIS_FIELD + " option must specify an override");
+            }
+          }
+          // if a weight isn't specified, assume "1.0" 
+          final double weight = null == entry.getValue() ? 1.0D : entry.getValue();
+          if (weight < 0) {
+            throw new SolrException(ErrorCode.BAD_REQUEST,
+                                    PHRASE_FIELDS + " param must use non-negative weight value for field " + field.getName());
+          }
+          tmpWeights.put(entry.getKey(), weight);
+        }
+        assert null != tmpAnalysisField;
+        
+        this.analysisField = tmpAnalysisField;
+        this.fieldWeights = Collections.unmodifiableMap(tmpWeights);
+      }
+
+      { // index/query max phrase sizes...
+        final FieldType ft = analysisField.getType();
+        this.maxIndexedPositionLength = req.getParams().getInt(PHRASE_INDEX_MAXLEN,
+                                                               getMaxShingleSize(ft.getIndexAnalyzer()));
+        if (this.maxIndexedPositionLength < 0) {
+          throw new SolrException(ErrorCode.BAD_REQUEST,
+                                  "Unable to determine max position length of indexed phrases using " +
+                                  "index analyzer for analysis field: " + analysisField.getName() +
+                                  " and no override detected using param: " + PHRASE_INDEX_MAXLEN);
+        }
+        this.maxQueryPositionLength = req.getParams().getInt(PHRASE_QUERY_MAXLEN,
+                                                             getMaxShingleSize(ft.getQueryAnalyzer()));
+        if (this.maxQueryPositionLength < 0) {
+          throw new SolrException(ErrorCode.BAD_REQUEST,
+                                  "Unable to determine max position length of query phrases using " +
+                                  "query analyzer for analysis field: " + analysisField.getName() +
+                                  " and no override detected using param: " + PHRASE_QUERY_MAXLEN);
+        }
+        if (this.maxQueryPositionLength < this.maxIndexedPositionLength) {
+          throw new SolrException
+            (ErrorCode.BAD_REQUEST,
+             "Effective value of " + PHRASE_INDEX_MAXLEN + " (either from index analyzer shingle factory, " +
+             " or expert param override) must be less then or equal to the effective value of " +
+             PHRASE_QUERY_MAXLEN + " (either from query analyzer shingle factory, or expert param override)");
+        }
+      }
+      
+      this.summaryPre = params.get(PHRASE_SUMMARY_PRE, "{");
+      this.summaryPost = params.get(PHRASE_SUMMARY_POST, "}");
+
+      this.allPhrases = Phrase.extractPhrases(this.rawInput, this.analysisField,
+                                              this.maxIndexedPositionLength,
+                                              this.maxQueryPositionLength);
+        
+    }
+

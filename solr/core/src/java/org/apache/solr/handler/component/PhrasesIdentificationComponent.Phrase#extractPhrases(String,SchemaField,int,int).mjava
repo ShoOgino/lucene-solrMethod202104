@@ -1,0 +1,134 @@
+    /**
+     * Factory method for constructing a list of Phrases given the specified input and using the analyzer
+     * for the specified field.  The <code>maxIndexedPositionLength</code> and 
+     * <code>maxQueryPositionLength</code> provided *must* match the effective values used by 
+     * respective analyzers.
+     */
+    public static List<Phrase> extractPhrases(final String input, final SchemaField analysisField,
+                                              final int maxIndexedPositionLength,
+                                              final int maxQueryPositionLength) {
+
+      // TODO: rather then requiring the query analyzer to produce the Phrases for us (assuming Shingles)
+      // we could potentially just require that it produces unigrams compatible with the unigrams in the
+      // indexed fields, and then build our own Phrases at query time -- making the maxQueryPositionLength
+      // a 100% run time configuration option.
+      // But that could be tricky given an arbitrary analyzer -- we'd have pay careful attention
+      // to positions, and we'd have to guess/assume what placeholders/fillers was used in the indexed Phrases
+      // (typically shingles)
+
+      assert maxIndexedPositionLength <= maxQueryPositionLength;
+      
+      final CharsRefBuilder buffer = new CharsRefBuilder();
+      final FieldType ft = analysisField.getType();
+      final Analyzer analyzer = ft.getQueryAnalyzer();
+      final List<Phrase> results = new ArrayList<>(42);
+      try (TokenStream tokenStream = analyzer.tokenStream(analysisField.getName(), input)) {
+        
+        final OffsetAttribute offsetAttr = tokenStream.addAttribute(OffsetAttribute.class);
+        final PositionIncrementAttribute posIncAttr = tokenStream.addAttribute(PositionIncrementAttribute.class);
+        final PositionLengthAttribute posLenAttr = tokenStream.addAttribute(PositionLengthAttribute.class);
+        final TermToBytesRefAttribute termAttr = tokenStream.addAttribute(TermToBytesRefAttribute.class);
+        
+        int position = 0;
+        int lastPosLen = -1;
+        
+        tokenStream.reset();
+        while (tokenStream.incrementToken()) {
+          final Phrase phrase = new Phrase();
+
+          final int posInc = posIncAttr.getPositionIncrement();
+          final int posLen = posLenAttr.getPositionLength();
+
+          if (0 == posInc && posLen <= lastPosLen) {
+            // This requirement of analyzers to return tokens in ascending order of length
+            // is currently neccessary for the "linking" logic below to work
+            // if people run into real world sitautions where this is problematic,
+            // we can relax this check if we also make the linking logic more complex
+            // (ie: less optimzied)
+            throw new SolrException
+              (ErrorCode.BAD_REQUEST, "Phrase identification currently requires that " +
+               "the analyzer used must produce tokens that overlap in increasing order of length. ");
+          }
+          
+          position += posInc;
+          lastPosLen = posLen;
+          
+          phrase.position_start = position;
+          phrase.position_end = position + posLen;
+          
+          phrase.is_indexed = (posLen <= maxIndexedPositionLength);
+          
+          phrase.offset_start = offsetAttr.startOffset();
+          phrase.offset_end = offsetAttr.endOffset();
+
+          // populate the subsequence directly from the raw input using the offsets,
+          // (instead of using the TermToBytesRefAttribute) so we preserve the original
+          // casing, whitespace, etc...
+          phrase.subSequence = input.subSequence(phrase.offset_start, phrase.offset_end);
+          
+          if (phrase.is_indexed) {
+            // populate the bytes so we can build term queries
+            phrase.bytes = BytesRef.deepCopyOf(termAttr.getBytesRef());
+          }
+          
+          results.add(phrase);
+        }
+        tokenStream.end();
+      } catch (IOException e) {
+        throw new SolrException(ErrorCode.SERVER_ERROR,
+                                "Analysis error extracting phrases from: " + input, e); 
+      }
+      
+      // fill in the relationships of each phrase
+      //
+      // NOTE: this logic currently requries that the phrases are sorted by position ascending
+      // (automatic because of how PositionIncrementAttribute works) then by length ascending
+      // (when positions are tied).
+      // We could de-optimize this code if we find that secondary ordering is too restrictive for
+      // some analyzers
+      //
+      // NOTE changes to scoring model may be allow optimize/prune down the relationships tracked,
+      // ...OR.... may require us to add/track more details about sub/parent phrases
+      //
+      for (int p = 0; p < results.size(); p++) {
+        final Phrase current = results.get(p);
+        if (! current.is_indexed) {
+          // we're not an interesting sub phrase of anything
+          continue;
+        }
+        
+        // setup links from the phrase to itself if needed
+        addLinkages(current, current, maxIndexedPositionLength);
+        
+        // scan backwards looking for phrases that might include us...
+        BEFORE: for (int i = p-1; 0 <= i; i--) {
+          final Phrase previous = results.get(i);
+          if (previous.position_start < (current.position_end - maxQueryPositionLength)) {
+            // we've scanned so far back nothing else is viable
+            break BEFORE;
+          }
+          // any 'previous' phrases must start where current starts or earlier,
+          // so only need to check the end...
+          if (current.position_end <= previous.position_end) {
+            addLinkages(previous, current, maxIndexedPositionLength);
+          }
+        }
+        // scan forwards looking for phrases that might include us...
+        AFTER: for (int i = p+1; i < results.size(); i++) {
+          final Phrase next = results.get(i);
+          // the only way a phrase that comes after current can include current is
+          // if they have the same start position...
+          if (current.position_start != next.position_start) {
+            // we've scanned so far forward nothing else is viable
+            break AFTER;
+          }
+          // any 'next' phrases must start where current starts, so only need to check the end...
+          if (current.position_end <= next.position_end) {
+            addLinkages(next, current, maxIndexedPositionLength);
+          }
+        }
+      }
+      
+      return Collections.unmodifiableList(results);
+    }
+

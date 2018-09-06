@@ -1,0 +1,60 @@
+  /** 
+   * Helper method (suitable for both single node &amp; distributed coordinator node) to 
+   * score, sort, and format the end user response once all phrases have been populated with stats.
+   */
+  private void scoreAndAddResultsToResponse(final ResponseBuilder rb, final PhrasesContextData contextData) {
+    assert null != contextData : "Should not be called if no phrase data to use";
+    if (null == contextData) {
+      // if prepare didn't give us anything to work with, then we should do nothing
+      return;
+    }
+    
+    SimpleOrderedMap<Object> output = new SimpleOrderedMap<>();
+    rb.rsp.add("phrases", output);
+    output.add("input", contextData.rawInput);
+
+    if (0 == contextData.allPhrases.size()) {
+      // w/o any phrases, the summary is just the input again...
+      output.add("summary", contextData.rawInput);
+      output.add("details", Collections.<Object>emptyList());
+      return;
+    }
+    
+    Phrase.populateScores(contextData);
+    final int maxPosition = contextData.allPhrases.get(contextData.allPhrases.size()-1).getPositionEnd();
+    
+    final List<Phrase> validScoringPhrasesSorted = contextData.allPhrases.stream()
+      // TODO: ideally this cut off of "0.0" should be a request option...
+      // so users can tune how aggresive/conservative they want to be in finding phrases
+      // but for that to be useful, we need:
+      //  - more hard & fast documentation about the "range" of scores that may be returned
+      //  - "useful" scores for single words
+      .filter(p -> 0.0D < p.getTotalScore())
+      .sorted(Comparator.comparing((p -> p.getTotalScore()), Collections.reverseOrder()))
+      .collect(Collectors.toList());
+
+    // we want to return only high scoring phrases that don't overlap w/higher scoring phrase
+    final BitSet positionsCovered = new BitSet(maxPosition+1);
+    final List<Phrase> results = new ArrayList<>(maxPosition);
+    for (Phrase phrase : validScoringPhrasesSorted) {
+      final BitSet phrasePositions = phrase.getPositionsBitSet();
+      
+      if (! phrasePositions.intersects(positionsCovered)) {
+        // we can use this phrase, record it...
+        positionsCovered.or(phrasePositions);
+        results.add(phrase);
+      } // else: overlaps higher scoring position(s), skip this phrase
+      
+      if (positionsCovered.cardinality() == maxPosition+1) {
+        // all positions are covered, so we can bail out and skip the rest
+        break;
+      }
+    }
+    
+    // a "quick summary" of the suggested parsing
+    output.add("summary", contextData.summarize(results));
+    // useful user level info on every (high scoring) phrase found (in current, descending score, order)
+    output.add("details", results.stream()
+               .map(p -> p.getDetails()).collect(Collectors.toList()));
+  }
+

@@ -1,66 +1,27 @@
   @Override
   public void processAdd(AddUpdateCommand cmd) throws IOException {
-    SolrInputDocument solrInputDocument = cmd.getSolrInputDocument();
-    final Object routeValue = solrInputDocument.getFieldValue(timeRoutedAlias.getRouteField());
-    final Instant routeTimestamp = parseRouteKey(routeValue);
+    final Instant docTimestamp =
+        parseRouteKey(cmd.getSolrInputDocument().getFieldValue(timeRoutedAlias.getRouteField()));
 
+    // TODO: maybe in some cases the user would want to ignore/warn instead?
+    if (docTimestamp.isAfter(Instant.now().plusMillis(timeRoutedAlias.getMaxFutureMs()))) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+          "The document's time routed key of " + docTimestamp + " is too far in the future given " +
+              TimeRoutedAlias.ROUTER_MAX_FUTURE + "=" + timeRoutedAlias.getMaxFutureMs());
+    }
+
+    // to avoid potential for race conditions, this next method should not get called again unless
+    // we have created a collection synchronously
     updateParsedCollectionAliases();
-    String targetCollection;
-    do { // typically we don't loop; it's only when we need to create a collection
-      targetCollection = findTargetCollectionGivenTimestamp(routeTimestamp);
 
-      if (targetCollection == null) {
-        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
-            "Doc " + cmd.getPrintableId() + " couldn't be routed with " + timeRoutedAlias.getRouteField() + "=" + routeTimestamp);
-      }
-
-      // Note: the following rule is tempting but not necessary and is not compatible with
-      // only using this URP when the alias distrib phase is NONE; otherwise a doc may be routed to from a non-recent
-      // collection to the most recent only to then go there directly instead of realizing a new collection is needed.
-      //      // If it's going to some other collection (not "this") then break to just send it there
-      //      if (!thisCollection.equals(targetCollection)) {
-      //        break;
-      //      }
-      // Also tempting but not compatible:  check that we're the leader, if not then break
-
-      // If the doc goes to the most recent collection then do some checks below, otherwise break the loop.
-      final Instant mostRecentCollTimestamp = parsedCollectionsDesc.get(0).getKey();
-      final String mostRecentCollName = parsedCollectionsDesc.get(0).getValue();
-      if (!mostRecentCollName.equals(targetCollection)) {
-        break;
-      }
-
-      // Check the doc isn't too far in the future
-      final Instant maxFutureTime = Instant.now().plusMillis(timeRoutedAlias.getMaxFutureMs());
-      if (routeTimestamp.isAfter(maxFutureTime)) {
-        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
-            "The document's time routed key of " + routeValue + " is too far in the future given " +
-                TimeRoutedAlias.ROUTER_MAX_FUTURE + "=" + timeRoutedAlias.getMaxFutureMs());
-      }
-
-      // Create a new collection?
-      final Instant nextCollTimestamp = timeRoutedAlias.computeNextCollTimestamp(mostRecentCollTimestamp);
-      if (routeTimestamp.isBefore(nextCollTimestamp)) {
-        break; // thus we don't need another collection
-      }
-
-      createCollectionAfter(mostRecentCollName); // *should* throw if fails for some reason but...
-      final boolean updated = updateParsedCollectionAliases();
-      if (!updated) { // thus we didn't make progress...
-        // this is not expected, even in known failure cases, but we check just in case
-        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
-            "We need to create a new time routed collection but for unknown reasons were unable to do so.");
-      }
-      // then retry the loop ...
-    } while(true);
-    assert targetCollection != null;
+    String targetCollection = createCollectionsIfRequired(docTimestamp, cmd);
 
     if (thisCollection.equals(targetCollection)) {
       // pass on through; we've reached the right collection
       super.processAdd(cmd);
     } else {
       // send to the right collection
-      SolrCmdDistributor.Node targetLeaderNode = routeDocToSlice(targetCollection, solrInputDocument);
+      SolrCmdDistributor.Node targetLeaderNode = routeDocToSlice(targetCollection, cmd.getSolrInputDocument());
       cmdDistrib.distribAdd(cmd, Collections.singletonList(targetLeaderNode), new ModifiableSolrParams(outParamsToLeader));
     }
   }

@@ -1,0 +1,37 @@
+  List<Violation> testPerNode(Policy.Session session, double[] deviations) {
+    ComputedValueEvaluator eval = new ComputedValueEvaluator(session);
+    eval.collName = (String) collection.getValue();
+    Violation.Ctx ctx = new Violation.Ctx(this, session.matrix, eval);
+    Set<String> shards = getShardNames(session, eval);
+    for (String s : shards) {
+      final ReplicaCount replicaCount = new ReplicaCount();
+      eval.shardName = s;
+      for (Row row : session.matrix) {
+        replicaCount.reset();
+        eval.node = row.node;
+        Condition tag = this.tag;
+        if (tag.computedType != null) {
+          tag = evaluateValue(tag, eval);
+        }
+        if (!tag.isPass(row)) continue;
+        addReplicaCountsForNode(eval, replicaCount, row);
+        SealedClause sealedClause = this.getSealedClause(eval);
+        if (!sealedClause.replica.isPass(replicaCount)) {
+          ReplicaCount replicaCountCopy = replicaCount.copy();
+          Violation violation = new Violation(sealedClause,
+              eval.collName,
+              eval.shardName,
+              eval.node,
+              replicaCountCopy,
+              sealedClause.getReplica().replicaCountDelta(replicaCountCopy),
+              eval.node);
+          ctx.resetAndAddViolation(row.node, replicaCountCopy, violation);
+          sealedClause.addViolatingReplicas(sealedClause.tag, eval, ctx, NODE, row.node, violation, session);
+        } else {
+          computeDeviation(deviations, replicaCount, sealedClause);
+        }
+      }
+    }
+    return ctx.allViolations;
+  }
+

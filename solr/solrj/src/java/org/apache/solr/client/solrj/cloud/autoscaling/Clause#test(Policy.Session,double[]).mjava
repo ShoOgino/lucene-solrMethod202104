@@ -1,50 +1,24 @@
   public List<Violation> test(Policy.Session session, double[] deviations) {
-    ComputedValueEvaluator computedValueEvaluator = new ComputedValueEvaluator(session);
-    Violation.Ctx ctx = new Violation.Ctx(this, session.matrix, computedValueEvaluator);
     if (isPerCollectiontag()) {
-      Map<String, Map<String, Map<String, ReplicaCount>>> replicaCounts = computeReplicaCounts(session.matrix, computedValueEvaluator);
-      for (Map.Entry<String, Map<String, Map<String, ReplicaCount>>> e : replicaCounts.entrySet()) {
-        computedValueEvaluator.collName = e.getKey();
-        if (!collection.isPass(computedValueEvaluator.collName)) continue;
-        for (Map.Entry<String, Map<String, ReplicaCount>> shardVsCount : e.getValue().entrySet()) {
-          computedValueEvaluator.shardName = shardVsCount.getKey();
-          if (!shard.isPass(computedValueEvaluator.shardName)) continue;
-          for (Map.Entry<String, ReplicaCount> counts : shardVsCount.getValue().entrySet()) {
-            if (tag.varType.meta.isNodeSpecificVal()) computedValueEvaluator.node = counts.getKey();
-            SealedClause sealedClause = getSealedClause(computedValueEvaluator);
-            ReplicaCount replicas = counts.getValue();
-            if (!sealedClause.replica.isPass(replicas)) {
-              Violation violation = new Violation(sealedClause,
-                  computedValueEvaluator.collName,
-                  computedValueEvaluator.shardName,
-                  tag.varType.meta.isNodeSpecificVal() ? computedValueEvaluator.node : null,
-                  counts.getValue(),
-                  sealedClause.getReplica().delta(replicas),
-                  tag.varType.meta.isNodeSpecificVal() ? null : counts.getKey());
-              tag.varType.addViolatingReplicas(ctx.reset(counts.getKey(), replicas, violation));
-            } else {
-              if (deviations != null && sealedClause.replica.op == RANGE_EQUAL) {
-                Number actualCount = replicas.getVal(type);
-                Double realDelta = ((RangeVal) sealedClause.replica.val).realDelta(actualCount.doubleValue());
-                realDelta = this.isReplicaZero() ? -1 * realDelta : realDelta;
-                deviations[0] += Math.abs(realDelta);
-              }
-            }
-          }
-        }
-      }
+      return tag.varType == Type.NODE ||
+          (tag.varType.meta.isNodeSpecificVal() && replica.computedType == null) ?
+          testPerNode(session, deviations) :
+          testGroupNodes(session, deviations);
     } else {
+      ComputedValueEvaluator computedValueEvaluator = new ComputedValueEvaluator(session);
+      Violation.Ctx ctx = new Violation.Ctx(this, session.matrix, computedValueEvaluator);
       for (Row r : session.matrix) {
         computedValueEvaluator.node = r.node;
         SealedClause sealedClause = getSealedClause(computedValueEvaluator);
         if (!sealedClause.getGlobalTag().isPass(r)) {
-          sealedClause.getGlobalTag().varType.addViolatingReplicas(ctx.reset(null, null,
-              new Violation(sealedClause, null, null, r.node, r.getVal(sealedClause.globalTag.name),
-                  sealedClause.globalTag.delta(r.getVal(globalTag.name)), null)));
+          ctx.resetAndAddViolation(r.node, null, new Violation(sealedClause, null, null, r.node, r.getVal(sealedClause.globalTag.name),
+              sealedClause.globalTag.delta(r.getVal(globalTag.name)), r.node));
+          addViolatingReplicas(sealedClause.globalTag, computedValueEvaluator, ctx, Type.CORES.tagName, r.node, ctx.currentViolation, session);
+
         }
       }
-    }
-    return ctx.allViolations;
+      return ctx.allViolations;
 
+    }
   }
 

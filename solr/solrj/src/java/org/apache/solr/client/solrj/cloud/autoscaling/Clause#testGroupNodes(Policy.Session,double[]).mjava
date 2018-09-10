@@ -1,0 +1,62 @@
+  List<Violation> testGroupNodes(Policy.Session session, double[] deviations) {
+    //e.g:  {replica:'#EQUAL', shard:'#EACH',  sysprop.zone:'#EACH'}
+    ComputedValueEvaluator eval = new ComputedValueEvaluator(session);
+    eval.collName = (String) collection.getValue();
+    Violation.Ctx ctx = new Violation.Ctx(this, session.matrix, eval);
+
+    Set tags = new HashSet();
+    for (Row row : session.matrix) {
+      eval.node = row.node;
+      Condition tag = this.tag;
+      if (tag.computedType != null) tag = evaluateValue(tag, eval);
+      Object val = row.getVal(tag.name);
+      if (val != null && tag.isPass(val)) {
+        if (tag.op == LESS_THAN || tag.op == GREATER_THAN) {
+          tags.add(this.tag);
+        } else {
+          tags.add(val);
+        }
+      }
+    }
+    if (tags.isEmpty()) return Collections.emptyList();
+
+    Set<String> shards = getShardNames(session, eval);
+
+    for (String s : shards) {
+      final ReplicaCount replicaCount = new ReplicaCount();
+      eval.shardName = s;
+
+      for (Object t : tags) {
+        replicaCount.reset();
+        for (Row row : session.matrix) {
+          eval.node = row.node;
+          if (t instanceof Condition) {
+            Condition tag = (Condition) t;
+            if (tag.computedType != null) tag = evaluateValue(tag, eval);
+            if (!tag.isPass(row)) continue;
+          } else {
+            if (!t.equals(row.getVal(tag.name))) continue;
+          }
+          addReplicaCountsForNode(eval, replicaCount, row);
+        }
+
+        SealedClause sealedClause = this.getSealedClause(eval);
+        if (!sealedClause.replica.isPass(replicaCount)) {
+          ReplicaCount replicaCountCopy = replicaCount.copy();
+          Violation violation = new Violation(sealedClause,
+              eval.collName,
+              eval.shardName,
+              null,
+              replicaCountCopy,
+              sealedClause.getReplica().replicaCountDelta(replicaCountCopy),
+              t);
+          ctx.resetAndAddViolation(t, replicaCountCopy, violation);
+          sealedClause.addViolatingReplicas(sealedClause.tag, eval, ctx, tag.name, t, violation, session);
+        } else {
+          computeDeviation(deviations, replicaCount, sealedClause);
+        }
+      }
+    }
+    return ctx.allViolations;
+  }
+

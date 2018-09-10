@@ -1,14 +1,12 @@
   @Override
   public void getSuggestions(Suggestion.Ctx ctx) {
     if (ctx.violation == null) return;
-    if (ctx.violation.replicaCountDelta < 0 && !ctx.violation.getViolatingReplicas().isEmpty()) {
-
-      Comparator<Row> rowComparator = Comparator.comparing(r -> ((Double) r.getVal(ImplicitSnitch.DISK, 0d)));
+    if (ctx.violation.replicaCountDelta > 0) {
       List<Row> matchingNodes = ctx.session.matrix.stream().filter(
           row -> ctx.violation.getViolatingReplicas()
               .stream()
               .anyMatch(p -> row.node.equals(p.replicaInfo.getNode())))
-          .sorted(rowComparator)
+          .sorted(Comparator.comparing(r -> ((Double) r.getVal(ImplicitSnitch.DISK, 0d))))
           .collect(Collectors.toList());
 
 
@@ -27,13 +25,15 @@
           if (currentDelta < 1) break;
           if (replica.getVariables().get(CORE_IDX.tagName) == null) continue;
           Suggester suggester = ctx.session.getSuggester(MOVEREPLICA)
-              .hint(Suggester.Hint.COLL_SHARD, new Pair<>(replica.getCollection(), replica.getShard()))
-              .hint(Suggester.Hint.SRC_NODE, node.node)
+              .hint(Hint.COLL_SHARD, new Pair<>(replica.getCollection(), replica.getShard()))
+              .hint(Hint.SRC_NODE, node.node)
               .forceOperation(true);
           if (ctx.addSuggestion(suggester) == null) break;
           currentDelta -= Clause.parseLong(CORE_IDX.tagName, replica.getVariable(CORE_IDX.tagName));
         }
       }
+    } else if (ctx.violation.replicaCountDelta < 0) {
+      suggestNegativeViolations(ctx, shards -> getSortedShards(ctx,shards));
     }
   }
 

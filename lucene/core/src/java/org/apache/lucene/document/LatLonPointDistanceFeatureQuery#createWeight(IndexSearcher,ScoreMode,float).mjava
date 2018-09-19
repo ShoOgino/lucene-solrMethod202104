@@ -1,0 +1,138 @@
+  @Override
+  public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
+    return new Weight(this) {
+
+      @Override
+      public boolean isCacheable(LeafReaderContext ctx) {
+        return false;
+      }
+
+      @Override
+      public void extractTerms(Set<Term> terms) {}
+
+      @Override
+      public Explanation explain(LeafReaderContext context, int doc) throws IOException {
+        SortedNumericDocValues multiDocValues = DocValues.getSortedNumeric(context.reader(), field);
+        if (multiDocValues.advanceExact(doc) == false) {
+          return Explanation.noMatch("Document " + doc + " doesn't have a value for field " + field);
+        }
+        long encoded = selectValue(multiDocValues);
+        int latitudeBits = (int)(encoded >> 32);
+        int longitudeBits = (int)(encoded & 0xFFFFFFFF);
+        double lat = GeoEncodingUtils.decodeLatitude(latitudeBits);
+        double lon = GeoEncodingUtils.decodeLongitude(longitudeBits);
+        double distance = SloppyMath.haversinMeters(originLat, originLon, lat, lon);
+        float score = (float) (boost * (pivotDistance / (pivotDistance + distance)));
+        return Explanation.match(score, "Distance score, computed as weight * pivotDistance / (pivotDistance + abs(distance)) from:",
+            Explanation.match(boost, "weight"),
+            Explanation.match(pivotDistance, "pivotDistance"),
+            Explanation.match(originLat, "originLat"),
+            Explanation.match(originLon, "originLon"),
+            Explanation.match(lat, "current lat"),
+            Explanation.match(lon, "current lon"),
+            Explanation.match(distance, "distance"));
+      }
+
+      private long selectValue(SortedNumericDocValues multiDocValues) throws IOException {
+        int count = multiDocValues.docValueCount();
+        long value = multiDocValues.nextValue();
+        if (count == 1) {
+          return value;
+        }
+        // compute exact sort key: avoid any asin() computations
+        double distance = getDistanceKeyFromEncoded(value);
+        for (int i = 1; i < count; ++i) {
+          long nextValue = multiDocValues.nextValue();
+          double nextDistance = getDistanceKeyFromEncoded(nextValue);
+          if (nextDistance < distance) {
+            distance = nextDistance;
+            value = nextValue;
+          }
+        }
+        return value;
+      }
+
+      private NumericDocValues selectValues(SortedNumericDocValues multiDocValues) {
+        final NumericDocValues singleton = DocValues.unwrapSingleton(multiDocValues);
+        if (singleton != null) {
+          return singleton;
+        }
+        return  new NumericDocValues() {
+
+          long value;
+
+          @Override
+          public long longValue() throws IOException {
+            return value;
+          }
+
+          @Override
+          public boolean advanceExact(int target) throws IOException {
+            if (multiDocValues.advanceExact(target)) {
+              value = selectValue(multiDocValues);
+              return true;
+            } else {
+              return false;
+            }
+          }
+
+          @Override
+          public int docID() {
+            return multiDocValues.docID();
+          }
+
+          @Override
+          public int nextDoc() throws IOException {
+            return multiDocValues.nextDoc();
+          }
+
+          @Override
+          public int advance(int target) throws IOException {
+            return multiDocValues.advance(target);
+          }
+
+          @Override
+          public long cost() {
+            return multiDocValues.cost();
+          }
+
+        };
+      }
+
+      @Override
+      public ScorerSupplier scorerSupplier(LeafReaderContext context) throws IOException {
+        PointValues pointValues = context.reader().getPointValues(field);
+        if (pointValues == null) {
+          // No data on this segment
+          return null;
+        }
+        final SortedNumericDocValues multiDocValues = DocValues.getSortedNumeric(context.reader(), field);
+        final NumericDocValues docValues = selectValues(multiDocValues);
+
+        final Weight weight = this;
+        return new ScorerSupplier() {
+
+          @Override
+          public Scorer get(long leadCost) throws IOException {
+            return new DistanceScorer(weight, context.reader().maxDoc(), leadCost, boost, pointValues, docValues);
+          }
+
+          @Override
+          public long cost() {
+            return docValues.cost();
+          }
+        };
+      }
+
+      @Override
+      public Scorer scorer(LeafReaderContext context) throws IOException {
+        ScorerSupplier scorerSupplier = scorerSupplier(context);
+        if (scorerSupplier == null) {
+          return null;
+        }
+        return scorerSupplier.get(Long.MAX_VALUE);
+      }
+
+    };
+  }
+

@@ -10,65 +10,59 @@
 
     DocCollection collection = clusterState.getCollection(collectionName);
 
-    ZkStateReader zkStateReader = ocmh.zkStateReader;
-    AtomicReference<PolicyHelper.SessionWrapper> sessionWrapper = new AtomicReference<>();
-    SolrCloseableLatch countDownLatch;
-    try {
-      List<ReplicaPosition> positions = buildReplicaPositions(ocmh.cloudManager, clusterState, collectionName, message, sessionWrapper);
-      Overseer.getStateUpdateQueue(zkStateReader.getZkClient()).offer(Utils.toJSON(message));
-      // wait for a while until we see the shard
-      ocmh.waitForNewShard(collectionName, sliceName);
+    int numNrtReplicas = message.getInt(NRT_REPLICAS, message.getInt(REPLICATION_FACTOR, collection.getInt(NRT_REPLICAS, collection.getInt(REPLICATION_FACTOR, 1))));
+    int numPullReplicas = message.getInt(PULL_REPLICAS, collection.getInt(PULL_REPLICAS, 0));
+    int numTlogReplicas = message.getInt(TLOG_REPLICAS, collection.getInt(TLOG_REPLICAS, 0));
 
-      String async = message.getStr(ASYNC);
-      countDownLatch = new SolrCloseableLatch(positions.size(), ocmh);
-      for (ReplicaPosition position : positions) {
-        String nodeName = position.node;
-        String coreName = Assign.buildSolrCoreName(ocmh.cloudManager.getDistribStateManager(), collection, sliceName, position.type);
-        log.info("Creating replica " + coreName + " as part of slice " + sliceName + " of collection " + collectionName
-            + " on " + nodeName);
-
-        // Need to create new params for each request
-        ZkNodeProps addReplicasProps = new ZkNodeProps(
-            COLLECTION_PROP, collectionName,
-            SHARD_ID_PROP, sliceName,
-            ZkStateReader.REPLICA_TYPE, position.type.name(),
-            CoreAdminParams.NODE, nodeName,
-            CoreAdminParams.NAME, coreName,
-            CommonAdminParams.WAIT_FOR_FINAL_STATE, Boolean.toString(waitForFinalState));
-        Map<String, Object> propertyParams = new HashMap<>();
-        ocmh.addPropertyParams(message, propertyParams);
-        addReplicasProps = addReplicasProps.plus(propertyParams);
-        if (async != null) addReplicasProps.getProperties().put(ASYNC, async);
-        final NamedList addResult = new NamedList();
-        ocmh.addReplica(zkStateReader.getClusterState(), addReplicasProps, addResult, () -> {
-          countDownLatch.countDown();
-          Object addResultFailure = addResult.get("failure");
-          if (addResultFailure != null) {
-            SimpleOrderedMap failure = (SimpleOrderedMap) results.get("failure");
-            if (failure == null) {
-              failure = new SimpleOrderedMap();
-              results.add("failure", failure);
-            }
-            failure.addAll((NamedList) addResultFailure);
-          } else {
-            SimpleOrderedMap success = (SimpleOrderedMap) results.get("success");
-            if (success == null) {
-              success = new SimpleOrderedMap();
-              results.add("success", success);
-            }
-            success.addAll((NamedList) addResult.get("success"));
-          }
-        });
-      }
-    } finally {
-      if (sessionWrapper.get() != null) sessionWrapper.get().release();
+    if (numNrtReplicas + numTlogReplicas <= 0) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, NRT_REPLICAS + " + " + TLOG_REPLICAS + " must be greater than 0");
     }
 
-    log.debug("Waiting for create shard action to complete");
-    countDownLatch.await(5, TimeUnit.MINUTES);
-    log.debug("Finished waiting for create shard action to complete");
+    ZkStateReader zkStateReader = ocmh.zkStateReader;
+    Overseer.getStateUpdateQueue(zkStateReader.getZkClient()).offer(Utils.toJSON(message));
+    // wait for a while until we see the shard
+    ocmh.waitForNewShard(collectionName, sliceName);
+    String async = message.getStr(ASYNC);
+    ZkNodeProps addReplicasProps = new ZkNodeProps(
+        COLLECTION_PROP, collectionName,
+        SHARD_ID_PROP, sliceName,
+        ZkStateReader.NRT_REPLICAS, String.valueOf(numNrtReplicas),
+        ZkStateReader.TLOG_REPLICAS, String.valueOf(numTlogReplicas),
+        ZkStateReader.PULL_REPLICAS, String.valueOf(numPullReplicas),
+        OverseerCollectionMessageHandler.CREATE_NODE_SET, message.getStr(OverseerCollectionMessageHandler.CREATE_NODE_SET),
+        CommonAdminParams.WAIT_FOR_FINAL_STATE, Boolean.toString(waitForFinalState));
+
+    Map<String, Object> propertyParams = new HashMap<>();
+    ocmh.addPropertyParams(message, propertyParams);
+    addReplicasProps = addReplicasProps.plus(propertyParams);
+    if (async != null) addReplicasProps.getProperties().put(ASYNC, async);
+    final NamedList addResult = new NamedList();
+    try {
+      ocmh.addReplica(zkStateReader.getClusterState(), addReplicasProps, addResult, () -> {
+        Object addResultFailure = addResult.get("failure");
+        if (addResultFailure != null) {
+          SimpleOrderedMap failure = (SimpleOrderedMap) results.get("failure");
+          if (failure == null) {
+            failure = new SimpleOrderedMap();
+            results.add("failure", failure);
+          }
+          failure.addAll((NamedList) addResultFailure);
+        } else {
+          SimpleOrderedMap success = (SimpleOrderedMap) results.get("success");
+          if (success == null) {
+            success = new SimpleOrderedMap();
+            results.add("success", success);
+          }
+          success.addAll((NamedList) addResult.get("success"));
+        }
+      });
+    } catch (Assign.AssignmentException e) {
+      // clean up the slice that we created
+      ZkNodeProps deleteShard = new ZkNodeProps(COLLECTION_PROP, collectionName, SHARD_ID_PROP, sliceName, ASYNC, async);
+      new DeleteShardCmd(ocmh).call(clusterState, deleteShard, results);
+      throw e;
+    }
 
     log.info("Finished create command on all shards for collection: " + collectionName);
-
   }
 

@@ -1,0 +1,59 @@
+  @Test
+  public void testAddMultipleReplicas() throws Exception  {
+    cluster.waitForAllNodes(5);
+    String collection = "testAddMultipleReplicas";
+    CloudSolrClient cloudClient = cluster.getSolrClient();
+
+    CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(collection, "conf1", 1, 1);
+    create.setMaxShardsPerNode(2);
+    cloudClient.request(create);
+
+    CollectionAdminRequest.AddReplica addReplica = CollectionAdminRequest.addReplicaToShard(collection, "shard1")
+        .setNrtReplicas(1)
+        .setTlogReplicas(1)
+        .setPullReplicas(1);
+    RequestStatusState status = addReplica.processAndWait(collection + "_xyz1", cloudClient, 120);
+    assertEquals(COMPLETED, status);
+    DocCollection docCollection = cloudClient.getZkStateReader().getClusterState().getCollectionOrNull(collection);
+    assertNotNull(docCollection);
+    assertEquals(4, docCollection.getReplicas().size());
+    assertEquals(2, docCollection.getReplicas(EnumSet.of(Replica.Type.NRT)).size());
+    assertEquals(1, docCollection.getReplicas(EnumSet.of(Replica.Type.TLOG)).size());
+    assertEquals(1, docCollection.getReplicas(EnumSet.of(Replica.Type.PULL)).size());
+
+    // try to add 5 more replicas which should fail because numNodes(4)*maxShardsPerNode(2)=8 and 4 replicas already exist
+    addReplica = CollectionAdminRequest.addReplicaToShard(collection, "shard1")
+        .setNrtReplicas(3)
+        .setTlogReplicas(1)
+        .setPullReplicas(1);
+    status = addReplica.processAndWait(collection + "_xyz1", cloudClient, 120);
+    assertEquals(FAILED, status);
+    docCollection = cloudClient.getZkStateReader().getClusterState().getCollectionOrNull(collection);
+    assertNotNull(docCollection);
+    // sanity check that everything is as before
+    assertEquals(4, docCollection.getReplicas().size());
+    assertEquals(2, docCollection.getReplicas(EnumSet.of(Replica.Type.NRT)).size());
+    assertEquals(1, docCollection.getReplicas(EnumSet.of(Replica.Type.TLOG)).size());
+    assertEquals(1, docCollection.getReplicas(EnumSet.of(Replica.Type.PULL)).size());
+
+    // but adding any number of replicas is supported if an explicit create node set is specified
+    // so test that as well
+    List<String> createNodeSet = new ArrayList<>(2);
+    createNodeSet.add(cluster.getRandomJetty(random()).getNodeName());
+    createNodeSet.add(cluster.getRandomJetty(random()).getNodeName());
+    addReplica = CollectionAdminRequest.addReplicaToShard(collection, "shard1")
+        .setNrtReplicas(3)
+        .setTlogReplicas(1)
+        .setPullReplicas(1)
+        .setCreateNodeSet(String.join(",", createNodeSet));
+    status = addReplica.processAndWait(collection + "_xyz1", cloudClient, 120);
+    assertEquals(COMPLETED, status);
+    docCollection = cloudClient.getZkStateReader().getClusterState().getCollectionOrNull(collection);
+    assertNotNull(docCollection);
+    // sanity check that everything is as before
+    assertEquals(9, docCollection.getReplicas().size());
+    assertEquals(5, docCollection.getReplicas(EnumSet.of(Replica.Type.NRT)).size());
+    assertEquals(2, docCollection.getReplicas(EnumSet.of(Replica.Type.TLOG)).size());
+    assertEquals(2, docCollection.getReplicas(EnumSet.of(Replica.Type.PULL)).size());
+  }
+

@@ -1,0 +1,23 @@
+  private static void suggestOptimizations(Suggestion.Ctx ctx) {
+    List<Row> matrix = ctx.session.matrix;
+    if (matrix.isEmpty()) return;
+    for (int i = 0; i < matrix.size(); i++) {
+      Row row = matrix.get(i);
+      Map<String, Collection<String>> collVsShards = new HashMap<>();
+      row.forEachReplica(ri -> collVsShards.computeIfAbsent(ri.getCollection(), s -> new HashSet<>()).add(ri.getShard()));
+      for (Map.Entry<String, Collection<String>> e : collVsShards.entrySet()) {
+        e.setValue(FreeDiskVariable.getSortedShards(Collections.singletonList(row), e.getValue(), e.getKey()));
+      }
+      for (Map.Entry<String, Collection<String>> e : collVsShards.entrySet()) {
+        if (!ctx.needMore()) break;
+        for (String shard : e.getValue()) {
+          if (!ctx.needMore()) break;
+          Suggester suggester = ctx.session.getSuggester(MOVEREPLICA)
+              .hint(Hint.COLL_SHARD, new Pair<>(e.getKey(), shard))
+              .hint(Hint.SRC_NODE, row.node);
+          ctx.addSuggestion(suggester);
+        }
+      }
+    }
+  }
+

@@ -14,12 +14,24 @@
     sliceName.set(message.getStr(SHARD_ID_PROP));
     String splitKey = message.getStr("split.key");
 
-    // always invalidate cached collection states to get up-to-date metrics
-    collectionsStatesRef.set(null);
-
     ClusterState clusterState = getClusterState();
     DocCollection collection = clusterState.getCollection(collectionName);
     Slice parentSlice = SplitShardCmd.getParentSlice(clusterState, collectionName, sliceName, splitKey);
+    Replica leader = parentSlice.getLeader();
+    // XXX leader election may not have happened yet - should we require it?
+    if (leader == null) {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Shard " + collectionName +
+          " /  " + sliceName.get() + " has no leader and can't be split");
+    }
+    // start counting buffered updates
+    Map<String, Object> props = sliceProperties.computeIfAbsent(collectionName, c -> new ConcurrentHashMap<>())
+        .computeIfAbsent(sliceName.get(), ss -> new ConcurrentHashMap<>());
+    if (props.containsKey(BUFFERED_UPDATES)) {
+      log.debug("--- SOLR-12729: Overlapping splitShard commands for {} / {}", collectionName, sliceName.get());
+      return;
+    }
+    props.put(BUFFERED_UPDATES, new AtomicLong());
+
     List<DocRouter.Range> subRanges = new ArrayList<>();
     List<String> subSlices = new ArrayList<>();
     List<String> subShardNames = new ArrayList<>();
@@ -45,12 +57,7 @@
     if (sessionWrapper != null) sessionWrapper.release();
 
     // adjust numDocs / deletedDocs / maxDoc
-    Replica leader = parentSlice.getLeader();
-    // XXX leader election may not have happened yet - should we require it?
-    if (leader == null) {
-      leader = parentSlice.getReplicas().iterator().next();
-    }
-    String numDocsStr = leader.getStr("SEARCHER.searcher.numDocs", "0");
+    String numDocsStr = String.valueOf(getReplicaInfo(leader).getVariable("SEARCHER.searcher.numDocs", "0"));
     long numDocs = Long.parseLong(numDocsStr);
     long newNumDocs = numDocs / subSlices.size();
     long remainderDocs = numDocs % subSlices.size();
@@ -58,10 +65,23 @@
     long remainderIndexSize = SimCloudManager.DEFAULT_IDX_SIZE_BYTES + remainderDocs * DEFAULT_DOC_SIZE_BYTES;
     String remainderSlice = null;
 
+    // add slice props
+    for (int i = 0; i < subRanges.size(); i++) {
+      String subSlice = subSlices.get(i);
+      DocRouter.Range range = subRanges.get(i);
+      Map<String, Object> sliceProps = sliceProperties.computeIfAbsent(collectionName, c -> new ConcurrentHashMap<>())
+          .computeIfAbsent(subSlice, ss -> new ConcurrentHashMap<>());
+      sliceProps.put(Slice.RANGE, range);
+      sliceProps.put(Slice.PARENT, sliceName.get());
+      sliceProps.put(ZkStateReader.STATE_PROP, Slice.State.CONSTRUCTION.toString());
+      sliceProps.put(ZkStateReader.STATE_TIMESTAMP_PROP, String.valueOf(cloudManager.getTimeSource().getEpochTimeNs()));
+    }
+    // add replicas
     for (ReplicaPosition replicaPosition : replicaPositions) {
       String subSliceName = replicaPosition.shard;
       String subShardNodeName = replicaPosition.node;
-      String solrCoreName = collectionName + "_" + subSliceName + "_replica" + (replicaPosition.index);
+//      String solrCoreName = collectionName + "_" + subSliceName + "_replica_n" + (replicaPosition.index);
+      String solrCoreName = Assign.buildSolrCoreName(collectionName, subSliceName, replicaPosition.type, Assign.incAndGetId(stateManager, collectionName, 0));
       Map<String, Object> replicaProps = new HashMap<>();
       replicaProps.put(ZkStateReader.SHARD_ID_PROP, replicaPosition.shard);
       replicaProps.put(ZkStateReader.NODE_NAME_PROP, replicaPosition.node);
@@ -77,43 +97,75 @@
         replicasNumDocs += remainderDocs;
         replicasIndexSize += remainderIndexSize;
       }
-      replicaProps.put("SEARCHER.searcher.numDocs", replicasNumDocs);
-      replicaProps.put("SEARCHER.searcher.maxDoc", replicasNumDocs);
-      replicaProps.put("SEARCHER.searcher.deletedDocs", 0);
-      replicaProps.put(Type.CORE_IDX.metricsAttribute, replicasIndexSize);
-      replicaProps.put(Variable.coreidxsize, Type.CORE_IDX.convertVal(replicasIndexSize));
+      replicaProps.put("SEARCHER.searcher.numDocs", new AtomicLong(replicasNumDocs));
+      replicaProps.put("SEARCHER.searcher.maxDoc", new AtomicLong(replicasNumDocs));
+      replicaProps.put("SEARCHER.searcher.deletedDocs", new AtomicLong(0));
+      replicaProps.put(Type.CORE_IDX.metricsAttribute, new AtomicLong(replicasIndexSize));
+      replicaProps.put(Variable.coreidxsize, new AtomicDouble((Double)Type.CORE_IDX.convertVal(replicasIndexSize)));
 
       ReplicaInfo ri = new ReplicaInfo("core_node" + Assign.incAndGetId(stateManager, collectionName, 0),
           solrCoreName, collectionName, replicaPosition.shard, replicaPosition.type, subShardNodeName, replicaProps);
       simAddReplica(replicaPosition.node, ri, false);
     }
-    // mark the old slice as inactive
+    simRunLeaderElection(Collections.singleton(collectionName), true);
+
+    // delay it once again to better simulate replica recoveries
+    //opDelay(collectionName, CollectionParams.CollectionAction.SPLITSHARD.name());
+
+    CloudTestUtils.waitForState(cloudManager, collectionName, 30, TimeUnit.SECONDS, (liveNodes, state) -> {
+      for (String subSlice : subSlices) {
+        Slice s = state.getSlice(subSlice);
+        if (s.getLeader() == null) {
+          log.debug("** no leader in {} / {}", collectionName, s);
+          return false;
+        }
+        if (s.getReplicas().size() < repFactor) {
+          log.debug("** expected {} repFactor but there are {} replicas", repFactor, s.getReplicas().size());
+          return false;
+        }
+      }
+      return true;
+    });
+    // mark the new slices as active and the old slice as inactive
+    log.trace("-- switching slice states after split shard: collection={}, parent={}, subSlices={}", collectionName,
+        sliceName.get(), subSlices);
     lock.lockInterruptibly();
     try {
-      Map<String, Object> props = sliceProperties.computeIfAbsent(collectionName, c -> new ConcurrentHashMap<>())
+      Map<String, Object> sProps = sliceProperties.computeIfAbsent(collectionName, c -> new ConcurrentHashMap<>())
           .computeIfAbsent(sliceName.get(), s -> new ConcurrentHashMap<>());
-      props.put(ZkStateReader.STATE_PROP, Slice.State.INACTIVE.toString());
-      props.put(ZkStateReader.STATE_TIMESTAMP_PROP, String.valueOf(cloudManager.getTimeSource().getEpochTimeNs()));
+      sProps.put(ZkStateReader.STATE_PROP, Slice.State.INACTIVE.toString());
+      sProps.put(ZkStateReader.STATE_TIMESTAMP_PROP, String.valueOf(cloudManager.getTimeSource().getEpochTimeNs()));
+      AtomicLong bufferedUpdates = (AtomicLong)sProps.remove(BUFFERED_UPDATES);
+      if (bufferedUpdates.get() > 0) {
+        // apply buffered updates
+        long perShard = bufferedUpdates.get() / subSlices.size();
+        long remainder = bufferedUpdates.get() % subSlices.size();
+        log.debug("-- applying {} buffered docs from {} / {}, perShard={}, remainder={}", bufferedUpdates.get(),
+            collectionName, parentSlice.getName(), perShard, remainder);
+        for (int i = 0; i < subSlices.size(); i++) {
+          String sub = subSlices.get(i);
+          long numUpdates = perShard;
+          if (i == 0) {
+            numUpdates += remainder;
+          }
+          simSetShardValue(collectionName, sub, "SEARCHER.searcher.numDocs", numUpdates, true, false);
+          simSetShardValue(collectionName, sub, "SEARCHER.searcher.maxDoc", numUpdates, true, false);
+        }
+      }
       // XXX also mark replicas as down? currently SplitShardCmd doesn't do this
+
+      for (String s : subSlices) {
+        Map<String, Object> sliceProps = sliceProperties.computeIfAbsent(collectionName, c -> new ConcurrentHashMap<>())
+            .computeIfAbsent(s, ss -> new ConcurrentHashMap<>());
+        sliceProps.put(ZkStateReader.STATE_PROP, Slice.State.ACTIVE.toString());
+        sliceProps.put(ZkStateReader.STATE_TIMESTAMP_PROP, String.valueOf(cloudManager.getTimeSource().getEpochTimeNs()));
+      }
 
       // invalidate cached state
       collectionsStatesRef.set(null);
     } finally {
       lock.unlock();
     }
-    // add slice props
-    for (int i = 0; i < subRanges.size(); i++) {
-      String subSlice = subSlices.get(i);
-      DocRouter.Range range = subRanges.get(i);
-      Map<String, Object> sliceProps = sliceProperties.computeIfAbsent(collectionName, c -> new ConcurrentHashMap<>())
-          .computeIfAbsent(subSlice, ss -> new ConcurrentHashMap<>());
-      sliceProps.put(Slice.RANGE, range);
-      sliceProps.put(Slice.PARENT, sliceName.get());
-      sliceProps.put(ZkStateReader.STATE_PROP, Slice.State.ACTIVE.toString());
-      sliceProps.put(ZkStateReader.STATE_TIMESTAMP_PROP, String.valueOf(cloudManager.getTimeSource().getEpochTimeNs()));
-    }
-    collectionsStatesRef.set(null);
-    simRunLeaderElection(Collections.singleton(collectionName), true);
     results.add("success", "");
 
   }

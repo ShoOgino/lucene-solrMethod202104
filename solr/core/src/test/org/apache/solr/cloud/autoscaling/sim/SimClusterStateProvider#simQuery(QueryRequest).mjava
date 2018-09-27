@@ -1,0 +1,35 @@
+  public QueryResponse simQuery(QueryRequest req) throws SolrException, InterruptedException, IOException {
+    ensureNotClosed();
+    String collection = req.getCollection();
+    if (collection == null) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Collection not set");
+    }
+    if (!colShardReplicaMap.containsKey(collection)) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Collection does not exist");
+    }
+    String query = req.getParams().get(CommonParams.Q);
+    if (query == null || !query.equals("*:*")) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Only '*:*' query is supported");
+    }
+    ClusterState clusterState = getClusterState();
+    DocCollection coll = clusterState.getCollection(collection);
+    AtomicLong count = new AtomicLong();
+    for (Slice s : coll.getActiveSlicesArr()) {
+      Replica r = s.getLeader();
+      if (r == null) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, collection + "/" + s.getName() + " has no leader");
+      }
+      ReplicaInfo ri = getReplicaInfo(r);
+      Number numDocs = (Number)ri.getVariable("SEARCHER.searcher.numDocs", 0L);
+      count.addAndGet(numDocs.longValue());
+    }
+    QueryResponse rsp = new QueryResponse();
+    NamedList<Object> values = new NamedList<>();
+    values.add("responseHeader", new NamedList<>());
+    SolrDocumentList docs = new SolrDocumentList();
+    docs.setNumFound(count.get());
+    values.add("response", docs);
+    rsp.setResponse(values);
+    return rsp;
+  }
+

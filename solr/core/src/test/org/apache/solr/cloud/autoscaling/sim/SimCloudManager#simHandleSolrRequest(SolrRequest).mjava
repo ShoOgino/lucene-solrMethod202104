@@ -65,6 +65,9 @@
         rsp.setResponse(queryResponse.getValues());
         log.trace("-- response: {}", rsp);
         return rsp;
+      } else if (req instanceof QueryRequest) {
+        incrementCount("query");
+        return clusterStateProvider.simQuery((QueryRequest)req);
       }
     }
     if (req instanceof UpdateRequest) {
@@ -75,7 +78,17 @@
       if (collection == null || collection.equals(CollectionAdminParams.SYSTEM_COLL)) {
         List<SolrInputDocument> docs = ureq.getDocuments();
         if (docs != null) {
-          systemColl.addAll(docs);
+          if (useSystemCollection) {
+            systemColl.addAll(docs);
+          }
+          for (SolrInputDocument d : docs) {
+            if (!"autoscaling_event".equals(d.getFieldValue("type"))) {
+              continue;
+            }
+            eventCounts.computeIfAbsent((String)d.getFieldValue("event.source_s"), s -> new TreeMap<>())
+                .computeIfAbsent((String)d.getFieldValue("stage_s"), s -> new AtomicInteger())
+                .incrementAndGet();
+          }
         }
         return new UpdateResponse();
       } else {

@@ -10,17 +10,15 @@
    *               divided by the number of replicas.
    */
   public void simSetShardValue(String collection, String shard, String key, Object value, boolean delta, boolean divide) throws Exception {
-    List<ReplicaInfo> infos = new ArrayList<>();
-    nodeReplicaMap.forEach((n, replicas) -> {
-      replicas.forEach(r -> {
-        if (r.getCollection().equals(collection)) {
-          if (shard != null && !shard.equals(r.getShard())) {
-            return;
-          }
-          infos.add(r);
-        }
-      });
-    });
+    final List<ReplicaInfo> infos;
+    if (shard == null) {
+      infos = new ArrayList<>();
+      colShardReplicaMap.computeIfAbsent(collection, c -> new ConcurrentHashMap<>())
+        .forEach((sh, replicas) -> infos.addAll(replicas));
+    } else {
+      infos = colShardReplicaMap.computeIfAbsent(collection, c -> new ConcurrentHashMap<>())
+          .computeIfAbsent(shard, s -> new ArrayList<>());
+    }
     if (infos.isEmpty()) {
       throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Collection " + collection + " doesn't exist (shard=" + shard + ").");
     }
@@ -40,22 +38,50 @@
             Object prevValue = r.getVariables().get(key);
             if (prevValue != null) {
               if ((prevValue instanceof Number) && (value instanceof Number)) {
-                if (((prevValue instanceof Long) || (prevValue instanceof Integer)) &&
+                if (((prevValue instanceof Long) || (prevValue instanceof Integer) ||
+                    (prevValue instanceof AtomicLong) || (prevValue instanceof AtomicInteger)) &&
                     ((value instanceof Long) || (value instanceof Integer))) {
-                  Long newValue = ((Number)prevValue).longValue() + ((Number)value).longValue();
-                  r.getVariables().put(key, newValue);
+                  long newValue = ((Number)prevValue).longValue() + ((Number)value).longValue();
+                  // minimize object allocations
+                  if (prevValue instanceof AtomicLong) {
+                    ((AtomicLong)prevValue).set(newValue);
+                  } else if (prevValue instanceof AtomicInteger) {
+                    ((AtomicInteger)prevValue).set(((Number)prevValue).intValue() + ((Number)value).intValue());
+                  } else {
+                    r.getVariables().put(key, newValue);
+                  }
                 } else {
-                  Double newValue = ((Number)prevValue).doubleValue() + ((Number)value).doubleValue();
-                  r.getVariables().put(key, newValue);
+                  double newValue = ((Number)prevValue).doubleValue() + ((Number)value).doubleValue();
+                  if (prevValue instanceof AtomicDouble) {
+                    ((AtomicDouble)prevValue).set(newValue);
+                  } else {
+                    r.getVariables().put(key, newValue);
+                  }
                 }
               } else {
                 throw new UnsupportedOperationException("delta cannot be applied to non-numeric values: " + prevValue + " and " + value);
               }
             } else {
-              r.getVariables().put(key, value);
+              if (value instanceof Integer) {
+                r.getVariables().put(key, new AtomicInteger((Integer)value));
+              } else if (value instanceof Long) {
+                r.getVariables().put(key, new AtomicLong((Long)value));
+              } else if (value instanceof Double) {
+                r.getVariables().put(key, new AtomicDouble((Double)value));
+              } else {
+                r.getVariables().put(key, value);
+              }
             }
           } else {
-            r.getVariables().put(key, value);
+            if (value instanceof Integer) {
+              r.getVariables().put(key, new AtomicInteger((Integer)value));
+            } else if (value instanceof Long) {
+              r.getVariables().put(key, new AtomicLong((Long)value));
+            } else if (value instanceof Double) {
+              r.getVariables().put(key, new AtomicDouble((Double)value));
+            } else {
+              r.getVariables().put(key, value);
+            }
           }
         }
       }

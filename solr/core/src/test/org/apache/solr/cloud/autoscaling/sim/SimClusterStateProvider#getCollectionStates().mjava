@@ -1,14 +1,13 @@
   // this method uses a simple cache in collectionsStatesRef. Operations that modify
   // cluster state should always reset this cache so that the changes become visible
-  private Map<String, DocCollection> getCollectionStates() {
+  private Map<String, DocCollection> getCollectionStates() throws IOException {
     Map<String, DocCollection> collectionStates = collectionsStatesRef.get();
     if (collectionStates != null) {
       return collectionStates;
     }
     lock.lock();
     collectionsStatesRef.set(null);
-    saveClusterState.set(true);
-    log.debug("** creating new collection states");
+    log.debug("** creating new collection states, currentVersion={}", clusterStateVersion);
     try {
       Map<String, Map<String, Map<String, Replica>>> collMap = new HashMap<>();
       nodeReplicaMap.forEach((n, replicas) -> {
@@ -50,9 +49,10 @@
         Map<String, Object> collProps = collProperties.computeIfAbsent(coll, c -> new ConcurrentHashMap<>());
         Map<String, Object> routerProp = (Map<String, Object>) collProps.getOrDefault(DocCollection.DOC_ROUTER, Collections.singletonMap("name", DocRouter.DEFAULT_NAME));
         DocRouter router = DocRouter.getDocRouter((String)routerProp.getOrDefault("name", DocRouter.DEFAULT_NAME));
-        DocCollection dc = new DocCollection(coll, slices, collProps, router, clusterStateVersion + 1, ZkStateReader.CLUSTER_STATE);
+        DocCollection dc = new DocCollection(coll, slices, collProps, router, clusterStateVersion, ZkStateReader.CLUSTER_STATE);
         res.put(coll, dc);
       });
+      saveClusterState(new ClusterState(clusterStateVersion, liveNodes.get(), res));
       collectionsStatesRef.set(res);
       return res;
     } finally {

@@ -1,0 +1,47 @@
+  void visitDocValues(int[] commonPrefixLengths, byte[] scratchDataPackedValue, byte[] scratchMinIndexPackedValue, byte[] scratchMaxIndexPackedValue,
+                      IndexInput in, int[] docIDs, int count, IntersectVisitor visitor) throws IOException {
+
+
+    readCommonPrefixes(commonPrefixLengths, scratchDataPackedValue, in);
+
+    if (numIndexDims != 1 && version >= BKDWriter.VERSION_LEAF_STORES_BOUNDS) {
+      byte[] minPackedValue = scratchMinIndexPackedValue;
+      System.arraycopy(scratchDataPackedValue, 0, minPackedValue, 0, packedIndexBytesLength);
+      byte[] maxPackedValue = scratchMaxIndexPackedValue;
+      //Copy common prefixes before reading adjusted
+      // box
+      System.arraycopy(minPackedValue, 0, maxPackedValue, 0, packedIndexBytesLength);
+      readMinMax(commonPrefixLengths, minPackedValue, maxPackedValue, in);
+
+      // The index gives us range of values for each dimension, but the actual range of values
+      // might be much more narrow than what the index told us, so we double check the relation
+      // here, which is cheap yet might help figure out that the block either entirely matches
+      // or does not match at all. This is especially more likely in the case that there are
+      // multiple dimensions that have correlation, ie. splitting on one dimension also
+      // significantly changes the range of values in another dimension.
+      Relation r = visitor.compare(minPackedValue, maxPackedValue);
+      if (r == Relation.CELL_OUTSIDE_QUERY) {
+        return;
+      }
+      visitor.grow(count);
+
+      if (r == Relation.CELL_INSIDE_QUERY) {
+        for (int i = 0; i < count; ++i) {
+          visitor.visit(docIDs[i]);
+        }
+        return;
+      }
+    } else {
+      visitor.grow(count);
+    }
+
+
+    int compressedDim = readCompressedDim(in);
+
+    if (compressedDim == -1) {
+      visitRawDocValues(commonPrefixLengths, scratchDataPackedValue, in, docIDs, count, visitor);
+    } else {
+      visitCompressedDocValues(commonPrefixLengths, scratchDataPackedValue, in, docIDs, count, visitor, compressedDim);
+    }
+  }
+

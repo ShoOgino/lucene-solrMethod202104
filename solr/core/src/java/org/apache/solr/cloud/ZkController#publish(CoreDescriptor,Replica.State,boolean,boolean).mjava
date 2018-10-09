@@ -29,29 +29,6 @@
       
       String coreNodeName = cd.getCloudDescriptor().getCoreNodeName();
 
-      // If the leader initiated recovery, then verify that this replica has performed
-      // recovery as requested before becoming active; don't even look at lirState if going down
-      if (state != Replica.State.DOWN) {
-        final Replica.State lirState = getLeaderInitiatedRecoveryState(collection, shardId, coreNodeName);
-        if (lirState != null) {
-          assert cd.getCloudDescriptor().getReplicaType() != Replica.Type.PULL: "LIR should not happen for pull replicas!";
-          if (state == Replica.State.ACTIVE) {
-            // trying to become active, so leader-initiated state must be recovering
-            if (lirState == Replica.State.RECOVERING) {
-              updateLeaderInitiatedRecoveryState(collection, shardId, coreNodeName, Replica.State.ACTIVE, cd, true);
-            } else if (lirState == Replica.State.DOWN) {
-              throw new SolrException(ErrorCode.INVALID_STATE,
-                  "Cannot publish state of core '" + cd.getName() + "' as active without recovering first!");
-            }
-          } else if (state == Replica.State.RECOVERING) {
-            // if it is currently DOWN, then trying to enter into recovering state is good
-            if (lirState == Replica.State.DOWN) {
-              updateLeaderInitiatedRecoveryState(collection, shardId, coreNodeName, Replica.State.RECOVERING, cd, true);
-            }
-          }
-        }
-      }
-
       Map<String,Object> props = new HashMap<>();
       props.put(Overseer.QUEUE_OPERATION, "state");
       props.put(ZkStateReader.STATE_PROP, state.toString());
@@ -90,15 +67,13 @@
         log.info("The core '{}' had failed to initialize before.", cd.getName());
       }
 
-      // This flag is used for testing rolling updates and should be removed in SOLR-11812
-      boolean isRunningInNewLIR = "new".equals(cd.getCoreProperty("lirVersion", "new"));
       // pull replicas are excluded because their terms are not considered
-      if (state == Replica.State.RECOVERING && isRunningInNewLIR && cd.getCloudDescriptor().getReplicaType() != Type.PULL) {
+      if (state == Replica.State.RECOVERING && cd.getCloudDescriptor().getReplicaType() != Type.PULL) {
         // state is used by client, state of replica can change from RECOVERING to DOWN without needed to finish recovery
         // by calling this we will know that a replica actually finished recovery or not
         getShardTerms(collection, shardId).startRecovering(coreNodeName);
       }
-      if (state == Replica.State.ACTIVE && isRunningInNewLIR && cd.getCloudDescriptor().getReplicaType() != Type.PULL) {
+      if (state == Replica.State.ACTIVE && cd.getCloudDescriptor().getReplicaType() != Type.PULL) {
         getShardTerms(collection, shardId).doneRecovering(coreNodeName);
       }
 

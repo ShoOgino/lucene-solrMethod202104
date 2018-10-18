@@ -1,0 +1,62 @@
+  public void testSetMinCompetitiveScore() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig().setMergePolicy(NoMergePolicy.INSTANCE));
+    Document doc = new Document();
+    w.addDocuments(Arrays.asList(doc, doc, doc, doc));
+    w.flush();
+    w.addDocuments(Arrays.asList(doc, doc));
+    w.flush();
+    IndexReader reader = DirectoryReader.open(w);
+    assertEquals(2, reader.leaves().size());
+    w.close();
+
+    Sort sort = new Sort(FIELD_SCORE, new SortField("foo", SortField.Type.LONG));
+    TopFieldCollector collector = TopFieldCollector.create(sort, 2, null, 1);
+    ScoreAndDoc scorer = new ScoreAndDoc();
+
+    LeafCollector leafCollector = collector.getLeafCollector(reader.leaves().get(0));
+    leafCollector.setScorer(scorer);
+    assertNull(scorer.minCompetitiveScore);
+
+    scorer.doc = 0;
+    scorer.score = 1;
+    leafCollector.collect(0);
+    assertNull(scorer.minCompetitiveScore);
+
+    scorer.doc = 1;
+    scorer.score = 2;
+    leafCollector.collect(1);
+    assertEquals(1f, scorer.minCompetitiveScore, 0f);
+
+    scorer.doc = 2;
+    scorer.score = 0.5f;
+    // Make sure we do not call setMinCompetitiveScore for non-competitive hits
+    scorer.minCompetitiveScore = Float.NaN;
+    leafCollector.collect(2);
+    assertTrue(Float.isNaN(scorer.minCompetitiveScore));
+
+    scorer.doc = 3;
+    scorer.score = 4;
+    leafCollector.collect(3);
+    assertEquals(2f, scorer.minCompetitiveScore, 0f);
+
+    // Make sure the min score is set on scorers on new segments
+    scorer = new ScoreAndDoc();
+    leafCollector = collector.getLeafCollector(reader.leaves().get(1));
+    leafCollector.setScorer(scorer);
+    assertEquals(2f, scorer.minCompetitiveScore, 0f);
+
+    scorer.doc = 0;
+    scorer.score = 1;
+    leafCollector.collect(0);
+    assertEquals(2f, scorer.minCompetitiveScore, 0f);
+
+    scorer.doc = 1;
+    scorer.score = 3;
+    leafCollector.collect(1);
+    assertEquals(3f, scorer.minCompetitiveScore, 0f);
+
+    reader.close();
+    dir.close();
+  }
+

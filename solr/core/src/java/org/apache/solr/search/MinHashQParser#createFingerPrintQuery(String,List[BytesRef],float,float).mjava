@@ -1,0 +1,46 @@
+  private Query createFingerPrintQuery(String field, List<BytesRef> minhashes, float similarity, float expectedTruePositive) {
+    int bandSize = 1;
+    if (expectedTruePositive < 1) {
+      bandSize = computeBandSize(minhashes.size(), similarity, expectedTruePositive);
+    }
+
+    BooleanQuery.Builder builder = new BooleanQuery.Builder();
+    BooleanQuery.Builder childBuilder = new BooleanQuery.Builder();
+    int rowInBand = 0;
+    for (BytesRef minHash : minhashes) {
+      TermQuery tq = new TermQuery(new Term(field, minHash));
+      if (bandSize == 1) {
+        builder.add(new ConstantScoreQuery(tq), Occur.SHOULD);
+      } else {
+        childBuilder.add(new ConstantScoreQuery(tq), Occur.MUST);
+        rowInBand++;
+        if (rowInBand == bandSize) {
+          builder.add(new ConstantScoreQuery(childBuilder.build()),
+              Occur.SHOULD);
+          childBuilder = new BooleanQuery.Builder();
+          rowInBand = 0;
+        }
+      }
+    }
+    // Avoid a dubious narrow band .... wrap around and pad with the
+    // start
+    if (childBuilder.build().clauses().size() > 0) {
+      for (BytesRef token : minhashes) {
+        TermQuery tq = new TermQuery(new Term(field, token.toString()));
+        childBuilder.add(new ConstantScoreQuery(tq), Occur.MUST);
+        rowInBand++;
+        if (rowInBand == bandSize) {
+          builder.add(new ConstantScoreQuery(childBuilder.build()),
+              Occur.SHOULD);
+          break;
+        }
+      }
+    }
+
+    if (expectedTruePositive >= 1.0 && similarity < 1) {
+      builder.setMinimumNumberShouldMatch((int) (Math.ceil(minhashes.size() * similarity)));
+    }
+    return builder.build();
+
+  }
+

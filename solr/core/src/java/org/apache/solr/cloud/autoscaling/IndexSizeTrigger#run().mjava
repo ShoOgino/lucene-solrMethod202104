@@ -27,7 +27,7 @@
           DocCollection docCollection = clusterState.getCollection(coll);
 
           shards.forEach((sh, replicas) -> {
-            // check only the leader of a replica in active shard
+            // check only the leader replica in an active shard
             Slice s = docCollection.getSlice(sh);
             if (s.getState() != Slice.State.ACTIVE) {
               return;
@@ -35,6 +35,10 @@
             Replica r = s.getLeader();
             // no leader - don't do anything
             if (r == null) {
+              return;
+            }
+            // not on this node
+            if (!r.getNodeName().equals(node)) {
               return;
             }
             // find ReplicaInfo
@@ -72,14 +76,14 @@
           } else {
             // verify that it's a Number
             if (!(size instanceof Number)) {
-              log.warn("invalid size value - not a number: '" + size + "' is " + size.getClass().getName());
+              log.warn("invalid size value for tag " + tag + " - not a number: '" + size + "' is " + size.getClass().getName());
               return;
             }
 
             ReplicaInfo currentInfo = currentSizes.computeIfAbsent(info.getCore(), k -> (ReplicaInfo)info.clone());
             if (tag.contains("INDEX")) {
               currentInfo.getVariables().put(BYTES_SIZE_PROP, ((Number) size).longValue());
-            } else {
+            } else if (tag.contains("SEARCHER")) {
               currentInfo.getVariables().put(DOCS_SIZE_PROP, ((Number) size).longValue());
             }
           }
@@ -176,6 +180,9 @@
         }
         TriggerEvent.Op op = new TriggerEvent.Op(aboveOp);
         op.addHint(Suggester.Hint.COLL_SHARD, new Pair<>(coll, r.getShard()));
+        Map<String, Object> params = new HashMap<>();
+        params.put(CommonAdminParams.SPLIT_METHOD, splitMethod.toLower());
+        op.addHint(Suggester.Hint.PARAMS, params);
         ops.add(op);
         Long time = lastAboveEventMap.get(r.getCore());
         if (time != null && eventTime.get() > time) {

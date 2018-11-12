@@ -1,0 +1,33 @@
+    public MissedUpdatesRequest find(List<Long> leaderVersions, Object updateFrom, Supplier<Boolean> canHandleVersionRanges) {
+      leaderVersions.sort(absComparator);
+      log.debug("{} sorted versions from {} = {}", logPrefix, leaderVersions, updateFrom);
+
+      long leaderLowest = leaderVersions.get(leaderVersions.size() - 1);
+      if (Math.abs(ourHighest) < Math.abs(leaderLowest)) {
+        log.info("{} Our versions are too old comparing to leader, ourHighest={} otherLowest={}", logPrefix, ourHighest, leaderLowest);
+        return MissedUpdatesRequest.UNABLE_TO_SYNC;
+      }
+      // we don't have to check the case we ahead of the leader.
+      // (maybe we are the old leader and we contain some updates that no one have)
+      // In that case, we will fail on compute fingerprint with the current leader and start segments replication
+
+      boolean completeList = leaderVersions.size() < nUpdates;
+      MissedUpdatesRequest updatesRequest;
+      if (canHandleVersionRanges.get()) {
+        updatesRequest = handleVersionsWithRanges(leaderVersions, completeList);
+      } else {
+        updatesRequest = handleIndividualVersions(leaderVersions, completeList);
+      }
+
+      if (updatesRequest.totalRequestedUpdates > nUpdates) {
+        log.info("{} PeerSync will fail because number of missed updates is more than:{}", logPrefix, nUpdates);
+        return MissedUpdatesRequest.UNABLE_TO_SYNC;
+      }
+
+      if (updatesRequest == MissedUpdatesRequest.EMPTY) {
+        log.info("{} No additional versions requested", logPrefix);
+      }
+
+      return updatesRequest;
+    }
+

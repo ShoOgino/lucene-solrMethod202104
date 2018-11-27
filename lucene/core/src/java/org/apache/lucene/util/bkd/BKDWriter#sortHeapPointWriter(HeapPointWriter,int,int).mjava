@@ -1,0 +1,57 @@
+  /** Sort the heap writer by the specified dim */
+  private void sortHeapPointWriter(final HeapPointWriter writer, int pointCount, int dim) {
+    // Tie-break by docID:
+
+    // No need to tie break on ord, for the case where the same doc has the same value in a given dimension indexed more than once: it
+    // can't matter at search time since we don't write ords into the index:
+    new MSBRadixSorter(bytesPerDim + Integer.BYTES) {
+
+      @Override
+      protected int byteAt(int i, int k) {
+        assert k >= 0;
+        if (k < bytesPerDim) {
+          // dim bytes
+          int block = i / writer.valuesPerBlock;
+          int index = i % writer.valuesPerBlock;
+          return writer.blocks.get(block)[index * packedBytesLength + dim * bytesPerDim + k] & 0xff;
+        } else {
+          // doc id
+          int s = 3 - (k - bytesPerDim);
+          return (writer.docIDs[i] >>> (s * 8)) & 0xff;
+        }
+      }
+
+      @Override
+      protected void swap(int i, int j) {
+        int docID = writer.docIDs[i];
+        writer.docIDs[i] = writer.docIDs[j];
+        writer.docIDs[j] = docID;
+
+        if (singleValuePerDoc == false) {
+          if (longOrds) {
+            long ord = writer.ordsLong[i];
+            writer.ordsLong[i] = writer.ordsLong[j];
+            writer.ordsLong[j] = ord;
+          } else {
+            int ord = writer.ords[i];
+            writer.ords[i] = writer.ords[j];
+            writer.ords[j] = ord;
+          }
+        }
+
+        byte[] blockI = writer.blocks.get(i / writer.valuesPerBlock);
+        int indexI = (i % writer.valuesPerBlock) * packedBytesLength;
+        byte[] blockJ = writer.blocks.get(j / writer.valuesPerBlock);
+        int indexJ = (j % writer.valuesPerBlock) * packedBytesLength;
+
+        // scratch1 = values[i]
+        System.arraycopy(blockI, indexI, scratch1, 0, packedBytesLength);
+        // values[i] = values[j]
+        System.arraycopy(blockJ, indexJ, blockI, indexI, packedBytesLength);
+        // values[j] = scratch1
+        System.arraycopy(scratch1, 0, blockJ, indexJ, packedBytesLength);
+      }
+
+    }.sort(0, pointCount);
+  }
+

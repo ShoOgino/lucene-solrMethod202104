@@ -1,47 +1,45 @@
   @Test
   public void testDoubleAssignment() throws Exception {
-    String zkDir = createTempDir("zkData").toFile().getAbsolutePath();
     
-    ZkTestServer server = new ZkTestServer(zkDir);
-    
-    SolrZkClient controllerClient = null;
     SolrZkClient overseerClient = null;
     ZkStateReader reader = null;
     MockZKController mockController = null;
     
     try {
-      server.run();
-      controllerClient = new SolrZkClient(server.getZkAddress(), TIMEOUT);
       
-      AbstractZkTestCase.tryCleanSolrZkNode(server.getZkHost());
-      AbstractZkTestCase.makeSolrZkNode(server.getZkHost());
-      ZkController.createClusterZkNodes(controllerClient);
+      ZkController.createClusterZkNodes(zkClient);
       
-      reader = new ZkStateReader(controllerClient);
+      reader = new ZkStateReader(zkClient);
       reader.createClusterStateWatchersAndUpdate();
 
-      mockController = new MockZKController(server.getZkAddress(), "node1");
+      mockController = new MockZKController(server.getZkAddress(), "node1", overseers);
       
       overseerClient = electNewOverseer(server.getZkAddress());
 
       mockController.createCollection(COLLECTION, 1);
-      mockController.publishState(COLLECTION, "core1", "core_node1", "shard1", Replica.State.RECOVERING, 1);
+      
+      ZkController zkController = createMockZkController(server.getZkAddress(), zkClient, reader);
+      
+      mockController.publishState(COLLECTION, "core1", "core_node1", "shard1", Replica.State.RECOVERING, 1, true, overseers.get(0));
 
-      waitForCollections(reader, "collection1");
+      waitForCollections(reader, COLLECTION);
 
       verifyReplicaStatus(reader, COLLECTION, "shard1", "core_node1", Replica.State.RECOVERING);
 
       mockController.close();
 
-      int version = getClusterStateVersion(controllerClient);
+      int version = getClusterStateVersion(zkClient);
       
-      mockController = new MockZKController(server.getZkAddress(), "node1");
-      mockController.publishState(COLLECTION, "core1", "core_node1","shard1", Replica.State.RECOVERING, 1);
+      mockController = new MockZKController(server.getZkAddress(), "node1", overseers);
 
-      while (version == reader.getClusterState().getZkClusterStateVersion()) {
-        Thread.sleep(100);
-      }
+      mockController.publishState(COLLECTION, "core1", "core_node1","shard1", Replica.State.RECOVERING, 1, true, overseers.get(0));
       
+      try {
+        reader.waitForState(COLLECTION, 5, TimeUnit.SECONDS, (liveNodes, collectionState) -> version == zkController
+            .getZkStateReader().getClusterState().getZkClusterStateVersion());
+      } catch (TimeoutException e) {
+        // okay
+      }
       ClusterState state = reader.getClusterState();
       
       int numFound = 0;
@@ -59,9 +57,7 @@
     } finally {
       close(overseerClient);
       close(mockController);
-      close(controllerClient);
       close(reader);
-      server.shutdown();
     }
   }
 

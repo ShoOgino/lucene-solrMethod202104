@@ -55,7 +55,36 @@
       params.add("prefix", StrUtils.join(prefixes, ','));
 
       try {
-        SimpleSolrResponse rsp = snitchContext.invoke(solrNode, CommonParams.METRICS_PATH, params);
+        SimpleSolrResponse rsp = null;
+        int retries = 5;
+        int cnt = 0;
+        while (cnt++ < retries) {
+          try {
+            rsp = snitchContext.invoke(solrNode, CommonParams.METRICS_PATH, params);
+          } catch (SolrException | SolrServerException | SocketException e) {
+            boolean hasCauseSocketException = false;
+            Throwable cause = e;
+            while (cause != null) {
+              if (cause instanceof SocketException) {
+                hasCauseSocketException = true;
+                break;
+              }
+              cause = cause.getCause();
+            }
+            if (hasCauseSocketException || e instanceof SocketException) {
+              log.info("Error on getting remote info, trying again: " + e.getMessage());
+              Thread.sleep(500);
+              continue;
+            } else {
+              throw e;
+            }
+          }
+        }
+        
+        if (cnt == retries) {
+          throw new SolrException(ErrorCode.SERVER_ERROR, "Could not get remote info after many retries on NoHttpResponseException");
+        }
+                
         Map m = rsp.nl.asMap(4);
         if (requestedTags.contains(FREEDISK.tagName)) {
           Object n = Utils.getObjectByPath(m, true, "metrics/solr.node/CONTAINER.fs.usableSpace");
@@ -82,7 +111,7 @@
           if (n != null) ctx.getTags().put(HEAPUSAGE, n.doubleValue() * 100.0d);
         }
       } catch (Exception e) {
-        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "", e);
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Error getting remote info", e);
       }
     }
 

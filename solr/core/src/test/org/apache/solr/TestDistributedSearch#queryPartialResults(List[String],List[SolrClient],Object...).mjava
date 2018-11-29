@@ -18,17 +18,22 @@
     params.remove("distrib");
     setDistributedParams(params);
 
-    QueryResponse rsp = queryRandomUpServer(params,upClients);
+    if (upClients.size() == 0) {
+      return;
+    }
+    QueryResponse rsp = queryRandomUpServer(params, upClients);
 
     comparePartialResponses(rsp, controlRsp, upShards);
 
     if (stress > 0) {
       log.info("starting stress...");
-      Thread[] threads = new Thread[nThreads];
+      Set<Future<Object>> pending = new HashSet<>();;
+      ExecutorCompletionService<Object> cs = new ExecutorCompletionService<>(executor);
+      Callable[] threads = new Callable[nThreads];
       for (int i = 0; i < threads.length; i++) {
-        threads[i] = new Thread() {
+        threads[i] = new Callable() {
           @Override
-          public void run() {
+          public Object call() {
             for (int j = 0; j < stress; j++) {
               int which = r.nextInt(upClients.size());
               SolrClient client = upClients.get(which);
@@ -41,14 +46,18 @@
                 throw new RuntimeException(e);
               }
             }
+            return null;
           }
         };
-        threads[i].start();
+        pending.add(cs.submit(threads[i]));
+      }
+      
+      while (pending.size() > 0) {
+        Future<Object> future = cs.take();
+        pending.remove(future);
+        future.get();
       }
 
-      for (Thread thread : threads) {
-        thread.join();
-      }
     }
   }
 

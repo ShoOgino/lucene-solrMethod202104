@@ -1,7 +1,5 @@
   @Test
   // This apparently fails in both subclasses.
-  // 12-Jun-2018 @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028")
-  // commented 15-Sep-2018 @LuceneTestCase.BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // 2-Aug-2018
   public void testSimple() throws Exception {
     JettySolrRunner jetty1 = cluster.getJettySolrRunner(0);
     JettySolrRunner jetty2 = cluster.getJettySolrRunner(1);
@@ -30,25 +28,36 @@
     String lostNodeName = lostJetty.getNodeName();
     List<Replica> replacedHdfsReplicas = getReplacedSharedFsReplicas(COLLECTION1, zkStateReader, lostNodeName);
     lostJetty.stop();
+    
+    cluster.waitForJettyToStop(lostJetty);
+    
     waitForNodeLeave(lostNodeName);
+    
     // ensure that 2 shards have 2 active replicas and only 4 replicas in total
     // i.e. old replicas have been deleted.
     // todo remove the condition for total replicas == 4 after SOLR-11591 is fixed
-    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, (liveNodes, collectionState) -> clusterShape(2, 2).matches(liveNodes, collectionState)
-        && collectionState.getReplicas().size() == 4);
+    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, (liveNodes, collectionState) -> clusterShape(2, 4).matches(liveNodes, collectionState)
+        && collectionState.getReplicas().size() == 4, 90, TimeUnit.SECONDS);
     checkSharedFsReplicasMovedCorrectly(replacedHdfsReplicas, zkStateReader, COLLECTION1);
     lostJetty.start();
+    
+    cluster.waitForAllNodes(30);
+    
     assertTrue("Timeout waiting for all live and active", ClusterStateUtil.waitForAllActiveAndLiveReplicas(cluster.getSolrClient().getZkStateReader(), 90000));
 
     // check cluster property is considered
     disableAutoAddReplicasInCluster();
     lostNodeName = jetty3.getNodeName();
     jetty3.stop();
+    
+    cluster.waitForJettyToStop(jetty3);
+    
     waitForNodeLeave(lostNodeName);
-    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, clusterShape(2, 1));
-    jetty3.start();
+    
     waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, clusterShape(2, 2));
-    waitForState("Waiting for collection " + COLLECTION2, COLLECTION2, clusterShape(2, 2));
+    jetty3.start();
+    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, clusterShape(2, 4));
+    waitForState("Waiting for collection " + COLLECTION2, COLLECTION2, clusterShape(2, 4));
     enableAutoAddReplicasInCluster();
 
 
@@ -65,10 +74,14 @@
 
     lostNodeName = jetty2.getNodeName();
     replacedHdfsReplicas = getReplacedSharedFsReplicas(COLLECTION2, zkStateReader, lostNodeName);
+    
     jetty2.stop();
+    
+    cluster.waitForJettyToStop(jetty2);
+    
     waitForNodeLeave(lostNodeName);
-    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, clusterShape(2, 2));
-    waitForState("Waiting for collection " + COLLECTION2, COLLECTION2, clusterShape(2, 2));
+    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, clusterShape(2, 4), 45, TimeUnit.SECONDS);
+    waitForState("Waiting for collection " + COLLECTION2, COLLECTION2, clusterShape(2, 4), 45, TimeUnit.SECONDS);
     checkSharedFsReplicasMovedCorrectly(replacedHdfsReplicas, zkStateReader, COLLECTION2);
 
     // overseer failover test..

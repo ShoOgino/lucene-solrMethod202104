@@ -10,6 +10,9 @@
     create.setMaxShardsPerNode(5); // some high number so we can create replicas without hindrance
     create.setCreateNodeSet(nodeName); // we want to create the leader on a fixed node so that we know which one to restart later
     create.process(cloudClient);
+    
+    cloudClient.waitForState(collectionName, 30, TimeUnit.SECONDS, SolrCloudTestCase.activeClusterShape(1, 1));
+    
     try (CloudSolrClient client = getCloudSolrClient(zkServer.getZkAddress(), true, cloudClient.getLbClient().getHttpClient())) {
       client.setDefaultCollection(collectionName);
       StoppableIndexingThread thread = new StoppableIndexingThread(controlClient, client, "i1", true);
@@ -52,12 +55,14 @@
           int liveNodeCount = client.getZkStateReader().getClusterState().getLiveNodes().size();
 
           // restart the sub-shard leader node
+          String stoppedNodeName = null;
           boolean restarted = false;
           for (JettySolrRunner jetty : jettys) {
             int port = jetty.getBaseUrl().getPort();
             if (replica.getStr(BASE_URL_PROP).contains(":" + port))  {
-              ChaosMonkey.kill(jetty);
-              ChaosMonkey.start(jetty);
+              stoppedNodeName = jetty.getNodeName();
+              jetty.stop();
+              jetty.start();
               restarted = true;
               break;
             }
@@ -66,6 +71,8 @@
             // sanity check
             fail("We could not find a jetty to kill for replica: " + replica.getCoreUrl());
           }
+          
+          cloudClient.getZkStateReader().waitForLiveNodes(30, TimeUnit.SECONDS, SolrCloudTestCase.containsLiveNode(stoppedNodeName));
 
           // add a new replica for the sub-shard
           CollectionAdminRequest.AddReplica addReplica = CollectionAdminRequest.addReplicaToShard(collectionName, SHARD1_0);
@@ -75,6 +82,9 @@
           try (HttpSolrClient control = new HttpSolrClient.Builder(control_collection).withHttpClient(client.getLbClient().getHttpClient()).build())  {
             state = addReplica.processAndWait(control, 30);
           }
+          
+          cloudClient.waitForState(collectionName, 30, TimeUnit.SECONDS, SolrCloudTestCase.activeClusterShape(2, 4));
+          
           if (state == RequestStatusState.COMPLETED)  {
             CountDownLatch newReplicaLatch = new CountDownLatch(1);
             client.getZkStateReader().registerCollectionStateWatcher(collectionName, (liveNodes, collectionState) -> {

@@ -11,31 +11,53 @@
     // Do not let Jetty/Solr pollute the MDC for this thread
     Map<String, String> prevContext = MDC.getCopyOfContextMap();
     MDC.clear();
+    
+    log.info("Start Jetty (original configured port={})", this.config.port);
+    
     try {
+      int port = reusePort && jettyPort != -1 ? jettyPort : this.config.port;
+      
       // if started before, make a new server
       if (startedBefore) {
         waitOnSolr = false;
-        int port = reusePort ? jettyPort : this.config.port;
         init(port);
       } else {
         startedBefore = true;
       }
 
       if (!server.isRunning()) {
-        server.start();
+        if (config.portRetryTime > 0) {
+          retryOnPortBindFailure(config.portRetryTime, port);
+        } else {
+          server.start();
+        }
       }
       synchronized (JettySolrRunner.this) {
         int cnt = 0;
-        while (!waitOnSolr) {
+        while (!waitOnSolr || !dispatchFilter.isRunning() || getCoreContainer() == null) {
           this.wait(100);
-          if (cnt++ == 5) {
+          if (cnt++ == 15) {
             throw new RuntimeException("Jetty/Solr unresponsive");
           }
         }
       }
       
-      if (config.waitForLoadingCoresToFinishMs != null && config.waitForLoadingCoresToFinishMs > 0L) waitForLoadingCoresToFinish(config.waitForLoadingCoresToFinishMs);
+      if (config.waitForLoadingCoresToFinishMs != null && config.waitForLoadingCoresToFinishMs > 0L) {
+        waitForLoadingCoresToFinish(config.waitForLoadingCoresToFinishMs);
+      }
+      
+      setProtocolAndHost();
+      
+      if (enableProxy) {
+        if (started) {
+          proxy.reopen();
+        } else {
+          proxy.open(getBaseUrl().toURI());
+        }
+      }    
+      
     } finally {
+      started  = true;
       if (prevContext != null)  {
         MDC.setContextMap(prevContext);
       } else {

@@ -3,42 +3,62 @@
    */
   public void close() {
     this.isClosed = true;
+
+    ForkJoinPool customThreadPool = new ForkJoinPool(10);
+
+    customThreadPool.submit(() -> Collections.singleton(overseerElector.getContext()).parallelStream().forEach(c -> {
+      IOUtils.closeQuietly(c);
+    }));
+
+    customThreadPool.submit(() -> Collections.singleton(overseer).parallelStream().forEach(c -> {
+      IOUtils.closeQuietly(c);
+    }));
+
     synchronized (collectionToTerms) {
-      collectionToTerms.values().forEach(ZkCollectionTerms::close);
+      customThreadPool.submit(() -> collectionToTerms.values().parallelStream().forEach(c -> {
+        c.close();
+      }));
     }
     try {
-      for (ElectionContext context : electionContexts.values()) {
-        try {
-          context.close();
-        } catch (Exception e) {
-          log.error("Error closing overseer", e);
-        }
-      }
+
+      customThreadPool.submit(() -> replicateFromLeaders.values().parallelStream().forEach(c -> {
+        c.stopReplication();
+      }));
+
+      customThreadPool.submit(() -> electionContexts.values().parallelStream().forEach(c -> {
+        IOUtils.closeQuietly(c);
+      }));
+
     } finally {
+
+      customThreadPool.submit(() -> Collections.singleton(cloudSolrClient).parallelStream().forEach(c -> {
+        IOUtils.closeQuietly(c);
+      }));
+      customThreadPool.submit(() -> Collections.singleton(cloudManager).parallelStream().forEach(c -> {
+        IOUtils.closeQuietly(c);
+      }));
+
       try {
-        IOUtils.closeQuietly(overseerElector.getContext());
-        IOUtils.closeQuietly(overseer);
-      } finally {
-        if (cloudSolrClient != null) {
-          IOUtils.closeQuietly(cloudSolrClient);
-        }
-        if (cloudManager != null) {
-          IOUtils.closeQuietly(cloudManager);
-        }
         try {
-          try {
-            zkStateReader.close();
-          } catch (Exception e) {
-            log.error("Error closing zkStateReader", e);
-          }
-        } finally {
-          try {
-            zkClient.close();
-          } catch (Exception e) {
-            log.error("Error closing zkClient", e);
-          }
+          zkStateReader.close();
+        } catch (Exception e) {
+          log.error("Error closing zkStateReader", e);
         }
+      } finally {
+        try {
+          zkClient.close();
+        } catch (Exception e) {
+          log.error("Error closing zkClient", e);
+        } finally {
+
+          // just in case the OverseerElectionContext managed to start another Overseer
+          IOUtils.closeQuietly(overseer);
+
+          ExecutorUtil.shutdownAndAwaitTermination(customThreadPool);
+        }
+
       }
+
     }
     assert ObjectReleaseTracker.release(this);
   }

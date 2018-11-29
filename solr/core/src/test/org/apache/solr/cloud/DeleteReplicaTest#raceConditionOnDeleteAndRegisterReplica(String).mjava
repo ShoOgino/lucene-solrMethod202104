@@ -1,8 +1,12 @@
   public void raceConditionOnDeleteAndRegisterReplica(String legacyCloud) throws Exception {
+    
     CollectionAdminRequest.setClusterProperty(ZkStateReader.LEGACY_CLOUD, legacyCloud).process(cluster.getSolrClient());
     final String collectionName = "raceDeleteReplica_"+legacyCloud;
     CollectionAdminRequest.createCollection(collectionName, "conf", 1, 2)
         .process(cluster.getSolrClient());
+    
+    cluster.waitForActiveCollection(collectionName, 1, 2);
+    
     waitForState("Expected 1x2 collections", collectionName, clusterShape(1, 2));
 
     Slice shard1 = getCollectionState(collectionName).getSlice("shard1");
@@ -35,7 +39,7 @@
               ZkStateReader.COLLECTION_PROP, collectionName,
               ZkStateReader.CORE_NODE_NAME_PROP, replica1.getName(),
               ZkStateReader.BASE_URL_PROP, replica1.getBaseUrl());
-          Overseer.getStateUpdateQueue(cluster.getZkClient()).offer(Utils.toJSON(m));
+          cluster.getOpenOverseer().getStateUpdateQueue().offer(Utils.toJSON(m));
 
           boolean replicaDeleted = false;
           TimeOut timeOut = new TimeOut(20, TimeUnit.SECONDS, TimeSource.NANO_TIME);
@@ -94,6 +98,9 @@
     });
     waitForState("Expected 1x2 collections", collectionName, clusterShape(1, 2));
 
+    shard1 = getCollectionState(collectionName).getSlice("shard1");
+    Replica latestLeader = shard1.getLeader();
+    leaderJetty = getJettyForReplica(latestLeader);
     String leaderJettyNodeName = leaderJetty.getNodeName();
     leaderJetty.stop();
     waitForNodeLeave(leaderJettyNodeName);
@@ -101,7 +108,7 @@
     waitForState("Expected new active leader", collectionName, (liveNodes, collectionState) -> {
       Slice shard = collectionState.getSlice("shard1");
       Replica newLeader = shard.getLeader();
-      return newLeader != null && newLeader.getState() == Replica.State.ACTIVE && !newLeader.getName().equals(leader.getName());
+      return newLeader != null && newLeader.getState() == Replica.State.ACTIVE && !newLeader.getName().equals(latestLeader.getName());
     });
 
     leaderJetty.start();

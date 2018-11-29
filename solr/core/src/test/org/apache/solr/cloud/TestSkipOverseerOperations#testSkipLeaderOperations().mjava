@@ -1,9 +1,17 @@
   public void testSkipLeaderOperations() throws Exception {
+
     String overseerLeader = getOverseerLeader();
+    
+    assertNotNull(overseerLeader);
+    assertTrue(overseerLeader.length() > 0);
+    
     List<JettySolrRunner> notOverseerNodes = cluster.getJettySolrRunners()
         .stream()
         .filter(solrRunner -> !solrRunner.getNodeName().equals(overseerLeader))
         .collect(Collectors.toList());
+    
+    assertEquals(2, notOverseerNodes.size());
+    
     String collection = "collection1";
     CollectionAdminRequest
         .createCollection(collection, 2, 1)
@@ -13,10 +21,39 @@
             .collect(Collectors.joining(","))
         )
         .process(cluster.getSolrClient());
+    cluster.waitForActiveCollection("collection1", 2, 2);
 
+    ZkStateReader reader = cluster.getSolrClient().getZkStateReader();
+    
+    List<String> nodes = new ArrayList<>();
+    for (JettySolrRunner solrRunner : notOverseerNodes) {
+      nodes.add(solrRunner.getNodeName());
+    }
+    
     for (JettySolrRunner solrRunner : notOverseerNodes) {
       solrRunner.stop();
     }
+    
+    for (JettySolrRunner solrRunner : notOverseerNodes) {
+      cluster.waitForJettyToStop(solrRunner);
+    }
+    
+    reader.waitForLiveNodes(30, TimeUnit.SECONDS, new LiveNodesPredicate() {
+      
+      @Override
+      public boolean matches(SortedSet<String> oldLiveNodes, SortedSet<String> newLiveNodes) {
+        boolean success = true;
+        for (String lostNodeName : nodes) {
+          if (newLiveNodes.contains(lostNodeName)) {
+            success = false;
+            break;
+          }
+        }
+        
+        return success;
+      }
+    });
+    
     waitForState("Expected single liveNode", collection,
         (liveNodes, collectionState) -> liveNodes.size() == 1);
 
@@ -24,9 +61,11 @@
     for (JettySolrRunner solrRunner : notOverseerNodes) {
       solrRunner.start();
     }
+    
+    cluster.waitForAllNodes(30);
 
     waitForState("Expected 2x1 for collection: " + collection, collection,
-        clusterShape(2, 1));
+        clusterShape(2, 2));
     CollectionAdminResponse resp2 = CollectionAdminRequest.getOverseerStatus().process(cluster.getSolrClient());
     assertEquals(getNumLeaderOpeations(resp), getNumLeaderOpeations(resp2));
     CollectionAdminRequest.deleteCollection(collection).process(cluster.getSolrClient());

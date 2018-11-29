@@ -1,0 +1,37 @@
+  public void publishAndWaitForDownStates(int timeoutSeconds) throws KeeperException,
+      InterruptedException {
+
+    publishNodeAsDown(getNodeName());
+
+    Set<String> collectionsWithLocalReplica = ConcurrentHashMap.newKeySet();
+    for (CoreDescriptor descriptor : cc.getCoreDescriptors()) {
+      collectionsWithLocalReplica.add(descriptor.getCloudDescriptor().getCollectionName());
+    }
+
+    CountDownLatch latch = new CountDownLatch(collectionsWithLocalReplica.size());
+    for (String collectionWithLocalReplica : collectionsWithLocalReplica) {
+      zkStateReader.registerCollectionStateWatcher(collectionWithLocalReplica, (liveNodes, collectionState) -> {
+        if (collectionState == null)  return false;
+        boolean foundStates = true;
+        for (CoreDescriptor coreDescriptor : cc.getCoreDescriptors()) {
+          if (coreDescriptor.getCloudDescriptor().getCollectionName().equals(collectionWithLocalReplica))  {
+            Replica replica = collectionState.getReplica(coreDescriptor.getCloudDescriptor().getCoreNodeName());
+            if (replica == null || replica.getState() != Replica.State.DOWN) {
+              foundStates = false;
+            }
+          }
+        }
+
+        if (foundStates && collectionsWithLocalReplica.remove(collectionWithLocalReplica))  {
+          latch.countDown();
+        }
+        return foundStates;
+      });
+    }
+
+    boolean allPublishedDown = latch.await(timeoutSeconds, TimeUnit.SECONDS);
+    if (!allPublishedDown) {
+      log.warn("Timed out waiting to see all nodes published as DOWN in our cluster state.");
+    }
+  }
+

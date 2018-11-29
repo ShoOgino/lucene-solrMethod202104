@@ -1,11 +1,10 @@
   @Test
-  //28-June-2018 @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // 21-May-2018
-  @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // 6-Sep-2018
   public void basicTest() throws Exception {
     final String collectionName = "basicTest";
     CollectionAdminRequest.createCollection(collectionName, 1, 1)
         .setCreateNodeSet(cluster.getJettySolrRunner(0).getNodeName())
         .process(cluster.getSolrClient());
+    cluster.waitForActiveCollection(collectionName, 1, 1);
     cluster.getSolrClient().add(collectionName, new SolrInputDocument("id", "1"));
     cluster.getSolrClient().add(collectionName, new SolrInputDocument("id", "2"));
     cluster.getSolrClient().commit(collectionName);
@@ -15,7 +14,13 @@
       assertEquals(1L, zkShardTerms.getHighestTerm());
     }
 
-    cluster.getJettySolrRunner(0).stop();
+    String nodeName = cluster.getJettySolrRunner(0).getCoreContainer().getZkController().getNodeName();
+    
+    JettySolrRunner j = cluster.getJettySolrRunner(0);
+    j.stop();
+    cluster.waitForJettyToStop(j);
+    
+    cluster.getSolrClient().getZkStateReader().waitForState(collectionName, 10, TimeUnit.SECONDS, (liveNodes, collectionState) -> !liveNodes.contains(nodeName));
 
     CollectionAdminRequest.addReplicaToShard(collectionName, "shard1")
         .setNode(cluster.getJettySolrRunner(1).getNodeName())
@@ -23,6 +28,9 @@
 
     waitForState("Timeout waiting for replica win the election", collectionName, (liveNodes, collectionState) -> {
       Replica newLeader = collectionState.getSlice("shard1").getLeader();
+      if (newLeader == null) {
+        return false;
+      }
       return newLeader.getNodeName().equals(cluster.getJettySolrRunner(1).getNodeName());
     });
 
@@ -33,6 +41,8 @@
     }
 
     cluster.getJettySolrRunner(0).start();
+    
+    cluster.waitForAllNodes(30);
     CollectionAdminRequest.deleteCollection(collectionName).process(cluster.getSolrClient());
   }
 

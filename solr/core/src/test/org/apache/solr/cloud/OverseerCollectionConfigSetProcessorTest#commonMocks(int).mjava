@@ -1,5 +1,6 @@
   protected Set<String> commonMocks(int liveNodesCount) throws Exception {
     when(shardHandlerFactoryMock.getShardHandler()).thenReturn(shardHandlerMock);
+    when(shardHandlerFactoryMock.getShardHandler(any())).thenReturn(shardHandlerMock);
     when(workQueueMock.peekTopN(anyInt(), any(), anyLong())).thenAnswer(invocation -> {
       Object result;
       int count = 0;
@@ -83,77 +84,174 @@
     });
 
     when(clusterStateMock.getLiveNodes()).thenReturn(liveNodes);
-    Map<String, byte[]> zkClientData = new HashMap<>();
+
     when(solrZkClientMock.setData(anyString(), any(), anyInt(), anyBoolean())).then(invocation -> {
-          zkClientData.put(invocation.getArgument(0), invocation.getArgument(1));
+      System.out.println("set data: " + invocation.getArgument(0) + " " + invocation.getArgument(1));
+      if (invocation.getArgument(1) == null) {
+        zkClientData.put(invocation.getArgument(0), new byte[0]);
+      } else {
+        zkClientData.put(invocation.getArgument(0), invocation.getArgument(1));
+      }
+      return null;
+    });
+ 
+    when(solrZkClientMock.getData(anyString(), any(), any(), anyBoolean())).thenAnswer(invocation -> {
+        byte[] data = zkClientData.get(invocation.getArgument(0));
+        if (data == null || data.length == 0) {
           return null;
         }
-    );
-    when(solrZkClientMock.getData(anyString(), any(), any(), anyBoolean())).then(invocation ->
-        zkClientData.get(invocation.getArgument(0)));
+        return data;
+    });
+    
     when(solrZkClientMock.create(any(), any(), any(), anyBoolean())).thenAnswer(invocation -> {
-      String key = invocation.getArgument(0);
-      zkMap.put(key, null);
-      handleCreateCollMessage(invocation.getArgument(1));
-      return key;
+      zkClientData.put(invocation.getArgument(0), invocation.getArgument(1));
+      return invocation.getArgument(0);
     });
 
     when(solrZkClientMock.exists(any(String.class), anyBoolean())).thenAnswer(invocation -> {
       String key = invocation.getArgument(0);
-      return zkMap.containsKey(key);
+      return zkClientData.containsKey(key);
     });
 
     when(overseerMock.getZkController()).thenReturn(zkControllerMock);
     when(overseerMock.getSolrCloudManager()).thenReturn(cloudDataProviderMock);
+    when(overseerMock.getCoreContainer()).thenReturn(coreContainerMock);
+    when(coreContainerMock.getUpdateShardHandler()).thenReturn(updateShardHandlerMock);
+    when(updateShardHandlerMock.getDefaultHttpClient()).thenReturn(httpClientMock);
+    
     when(zkControllerMock.getSolrCloudManager()).thenReturn(cloudDataProviderMock);
     when(cloudDataProviderMock.getClusterStateProvider()).thenReturn(clusterStateProviderMock);
     when(clusterStateProviderMock.getClusterState()).thenReturn(clusterStateMock);
     when(clusterStateProviderMock.getLiveNodes()).thenReturn(liveNodes);
     when(clusterStateProviderMock.getClusterProperties()).thenReturn(Utils.makeMap(DEFAULTS, Utils.makeMap(CLUSTER, Utils.makeMap(USE_LEGACY_REPLICA_ASSIGNMENT, true))));
     when(cloudDataProviderMock.getDistribStateManager()).thenReturn(stateManagerMock);
-    when(stateManagerMock.hasData(anyString())).thenAnswer(invocation -> zkMap.containsKey(invocation.getArgument(0)));
-    when(stateManagerMock.getAutoScalingConfig()).thenReturn(autoScalingConfig);
-    doAnswer(new Answer<Void>() {
-      @Override
-      public Void answer(InvocationOnMock invocation) throws Throwable {
-        if (!zkMap.containsKey(invocation.getArgument(0))) {
-          zkMap.put(invocation.getArgument(0), "");
-        }
+    when(cloudManagerMock.getDistribStateManager()).thenReturn(distribStateManagerMock);
+    when(distribStateManagerMock.getAutoScalingConfig()).thenReturn(new AutoScalingConfig(Collections.emptyMap()));
+
+    Mockito.doAnswer(
+      new Answer<Void>() {
+        public Void answer(InvocationOnMock invocation) {
+          System.out.println("set data: " + invocation.getArgument(0) + " " + invocation.getArgument(1));
+          if (invocation.getArgument(1) == null) {
+            zkClientData.put(invocation.getArgument(0), new byte[0]);
+          } else {
+            zkClientData.put(invocation.getArgument(0), invocation.getArgument(1));
+          }
+       
+          return null;
+        }}).when(distribStateManagerMock).setData(anyString(), any(), anyInt());
+    
+    when(distribStateManagerMock.getData(anyString(), any())).thenAnswer(invocation -> {
+      byte[] data = zkClientData.get(invocation.getArgument(0));
+      if (data == null || data.length == 0) {
         return null;
       }
-    }).when(stateManagerMock).makePath(anyString());
-    doAnswer(new Answer<Void>() {
-      @Override
-      public Void answer(InvocationOnMock invocation) throws Throwable {
-        VersionedData d = new VersionedData(0, invocation.getArgument(1), "test");
-        zkMap.put(invocation.getArgument(0), d);
-        return null;
+      return new VersionedData(-1, data, "");
+        
+    });
+    
+    when(distribStateManagerMock.createData(any(), any(), any())).thenAnswer(invocation -> {
+      System.out.println("set data: " + invocation.getArgument(0) + " " + invocation.getArgument(1));
+      if (invocation.getArgument(1) == null) {
+        zkClientData.put(invocation.getArgument(0), new byte[0]);
+      } else {
+        zkClientData.put(invocation.getArgument(0), invocation.getArgument(1));
       }
-    }).when(stateManagerMock).createData(anyString(), any(byte[].class), any(CreateMode.class));
-    doAnswer(new Answer<Void>() {
-      @Override
-      public Void answer(InvocationOnMock invocation) throws Throwable {
-        VersionedData d = (VersionedData)zkMap.get(invocation.getArgument(0));
-        if (d != null && d.getVersion() != (Integer)invocation.getArgument(2)) {
-          throw new BadVersionException(invocation.getArgument(2), invocation.getArgument(0));
-        }
-        int version = (Integer)invocation.getArgument(2) + 1;
-        zkMap.put(invocation.getArgument(0), new VersionedData(version, invocation.getArgument(1), "test"));
-        return null;
-      }
-    }).when(stateManagerMock).setData(anyString(), any(byte[].class), anyInt());
-    when(stateManagerMock.getData(anyString(), any())).thenAnswer(invocation -> zkMap.get(invocation.getArgument(0)));
+      return null;
+    });
+    
+    when(distribStateManagerMock.hasData(anyString()))
+    .then(invocation -> zkClientData.containsKey(invocation.getArgument(0)) && zkClientData.get(invocation.getArgument(0)).length > 0);
+    
+    Mockito.doAnswer(
+        new Answer<Void>() {
+          public Void answer(InvocationOnMock invocation) {
+            System.out.println("set data: " + invocation.getArgument(0) + " " + new byte[0]);
+            zkClientData.put(invocation.getArgument(0), new byte[0]);
+            return null;
+          }}).when(distribStateManagerMock).makePath(anyString());
 
     when(solrZkClientMock.exists(any(String.class), isNull(), anyBoolean())).thenAnswer(invocation -> {
       String key = invocation.getArgument(0);
-      if (zkMap.containsKey(key)) {
+      if (zkClientData.containsKey(key)) {
         return new Stat();
       } else {
         return null;
       }
     });
+    
+    when(cloudManagerMock.getClusterStateProvider()).thenReturn(clusterStateProviderMock);
+    when(cloudManagerMock.getTimeSource()).thenReturn(new TimeSource.NanoTimeSource());
+    when(cloudManagerMock.getDistribStateManager()).thenReturn(distribStateManagerMock);
+    
+    when(overseerMock.getSolrCloudManager()).thenReturn(cloudManagerMock);
+    
+    when(overseerMock.getStateUpdateQueue(any())).thenReturn(stateUpdateQueueMock);
+    when(overseerMock.getStateUpdateQueue()).thenReturn(stateUpdateQueueMock);
+    
+    Mockito.doAnswer(
+        new Answer<Void>() {
+          public Void answer(InvocationOnMock invocation) {
+            try {
+              handleCreateCollMessage(invocation.getArgument(0));
+              stateUpdateQueueMock.offer(invocation.getArgument(0));
+            } catch (KeeperException e) {
+              throw new RuntimeException(e);
+            } catch (InterruptedException e) {
+              throw new RuntimeException(e);
+            }
+            return null;
+          }}).when(overseerMock).offerStateUpdate(any());
+    
+    when(zkControllerMock.getZkClient()).thenReturn(solrZkClientMock);
+    
+    when(cloudManagerMock.getDistribStateManager()).thenReturn(distribStateManagerMock);
+    when(distribStateManagerMock.getAutoScalingConfig()).thenReturn(new AutoScalingConfig(Collections.emptyMap()));
 
-    zkMap.put("/configs/myconfig", null);
+    Mockito.doAnswer(
+      new Answer<Void>() {
+        public Void answer(InvocationOnMock invocation) {
+          System.out.println("set data: " + invocation.getArgument(0) + " " + invocation.getArgument(1));
+          if (invocation.getArgument(1) == null) {
+            zkClientData.put(invocation.getArgument(0), new byte[0]);
+          } else {
+            zkClientData.put(invocation.getArgument(0), invocation.getArgument(1));
+          }
+       
+          return null;
+        }}).when(distribStateManagerMock).setData(anyString(), any(), anyInt());
+    
+    when(distribStateManagerMock.getData(anyString(), any())).thenAnswer(invocation -> {
+      byte[] data = zkClientData.get(invocation.getArgument(0));
+      if (data == null || data.length == 0) {
+        return null;
+      }
+      return new VersionedData(-1, data, "");
+        
+    });
+    
+    when(distribStateManagerMock.createData(any(), any(), any())).thenAnswer(invocation -> {
+      System.out.println("set data: " + invocation.getArgument(0) + " " + invocation.getArgument(1));
+      if (invocation.getArgument(1) == null) {
+        zkClientData.put(invocation.getArgument(0), new byte[0]);
+      } else {
+        zkClientData.put(invocation.getArgument(0), invocation.getArgument(1));
+      }
+      return null;
+    });
+    
+    when(distribStateManagerMock.hasData(anyString()))
+    .then(invocation -> zkClientData.containsKey(invocation.getArgument(0)) && zkClientData.get(invocation.getArgument(0)).length > 0);
+    
+    Mockito.doAnswer(
+        new Answer<Void>() {
+          public Void answer(InvocationOnMock invocation) {
+            System.out.println("set data: " + invocation.getArgument(0) + " " + new byte[0]);
+            zkClientData.put(invocation.getArgument(0), new byte[0]);
+            return null;
+          }}).when(distribStateManagerMock).makePath(anyString());
+
+    zkClientData.put("/configs/myconfig", new byte[1]);
     
     return liveNodes;
   }

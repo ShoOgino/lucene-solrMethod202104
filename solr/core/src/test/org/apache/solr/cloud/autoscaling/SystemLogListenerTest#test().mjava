@@ -32,7 +32,7 @@
     create.process(solrClient);
 
     waitForState("Timed out waiting for replicas of new collection to be active",
-        "test", clusterShape(3, 2));
+        "test", clusterShape(3, 6));
 
     String setListenerCommand = "{" +
         "'set-listener' : " +
@@ -60,20 +60,43 @@
       }
     }
     log.info("Stopping node " + cluster.getJettySolrRunner(nonOverseerLeaderIndex).getNodeName());
-    cluster.stopJettySolrRunner(nonOverseerLeaderIndex);
-    cluster.waitForAllNodes(30);
-    assertTrue("Trigger was not fired ", triggerFiredLatch.await(30, TimeUnit.SECONDS));
+    JettySolrRunner j = cluster.stopJettySolrRunner(nonOverseerLeaderIndex);
+    cluster.waitForJettyToStop(j);
+    assertTrue("Trigger was not fired ", triggerFiredLatch.await(60, TimeUnit.SECONDS));
     assertTrue(fired.get());
     Map context = actionContextPropsRef.get();
     assertNotNull(context);
 
+    
+    
+    TimeOut timeout = new TimeOut(30, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+    
+    ModifiableSolrParams query = new ModifiableSolrParams();
+    query.add(CommonParams.Q, "type:" + SystemLogListener.DOC_TYPE);
+    query.add(CommonParams.SORT, "id asc");
+    
+    try {
+      timeout.waitFor("", new Supplier<Boolean>() {
+
+        @Override
+        public Boolean get() {
+          try {
+            cluster.getSolrClient().commit(CollectionAdminParams.SYSTEM_COLL, true, true);
+
+            return cluster.getSolrClient().query(CollectionAdminParams.SYSTEM_COLL, query).getResults().size() == 9;
+          } catch (SolrServerException | IOException e) {
+            throw new RuntimeException(e);
+          }
+        }
+      });
+    } catch (TimeoutException e) {
+      // fine
+    }
     // make sure the event docs are replicated and committed
     Thread.sleep(5000);
     cluster.getSolrClient().commit(CollectionAdminParams.SYSTEM_COLL, true, true);
 
-    ModifiableSolrParams query = new ModifiableSolrParams();
-    query.add(CommonParams.Q, "type:" + SystemLogListener.DOC_TYPE);
-    query.add(CommonParams.SORT, "id asc");
+
     QueryResponse resp = cluster.getSolrClient().query(CollectionAdminParams.SYSTEM_COLL, query);
     SolrDocumentList docs = resp.getResults();
     assertNotNull(docs);

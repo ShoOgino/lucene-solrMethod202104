@@ -16,6 +16,7 @@
     }
     // add a node
     JettySolrRunner node = cluster.startJettySolrRunner();
+    cluster.waitForAllNodes(30);
     if (!listener.onChangeLatch.await(10, TimeUnit.SECONDS)) {
       fail("onChange listener didn't execute on cluster change");
     }
@@ -27,18 +28,39 @@
     listener.reset();
     // stop overseer
     log.info("====== KILL OVERSEER 1");
-    cluster.stopJettySolrRunner(overseerLeaderIndex);
+    JettySolrRunner j = cluster.stopJettySolrRunner(overseerLeaderIndex);
+    cluster.waitForJettyToStop(j);
     if (!listener.onChangeLatch.await(10, TimeUnit.SECONDS)) {
       fail("onChange listener didn't execute on cluster change");
     }
-    assertEquals(1, listener.lostNodes.size());
-    assertEquals(overseerLeader, listener.lostNodes.iterator().next());
+
     assertEquals(0, listener.addedNodes.size());
     // wait until the new overseer is up
     Thread.sleep(5000);
+    
+    assertEquals(1, listener.lostNodes.size());
+    assertEquals(overseerLeader, listener.lostNodes.iterator().next());
+    
+    
+    String pathLost = ZkStateReader.SOLR_AUTOSCALING_NODE_LOST_PATH + "/" + overseerLeader;
+    
+    TimeOut timeout = new TimeOut(30, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+    try {
+      timeout.waitFor("zk path to go away", () -> {
+        try {
+          return !zkClient().exists(pathLost, true);
+        } catch (KeeperException e) {
+          throw new RuntimeException(e);
+        } catch (InterruptedException e) {
+          return false;
+        }
+      });
+    } catch (TimeoutException e) {
+      // okay
+    }
+
     // verify that a znode does NOT exist - there's no nodeLost trigger,
     // so the new overseer cleaned up existing nodeLost markers
-    String pathLost = ZkStateReader.SOLR_AUTOSCALING_NODE_LOST_PATH + "/" + overseerLeader;
     assertFalse("Path " + pathLost + " exists", zkClient().exists(pathLost, true));
 
     listener.reset();
@@ -97,6 +119,7 @@
     // create another node
     log.info("====== ADD NODE 1");
     JettySolrRunner node1 = cluster.startJettySolrRunner();
+    cluster.waitForAllNodes(30);
     if (!listener.onChangeLatch.await(10, TimeUnit.SECONDS)) {
       fail("onChange listener didn't execute on cluster change");
     }

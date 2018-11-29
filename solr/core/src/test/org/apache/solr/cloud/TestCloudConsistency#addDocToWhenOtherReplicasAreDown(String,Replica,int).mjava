@@ -4,18 +4,29 @@
    * Leader should be on node - 0
    */
   private void addDocToWhenOtherReplicasAreDown(String collection, Replica leader, int docId) throws Exception {
-    ChaosMonkey.stop(cluster.getJettySolrRunner(1));
-    ChaosMonkey.stop(cluster.getJettySolrRunner(2));
+    JettySolrRunner j1 = cluster.getJettySolrRunner(1);
+    JettySolrRunner j2 = cluster.getJettySolrRunner(2);
+    j1.stop();
+    j2.stop();
+    cluster.waitForJettyToStop(j1);
+    cluster.waitForJettyToStop(j2);
+    
     waitForState("", collection, (liveNodes, collectionState) ->
       collectionState.getSlice("shard1").getReplicas().stream()
           .filter(replica -> replica.getState() == Replica.State.DOWN).count() == 2);
 
     addDocs(collection, 1, docId);
-    ChaosMonkey.stop(cluster.getJettySolrRunner(0));
+    JettySolrRunner j3 = cluster.getJettySolrRunner(0);
+    j3.stop();
+    cluster.waitForJettyToStop(j3);
     waitForState("", collection, (liveNodes, collectionState) -> collectionState.getReplica(leader.getName()).getState() == Replica.State.DOWN);
 
-    ChaosMonkey.start(cluster.getJettySolrRunner(1));
-    ChaosMonkey.start(cluster.getJettySolrRunner(2));
+    cluster.getJettySolrRunner(1).start();
+    cluster.getJettySolrRunner(2).start();
+    
+    cluster.waitForNode(j1, 30);
+    cluster.waitForNode(j2, 30);
+    
     TimeOut timeOut = new TimeOut(10, TimeUnit.SECONDS, TimeSource.CURRENT_TIME);
     while (!timeOut.hasTimedOut()) {
       Replica newLeader = getCollectionState(collection).getSlice("shard1").getLeader();
@@ -24,7 +35,13 @@
       }
     }
 
-    ChaosMonkey.start(cluster.getJettySolrRunner(0));
+    JettySolrRunner j0 = cluster.getJettySolrRunner(0);
+    j0.start();
+    cluster.waitForNode(j0, 30);
+    
+    // waitForNode not solid yet?
+    cluster.waitForAllNodes(30);
+    
     waitForState("Timeout waiting for leader", collection, (liveNodes, collectionState) -> {
       Replica newLeader = collectionState.getLeader("shard1");
       return newLeader != null && newLeader.getName().equals(leader.getName());

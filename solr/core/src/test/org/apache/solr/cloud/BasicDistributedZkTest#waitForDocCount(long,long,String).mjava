@@ -1,21 +1,26 @@
-  // Insure that total docs found is the expected number.
+  // Ensure that total docs found is the expected number.
   private void waitForDocCount(long expectedNumFound, long waitMillis, String failureMessage)
       throws Exception {
-    RTimer timer = new RTimer();
-    long timeout = (long)timer.getTime() + waitMillis;
-    
-    ClusterState clusterState = getCommonCloudSolrClient().getZkStateReader().getClusterState();
-    DocCollection dColl = clusterState.getCollection(DEFAULT_COLLECTION);
-    long docTotal = -1; // Could use this for 0 hits too!
-    
-    while (docTotal != expectedNumFound && timeout > (long) timer.getTime()) {
-      docTotal = checkSlicesSameCounts(dColl);
-      if (docTotal != expectedNumFound) {
-        Thread.sleep(100);
-      }
+    AtomicLong total = new AtomicLong(-1);
+    try {
+      getCommonCloudSolrClient().getZkStateReader().waitForState(DEFAULT_COLLECTION, waitMillis, TimeUnit.MILLISECONDS, (n, c) -> {
+        long docTotal;
+        try {
+          docTotal = checkSlicesSameCounts(c);
+        } catch (SolrServerException | IOException e) {
+          throw new RuntimeException(e);
+        }
+        total.set(docTotal);
+        if (docTotal == expectedNumFound) {
+          return true;
+        }
+        return false;
+      });
+    } catch (TimeoutException | InterruptedException e) {
+     
     }
     // We could fail here if we broke out of the above because we exceeded the time allowed.
-    assertEquals(failureMessage, expectedNumFound, docTotal);
+    assertEquals(failureMessage, expectedNumFound, total.get());
 
     // This should be redundant, but it caught a test error after all.
     for (SolrClient client : clients) {

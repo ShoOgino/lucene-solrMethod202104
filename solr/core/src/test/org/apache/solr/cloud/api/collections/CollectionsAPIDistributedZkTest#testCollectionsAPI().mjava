@@ -7,6 +7,14 @@
     // create new collections rapid fire
     int cnt = random().nextInt(TEST_NIGHTLY ? 3 : 1) + 1;
     CollectionAdminRequest.Create[] createRequests = new CollectionAdminRequest.Create[cnt];
+    
+    class Coll {
+      String name;
+      int numShards;
+      int replicationFactor;
+    }
+    
+    List<Coll> colls = new ArrayList<>();
 
     for (int i = 0; i < cnt; i++) {
 
@@ -18,25 +26,30 @@
           = CollectionAdminRequest.createCollection("awhollynewcollection_" + i, "conf2", numShards, replicationFactor)
           .setMaxShardsPerNode(maxShardsPerNode);
       createRequests[i].processAsync(cluster.getSolrClient());
+      
+      Coll coll = new Coll();
+      coll.name = "awhollynewcollection_" + i;
+      coll.numShards = numShards;
+      coll.replicationFactor = replicationFactor;
+      colls.add(coll);
     }
 
-    for (int i = 0; i < cnt; i++) {
-      String collectionName = "awhollynewcollection_" + i;
-      final int j = i;
-      waitForState("Expected to see collection " + collectionName, collectionName,
-          (n, c) -> {
-            CollectionAdminRequest.Create req = createRequests[j];
-            return DocCollection.isFullyActive(n, c, req.getNumShards(), req.getReplicationFactor());
-          });
+    for (Coll coll : colls) {
+      cluster.waitForActiveCollection(coll.name, coll.numShards, coll.numShards * coll.replicationFactor);
     }
 
-    cluster.injectChaos(random());
+    waitForStable(cnt, createRequests);
 
     for (int i = 0; i < cluster.getJettySolrRunners().size(); i++) {
       checkInstanceDirs(cluster.getJettySolrRunner(i));
     }
-
+    
     String collectionName = createRequests[random().nextInt(createRequests.length)].getCollectionName();
+    
+    // TODO: we should not need this...beast test well when trying to fix
+    Thread.sleep(1000);
+    
+    cluster.getSolrClient().getZkStateReader().forciblyRefreshAllClusterStateSlow();
 
     new UpdateRequest()
         .add("id", "6")

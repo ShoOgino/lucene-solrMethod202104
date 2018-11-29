@@ -20,13 +20,12 @@
     if (state == Slice.State.RECOVERY)  {
       // mark the slice as 'construction' and only then try to delete the cores
       // see SOLR-9455
-      DistributedQueue inQueue = Overseer.getStateUpdateQueue(ocmh.zkStateReader.getZkClient());
       Map<String, Object> propMap = new HashMap<>();
       propMap.put(Overseer.QUEUE_OPERATION, OverseerAction.UPDATESHARDSTATE.toLower());
       propMap.put(sliceId, Slice.State.CONSTRUCTION.toString());
       propMap.put(ZkStateReader.COLLECTION_PROP, collectionName);
       ZkNodeProps m = new ZkNodeProps(propMap);
-      inQueue.offer(Utils.toJSON(m));
+      ocmh.overseer.offerStateUpdate(Utils.toJSON(m));
     }
 
     String asyncId = message.getStr(ASYNC);
@@ -64,29 +63,14 @@
         }
       }
       log.debug("Waiting for delete shard action to complete");
-      cleanupLatch.await(5, TimeUnit.MINUTES);
+      cleanupLatch.await(1, TimeUnit.MINUTES);
 
       ZkNodeProps m = new ZkNodeProps(Overseer.QUEUE_OPERATION, DELETESHARD.toLower(), ZkStateReader.COLLECTION_PROP,
           collectionName, ZkStateReader.SHARD_ID_PROP, sliceId);
       ZkStateReader zkStateReader = ocmh.zkStateReader;
-      Overseer.getStateUpdateQueue(zkStateReader.getZkClient()).offer(Utils.toJSON(m));
+      ocmh.overseer.offerStateUpdate(Utils.toJSON(m));
 
-      // wait for a while until we don't see the shard
-      TimeOut timeout = new TimeOut(30, TimeUnit.SECONDS, timeSource);
-      boolean removed = false;
-      while (!timeout.hasTimedOut()) {
-        timeout.sleep(100);
-        DocCollection collection = zkStateReader.getClusterState().getCollection(collectionName);
-        removed = collection.getSlice(sliceId) == null;
-        if (removed) {
-          timeout.sleep(100); // just a bit of time so it's more likely other readers see on return
-          break;
-        }
-      }
-      if (!removed) {
-        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
-            "Could not fully remove collection: " + collectionName + " shard: " + sliceId);
-      }
+      zkStateReader.waitForState(collectionName, 45, TimeUnit.SECONDS, (l, c) -> c.getSlice(sliceId) == null);
 
       log.info("Successfully deleted collection: " + collectionName + ", shard: " + sliceId);
     } catch (SolrException e) {

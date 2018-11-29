@@ -1,0 +1,62 @@
+    public String publishState(String collection, String coreName, String coreNodeName, String shard, Replica.State stateName, int numShards, boolean startElection, Overseer overseer)
+        throws Exception {
+      if (stateName == null) {
+        ElectionContext ec = electionContext.remove(coreName);
+        if (ec != null) {
+          ec.cancelElection();
+        }
+        ZkNodeProps m = new ZkNodeProps(Overseer.QUEUE_OPERATION, OverseerAction.DELETECORE.toLower(),
+            ZkStateReader.NODE_NAME_PROP, nodeName,
+            ZkStateReader.CORE_NAME_PROP, coreName,
+            ZkStateReader.CORE_NODE_NAME_PROP, coreNodeName,
+            ZkStateReader.COLLECTION_PROP, collection);
+        ZkDistributedQueue q = overseer.getStateUpdateQueue();
+        q.offer(Utils.toJSON(m));
+        return null;
+      } else {
+        ZkNodeProps m = new ZkNodeProps(Overseer.QUEUE_OPERATION, OverseerAction.STATE.toLower(),
+            ZkStateReader.STATE_PROP, stateName.toString(),
+            ZkStateReader.NODE_NAME_PROP, nodeName,
+            ZkStateReader.CORE_NAME_PROP, coreName,
+            ZkStateReader.CORE_NODE_NAME_PROP, coreNodeName,
+            ZkStateReader.COLLECTION_PROP, collection,
+            ZkStateReader.SHARD_ID_PROP, shard,
+            ZkStateReader.NUM_SHARDS_PROP, Integer.toString(numShards),
+            ZkStateReader.BASE_URL_PROP, "http://" + nodeName + "/solr/");
+        ZkDistributedQueue q = overseer.getStateUpdateQueue();
+        q.offer(Utils.toJSON(m));
+      }
+
+      if (startElection && collection.length() > 0) {
+        zkStateReader.waitForState(collection, 45000, TimeUnit.MILLISECONDS,
+            (liveNodes, collectionState) -> getShardId(collectionState, coreNodeName) != null);
+        String shardId = getShardId(collection, coreNodeName);
+        if (shardId != null) {
+          ElectionContext prevContext = electionContext.get(coreName);
+          if (prevContext != null) {
+            prevContext.cancelElection();
+          }
+
+          try {
+            zkClient.makePath("/collections/" + collection + "/leader_elect/"
+                + shardId + "/election", true);
+          } catch (NodeExistsException nee) {}
+          ZkNodeProps props = new ZkNodeProps(ZkStateReader.BASE_URL_PROP,
+              "http://" + nodeName + "/solr/", ZkStateReader.NODE_NAME_PROP,
+              nodeName, ZkStateReader.CORE_NAME_PROP, coreName,
+              ZkStateReader.SHARD_ID_PROP, shardId,
+              ZkStateReader.COLLECTION_PROP, collection,
+              ZkStateReader.CORE_NODE_NAME_PROP, coreNodeName);
+          LeaderElector elector = new LeaderElector(zkClient);
+          ShardLeaderElectionContextBase ctx = new ShardLeaderElectionContextBase(
+              elector, shardId, collection, nodeName + "_" + coreName, props,
+              MockSolrSource.makeSimpleMock(overseer, zkStateReader, null));
+          elector.setup(ctx);
+          electionContext.put(coreName, ctx);
+          elector.joinElection(ctx, false);
+          return shardId;
+        }
+      }
+      return null;
+    }
+

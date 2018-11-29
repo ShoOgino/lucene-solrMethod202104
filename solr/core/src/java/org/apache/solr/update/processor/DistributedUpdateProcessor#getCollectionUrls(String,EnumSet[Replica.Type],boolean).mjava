@@ -1,0 +1,37 @@
+  private List<Node> getCollectionUrls(String collection, EnumSet<Replica.Type> types, boolean onlyLeaders) {
+    ClusterState clusterState = zkController.getClusterState();
+    final DocCollection docCollection = clusterState.getCollectionOrNull(collection);
+    if (collection == null || docCollection.getSlicesMap() == null) {
+      throw new ZooKeeperException(ErrorCode.BAD_REQUEST,
+          "Could not find collection in zk: " + clusterState);
+    }
+    Map<String,Slice> slices = docCollection.getSlicesMap();
+    final List<Node> urls = new ArrayList<>(slices.size());
+    for (Map.Entry<String,Slice> sliceEntry : slices.entrySet()) {
+      Slice replicas = slices.get(sliceEntry.getKey());
+      if (onlyLeaders) {
+        Replica replica = docCollection.getLeader(replicas.getName());
+        if (replica != null) {
+          ZkCoreNodeProps nodeProps = new ZkCoreNodeProps(replica);
+          urls.add(new StdNode(nodeProps, collection, replicas.getName()));
+        }
+        continue;
+      }
+      Map<String,Replica> shardMap = replicas.getReplicasMap();
+      
+      for (Entry<String,Replica> entry : shardMap.entrySet()) {
+        if (!types.contains(entry.getValue().getType())) {
+          continue;
+        }
+        ZkCoreNodeProps nodeProps = new ZkCoreNodeProps(entry.getValue());
+        if (clusterState.liveNodesContain(nodeProps.getNodeName())) {
+          urls.add(new StdNode(nodeProps, collection, replicas.getName()));
+        }
+      }
+    }
+    if (urls.isEmpty()) {
+      return null;
+    }
+    return urls;
+  }
+

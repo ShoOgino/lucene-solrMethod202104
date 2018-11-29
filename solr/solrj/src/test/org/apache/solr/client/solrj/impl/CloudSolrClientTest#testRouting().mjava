@@ -1,8 +1,7 @@
   @Test
   public void testRouting() throws Exception {
-    CollectionAdminRequest.createCollection(COLLECTION, "conf", 2, 1).process(cluster.getSolrClient());
-    AbstractDistribZkTestBase.waitForRecoveriesToFinish(COLLECTION, cluster.getSolrClient().getZkStateReader(),
-        false, true, TIMEOUT);
+    CollectionAdminRequest.createCollection("routing_collection", "conf", 2, 1).process(cluster.getSolrClient());
+    cluster.waitForActiveCollection("routing_collection", 2, 2);
     
     AbstractUpdateRequest request = new UpdateRequest()
         .add(id, "0", "a_t", "hello1")
@@ -10,7 +9,7 @@
         .setAction(AbstractUpdateRequest.ACTION.COMMIT, true, true);
     
     // Test single threaded routed updates for UpdateRequest
-    NamedList<Object> response = getRandomClient().request(request, COLLECTION);
+    NamedList<Object> response = getRandomClient().request(request, "routing_collection");
     if (getRandomClient().isDirectUpdatesToLeadersOnly()) {
       checkSingleServer(response);
     }
@@ -41,12 +40,12 @@
     final UpdateResponse uResponse = new UpdateRequest()
         .deleteById("0")
         .deleteById("2")
-        .commit(cluster.getSolrClient(), COLLECTION);
+        .commit(cluster.getSolrClient(), "routing_collection");
     if (getRandomClient().isDirectUpdatesToLeadersOnly()) {
       checkSingleServer(uResponse.getResponse());
     }
 
-    QueryResponse qResponse = getRandomClient().query(COLLECTION, new SolrQuery("*:*"));
+    QueryResponse qResponse = getRandomClient().query("routing_collection", new SolrQuery("*:*"));
     SolrDocumentList docs = qResponse.getResults();
     assertEquals(0, docs.getNumFound());
     
@@ -55,7 +54,7 @@
         (Collections.singletonList(cluster.getZkServer().getZkAddress()), Optional.empty())
         .withParallelUpdates(true)
         .build()) {
-      threadedClient.setDefaultCollection(COLLECTION);
+      threadedClient.setDefaultCollection("routing_collection");
       response = threadedClient.request(request);
       if (threadedClient.isDirectUpdatesToLeadersOnly()) {
         checkSingleServer(response);
@@ -87,12 +86,12 @@
 
     // Track request counts on each node before query calls
     ClusterState clusterState = cluster.getSolrClient().getZkStateReader().getClusterState();
-    DocCollection col = clusterState.getCollection(COLLECTION);
+    DocCollection col = clusterState.getCollection("routing_collection");
     Map<String, Long> requestCountsMap = Maps.newHashMap();
     for (Slice slice : col.getSlices()) {
       for (Replica replica : slice.getReplicas()) {
         String baseURL = (String) replica.get(ZkStateReader.BASE_URL_PROP);
-        requestCountsMap.put(baseURL, getNumRequests(baseURL, COLLECTION));
+        requestCountsMap.put(baseURL, getNumRequests(baseURL, "routing_collection"));
       }
     }
 
@@ -137,7 +136,7 @@
       ModifiableSolrParams solrParams = new ModifiableSolrParams();
       solrParams.set(CommonParams.Q, "*:*");
       solrParams.set(ShardParams._ROUTE_, sameShardRoutes.get(random().nextInt(sameShardRoutes.size())));
-      log.info("output: {}", getRandomClient().query(COLLECTION, solrParams));
+      log.info("output: {}", getRandomClient().query("routing_collection", solrParams));
     }
 
     // Request counts increase from expected nodes should aggregate to 1000, while there should be
@@ -150,7 +149,7 @@
         String baseURL = (String) replica.get(ZkStateReader.BASE_URL_PROP);
 
         Long prevNumRequests = requestCountsMap.get(baseURL);
-        Long curNumRequests = getNumRequests(baseURL, COLLECTION);
+        Long curNumRequests = getNumRequests(baseURL, "routing_collection");
 
         long delta = curNumRequests - prevNumRequests;
         if (expectedBaseURLs.contains(baseURL)) {

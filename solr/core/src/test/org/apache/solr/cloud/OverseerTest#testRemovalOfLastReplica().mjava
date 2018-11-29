@@ -4,18 +4,10 @@
     final Integer numReplicas = 1+random().nextInt(4); // between 1 and 4 replicas
     final Integer numShards = 1+random().nextInt(4); // between 1 and 4 shards
 
-    final String zkDir = createTempDir("zkData").toFile().getAbsolutePath();
-    final ZkTestServer server = new ZkTestServer(zkDir);
-
-    SolrZkClient zkClient = null;
     ZkStateReader zkStateReader = null;
     SolrZkClient overseerClient = null;
     try {
-      server.run();
-      AbstractZkTestCase.tryCleanSolrZkNode(server.getZkHost());
-      AbstractZkTestCase.makeSolrZkNode(server.getZkHost());
 
-      zkClient = new SolrZkClient(server.getZkAddress(), TIMEOUT);
       ZkController.createClusterZkNodes(zkClient);
 
       zkStateReader = new ZkStateReader(zkClient);
@@ -23,7 +15,7 @@
 
       overseerClient = electNewOverseer(server.getZkAddress());
 
-      ZkDistributedQueue q = Overseer.getStateUpdateQueue(zkClient);
+      ZkDistributedQueue q = overseers.get(0).getStateUpdateQueue();
 
       // create collection
       {
@@ -96,17 +88,10 @@
               ZkStateReader.CORE_NODE_NAME_PROP, "core_node"+N);
 
           q.offer(Utils.toJSON(m));
-
+           
           {
-            int iterationsLeft = 100;
-            while (iterationsLeft-- > 0) {
-              final Slice slice = zkStateReader.getClusterState().getCollection(COLLECTION).getSlice("shard"+ss);
-              if (null == slice || null == slice.getReplicasMap().get("core_node"+N)) {
-                break;
-              }
-              if (VERBOSE) log.info("still seeing {} shard{} core_node{}, rechecking in 50ms ({} iterations left)", COLLECTION, ss, N, iterationsLeft);
-              Thread.sleep(50);
-            }
+            String shard = "shard"+ss;
+            zkStateReader.waitForState(COLLECTION, 15000, TimeUnit.MILLISECONDS, (liveNodes, collectionState) -> collectionState != null && (collectionState.getSlice(shard) == null || collectionState.getSlice(shard).getReplicasMap().get("core_node"+N) == null));
           }
 
           final DocCollection docCollection = zkStateReader.getClusterState().getCollection(COLLECTION);
@@ -124,9 +109,6 @@
 
       close(overseerClient);
       close(zkStateReader);
-      close(zkClient);
-
-      server.shutdown();
     }
   }
 

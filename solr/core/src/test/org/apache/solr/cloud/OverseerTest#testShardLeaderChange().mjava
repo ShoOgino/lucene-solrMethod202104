@@ -1,45 +1,126 @@
   @Test
   public void testShardLeaderChange() throws Exception {
-    String zkDir = createTempDir("zkData").toFile().getAbsolutePath();
-    final ZkTestServer server = new ZkTestServer(zkDir);
-    SolrZkClient controllerClient = null;
     ZkStateReader reader = null;
     MockZKController mockController = null;
     MockZKController mockController2 = null;
     OverseerRestarter killer = null;
     Thread killerThread = null;
+
     try {
-      server.run();
-      controllerClient = new SolrZkClient(server.getZkAddress(), TIMEOUT);
-      AbstractZkTestCase.tryCleanSolrZkNode(server.getZkHost());
-      AbstractZkTestCase.makeSolrZkNode(server.getZkHost());
-      ZkController.createClusterZkNodes(controllerClient);
+      ZkController.createClusterZkNodes(zkClient);
 
       killer = new OverseerRestarter(server.getZkAddress());
       killerThread = new Thread(killer);
       killerThread.start();
 
-      reader = new ZkStateReader(controllerClient);
+      reader = new ZkStateReader(zkClient);
       reader.createClusterStateWatchersAndUpdate();
 
+      UpdateShardHandler updateShardHandler = new UpdateShardHandler(UpdateShardHandlerConfig.DEFAULT);
+      updateShardHandlers.add(updateShardHandler);
+      HttpShardHandlerFactory httpShardHandlerFactory = new HttpShardHandlerFactory();
+      httpShardHandlerFactorys.add(httpShardHandlerFactory);
+
+     electNewOverseer(server.getZkAddress());
+
       for (int i = 0; i < atLeast(4); i++) {
-        killCounter.incrementAndGet(); //for each round allow 1 kill
-        mockController = new MockZKController(server.getZkAddress(), "node1");
-        mockController.createCollection(COLLECTION, 1);
-        mockController.publishState(COLLECTION, "core1", "node1", "shard1", Replica.State.ACTIVE,1);
-        if(mockController2!=null) {
+        killCounter.incrementAndGet(); // for each round allow 1 kill
+
+        mockController = new MockZKController(server.getZkAddress(), "node1", overseers);
+
+        TimeOut timeout = new TimeOut(5, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+        while (!timeout.hasTimedOut()) {
+          try {
+            mockController.createCollection(COLLECTION, 1);
+            break;
+          } catch (SolrException | KeeperException | AlreadyClosedException e) {
+            e.printStackTrace();
+          }
+        }
+
+        timeout = new TimeOut(5, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+        while (!timeout.hasTimedOut()) {
+          try {
+            mockController.publishState(COLLECTION, "core1", "node1", "shard1", Replica.State.ACTIVE,
+                1, true, getOpenOverseer());
+            break;
+          } catch (SolrException | KeeperException | AlreadyClosedException e) {
+            e.printStackTrace();
+          }
+        }
+
+        if (mockController2 != null) {
           mockController2.close();
           mockController2 = null;
         }
-        mockController.publishState(COLLECTION, "core1", "node1","shard1", Replica.State.RECOVERING,1);
-        mockController2 = new MockZKController(server.getZkAddress(), "node2");
-        mockController.publishState(COLLECTION, "core1", "node1","shard1", Replica.State.ACTIVE,1);
+        
+        Thread.sleep(100);
+        
+        timeout = new TimeOut(1, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+        while (!timeout.hasTimedOut()) {
+          try {
+            mockController.publishState(COLLECTION, "core1", "node1", "shard1",
+                Replica.State.RECOVERING, 1, true, getOpenOverseer());
+            break;
+          } catch (SolrException | AlreadyClosedException e) {
+             e.printStackTrace();
+          }
+        }
+
+        mockController2 = new MockZKController(server.getZkAddress(), "node2", overseers);
+        
+       timeout = new TimeOut(5, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+        while (!timeout.hasTimedOut()) {
+          try {
+            mockController.publishState(COLLECTION, "core1", "node1", "shard1", Replica.State.ACTIVE,
+                1, true, getOpenOverseer());
+            break;
+          } catch (SolrException | AlreadyClosedException e) {
+            e.printStackTrace();
+          }
+        }
+
         verifyShardLeader(reader, COLLECTION, "shard1", "core1");
-        mockController2.publishState(COLLECTION, "core4", "node2", "shard1",  Replica.State.ACTIVE ,1);
+
+
+        timeout = new TimeOut(5, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+        while (!timeout.hasTimedOut()) {
+          try {
+            mockController2.publishState(COLLECTION, "core4", "node2", "shard1", Replica.State.ACTIVE,
+                1, true, getOpenOverseer());
+            break;
+          } catch (SolrException | AlreadyClosedException e) {
+            e.printStackTrace();
+          }
+        }
+        
+
         mockController.close();
         mockController = null;
-        verifyShardLeader(reader, COLLECTION, "shard1", "core4");
+
+        ZkController zkController = createMockZkController(server.getZkAddress(), null, reader);
+        zkControllers.add(zkController);
+
+        TimeOut timeOut = new TimeOut(10, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+        timeOut.waitFor("Timed out waiting to see core4 as leader", () -> {
+
+          ZkCoreNodeProps leaderProps;
+          try {
+            leaderProps = zkController.getLeaderProps(COLLECTION, "shard1", 1000);
+          } catch (SolrException e) { 
+            return false;
+          } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+          }
+          if (leaderProps.getCoreName().equals("core4")) {
+            return true;
+          }
+          return false;
+
+        });
+
       }
+
     } finally {
       if (killer != null) {
         killer.run = false;
@@ -48,10 +129,9 @@
         }
       }
       close(mockController);
+
       close(mockController2);
-      close(controllerClient);
       close(reader);
-      server.shutdown();
     }
   }
 

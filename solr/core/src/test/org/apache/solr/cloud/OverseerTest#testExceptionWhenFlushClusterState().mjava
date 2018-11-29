@@ -1,22 +1,14 @@
   @Test
   public void testExceptionWhenFlushClusterState() throws Exception {
-    String zkDir = createTempDir("zkData").toFile().getAbsolutePath();
 
-    ZkTestServer server = new ZkTestServer(zkDir);
-
-    SolrZkClient controllerClient = null;
     SolrZkClient overseerClient = null;
     ZkStateReader reader = null;
 
     try {
-      server.run();
-      controllerClient = new SolrZkClient(server.getZkAddress(), TIMEOUT);
 
-      AbstractZkTestCase.tryCleanSolrZkNode(server.getZkHost());
-      AbstractZkTestCase.makeSolrZkNode(server.getZkHost());
-      ZkController.createClusterZkNodes(controllerClient);
+      ZkController.createClusterZkNodes(zkClient);
 
-      reader = new ZkStateReader(controllerClient);
+      reader = new ZkStateReader(zkClient);
       reader.createClusterStateWatchersAndUpdate();
 
       // We did not create /collections -> this message will cause exception when Overseer try to flush the clusterstate
@@ -32,26 +24,32 @@
           ZkStateReader.NUM_SHARDS_PROP, "1",
           DocCollection.STATE_FORMAT, "1",
           "createNodeSet", "");
-      ZkDistributedQueue workQueue = Overseer.getInternalWorkQueue(controllerClient, new Stats());
+      ZkDistributedQueue workQueue = Overseer.getInternalWorkQueue(zkClient, new Stats());
       workQueue.offer(Utils.toJSON(badMessage));
       workQueue.offer(Utils.toJSON(goodMessage));
       overseerClient = electNewOverseer(server.getZkAddress());
       waitForCollections(reader, "collection2");
 
-      ZkDistributedQueue q = Overseer.getStateUpdateQueue(controllerClient);
+      ZkDistributedQueue q = getOpenOverseer().getStateUpdateQueue();
       q.offer(Utils.toJSON(badMessage));
       q.offer(Utils.toJSON(goodMessage.plus("name", "collection3")));
       waitForCollections(reader, "collection2", "collection3");
       assertNotNull(reader.getClusterState().getCollectionOrNull("collection2"));
       assertNotNull(reader.getClusterState().getCollectionOrNull("collection3"));
 
-      assertTrue(workQueue.peek() == null);
-      assertTrue(q.peek() == null);
+      TimeOut timeOut = new TimeOut(10, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+      while(!timeOut.hasTimedOut()) {
+        if (q.peek() == null) {
+          break;
+        }
+        Thread.sleep(50);
+      }
+      
+      assertTrue(showQpeek(workQueue), workQueue.peek() == null);
+      assertTrue(showQpeek(q),  q.peek() == null);
     } finally {
       close(overseerClient);
-      close(controllerClient);
       close(reader);
-      server.shutdown();
     }
   }
 

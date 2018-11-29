@@ -16,10 +16,39 @@
         )
         .setMaxShardsPerNode(2)
         .process(cluster.getSolrClient());
-
+    
+    cluster.waitForActiveCollection(collection, 2, 4);
+    
+    ZkStateReader reader = cluster.getSolrClient().getZkStateReader();
+    
+    List<String> nodes = new ArrayList<>();
+    for (JettySolrRunner solrRunner : notOverseerNodes) {
+      nodes.add(solrRunner.getNodeName());
+    }
+    
     for (JettySolrRunner solrRunner : notOverseerNodes) {
       solrRunner.stop();
     }
+    for (JettySolrRunner solrRunner : notOverseerNodes) {
+      cluster.waitForJettyToStop(solrRunner);
+    }
+    
+    reader.waitForLiveNodes(30, TimeUnit.SECONDS, new LiveNodesPredicate() {
+      
+      @Override
+      public boolean matches(SortedSet<String> oldLiveNodes, SortedSet<String> newLiveNodes) {
+        boolean success = true;
+        for (String lostNodeName : nodes) {
+          if (newLiveNodes.contains(lostNodeName)) {
+            success = false;
+            break;
+          }
+        }
+        
+        return success;
+      }
+    });
+    
     waitForState("Expected single liveNode", collection,
         (liveNodes, collectionState) -> liveNodes.size() == 1);
 
@@ -27,9 +56,9 @@
     for (JettySolrRunner solrRunner : notOverseerNodes) {
       solrRunner.start();
     }
-
+    cluster.waitForAllNodes(30);
     waitForState("Expected 2x2 for collection: " + collection, collection,
-        clusterShape(2, 2));
+        clusterShape(2, 4));
     CollectionAdminResponse resp2 = CollectionAdminRequest.getOverseerStatus().process(cluster.getSolrClient());
     // 2 for recovering state, 4 for active state
     assertEquals(getNumStateOpeations(resp) + 6, getNumStateOpeations(resp2));

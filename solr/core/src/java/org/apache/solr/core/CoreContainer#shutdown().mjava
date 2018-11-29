@@ -1,50 +1,37 @@
-  /**
-   * Stops all cores.
-   */
   public void shutdown() {
     log.info("Shutting down CoreContainer instance="
         + System.identityHashCode(this));
 
+    ForkJoinPool customThreadPool = new ForkJoinPool(6);
+
     isShutDown = true;
-
-    ExecutorUtil.shutdownAndAwaitTermination(coreContainerWorkExecutor);
-    replayUpdatesExecutor.shutdownAndAwaitTermination();
-
-    if (metricsHistoryHandler != null) {
-      IOUtils.closeQuietly(metricsHistoryHandler.getSolrClient());
-      metricsHistoryHandler.close();
-    }
-
-    if (metricManager != null) {
-      metricManager.closeReporters(SolrMetricManager.getRegistryName(SolrInfoBean.Group.node));
-      metricManager.closeReporters(SolrMetricManager.getRegistryName(SolrInfoBean.Group.jvm));
-      metricManager.closeReporters(SolrMetricManager.getRegistryName(SolrInfoBean.Group.jetty));
-
-      metricManager.unregisterGauges(SolrMetricManager.getRegistryName(SolrInfoBean.Group.node), metricTag);
-      metricManager.unregisterGauges(SolrMetricManager.getRegistryName(SolrInfoBean.Group.jvm), metricTag);
-      metricManager.unregisterGauges(SolrMetricManager.getRegistryName(SolrInfoBean.Group.jetty), metricTag);
-    }
-
-    if (isZooKeeperAware()) {
-      cancelCoreRecoveries();
-      zkSys.zkController.publishNodeAsDown(zkSys.zkController.getNodeName());
-      try {
-        zkSys.zkController.removeEphemeralLiveNode();
-      } catch (Exception e) {
-        log.warn("Error removing live node. Continuing to close CoreContainer", e);
-      }
-      if (metricManager != null) {
-        metricManager.closeReporters(SolrMetricManager.getRegistryName(SolrInfoBean.Group.cluster));
-      }
-    }
-
     try {
-      if (coreAdminHandler != null) coreAdminHandler.shutdown();
-    } catch (Exception e) {
-      log.warn("Error shutting down CoreAdminHandler. Continuing to close CoreContainer.", e);
-    }
+      if (isZooKeeperAware()) {
+        cancelCoreRecoveries();
 
-    try {
+        if (isZooKeeperAware()) {
+          cancelCoreRecoveries();
+          try {
+            zkSys.zkController.removeEphemeralLiveNode();
+          } catch (AlreadyClosedException | SessionExpiredException | ConnectionLossException e) {
+
+          } catch (Exception e) {
+            log.warn("Error removing live node. Continuing to close CoreContainer", e);
+          }
+        }
+
+        try {
+          if (zkSys.zkController.getZkClient().getConnectionManager().isConnected()) {
+            log.info("Publish this node as DOWN...");
+            zkSys.zkController.publishNodeAsDown(zkSys.zkController.getNodeName());
+          }
+        } catch (Exception e) {
+          log.warn("Error publishing nodes as down. Continuing to close CoreContainer", e);
+        }
+      }
+
+      ExecutorUtil.shutdownAndAwaitTermination(coreContainerWorkExecutor);
+      
       // First wake up the closer thread, it'll terminate almost immediately since it checks isShutDown.
       synchronized (solrCores.getModifyLock()) {
         solrCores.getModifyLock().notifyAll(); // wake up anyone waiting
@@ -76,27 +63,77 @@
       synchronized (solrCores.getModifyLock()) {
         solrCores.getModifyLock().notifyAll(); // wake up the thread
       }
+      
+      customThreadPool.submit(() -> Collections.singleton(replayUpdatesExecutor).parallelStream().forEach(c -> {
+        c.shutdownAndAwaitTermination();
+      }));
+
+      if (metricsHistoryHandler != null) {
+        customThreadPool.submit(() -> Collections.singleton(metricsHistoryHandler).parallelStream().forEach(c -> {
+          IOUtils.closeQuietly(c);
+        }));
+        customThreadPool.submit(() -> Collections.singleton(metricsHistoryHandler.getSolrClient()).parallelStream().forEach(c -> {
+          IOUtils.closeQuietly(c);
+        }));
+      }
+
+      if (metricManager != null) {
+        metricManager.closeReporters(SolrMetricManager.getRegistryName(SolrInfoBean.Group.node));
+        metricManager.closeReporters(SolrMetricManager.getRegistryName(SolrInfoBean.Group.jvm));
+        metricManager.closeReporters(SolrMetricManager.getRegistryName(SolrInfoBean.Group.jetty));
+
+        metricManager.unregisterGauges(SolrMetricManager.getRegistryName(SolrInfoBean.Group.node), metricTag);
+        metricManager.unregisterGauges(SolrMetricManager.getRegistryName(SolrInfoBean.Group.jvm), metricTag);
+        metricManager.unregisterGauges(SolrMetricManager.getRegistryName(SolrInfoBean.Group.jetty), metricTag);
+      }
+
+      if (isZooKeeperAware()) {
+        cancelCoreRecoveries();
+
+        if (metricManager != null) {
+          metricManager.closeReporters(SolrMetricManager.getRegistryName(SolrInfoBean.Group.cluster));
+        }
+      }
+
+      try {
+        if (coreAdminHandler != null) {
+          customThreadPool.submit(() -> Collections.singleton(coreAdminHandler).parallelStream().forEach(c -> {
+            c.shutdown();
+          }));
+        }
+      } catch (Exception e) {
+        log.warn("Error shutting down CoreAdminHandler. Continuing to close CoreContainer.", e);
+      }
 
     } finally {
       try {
         if (shardHandlerFactory != null) {
-          shardHandlerFactory.close();
+          customThreadPool.submit(() -> Collections.singleton(shardHandlerFactory).parallelStream().forEach(c -> {
+            c.close();
+          }));
         }
       } finally {
         try {
           if (updateShardHandler != null) {
-            updateShardHandler.close();
+            customThreadPool.submit(() -> Collections.singleton(shardHandlerFactory).parallelStream().forEach(c -> {
+              updateShardHandler.close();
+            }));
           }
         } finally {
-          // we want to close zk stuff last
-          zkSys.close();
+          try {
+            // we want to close zk stuff last
+            zkSys.close();
+          } finally {
+            ExecutorUtil.shutdownAndAwaitTermination(customThreadPool);
+          }
         }
+
       }
     }
 
     // It should be safe to close the authorization plugin at this point.
     try {
-      if(authorizationPlugin != null) {
+      if (authorizationPlugin != null) {
         authorizationPlugin.plugin.close();
       }
     } catch (IOException e) {
@@ -105,7 +142,7 @@
 
     // It should be safe to close the authentication plugin at this point.
     try {
-      if(authenticationPlugin != null) {
+      if (authenticationPlugin != null) {
         authenticationPlugin.plugin.close();
         authenticationPlugin = null;
       }

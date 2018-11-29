@@ -1,6 +1,8 @@
   protected List<JettySolrRunner> createJettys(int numJettys) throws Exception {
-    List<JettySolrRunner> jettys = new ArrayList<>();
-    List<SolrClient> clients = new ArrayList<>();
+    List<JettySolrRunner> jettys = Collections.synchronizedList(new ArrayList<>());
+    List<SolrClient> clients = Collections.synchronizedList(new ArrayList<>());
+    List<CollectionAdminRequest> createReplicaRequests = Collections.synchronizedList(new ArrayList<>());
+    List<CollectionAdminRequest> createPullReplicaRequests = Collections.synchronizedList(new ArrayList<>());
     StringBuilder sb = new StringBuilder();
 
     assertEquals(0, CollectionAdminRequest
@@ -9,7 +11,15 @@
         .setCreateNodeSet("")
         .process(cloudClient).getStatus());
     
+    cloudClient.waitForState(DEFAULT_COLLECTION, 30, TimeUnit.SECONDS, (l,c) -> c != null && c.getSlices().size() == sliceCount);
+    
+    ForkJoinPool customThreadPool = new ForkJoinPool(12);
+
     int numOtherReplicas = numJettys - getPullReplicaCount() * sliceCount;
+    
+    log.info("Creating jetty instances pullReplicaCount={} numOtherReplicas={}", getPullReplicaCount(), numOtherReplicas);
+    
+    int addedReplicas = 0;
     for (int i = 1; i <= numJettys; i++) {
       if (sb.length() > 0) sb.append(',');
       int cnt = this.jettyIntCntr.incrementAndGet();
@@ -18,66 +28,126 @@
 
       jettyDir.mkdirs();
       setupJettySolrHome(jettyDir);
-      JettySolrRunner j;
-
-      CollectionAdminResponse response;
+      int currentI = i;
       if (numOtherReplicas > 0) {
         numOtherReplicas--;
         if (useTlogReplicas()) {
-          log.info("create jetty {} in directory {} of type {}", i, jettyDir, Replica.Type.TLOG);
-          j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
-              + cnt) : null, null, "solrconfig.xml", null, Replica.Type.TLOG);
-          response = CollectionAdminRequest
-              .addReplicaToShard(DEFAULT_COLLECTION, "shard"+((i%sliceCount)+1))
-              .setNode(j.getNodeName())
-              .setType(Replica.Type.TLOG)
-              .process(cloudClient);
+          log.info("create jetty {} in directory {} of type {} in shard {}", i, jettyDir, Replica.Type.TLOG, ((currentI % sliceCount) + 1));
+          customThreadPool.submit(() -> Collections.singleton(controlClient).parallelStream().forEach(c -> {
+            try {
+              JettySolrRunner j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
+                  + cnt) : null, null, "solrconfig.xml", null, Replica.Type.TLOG);
+              j.start();
+              jettys.add(j);
+              waitForLiveNode(j);
+
+              createReplicaRequests.add(CollectionAdminRequest
+                  .addReplicaToShard(DEFAULT_COLLECTION, "shard" + ((currentI % sliceCount) + 1))
+                  .setNode(j.getNodeName())
+                  .setType(Replica.Type.TLOG));
+
+              coreClients.add(createNewSolrClient(coreName, j.getLocalPort()));
+              SolrClient client = createNewSolrClient(j.getLocalPort());
+              clients.add(client);
+
+            } catch (IOException e) {
+              throw new RuntimeException(e);
+            } catch (Exception e) {
+              throw new RuntimeException(e);
+            }
+          }));
+
+          addedReplicas++;
         } else {
-          log.info("create jetty {} in directory {} of type {}", i, jettyDir, Replica.Type.NRT);
-          j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
-              + cnt) : null, null, "solrconfig.xml", null, null);
-          response = CollectionAdminRequest
-              .addReplicaToShard(DEFAULT_COLLECTION, "shard"+((i%sliceCount)+1))
-              .setNode(j.getNodeName())
-              .setType(Replica.Type.NRT)
-              .process(cloudClient);
+          log.info("create jetty {} in directory {} of type {}", i, jettyDir, Replica.Type.NRT, ((currentI % sliceCount) + 1));
+          
+          customThreadPool.submit(() -> Collections.singleton(controlClient).parallelStream().forEach(c -> {
+            try {
+              JettySolrRunner j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
+                  + cnt) : null, null, "solrconfig.xml", null, null);
+              j.start();
+              jettys.add(j);
+              waitForLiveNode(j);
+              createReplicaRequests.add(CollectionAdminRequest
+                  .addReplicaToShard(DEFAULT_COLLECTION, "shard"+((currentI%sliceCount)+1))
+                  .setNode(j.getNodeName())
+                  .setType(Replica.Type.NRT));
+              coreClients.add(createNewSolrClient(coreName, j.getLocalPort()));
+              SolrClient client = createNewSolrClient(j.getLocalPort());
+              clients.add(client);
+            } catch (IOException e) {
+              throw new RuntimeException(e);
+            } catch (Exception e) {
+              throw new RuntimeException(e);
+            }
+          }));
+          
+          addedReplicas++;
         }
       } else {
-        log.info("create jetty {} in directory {} of type {}", i, jettyDir, Replica.Type.PULL);
-        j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
-            + cnt) : null, null, "solrconfig.xml", null, Replica.Type.PULL);
-        response = CollectionAdminRequest
-            .addReplicaToShard(DEFAULT_COLLECTION, "shard"+((i%sliceCount)+1))
-            .setNode(j.getNodeName())
-            .setType(Replica.Type.PULL)
-            .process(cloudClient);
+        log.info("create jetty {} in directory {} of type {}", i, jettyDir, Replica.Type.PULL, ((currentI % sliceCount) + 1));
+        customThreadPool.submit(() -> Collections.singleton(controlClient).parallelStream().forEach(c -> {
+          try {
+            JettySolrRunner j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
+                + cnt) : null, null, "solrconfig.xml", null, Replica.Type.PULL);
+            j.start();
+            jettys.add(j);
+            waitForLiveNode(j);
+            createPullReplicaRequests.add(CollectionAdminRequest
+                .addReplicaToShard(DEFAULT_COLLECTION, "shard"+((currentI%sliceCount)+1))
+                .setNode(j.getNodeName())
+                .setType(Replica.Type.PULL));
+            coreClients.add(createNewSolrClient(coreName, j.getLocalPort()));
+            SolrClient client = createNewSolrClient(j.getLocalPort());
+            clients.add(client);
+          } catch (IOException e) {
+            throw new RuntimeException(e);
+          } catch (Exception e) {
+            throw new RuntimeException(e);
+          }
+        }));
+        addedReplicas++;
       }
-      jettys.add(j);
+
+    }
+    
+    ExecutorUtil.shutdownAndAwaitTermination(customThreadPool);
+    
+    customThreadPool = new ForkJoinPool(12);
+    customThreadPool.submit(() -> createReplicaRequests.parallelStream().forEach(r -> {
+      CollectionAdminResponse response;
+      try {
+        response = (CollectionAdminResponse) r.process(cloudClient);
+      } catch (SolrServerException | IOException e) {
+        throw new RuntimeException(e);
+      }
+
       assertTrue(response.isSuccess());
       String coreName = response.getCollectionCoresStatus().keySet().iterator().next();
-      coreClients.add(createNewSolrClient(coreName, j.getLocalPort()));
-      SolrClient client = createNewSolrClient(j.getLocalPort());
-      clients.add(client);
-    }
+    }));
+   
+    ExecutorUtil.shutdownAndAwaitTermination(customThreadPool);
+    
+    customThreadPool = new ForkJoinPool(12);
+    customThreadPool.submit(() -> createPullReplicaRequests.parallelStream().forEach(r -> {
+      CollectionAdminResponse response;
+      try {
+        response = (CollectionAdminResponse) r.process(cloudClient);
+      } catch (SolrServerException | IOException e) {
+        throw new RuntimeException(e);
+      }
+
+      assertTrue(response.isSuccess());
+      String coreName = response.getCollectionCoresStatus().keySet().iterator().next();
+    }));
+    
+    ExecutorUtil.shutdownAndAwaitTermination(customThreadPool);
+    
+    waitForActiveReplicaCount(cloudClient, DEFAULT_COLLECTION, addedReplicas);
 
     this.jettys.addAll(jettys);
     this.clients.addAll(clients);
 
-    int numReplicas = getTotalReplicas(DEFAULT_COLLECTION);
-    int expectedNumReplicas = numJettys;
-
-    // now wait until we see that the number of shards in the cluster state
-    // matches what we expect
-    int retries = 0;
-    while (numReplicas != expectedNumReplicas) {
-      numReplicas = getTotalReplicas(DEFAULT_COLLECTION);
-      if (numReplicas == expectedNumReplicas) break;
-      if (retries++ == 60) {
-        printLayoutOnTearDown = true;
-        fail("Number of replicas in the state does not match what we set:" + numReplicas + " vs " + expectedNumReplicas);
-      }
-      Thread.sleep(500);
-    }
     
     ZkStateReader zkStateReader = cloudClient.getZkStateReader();
     // make sure we have a leader for each shard
@@ -85,7 +155,7 @@
       zkStateReader.getLeaderRetry(DEFAULT_COLLECTION, "shard" + i, 10000);
     }
 
-    if (numReplicas > 0) {
+    if (sliceCount > 0) {
       updateMappingsFromZk(this.jettys, this.clients);
     }
 

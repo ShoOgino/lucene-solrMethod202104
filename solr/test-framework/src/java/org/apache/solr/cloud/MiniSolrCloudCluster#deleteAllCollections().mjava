@@ -1,11 +1,53 @@
   /** Delete all collections (and aliases) */
   public void deleteAllCollections() throws Exception {
     try (ZkStateReader reader = new ZkStateReader(solrClient.getZkStateReader().getZkClient())) {
+      final CountDownLatch latch = new CountDownLatch(1);
+      reader.registerCloudCollectionsListener(new CloudCollectionsListener() {
+        
+        @Override
+        public void onChange(Set<String> oldCollections, Set<String> newCollections) {
+          if (newCollections != null && newCollections.size() == 0) {
+            latch.countDown();
+          }
+        }
+      });
+      
       reader.createClusterStateWatchersAndUpdate(); // up to date aliases & collections
       reader.aliasesManager.applyModificationAndExportToZk(aliases -> Aliases.EMPTY);
       for (String collection : reader.getClusterState().getCollectionStates().keySet()) {
         CollectionAdminRequest.deleteCollection(collection).process(solrClient);
       }
+      
+      boolean success = latch.await(60, TimeUnit.SECONDS);
+      if (!success) {
+        throw new IllegalStateException("Still waiting to see all collections removed from clusterstate.");
+      }
+      
+      for (String collection : reader.getClusterState().getCollectionStates().keySet()) {
+        reader.waitForState(collection, 15, TimeUnit.SECONDS, (liveNodes, collectionState) -> collectionState == null ? true : false);
+      }
+     
+    } 
+    
+    // may be deleted, but may not be gone yet - we only wait to not see it in ZK, not for core unloads
+    TimeOut timeout = new TimeOut(30, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+    while (true) {
+      
+      if( timeout.hasTimedOut() ) {
+        throw new TimeoutException("Timed out waiting for all collections to be fully removed.");
+      }
+      
+      boolean allContainersEmpty = true;
+      for(JettySolrRunner jetty : jettys) {
+        CoreContainer cc = jetty.getCoreContainer();
+        if (cc != null && cc.getCores().size() != 0) {
+          allContainersEmpty = false;
+        }
+      }
+      if (allContainersEmpty) {
+        break;
+      }
     }
+
   }
 

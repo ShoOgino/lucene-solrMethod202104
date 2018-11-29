@@ -2,8 +2,9 @@
     String testCollectionName = "collDoRecoveryOnRestart";
     try {
       // Inject pausing in recovery op, hence the replica won't be able to finish recovery
-      System.setProperty("solr.cloud.wait-for-updates-with-stale-state-pause", String.valueOf(Integer.MAX_VALUE));
 
+      TestInjection.prepRecoveryOpPauseForever = "true:100";
+      
       createCollection(testCollectionName, "conf1", 1, 2, 1);
       cloudClient.setDefaultCollection(testCollectionName);
 
@@ -34,15 +35,19 @@
 
       waitForState(testCollectionName, notLeaders.get(0).getName(), RECOVERING, 10000);
 
-      System.clearProperty("solr.cloud.wait-for-updates-with-stale-state-pause");
+      System.clearProperty("solrcloud.skip.autorecovery");
       JettySolrRunner notLeaderJetty = getJettyOnPort(getReplicaPort(notLeaders.get(0)));
-      ChaosMonkey.stop(notLeaderJetty);
+      String notLeaderNodeName = notLeaderJetty.getNodeName();
+      notLeaderJetty.stop();
+      
+      cloudClient.getZkStateReader().waitForLiveNodes(15, TimeUnit.SECONDS, SolrCloudTestCase.missingLiveNode(notLeaderNodeName));
 
-      ChaosMonkey.start(notLeaderJetty);
-      ensureAllReplicasAreActive(testCollectionName, "shard1", 1, 2, 100);
+      notLeaderJetty.start();
+      ensureAllReplicasAreActive(testCollectionName, "shard1", 1, 2, 130);
       assertDocsExistInAllReplicas(notLeaders, testCollectionName, 1, 2);
     } finally {
-      System.clearProperty("solr.cloud.wait-for-updates-with-stale-state-pause");
+      TestInjection.prepRecoveryOpPauseForever = null;
+      TestInjection.notifyPauseForeverDone();
     }
 
     // try to clean up

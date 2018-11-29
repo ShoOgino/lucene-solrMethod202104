@@ -1,17 +1,11 @@
   @Test
   public void testReplay() throws Exception{
-    String zkDir = createTempDir().toFile().getAbsolutePath() + File.separator
-        + "zookeeper/server1/data";
-    ZkTestServer server = new ZkTestServer(zkDir);
-    SolrZkClient zkClient = null;
+
     SolrZkClient overseerClient = null;
     ZkStateReader reader = null;
     
     try {
-      server.run();
-      zkClient = new SolrZkClient(server.getZkAddress(), TIMEOUT);
-      AbstractZkTestCase.tryCleanSolrZkNode(server.getZkHost());
-      AbstractZkTestCase.makeSolrZkNode(server.getZkHost());
+
       ZkController.createClusterZkNodes(zkClient);
 
       reader = new ZkStateReader(zkClient);
@@ -47,7 +41,7 @@
       overseerClient = electNewOverseer(server.getZkAddress());
       
       //submit to proper queue
-      queue = Overseer.getStateUpdateQueue(zkClient);
+      queue = overseers.get(0).getStateUpdateQueue();
       m = new ZkNodeProps(Overseer.QUEUE_OPERATION, OverseerAction.STATE.toLower(),
           ZkStateReader.BASE_URL_PROP, "http://127.0.0.1/solr",
           ZkStateReader.NODE_NAME_PROP, "node1",
@@ -58,19 +52,15 @@
           ZkStateReader.STATE_PROP, Replica.State.RECOVERING.toString());
       queue.offer(Utils.toJSON(m));
       
-      for(int i=0;i<100;i++) {
-        DocCollection dc = reader.getClusterState().getCollectionOrNull(COLLECTION);
-        Slice s = dc == null? null : dc.getSlice("shard1");
-        if(s!=null && s.getReplicasMap().size()==3) break;
-        Thread.sleep(100);
-      }
+      reader.waitForState(COLLECTION, 1000, TimeUnit.MILLISECONDS,
+          (liveNodes, collectionState) -> collectionState != null && collectionState.getSlice("shard1") != null
+              && collectionState.getSlice("shard1").getReplicas().size() == 3);
+      
       assertNotNull(reader.getClusterState().getCollection(COLLECTION).getSlice("shard1"));
       assertEquals(3, reader.getClusterState().getCollection(COLLECTION).getSlice("shard1").getReplicasMap().size());
     } finally {
       close(overseerClient);
-      close(zkClient);
       close(reader);
-      server.shutdown();
     }
   }
 

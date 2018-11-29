@@ -21,6 +21,8 @@
       // We don't need to handle this. This is just a fail-safe which comes in handy in skipping already processed
       // async calls.
       SolrException.log(log, "", e);
+    } catch (AlreadyClosedException e) {
+      return;
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
     }
@@ -32,6 +34,8 @@
 
     try {
       prioritizer.prioritizeOverseerNodes(myId);
+    } catch (AlreadyClosedException e) {
+        return;
     } catch (Exception e) {
       if (!zkStateReader.getZkClient().isClosed()) {
         log.error("Unable to prioritize overseer ", e);
@@ -54,14 +58,14 @@
             continue; // not a no, not a yes, try asking again
           }
 
-          log.debug("Cleaning up work-queue. #Running tasks: {}", runningTasks.size());
+          log.debug("Cleaning up work-queue. #Running tasks: {} #Completed tasks: {}",  runningTasksSize(), completedTasks.size());
           cleanUpWorkQueue();
 
           printTrackingMaps();
 
           boolean waited = false;
 
-          while (runningTasks.size() > MAX_PARALLEL_TASKS) {
+          while (runningTasksSize() > MAX_PARALLEL_TASKS) {
             synchronized (waitLock) {
               waitLock.wait(100);//wait for 100 ms or till a task is complete
             }
@@ -80,7 +84,7 @@
           // to clear out at least a few items in the queue before we read more items
           if (heads.size() < MAX_BLOCKED_TASKS) {
             //instead of reading MAX_PARALLEL_TASKS items always, we should only fetch as much as we can execute
-            int toFetch = Math.min(MAX_BLOCKED_TASKS - heads.size(), MAX_PARALLEL_TASKS - runningTasks.size());
+            int toFetch = Math.min(MAX_BLOCKED_TASKS - heads.size(), MAX_PARALLEL_TASKS - runningTasksSize());
             List<QueueEvent> newTasks = workQueue.peekTopN(toFetch, excludedTasks, 2000L);
             log.debug("Got {} tasks from work-queue : [{}]", newTasks.size(), newTasks);
             heads.addAll(newTasks);
@@ -102,7 +106,7 @@
           for (QueueEvent head : heads) {
             if (!tooManyTasks) {
               synchronized (runningTasks) {
-                tooManyTasks = runningTasks.size() >= MAX_PARALLEL_TASKS;
+                tooManyTasks = runningTasksSize() >= MAX_PARALLEL_TASKS;
               }
             }
             if (tooManyTasks) {
@@ -111,7 +115,9 @@
                 blockedTasks.put(head.getId(), head);
               continue;
             }
-            if (runningZKTasks.contains(head.getId())) continue;
+            synchronized (runningZKTasks) {
+              if (runningZKTasks.contains(head.getId())) continue;
+            }
             final ZkNodeProps message = ZkNodeProps.load(head.getBytes());
             final String asyncId = message.getStr(ASYNC);
             if (hasLeftOverItems) {
@@ -167,6 +173,8 @@
         } catch (InterruptedException e) {
           Thread.currentThread().interrupt();
           return;
+        } catch (AlreadyClosedException e) {
+
         } catch (Exception e) {
           SolrException.log(log, "", e);
         }

@@ -1,27 +1,32 @@
-  private void waitForAllNodes(int numServers, int timeout) throws IOException, InterruptedException {
-    try (SolrZkClient zkClient = new SolrZkClient(zkServer.getZkHost(), AbstractZkTestCase.TIMEOUT)) {
-      int numliveNodes = 0;
-      int retries = timeout;
-      String liveNodesPath = "/solr/live_nodes";
-      // Wait up to {timeout} seconds for number of live_nodes to match up number of servers
-      do {
-        if (zkClient.exists(liveNodesPath, true)) {
-          numliveNodes = zkClient.getChildren(liveNodesPath, null, true).size();
-          if (numliveNodes == numServers) {
-            break;
-          }
+  private void waitForAllNodes(int numServers, int timeoutSeconds) throws IOException, InterruptedException, TimeoutException {
+    
+    executorLauncher.shutdown();
+    
+    ExecutorUtil.shutdownAndAwaitTermination(executorLauncher);
+    
+    int numRunning = 0;
+    TimeOut timeout = new TimeOut(30, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+    
+    while (true) {
+      if (timeout.hasTimedOut()) {
+        throw new IllegalStateException("giving up waiting for all jetty instances to be running. numServers=" + numServers
+            + " numRunning=" + numRunning);
+      }
+      numRunning = 0;
+      for (JettySolrRunner jetty : getJettySolrRunners()) {
+        if (jetty.isRunning()) {
+          numRunning++;
         }
-        retries--;
-        if (retries == 0) {
-          throw new IllegalStateException("Solr servers failed to register with ZK."
-              + " Current count: " + numliveNodes + "; Expected count: " + numServers);
-        }
-
-        Thread.sleep(1000);
-      } while (numliveNodes != numServers);
+      }
+      if (numServers == numRunning) {
+        break;
+      }
+      Thread.sleep(100);
     }
-    catch (KeeperException e) {
-      throw new IOException("Error communicating with zookeeper", e);
+    
+    ZkStateReader reader = getSolrClient().getZkStateReader();
+    for (JettySolrRunner jetty : getJettySolrRunners()) {
+      reader.waitForLiveNodes(30, TimeUnit.SECONDS, (o, n) -> n.contains(jetty.getNodeName()));
     }
   }
 

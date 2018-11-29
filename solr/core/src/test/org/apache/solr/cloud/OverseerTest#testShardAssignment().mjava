@@ -1,19 +1,12 @@
   @Test
   public void testShardAssignment() throws Exception {
-    String zkDir = createTempDir("zkData").toFile().getAbsolutePath();
 
-    ZkTestServer server = new ZkTestServer(zkDir);
-
-    MockZKController zkController = null;
-    SolrZkClient zkClient = null;
+    MockZKController mockController = null;
     SolrZkClient overseerClient = null;
 
     try {
-      server.run();
-      AbstractZkTestCase.tryCleanSolrZkNode(server.getZkHost());
-      AbstractZkTestCase.makeSolrZkNode(server.getZkHost());
 
-      zkClient = new SolrZkClient(server.getZkAddress(), TIMEOUT);
+ 
       ZkController.createClusterZkNodes(zkClient);
 
       overseerClient = electNewOverseer(server.getZkAddress());
@@ -21,7 +14,7 @@
       try (ZkStateReader reader = new ZkStateReader(zkClient)) {
         reader.createClusterStateWatchersAndUpdate();
 
-        zkController = new MockZKController(server.getZkAddress(), "127.0.0.1");
+        mockController = new MockZKController(server.getZkAddress(), "127.0.0.1", overseers);
 
         final int numShards = 6;
 
@@ -30,12 +23,15 @@
             ZkStateReader.REPLICATION_FACTOR, "1",
             ZkStateReader.NUM_SHARDS_PROP, "3",
             "createNodeSet", "");
-        ZkDistributedQueue q = Overseer.getStateUpdateQueue(zkClient);
+        ZkDistributedQueue q = overseers.get(0).getStateUpdateQueue();
         q.offer(Utils.toJSON(m));
-
+        
         for (int i = 0; i < numShards; i++) {
-          assertNotNull("shard got no id?", zkController.publishState(COLLECTION, "core" + (i + 1), "node" + (i + 1), "shard" + ((i % 3) + 1), Replica.State.ACTIVE, 3));
+          assertNotNull("shard got no id?", mockController.publishState(COLLECTION, "core" + (i + 1), "node" + (i + 1), "shard" + ((i % 3) + 1), Replica.State.ACTIVE, 3, true, overseers.get(0)));
         }
+        
+        reader.waitForState(COLLECTION, 30, TimeUnit.SECONDS, MiniSolrCloudCluster.expectedShardsAndActiveReplicas(3, 6));
+        
         final Map<String, Replica> rmap = reader.getClusterState().getCollection(COLLECTION).getSlice("shard1").getReplicasMap();
         assertEquals(rmap.toString(), 2, rmap.size());
         assertEquals(rmap.toString(), 2, reader.getClusterState().getCollection(COLLECTION).getSlice("shard2").getReplicasMap().size());
@@ -47,12 +43,10 @@
         assertNotNull(reader.getLeaderUrl(COLLECTION, "shard3", 15000));
       }
     } finally {
-      close(zkClient);
-      if (zkController != null) {
-        zkController.close();
+      if (mockController != null) {
+        mockController.close();
       }
       close(overseerClient);
-      server.shutdown();
     }
   }
 

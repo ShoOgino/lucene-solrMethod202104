@@ -1,8 +1,12 @@
   @Test
-  //commented 9-Aug-2018  @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // 21-May-2018
-  @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // added 20-Sep-2018
   public void testAsyncRequests() throws Exception {
-
+    boolean legacy = random().nextBoolean();
+    if (legacy) {
+      CollectionAdminRequest.setClusterProperty(ZkStateReader.LEGACY_CLOUD, "true").process(cluster.getSolrClient());
+    } else {
+      CollectionAdminRequest.setClusterProperty(ZkStateReader.LEGACY_CLOUD, "false").process(cluster.getSolrClient());
+    }
+    
     final String collection = "testAsyncOperations";
     final CloudSolrClient client = cluster.getSolrClient();
 
@@ -12,6 +16,9 @@
         .processAndWait(client, MAX_TIMEOUT_SECONDS);
     assertSame("CreateCollection task did not complete!", RequestStatusState.COMPLETED, state);
 
+    
+    cluster.waitForActiveCollection(collection, 1, 1);
+    
     //Add a few documents to shard1
     int numDocs = TestUtil.nextInt(random(), 10, 100);
     List<SolrInputDocument> docs = new ArrayList<>(numDocs);
@@ -36,6 +43,8 @@
         .processAndWait(client, MAX_TIMEOUT_SECONDS);
     assertSame("CreateShard did not complete", RequestStatusState.COMPLETED, state);
 
+    client.getZkStateReader().forceUpdateCollection(collection);
+    
     //Add a doc to shard2 to make sure shard2 was created properly
     SolrInputDocument doc = new SolrInputDocument();
     doc.addField("id", numDocs + 1);
@@ -54,14 +63,20 @@
     assertSame("AddReplica did not complete", RequestStatusState.COMPLETED, state);
 
     //cloudClient watch might take a couple of seconds to reflect it
-    Slice shard1 = client.getZkStateReader().getClusterState().getCollection(collection).getSlice("shard1");
-    int count = 0;
-    while (shard1.getReplicas().size() != 2) {
-      if (count++ > 1000) {
-        fail("2nd Replica not reflecting in the cluster state");
+    client.getZkStateReader().waitForState(collection, 20, TimeUnit.SECONDS, (n, c) -> {
+      if (c == null)
+        return false;
+      Slice slice = c.getSlice("shard1");
+      if (slice == null) {
+        return false;
       }
-      Thread.sleep(100);
-    }
+
+      if (slice.getReplicas().size() == 2) {
+        return true;
+      }
+
+      return false;
+    });
 
     state = CollectionAdminRequest.createAlias("myalias",collection)
         .processAndWait(client, MAX_TIMEOUT_SECONDS);
@@ -81,7 +96,8 @@
     } catch (SolrException e) {
       //expected
     }
-
+    
+    Slice shard1 = client.getZkStateReader().getClusterState().getCollection(collection).getSlice("shard1");
     Replica replica = shard1.getReplicas().iterator().next();
     for (String liveNode : client.getZkStateReader().getClusterState().getLiveNodes()) {
       if (!replica.getNodeName().equals(liveNode)) {
@@ -91,15 +107,18 @@
         break;
       }
     }
-
+    client.getZkStateReader().forceUpdateCollection(collection);
+    
     shard1 = client.getZkStateReader().getClusterState().getCollection(collection).getSlice("shard1");
     String replicaName = shard1.getReplicas().iterator().next().getName();
     state = CollectionAdminRequest.deleteReplica(collection, "shard1", replicaName)
       .processAndWait(client, MAX_TIMEOUT_SECONDS);
     assertSame("DeleteReplica did not complete", RequestStatusState.COMPLETED, state);
 
-    state = CollectionAdminRequest.deleteCollection(collection)
-        .processAndWait(client, MAX_TIMEOUT_SECONDS);
-    assertSame("DeleteCollection did not complete", RequestStatusState.COMPLETED, state);
+    if (!legacy) {
+      state = CollectionAdminRequest.deleteCollection(collection)
+          .processAndWait(client, MAX_TIMEOUT_SECONDS);
+      assertSame("DeleteCollection did not complete", RequestStatusState.COMPLETED, state);
+    }
   }
 

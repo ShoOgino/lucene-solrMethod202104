@@ -5,11 +5,33 @@
    */
   public void stop() throws Exception {
     // Do not let Jetty/Solr pollute the MDC for this thread
-    Map<String, String> prevContext = MDC.getCopyOfContextMap();
+    Map<String,String> prevContext = MDC.getCopyOfContextMap();
     MDC.clear();
     try {
       Filter filter = dispatchFilter.getFilter();
 
+      // we want to shutdown outside of jetty cutting us off
+      SolrDispatchFilter sdf = getSolrDispatchFilter();
+      Thread shutdownThead = null;
+      if (sdf != null) {
+        shutdownThead = new Thread() {
+
+          public void run() {
+            try {
+              sdf.close();
+            } catch (Throwable t) {
+              log.error("Error shutting down Solr", t);
+            }
+          }
+
+        };
+        sdf.closeOnDestroy(false);
+        shutdownThead.start();
+      }
+
+      QueuedThreadPool qtp = (QueuedThreadPool) server.getThreadPool();
+      ReservedThreadExecutor rte = qtp.getBean(ReservedThreadExecutor.class);
+      
       server.stop();
 
       if (server.getState().equals(Server.FAILED)) {
@@ -21,9 +43,48 @@
         }
       }
 
-      server.join();
+      // stop timeout is 0, so we will interrupt right away
+      while(!qtp.isStopped()) {
+        qtp.stop();
+        if (qtp.isStopped()) {
+          Thread.sleep(50);
+        }
+      }
+      
+      // we tried to kill everything, now we wait for executor to stop
+      qtp.setStopTimeout(Integer.MAX_VALUE);
+      qtp.stop();
+      qtp.join();
+      
+      if (rte != null) {
+        // we try and wait for the reserved thread executor, but it doesn't always seem to work
+        // so we actually set 0 reserved threads at creation
+        
+        rte.stop();
+        
+        TimeOut timeout = new TimeOut(30, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+        timeout.waitFor("Timeout waiting for reserved executor to stop.", ()
+            -> rte.isStopped());
+      }
+
+      if (shutdownThead != null) {
+        shutdownThead.join();
+      }
+
+      do {
+        try {
+          server.join();
+        } catch (InterruptedException e) {
+          // ignore
+        }
+      } while (!server.isStopped());
+      
     } finally {
-      if (prevContext != null)  {
+      if (enableProxy) {
+        proxy.close();
+      }
+      
+      if (prevContext != null) {
         MDC.setContextMap(prevContext);
       } else {
         MDC.clear();

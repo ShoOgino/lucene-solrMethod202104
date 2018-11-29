@@ -23,7 +23,11 @@
         .setAutoAddReplicas(false)
         .setMaxShardsPerNode(3)
         .process(cluster.getSolrClient());
-
+    
+    cluster.waitForActiveCollection(collection1, 2, 4);
+    cluster.waitForActiveCollection(collection2, 1, 2);
+    cluster.waitForActiveCollection("testSimple3", 3, 3);
+    
     // we remove the implicit created trigger, so the replicas won't be moved
     String removeTriggerCommand = "{" +
         "'remove-trigger' : {" +
@@ -40,34 +44,71 @@
     List<CloudDescriptor> cloudDescriptors = lostJetty.getCoreContainer().getCores().stream()
         .map(solrCore -> solrCore.getCoreDescriptor().getCloudDescriptor())
         .collect(Collectors.toList());
+    
+    ZkStateReader reader = cluster.getSolrClient().getZkStateReader();
+
     lostJetty.stop();
-    waitForNodeLeave(lostNodeName);
+    
+    cluster.waitForJettyToStop(lostJetty);
+
+    reader.waitForLiveNodes(30, TimeUnit.SECONDS, missingLiveNode(lostNodeName));
+
 
     List<SolrRequest> operations = getOperations(jetty3, lostNodeName);
     assertOperations(collection1, operations, lostNodeName, cloudDescriptors,  null);
 
     lostJetty.start();
-    ClusterStateUtil.waitForAllActiveAndLiveReplicas(cluster.getSolrClient().getZkStateReader(), 30000);
+    cluster.waitForAllNodes(30);
+    
+    cluster.waitForActiveCollection(collection1, 2, 4);
+    cluster.waitForActiveCollection(collection2, 1, 2);
+    cluster.waitForActiveCollection("testSimple3", 3, 3);
+    
+    assertTrue("Timeout waiting for all live and active", ClusterStateUtil.waitForAllActiveAndLiveReplicas(cluster.getSolrClient().getZkStateReader(), 30000));
+    
     String setClusterPreferencesCommand = "{" +
         "'set-cluster-preferences': [" +
         "{'minimize': 'cores','precision': 0}]" +
         "}";
     req = createAutoScalingRequest(SolrRequest.METHOD.POST, setClusterPreferencesCommand);
-    response = cluster.getSolrClient().request(req);
+    
+    // you can hit a stale connection from pool when restarting jetty
+    try (CloudSolrClient cloudClient = new CloudSolrClient.Builder(Collections.singletonList(cluster.getZkServer().getZkAddress()),
+        Optional.empty())
+            .withSocketTimeout(45000).withConnectionTimeout(15000).build()) {
+      response = cloudClient.request(req);
+    }
+
     assertEquals(response.get("result").toString(), "success");
 
     lostJetty = random().nextBoolean()? jetty1 : jetty2;
-    lostNodeName = lostJetty.getNodeName();
+    String lostNodeName2 = lostJetty.getNodeName();
     cloudDescriptors = lostJetty.getCoreContainer().getCores().stream()
         .map(solrCore -> solrCore.getCoreDescriptor().getCloudDescriptor())
         .collect(Collectors.toList());
-    lostJetty.stop();
-    waitForNodeLeave(lostNodeName);
+    
 
-    operations = getOperations(jetty3, lostNodeName);
-    assertOperations(collection1, operations, lostNodeName, cloudDescriptors, jetty3);
+    
+    lostJetty.stop();
+   
+    reader.waitForLiveNodes(30, TimeUnit.SECONDS, missingLiveNode(lostNodeName2));
+
+    try {
+      operations = getOperations(jetty3, lostNodeName2);
+    } catch (SolrException e) {
+      // we might get a stale connection from the pool after jetty restarts
+      operations = getOperations(jetty3, lostNodeName2);
+    }
+    
+    assertOperations(collection1, operations, lostNodeName2, cloudDescriptors, jetty3);
 
     lostJetty.start();
+    cluster.waitForAllNodes(30);
+    
+    cluster.waitForActiveCollection(collection1, 2, 4);
+    cluster.waitForActiveCollection(collection2, 1, 2);
+    cluster.waitForActiveCollection("testSimple3", 3, 3);
+    
     assertTrue("Timeout waiting for all live and active", ClusterStateUtil.waitForAllActiveAndLiveReplicas(cluster.getSolrClient().getZkStateReader(), 30000));
 
     new CollectionAdminRequest.AsyncCollectionAdminRequest(CollectionParams.CollectionAction.MODIFYCOLLECTION) {
@@ -80,10 +121,13 @@
       }
     }.process(cluster.getSolrClient());
     lostJetty = jetty1;
-    lostNodeName = lostJetty.getNodeName();
+    String lostNodeName3 = lostJetty.getNodeName();
+    
     lostJetty.stop();
-    waitForNodeLeave(lostNodeName);
-    operations = getOperations(jetty3, lostNodeName);
+    
+    reader.waitForLiveNodes(30, TimeUnit.SECONDS, missingLiveNode(lostNodeName3));
+    
+    operations = getOperations(jetty3, lostNodeName3);
     assertNull(operations);
   }
 

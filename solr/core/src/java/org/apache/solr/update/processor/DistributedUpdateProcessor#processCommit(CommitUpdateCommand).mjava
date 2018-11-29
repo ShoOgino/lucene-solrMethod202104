@@ -5,38 +5,42 @@
     
     updateCommand = cmd;
     List<Node> nodes = null;
-    boolean singleLeader = false;
+    Replica leaderReplica = null;
     if (zkEnabled) {
       zkCheck();
+      try {
+        leaderReplica = zkController.getZkStateReader().getLeaderRetry(collection, cloudDesc.getShardId());
+      } catch (InterruptedException e) {
+        Thread.interrupted();
+        throw new SolrException(ErrorCode.SERVICE_UNAVAILABLE, "Exception finding leader for shard " + cloudDesc.getShardId(), e);
+      }
+      isLeader = leaderReplica.getName().equals(cloudDesc.getCoreNodeName());
       
-      nodes = getCollectionUrls(collection, EnumSet.of(Replica.Type.TLOG,Replica.Type.NRT));
+      nodes = getCollectionUrls(collection, EnumSet.of(Replica.Type.TLOG,Replica.Type.NRT), true);
       if (nodes == null) {
         // This could happen if there are only pull replicas
         throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, 
             "Unable to distribute commit operation. No replicas available of types " + Replica.Type.TLOG + " or " + Replica.Type.NRT);
       }
-      if (isLeader && nodes.size() == 1 && replicaType != Replica.Type.PULL) {
-        singleLeader = true;
-      }
+
+      nodes.removeIf((node) -> node.getNodeProps().getNodeName().equals(zkController.getNodeName())
+          && node.getNodeProps().getCoreName().equals(req.getCore().getName()));
     }
     
-    if (!zkEnabled || req.getParams().getBool(COMMIT_END_POINT, false) || singleLeader) {
+    CompletionService<Exception> completionService = new ExecutorCompletionService<>(req.getCore().getCoreContainer().getUpdateShardHandler().getUpdateExecutor());
+    Set<Future<Exception>> pending = new HashSet<>();
+    if (!zkEnabled || (!isLeader && req.getParams().get(COMMIT_END_POINT, "").equals("replicas"))) {
       if (replicaType == Replica.Type.TLOG) {
-        try {
-          Replica leaderReplica = zkController.getZkStateReader().getLeaderRetry(
-              collection, cloudDesc.getShardId());
-          isLeader = leaderReplica.getName().equals(cloudDesc.getCoreNodeName());
-          if (isLeader) {
-            long commitVersion = vinfo.getNewClock();
-            cmd.setVersion(commitVersion);
-            doLocalCommit(cmd);
-          } else {
-            assert TestInjection.waitForInSyncWithLeader(req.getCore(),
-                zkController, collection, cloudDesc.getShardId()): "Core " + req.getCore() + " not in sync with leader";
-          }
-        } catch (InterruptedException e) {
-          throw new SolrException(ErrorCode.SERVICE_UNAVAILABLE, "Exception finding leader for shard " + cloudDesc.getShardId(), e);
+
+        if (isLeader) {
+          long commitVersion = vinfo.getNewClock();
+          cmd.setVersion(commitVersion);
+          doLocalCommit(cmd);
+        } else {
+          assert TestInjection.waitForInSyncWithLeader(req.getCore(),
+              zkController, collection, cloudDesc.getShardId()) : "Core " + req.getCore() + " not in sync with leader";
         }
+
       } else if (replicaType == Replica.Type.PULL) {
         log.warn("Commit not supported on replicas of type " + Replica.Type.PULL);
       } else {
@@ -45,20 +49,50 @@
           long commitVersion = vinfo.getNewClock();
           cmd.setVersion(commitVersion);
         }
+  
         doLocalCommit(cmd);
       }
     } else {
       ModifiableSolrParams params = new ModifiableSolrParams(filterParams(req.getParams()));
-      if (!req.getParams().getBool(COMMIT_END_POINT, false)) {
-        params.set(COMMIT_END_POINT, true);
+
+      List<Node> useNodes = null;
+      if (req.getParams().get(COMMIT_END_POINT) == null) {
+        useNodes = nodes;
+        params.set(DISTRIB_UPDATE_PARAM, DistribPhase.TOLEADER.toString());
+        params.set(COMMIT_END_POINT, "leaders");
+        if (useNodes != null) {
+          params.set(DISTRIB_FROM, ZkCoreNodeProps.getCoreUrl(
+              zkController.getBaseUrl(), req.getCore().getName()));
+          cmdDistrib.distribCommit(cmd, useNodes, params);
+          cmdDistrib.blockAndDoRetries();
+        }
+      }
+
+      if (isLeader) {
         params.set(DISTRIB_UPDATE_PARAM, DistribPhase.FROMLEADER.toString());
-        params.set(DISTRIB_FROM, ZkCoreNodeProps.getCoreUrl(
-            zkController.getBaseUrl(), req.getCore().getName()));
-        if (nodes != null) {
-          cmdDistrib.distribCommit(cmd, nodes, params);
+
+        params.set(COMMIT_END_POINT, "replicas");
+
+        useNodes = getReplicaNodesForLeader(cloudDesc.getShardId(), leaderReplica);
+
+        if (useNodes != null) {
+          params.set(DISTRIB_FROM, ZkCoreNodeProps.getCoreUrl(
+              zkController.getBaseUrl(), req.getCore().getName()));
+
+          cmdDistrib.distribCommit(cmd, useNodes, params);
+        }
+        // NRT replicas will always commit
+        if (vinfo != null) {
+          long commitVersion = vinfo.getNewClock();
+          cmd.setVersion(commitVersion);
+        }
+
+        doLocalCommit(cmd);
+        if (useNodes != null) {
           cmdDistrib.blockAndDoRetries();
         }
       }
     }
+
   }
 

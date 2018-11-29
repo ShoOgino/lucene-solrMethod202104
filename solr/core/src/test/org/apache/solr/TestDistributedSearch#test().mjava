@@ -1,5 +1,8 @@
   @Test
   public void test() throws Exception {
+    
+    assertEquals(clients.size(), jettys.size());
+    
     QueryResponse rsp = null;
     int backupStress = stress; // make a copy so we can restore
 
@@ -843,74 +846,81 @@
     assertEquals("should have an entry for each shard ["+sinfo+"] "+shards, cnt, sinfo.size());
 
     // test shards.tolerant=true
-    for(int numDownServers = 0; numDownServers < jettys.size()-1; numDownServers++)
-    {
-      List<JettySolrRunner> upJettys = new ArrayList<>(jettys);
-      List<SolrClient> upClients = new ArrayList<>(clients);
-      List<JettySolrRunner> downJettys = new ArrayList<>();
-      List<String> upShards = new ArrayList<>(Arrays.asList(shardsArr));
-      for(int i=0; i<numDownServers; i++)
-      {
-        // shut down some of the jettys
-        int indexToRemove = r.nextInt(upJettys.size());
-        JettySolrRunner downJetty = upJettys.remove(indexToRemove);
-        upClients.remove(indexToRemove);
-        upShards.remove(indexToRemove);
-        ChaosMonkey.stop(downJetty);
-        downJettys.add(downJetty);
+
+    List<JettySolrRunner> upJettys = Collections.synchronizedList(new ArrayList<>(jettys));
+    List<SolrClient> upClients = Collections.synchronizedList(new ArrayList<>(clients));
+    List<JettySolrRunner> downJettys = Collections.synchronizedList(new ArrayList<>());
+    List<String> upShards = Collections.synchronizedList(new ArrayList<>(Arrays.asList(shardsArr)));
+    
+    int cap =  Math.max(upJettys.size() - 1, 1);
+
+    int numDownServers = random().nextInt(cap);
+    for (int i = 0; i < numDownServers; i++) {
+      if (upJettys.size() == 1) {
+        continue;
       }
-
-      queryPartialResults(upShards, upClients, 
-          "q","*:*",
-          "facet","true", 
-          "facet.field",t1,
-          "facet.field",t1,
-          "facet.limit",5,
-          ShardParams.SHARDS_INFO,"true",
-          ShardParams.SHARDS_TOLERANT,"true");
-
-      queryPartialResults(upShards, upClients,
-          "q", "*:*",
-          "facet", "true",
-          "facet.query", i1 + ":[1 TO 50]",
-          "facet.query", i1 + ":[1 TO 50]",
-          ShardParams.SHARDS_INFO, "true",
-          ShardParams.SHARDS_TOLERANT, "true");
-
-      // test group query
-      queryPartialResults(upShards, upClients,
-           "q", "*:*",
-           "rows", 100,
-           "fl", "id," + i1,
-           "group", "true",
-           "group.query", t1 + ":kings OR " + t1 + ":eggs",
-           "group.limit", 10,
-           "sort", i1 + " asc, id asc",
-           CommonParams.TIME_ALLOWED, 1,
-           ShardParams.SHARDS_INFO, "true",
-           ShardParams.SHARDS_TOLERANT, "true");
-
-      queryPartialResults(upShards, upClients,
-          "q", "*:*",
-          "stats", "true",
-          "stats.field", i1,
-          ShardParams.SHARDS_INFO, "true",
-          ShardParams.SHARDS_TOLERANT, "true");
-
-      queryPartialResults(upShards, upClients,
-          "q", "toyata",
-          "spellcheck", "true",
-          "spellcheck.q", "toyata",
-          "qt", "/spellCheckCompRH_Direct",
-          "shards.qt", "/spellCheckCompRH_Direct",
-          ShardParams.SHARDS_INFO, "true",
-          ShardParams.SHARDS_TOLERANT, "true");
-
-      // restart the jettys
-      for (JettySolrRunner downJetty : downJettys) {
-        ChaosMonkey.start(downJetty);
-      }
+      // shut down some of the jettys
+      int indexToRemove = r.nextInt(upJettys.size() - 1);
+      JettySolrRunner downJetty = upJettys.remove(indexToRemove);
+      upClients.remove(indexToRemove);
+      upShards.remove(indexToRemove);
+      downJetty.stop();
+      downJettys.add(downJetty);
     }
+    
+    Thread.sleep(100);
+
+    queryPartialResults(upShards, upClients,
+        "q", "*:*",
+        "facet", "true",
+        "facet.field", t1,
+        "facet.field", t1,
+        "facet.limit", 5,
+        ShardParams.SHARDS_INFO, "true",
+        ShardParams.SHARDS_TOLERANT, "true");
+
+    queryPartialResults(upShards, upClients,
+        "q", "*:*",
+        "facet", "true",
+        "facet.query", i1 + ":[1 TO 50]",
+        "facet.query", i1 + ":[1 TO 50]",
+        ShardParams.SHARDS_INFO, "true",
+        ShardParams.SHARDS_TOLERANT, "true");
+
+    // test group query
+    queryPartialResults(upShards, upClients,
+        "q", "*:*",
+        "rows", 100,
+        "fl", "id," + i1,
+        "group", "true",
+        "group.query", t1 + ":kings OR " + t1 + ":eggs",
+        "group.limit", 10,
+        "sort", i1 + " asc, id asc",
+        CommonParams.TIME_ALLOWED, 10000,
+        ShardParams.SHARDS_INFO, "true",
+        ShardParams.SHARDS_TOLERANT, "true");
+
+    queryPartialResults(upShards, upClients,
+        "q", "*:*",
+        "stats", "true",
+        "stats.field", i1,
+        ShardParams.SHARDS_INFO, "true",
+        ShardParams.SHARDS_TOLERANT, "true");
+
+    queryPartialResults(upShards, upClients,
+        "q", "toyata",
+        "spellcheck", "true",
+        "spellcheck.q", "toyata",
+        "qt", "/spellCheckCompRH_Direct",
+        "shards.qt", "/spellCheckCompRH_Direct",
+        ShardParams.SHARDS_INFO, "true",
+        ShardParams.SHARDS_TOLERANT, "true");
+
+    // restart the jettys
+    for (JettySolrRunner downJetty : downJettys) {
+      downJetty.start();
+    }
+    
 
     // This index has the same number for every field
     

@@ -1,30 +1,23 @@
   void createCollectAcc(int numDocs, int numSlots) throws IOException {
     accMap = new LinkedHashMap<>();
-
+    
+    // start with the assumption that we're going to defer the computation of all stats
+    deferredAggs.putAll(freq.getFacetStats());
+ 
     // we always count...
     // allow a subclass to set a custom counter.
     if (countAcc == null) {
       countAcc = new CountSlotArrAcc(fcontext, numSlots);
     }
 
-    if ("count".equals(freq.sortVariable)) {
-      sortAcc = countAcc;
-      deferredAggs = freq.getFacetStats();
-    } else if ("index".equals(freq.sortVariable)) {
-      // allow subclass to set indexOrderAcc first
-      if (indexOrderAcc == null) {
-        // This sorting accumulator just goes by the slot number, so does not need to be collected
-        // and hence does not need to find it's way into the accMap or accs array.
-        indexOrderAcc = new SortSlotAcc(fcontext);
-      }
-      sortAcc = indexOrderAcc;
-      deferredAggs = freq.getFacetStats();
-    }
+    sortAcc = getTrivialSortingSlotAcc(this.sort);
 
-    // If we are going to return all buckets and if there are no subfacets (that would need a domain), then don't defer
-    // any aggregation calculations to a second phase.  This way we can avoid calculating domains for each bucket, which
-    // can be expensive.
-    if (freq.limit == -1 && freq.subFacets.size() == 0) {
+    if (this.singlePassSlotAccCollection) {
+      // If we are going to return all buckets, and if there are no subfacets (that would need a domain),
+      // then don't defer any aggregation calculations to a second phase.
+      // This way we can avoid calculating domains for each bucket, which can be expensive.
+
+      // TODO: BEGIN: why can't we just call createAccs here ?
       accs = new SlotAcc[ freq.getFacetStats().size() ];
       int otherAccIdx = 0;
       for (Map.Entry<String,AggValueSource> entry : freq.getFacetStats().entrySet()) {
@@ -34,6 +27,7 @@
         accMap.put(acc.key, acc);
         accs[otherAccIdx++] = acc;
       }
+      // TODO: END: why can't we just call createAccs here ?
       if (accs.length == 1) {
         collectAcc = accs[0];
       } else {
@@ -41,26 +35,21 @@
       }
 
       if (sortAcc == null) {
-        sortAcc = accMap.get(freq.sortVariable);
+        sortAcc = accMap.get(sort.sortVariable);
         assert sortAcc != null;
       }
 
-      deferredAggs = null;
+      deferredAggs.clear();
     }
 
     if (sortAcc == null) {
-      AggValueSource sortAgg = freq.getFacetStats().get(freq.sortVariable);
+      AggValueSource sortAgg = freq.getFacetStats().get(sort.sortVariable);
       if (sortAgg != null) {
         collectAcc = sortAgg.createSlotAcc(fcontext, numDocs, numSlots);
-        collectAcc.key = freq.sortVariable; // TODO: improve this
+        collectAcc.key = sort.sortVariable; // TODO: improve this
       }
       sortAcc = collectAcc;
-      deferredAggs = new HashMap<>(freq.getFacetStats());
-      deferredAggs.remove(freq.sortVariable);
-    }
-
-    if (deferredAggs == null || deferredAggs.size() == 0) {
-      deferredAggs = null;
+      deferredAggs.remove(sort.sortVariable);
     }
 
     boolean needOtherAccs = freq.allBuckets;  // TODO: use for missing too...

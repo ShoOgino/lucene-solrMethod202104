@@ -18,11 +18,13 @@
         } else {
           effectiveLimit += freq.overrequest;
         }
+      } else if (null != resort && 0 < freq.overrequest) {
+        // in non-shard situations, if we have a 'resort' we check for explicit overrequest > 0
+        effectiveLimit += freq.overrequest;
       }
     }
 
-
-    final int sortMul = freq.sortDirection.getMultiplier();
+    final int sortMul = sort.sortDirection.getMultiplier();
 
     int maxTopVals = (int) (effectiveLimit >= 0 ? Math.min(freq.offset + effectiveLimit, Integer.MAX_VALUE - 1) : Integer.MAX_VALUE - 1);
     maxTopVals = Math.min(maxTopVals, slotCardinality);
@@ -109,31 +111,53 @@
       // moved missing fillBucket after we fill facet since it will reset all the accumulators.
     }
 
-    // if we are deep paging, we don't have to order the highest "offset" counts.
-    int collectCount = Math.max(0, queue.size() - off);
-    assert collectCount <= maxTopVals;
-    int[] sortedSlots = new int[collectCount];
-    for (int i = collectCount - 1; i >= 0; i--) {
-      sortedSlots[i] = queue.pop().slot;
+    final boolean needFilter = (!deferredAggs.isEmpty()) || freq.getSubFacets().size() > 0;
+    if (needFilter) {
+      createOtherAccs(-1, 1);
     }
 
-    ArrayList<SimpleOrderedMap> bucketList = new ArrayList<>(collectCount);
-    res.add("buckets", bucketList);
+    // if we are deep paging, we don't have to order the highest "offset" counts...
+    // ...unless we need to resort.
+    int collectCount = Math.max(0, queue.size() - (null == this.resort ? off : 0));
+    //
+    assert collectCount <= maxTopVals;
+    Slot[] sortedSlots = new Slot[collectCount];
+    for (int i = collectCount - 1; i >= 0; i--) {
+      Slot slot = sortedSlots[i] = queue.pop();
+      // At this point we know we're either returning this Slot as a Bucket, or resorting it,
+      // so definitely fill in the bucket value -- we'll need it either way
+      slot.bucketVal = bucketValFromSlotNumFunc.apply(slot.slot);
+      
+      if (needFilter || null != this.resort) {
+        slot.bucketFilter = makeBucketQuery(fieldQueryValFunc.apply(slot.bucketVal));
+      }
+    }
+    
+    final SlotAcc resortAccForFill = resortSlots(sortedSlots); // No-Op if not needed
+    
+    if (null != this.resort) {
+      // now that we've completely resorted, throw away extra docs from possible offset/overrequest...
+      final int endOffset = (int)Math.min((long) sortedSlots.length,
+                                          // NOTE: freq.limit is long, so no risk of overflow here
+                                          off + (freq.limit < 0 ? Integer.MAX_VALUE : freq.limit));
+      if (0 < off || endOffset < sortedSlots.length) {
+        sortedSlots = Arrays.copyOfRange(sortedSlots, off, endOffset);
+      }
+    }
+    List<SimpleOrderedMap> bucketList = new ArrayList<>(sortedSlots.length);
 
-    boolean needFilter = deferredAggs != null || freq.getSubFacets().size() > 0;
-
-    for (int slotNum : sortedSlots) {
+    for (Slot slot : sortedSlots) {
       SimpleOrderedMap<Object> bucket = new SimpleOrderedMap<>();
-      Comparable val = bucketValFromSlotNumFunc.apply(slotNum);
-      bucket.add("val", val);
+      bucket.add("val", slot.bucketVal);
 
-      Query filter = needFilter ? makeBucketQuery(fieldQueryValFunc.apply(val)) : null;
-
-      fillBucket(bucket, countAcc.getCount(slotNum), slotNum, null, filter);
+      fillBucketFromSlot(bucket, slot, resortAccForFill);
 
       bucketList.add(bucket);
     }
 
+    res.add("buckets", bucketList);
+      
+    
     if (fcontext.isShard() && shardHasMoreBuckets) {
       // Currently, "more" is an internal implementation detail and only returned for distributed sub-requests
       res.add("more", true);

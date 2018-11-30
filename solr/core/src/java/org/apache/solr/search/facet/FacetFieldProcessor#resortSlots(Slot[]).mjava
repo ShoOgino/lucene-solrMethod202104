@@ -1,0 +1,99 @@
+  /** 
+   * Helper method that resorts the slots (if needed).
+   * 
+   * @return a SlotAcc that should be used {@link SlotAcc#setValues} on the final buckets via 
+   *    {@link Slot#resortSlotNum} or null if no special SlotAcc was needed (ie: no resorting, or resorting 
+   *    on something already known/collected)
+   */
+  private SlotAcc resortSlots(Slot[] slots) throws IOException {
+    if (null == this.resort) {
+      return null; // Nothing to do.
+    }
+    assert ! fcontext.isShard();
+
+    // NOTE: getMultiplier() is confusing and weird and ment for use in PriorityQueue.lessThan,
+    // so it's backwards from what you'd expect in a Comparator...
+    final int resortMul = -1 * resort.sortDirection.getMultiplier();
+    
+    SlotAcc resortAcc = getTrivialSortingSlotAcc(this.resort);
+    if (null != resortAcc) {
+      // resorting on count or index is rare (and not particularly useful) but if someone chooses to do
+      // either of these we don't need to re-collect ... instead just re-sort the slots based on
+      // the previously collected values using the originally collected slot numbers...
+      if (resortAcc.equals(countAcc)) {
+        final Comparator<Slot> comparator = null != indexOrderAcc ?
+          (new Comparator<Slot>() {
+            public int compare(Slot x, Slot y) {
+              final int cmp = resortMul * countAcc.compare(x.slot, y.slot);
+              return  cmp != 0 ? cmp : indexOrderAcc.compare(x.slot, y.slot);
+            }
+          })
+          : (new Comparator<Slot>() {
+            public int compare(Slot x, Slot y) {
+              final int cmp = resortMul * countAcc.compare(x.slot, y.slot);
+              return  cmp != 0 ? cmp : Integer.compare(x.slot, y.slot);
+            }
+          });
+        Arrays.sort(slots, comparator);
+        return null;
+      }
+      if (resortAcc.equals(indexOrderAcc)) {
+        // obviously indexOrderAcc is not null, and no need for a fancy tie breaker...
+        Arrays.sort(slots, new Comparator<Slot>() {
+          public int compare(Slot x, Slot y) {
+            return resortMul * indexOrderAcc.compare(x.slot, y.slot);
+          }
+        });
+        return null;
+      }
+      // nothing else should be possible
+      assert false : "trivial resort isn't count or index: " + this.resort;
+    }
+
+    assert null == resortAcc;
+    for (SlotAcc acc : otherAccs) {
+      if (acc.key.equals(this.resort.sortVariable)) {
+        resortAcc = acc;
+        break;
+      }
+    }
+    // TODO: what if resortAcc is still null, ie: bad input? ... throw an error?  (see SOLR-13022)
+    // looks like equivilent sort code path silently ignores sorting if sortVariable isn't in accMap...
+    // ...and we get a deffered NPE when trying to collect.
+    assert null != resortAcc;
+    
+    final SlotAcc acc = resortAcc;
+    
+    // reset resortAcc to be (just) big enough for all the slots we care about...
+    acc.reset();
+    acc.resize(new FlatteningResizer(slots.length));
+    
+    // give each existing Slot a new resortSlotNum and let the resortAcc collect it...
+    for (int slotNum = 0; slotNum < slots.length; slotNum++) {
+      Slot slot = slots[slotNum];
+      slot.resortSlotNum = slotNum;
+      
+      assert null != slot.bucketFilter : "null filter for slot=" +slot.bucketVal;
+      
+      final DocSet subDomain = fcontext.searcher.getDocSet(slot.bucketFilter, fcontext.base);
+      acc.collect(subDomain, slotNum, s -> { return new SlotContext(slot.bucketFilter); } );
+    }
+    
+    // now resort all the Slots according to the new collected values...
+    final Comparator<Slot> comparator = null != indexOrderAcc ?
+      (new Comparator<Slot>() {
+        public int compare(Slot x, Slot y) {
+          final int cmp = resortMul * acc.compare(x.resortSlotNum, y.resortSlotNum);
+          return  cmp != 0 ? cmp : indexOrderAcc.compare(x.slot, y.slot);
+        }
+      })
+      : (new Comparator<Slot>() {
+        public int compare(Slot x, Slot y) {
+          final int cmp = resortMul * acc.compare(x.resortSlotNum, y.resortSlotNum);
+          return  cmp != 0 ? cmp : Integer.compare(x.slot, y.slot);
+        }
+      });
+    Arrays.sort(slots, comparator);
+    return acc;
+  }
+

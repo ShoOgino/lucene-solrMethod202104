@@ -16,18 +16,28 @@
              + "   } }"
              );
     
-    // simple single level facet w/skg stat & sorting
-    for (String sort : Arrays.asList("index asc", "skg desc")) {
-      // the relatedness score of each of our cat_s values is (conviniently) also alphabetical order
-      // so both of these sort options should produce identical output
-      // and testinging "index" sort allows the randomized use of "stream" processor as default to be tested
+    // simple single level facet w/skg stat & (re)sorting
+    for (String sort : Arrays.asList("sort:'index asc'",
+                                     "sort:'y desc'",
+                                     "sort:'z desc'",
+                                     "sort:'skg desc'",
+                                     "prelim_sort:'count desc', sort:'index asc'",
+                                     "prelim_sort:'count desc', sort:'y desc'",
+                                     "prelim_sort:'count desc', sort:'z desc'",
+                                     "prelim_sort:'count desc', sort:'skg desc'")) {
+      // the relatedness score of each of our cat_s values is (conviniently) also alphabetical order,
+      // (and the same order as 'sum(num_i) desc' & 'min(num_i) desc')
+      //
+      // So all of these re/sort options should produce identical output (since the num buckets is < limit)
+      // - Testing "index" sort allows the randomized use of "stream" processor as default to be tested.
+      // - Testing (re)sorts on other stats sanity checks code paths where relatedness() is a "defered" Agg
       assertJQ(req("q", "cat_s:[* TO *]", "rows", "0",
                    "fore", "where_s:NY", "back", "*:*",
                    "json.facet", ""
-                   + "{x: { type: terms, field: 'cat_s', sort: '"+sort+"', "
-                   + "      facet: { skg: 'relatedness($fore,$back)' } } }")
+                   + "{x: { type: terms, field: 'cat_s', "+sort+", "
+                   + "      facet: { skg: 'relatedness($fore,$back)', y:'sum(num_i)', z:'min(num_i)' } } }")
                , "facets=={count:5, x:{ buckets:["
-               + "   { val:'A', count:2, "
+               + "   { val:'A', count:2, y:5.0, z:2, "
                + "     skg : { relatedness: 0.00554, "
                //+ "             foreground_count: 1, "
                //+ "             foreground_size: 2, "
@@ -36,7 +46,7 @@
                + "             foreground_popularity: 0.16667,"
                + "             background_popularity: 0.33333, },"
                + "   }, "
-               + "   { val:'B', count:3, "
+               + "   { val:'B', count:3, y:-3.0, z:-5, "
                + "     skg : { relatedness: 0.0, " // perfectly average and uncorrolated
                //+ "             foreground_count: 1, "
                //+ "             foreground_size: 2, "
@@ -48,6 +58,37 @@
                );
     }
     
+    // trivial sanity check that we can (re)sort on SKG after pre-sorting on count...
+    // ...and it's only computed for the top N buckets (based on our pre-sort)
+    for (int overrequest : Arrays.asList(0, 1, 42)) {
+      // based on our counts & relatedness values, the blackbox output should be the same for both
+      // overrequest values ... only DebugAgg stats should change...
+      DebugAgg.Acc.collectDocs.set(0);
+      DebugAgg.Acc.collectDocSets.set(0);
+      
+      assertJQ(req("q", "cat_s:[* TO *]", "rows", "0",
+                   "fore", "where_s:NJ", "back", "*:*",
+                   "json.facet", ""
+                   + "{x: { type: terms, field: 'cat_s', prelim_sort: 'count desc', sort:'skg desc', "
+                   + "      limit: 1, overrequest: " + overrequest + ", "
+                   + "      facet: { skg: 'debug(wrap,relatedness($fore,$back))' } } }")
+               , "facets=={count:5, x:{ buckets:["
+               + "   { val:'B', count:3, "
+               + "     skg : { relatedness: 0.00638, " 
+               //+ "             foreground_count: 2, "
+               //+ "             foreground_size: 3, "
+               //+ "             background_count: 3, "
+               //+ "             background_size: 6,"
+               + "             foreground_popularity: 0.33333,"
+               + "             background_popularity: 0.5 },"
+               + "   }, "
+               + " ] } } "
+               );
+      // at most 2 buckets, regardless of overrequest...
+      assertEqualsAndReset(0 < overrequest ? 2 : 1, DebugAgg.Acc.collectDocSets);
+      assertEqualsAndReset(0, DebugAgg.Acc.collectDocs);
+    }
+      
     // SKG used in multiple nested facets
     //
     // we'll re-use these params in 2 requests, one will simulate a shard request

@@ -13,7 +13,7 @@
     
     cloudClient.waitForState(DEFAULT_COLLECTION, 30, TimeUnit.SECONDS, (l,c) -> c != null && c.getSlices().size() == sliceCount);
     
-    ForkJoinPool customThreadPool = new ForkJoinPool(12);
+    ExecutorService customThreadPool = ExecutorUtil.newMDCAwareCachedThreadPool(new SolrjNamedThreadFactory("closeThreadPool"));
 
     int numOtherReplicas = numJettys - getPullReplicaCount() * sliceCount;
     
@@ -33,7 +33,7 @@
         numOtherReplicas--;
         if (useTlogReplicas()) {
           log.info("create jetty {} in directory {} of type {} in shard {}", i, jettyDir, Replica.Type.TLOG, ((currentI % sliceCount) + 1));
-          customThreadPool.submit(() -> Collections.singleton(controlClient).parallelStream().forEach(c -> {
+          customThreadPool.submit(() -> {
             try {
               JettySolrRunner j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
                   + cnt) : null, null, "solrconfig.xml", null, Replica.Type.TLOG);
@@ -51,17 +51,19 @@
               clients.add(client);
 
             } catch (IOException e) {
+              e.printStackTrace();
               throw new RuntimeException(e);
             } catch (Exception e) {
+              e.printStackTrace();
               throw new RuntimeException(e);
             }
-          }));
+          });
 
           addedReplicas++;
         } else {
           log.info("create jetty {} in directory {} of type {}", i, jettyDir, Replica.Type.NRT, ((currentI % sliceCount) + 1));
           
-          customThreadPool.submit(() -> Collections.singleton(controlClient).parallelStream().forEach(c -> {
+          customThreadPool.submit(() -> {
             try {
               JettySolrRunner j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
                   + cnt) : null, null, "solrconfig.xml", null, null);
@@ -76,17 +78,19 @@
               SolrClient client = createNewSolrClient(j.getLocalPort());
               clients.add(client);
             } catch (IOException e) {
+              e.printStackTrace();
               throw new RuntimeException(e);
             } catch (Exception e) {
+              e.printStackTrace();
               throw new RuntimeException(e);
             }
-          }));
+          });
           
           addedReplicas++;
         }
       } else {
         log.info("create jetty {} in directory {} of type {}", i, jettyDir, Replica.Type.PULL, ((currentI % sliceCount) + 1));
-        customThreadPool.submit(() -> Collections.singleton(controlClient).parallelStream().forEach(c -> {
+        customThreadPool.submit(() -> {
           try {
             JettySolrRunner j = createJetty(jettyDir, useJettyDataDir ? getDataDir(testDir + "/jetty"
                 + cnt) : null, null, "solrconfig.xml", null, Replica.Type.PULL);
@@ -101,11 +105,13 @@
             SolrClient client = createNewSolrClient(j.getLocalPort());
             clients.add(client);
           } catch (IOException e) {
+            e.printStackTrace();
             throw new RuntimeException(e);
           } catch (Exception e) {
+            e.printStackTrace();
             throw new RuntimeException(e);
           }
-        }));
+        });
         addedReplicas++;
       }
 
@@ -113,33 +119,39 @@
     
     ExecutorUtil.shutdownAndAwaitTermination(customThreadPool);
     
-    customThreadPool = new ForkJoinPool(12);
-    customThreadPool.submit(() -> createReplicaRequests.parallelStream().forEach(r -> {
-      CollectionAdminResponse response;
-      try {
-        response = (CollectionAdminResponse) r.process(cloudClient);
-      } catch (SolrServerException | IOException e) {
-        throw new RuntimeException(e);
-      }
+    customThreadPool = ExecutorUtil.newMDCAwareCachedThreadPool(new SolrjNamedThreadFactory("createReplicaRequests"));
+    
+    for (CollectionAdminRequest r : createReplicaRequests) {
+      customThreadPool.submit(() -> {
+        CollectionAdminResponse response;
+        try {
+          response = (CollectionAdminResponse) r.process(cloudClient);
+        } catch (SolrServerException | IOException e) {
+          throw new RuntimeException(e);
+        }
 
-      assertTrue(response.isSuccess());
-      String coreName = response.getCollectionCoresStatus().keySet().iterator().next();
-    }));
+        assertTrue(response.isSuccess());
+        String coreName = response.getCollectionCoresStatus().keySet().iterator().next();
+      });
+    }
    
     ExecutorUtil.shutdownAndAwaitTermination(customThreadPool);
     
-    customThreadPool = new ForkJoinPool(12);
-    customThreadPool.submit(() -> createPullReplicaRequests.parallelStream().forEach(r -> {
-      CollectionAdminResponse response;
-      try {
-        response = (CollectionAdminResponse) r.process(cloudClient);
-      } catch (SolrServerException | IOException e) {
-        throw new RuntimeException(e);
-      }
+    customThreadPool = ExecutorUtil
+        .newMDCAwareCachedThreadPool(new SolrjNamedThreadFactory("createPullReplicaRequests"));
+    for (CollectionAdminRequest r : createPullReplicaRequests) {
+      customThreadPool.submit(() -> {
+        CollectionAdminResponse response;
+        try {
+          response = (CollectionAdminResponse) r.process(cloudClient);
+        } catch (SolrServerException | IOException e) {
+          throw new RuntimeException(e);
+        }
 
-      assertTrue(response.isSuccess());
-      String coreName = response.getCollectionCoresStatus().keySet().iterator().next();
-    }));
+        assertTrue(response.isSuccess());
+        String coreName = response.getCollectionCoresStatus().keySet().iterator().next();
+      });
+    }
     
     ExecutorUtil.shutdownAndAwaitTermination(customThreadPool);
     

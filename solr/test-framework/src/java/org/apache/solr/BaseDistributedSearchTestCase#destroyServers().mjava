@@ -1,31 +1,33 @@
   protected void destroyServers() throws Exception {
-    ForkJoinPool customThreadPool = new ForkJoinPool(12);
+    ExecutorService customThreadPool = ExecutorUtil.newMDCAwareCachedThreadPool(new SolrjNamedThreadFactory("closeThreadPool"));
     
     customThreadPool.submit(() -> Collections.singleton(controlClient).parallelStream().forEach(c -> {
       IOUtils.closeQuietly(c);
     }));
 
-    customThreadPool.submit(() -> Collections.singleton(controlJetty).parallelStream().forEach(c -> {
+    customThreadPool.submit(() -> {
       try {
-        c.stop();
+        controlJetty.stop();
       } catch (NullPointerException e) {
         // ignore
       } catch (Exception e) {
         log.error("Error stopping Control Jetty", e);
       }
-    }));
+    });
 
-    customThreadPool.submit(() -> clients.parallelStream().forEach(c -> {
-      IOUtils.closeQuietly(c);
-    }));
-
-    customThreadPool.submit(() -> jettys.parallelStream().forEach(c -> {
-      try {
-        c.stop();
-      } catch (Exception e) {
-        log.error("Error stopping Jetty", e);
-      }
-    }));
+    for (SolrClient client : clients) {
+      customThreadPool.submit(() ->  IOUtils.closeQuietly(client));
+    }
+    
+    for (JettySolrRunner jetty : jettys) {
+      customThreadPool.submit(() -> {
+        try {
+          jetty.stop();
+        } catch (Exception e) {
+          log.error("Error stopping Jetty", e);
+        }
+      });
+    }
 
     ExecutorUtil.shutdownAndAwaitTermination(customThreadPool);
     

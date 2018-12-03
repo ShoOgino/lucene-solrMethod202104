@@ -1,0 +1,53 @@
+  /**
+   * Create a compact version of the given values from index 0 to length-1.
+   * @param values PackedInts with no special constraints.
+   * @param length the number of values to compress.
+   * @param allowSparse if true and is the default limits matches the input, a sparse representation will be created.
+   * @param minTotalSparse the minimum absolute number of 0-entries needed for a sparse representation.
+   *                       0-entries are counted after minValue compression: {@code 3, 5, 3, 7, 16} has two 0-entries.
+   * @return a compact version of the given values or the given values if compression did not improve on heap overhead.
+   */
+  public static PackedInts.Reader compress(
+      PackedInts.Reader values, int length, boolean allowSparse,
+      int minTotalSparse, int minZeroSparse, double minZeroFractionSparse) {
+    if (length == 0) {
+      return PackedInts.getMutable(0, 1, PackedInts.DEFAULT);
+    }
+
+    final long min = getMin(values, length);
+    final long gcd = getGCD(values, length, min);
+    final long maxCompressed = getMax(values, length, min, gcd);
+
+    int zeroCount;
+    if (!isPossiblySparseCandidate(length, allowSparse, minTotalSparse) ||
+        !isSparseCandidate(values, length, true, minTotalSparse,
+            (zeroCount = countZeroes(values, length, min, gcd)), minZeroSparse, minZeroFractionSparse)) {
+      // TODO: Add abort-early if it becomes apparent that no space saving is possible
+      PackedInts.Mutable inner =
+          PackedInts.getMutable(length, PackedInts.bitsRequired(maxCompressed), PackedInts.DEFAULT);
+      for (int i = 0 ; i < length ; i++) {
+        inner.set(i, (values.get(i)-min)/gcd);
+      }
+      PackedInts.Reader comp = new CompressedReader(inner, min, gcd);
+      // Sanity check that compression worked and if not, return the original input
+      return comp.ramBytesUsed() < values.ramBytesUsed() ? comp : values;
+    }
+
+    // Sparsify
+    RankBitSet rank = new RankBitSet(length);
+    PackedInts.Mutable inner =
+        PackedInts.getMutable(values.size()-zeroCount, PackedInts.bitsRequired(maxCompressed), PackedInts.DEFAULT);
+    int valueIndex = 0;
+    for (int i = 0 ; i < length ; i++) {
+      long value = (values.get(i)-min)/gcd;
+      if (value != 0) {
+        rank.set(i);
+        inner.set(valueIndex++, value);
+      }
+    }
+    rank.buildRankCache();
+    PackedInts.Reader comp = new CompressedReader(inner, min, gcd, rank);
+    // Sanity check that compression worked and if not, return the original input
+    return comp.ramBytesUsed() < values.ramBytesUsed() ? comp : values;
+  }
+

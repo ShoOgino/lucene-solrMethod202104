@@ -1,6 +1,7 @@
   private int fillCache(
       IndexInput slice, AtomicInteger statBlockALL, AtomicInteger statBlockDENSE, AtomicInteger statBlockSPARSE)
       throws IOException {
+    char[] buildRank = new char[256];
     int largestBlock = -1;
     long index = 0;
     int rankIndex = -1;
@@ -35,7 +36,27 @@
       // The block is DENSE
       statBlockDENSE.incrementAndGet();
       long nextBlockOffset = slice.getFilePointer() + (1 << 13);
-      slice.seek(nextBlockOffset);
+      int setBits = 0;
+      int rankOrigo = blockIndex << 16 >> 9; // Double shift for clarity: The compiler will simplify it
+      for (int rankDelta = 0 ; rankDelta < RANKS_PER_BLOCK ; rankDelta++) { // 128 rank-entries in a block
+        rankIndex = rankOrigo + rankDelta;
+        buildRank = ArrayUtil.grow(buildRank, rankIndex+1);
+        buildRank[rankIndex] = (char)setBits;
+        for (int i = 0 ; i < 512/64 ; i++) { // 8 longs for each rank-entry
+          setBits += Long.bitCount(slice.readLong());
+        }
+      }
+      assert slice.getFilePointer() == nextBlockOffset;
+    }
+    // Compress the buildRank as it is potentially very sparse
+    if (rankIndex < 0) {
+      rank = null;
+    } else {
+      PackedInts.Mutable ranks = PackedInts.getMutable(rankIndex, 16, PackedInts.DEFAULT); // Char = 16 bit
+      for (int i = 0 ; i < rankIndex ; i++) {
+        ranks.set(i, buildRank[i]);
+      }
+      rank = LongCompressor.compress(ranks);
     }
 
     return largestBlock;

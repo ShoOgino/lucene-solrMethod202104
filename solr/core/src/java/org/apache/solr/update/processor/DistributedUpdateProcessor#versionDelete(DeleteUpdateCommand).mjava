@@ -7,7 +7,8 @@
       return false;
     }
 
-    // This is only the hash for the bucket, and must be based only on the uniqueKey (i.e. do not use a pluggable hash here)
+    // This is only the hash for the bucket, and must be based only on the uniqueKey (i.e. do not use a pluggable hash
+    // here)
     int bucketHash = bucketHash(idBytes);
 
     // at this point, there is an update we need to try and apply.
@@ -20,22 +21,21 @@
       versionOnUpdate = versionOnUpdateS == null ? 0 : Long.parseLong(versionOnUpdateS);
     }
     long signedVersionOnUpdate = versionOnUpdate;
-    versionOnUpdate = Math.abs(versionOnUpdate);  // normalize to positive version
+    versionOnUpdate = Math.abs(versionOnUpdate); // normalize to positive version
 
     boolean isReplayOrPeersync = (cmd.getFlags() & (UpdateCommand.REPLAY | UpdateCommand.PEER_SYNC)) != 0;
     boolean leaderLogic = isLeader && !isReplayOrPeersync;
     boolean forwardedFromCollection = cmd.getReq().getParams().get(DISTRIB_FROM_COLLECTION) != null;
 
-    if (!leaderLogic && versionOnUpdate==0) {
+    if (!leaderLogic && versionOnUpdate == 0) {
       throw new SolrException(ErrorCode.BAD_REQUEST, "missing _version_ on update from leader");
     }
 
     VersionBucket bucket = vinfo.bucket(bucketHash);
 
     vinfo.lockForUpdate();
-    try {
-
-      synchronized (bucket) {
+    if (bucket.tryLock()) {
+      try {
         if (versionsStored) {
           long bucketVersion = bucket.highest;
 
@@ -61,11 +61,13 @@
             if (signedVersionOnUpdate != 0) {
               Long lastVersion = vinfo.lookupVersion(cmd.getIndexedId());
               long foundVersion = lastVersion == null ? -1 : lastVersion;
-              if ( (signedVersionOnUpdate == foundVersion) || (signedVersionOnUpdate < 0 && foundVersion < 0) || (signedVersionOnUpdate == 1 && foundVersion > 0) ) {
+              if ((signedVersionOnUpdate == foundVersion) || (signedVersionOnUpdate < 0 && foundVersion < 0)
+                  || (signedVersionOnUpdate == 1 && foundVersion > 0)) {
                 // we're ok if versions match, or if both are negative (all missing docs are equal), or if cmd
                 // specified it must exist (versionOnUpdate==1) and it does.
               } else {
-                throw new SolrException(ErrorCode.CONFLICT, "version conflict for " + cmd.getId() + " expected=" + signedVersionOnUpdate + " actual=" + foundVersion);
+                throw new SolrException(ErrorCode.CONFLICT, "version conflict for " + cmd.getId() + " expected="
+                    + signedVersionOnUpdate + " actual=" + foundVersion);
               }
             }
 
@@ -88,11 +90,11 @@
               // in this bucket so far, so we know that no reordering has yet occured.
               bucket.updateHighest(versionOnUpdate);
             } else {
-              // there have been updates higher than the current update.  we need to check
+              // there have been updates higher than the current update. we need to check
               // the specific version for this id.
               Long lastVersion = vinfo.lookupVersion(cmd.getIndexedId());
               if (lastVersion != null && Math.abs(lastVersion) >= versionOnUpdate) {
-                // This update is a repeat, or was reordered.  We need to drop this update.
+                // This update is a repeat, or was reordered. We need to drop this update.
                 log.debug("Dropping delete update due to version {}", idBytes.utf8ToString());
                 return true;
               }
@@ -106,10 +108,13 @@
 
         doLocalDelete(cmd);
         return false;
-      }  // end synchronized (bucket)
-
-    } finally {
-      vinfo.unlockForUpdate();
+      } finally {
+        bucket.unlock();
+        vinfo.unlockForUpdate();
+      }
+    } else {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
+          "Unable to get version bucket lock in " + bucket.getLockTimeoutMs() + " ms");
     }
   }
 

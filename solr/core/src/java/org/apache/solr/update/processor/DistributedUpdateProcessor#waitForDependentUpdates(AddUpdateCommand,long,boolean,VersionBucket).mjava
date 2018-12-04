@@ -12,31 +12,31 @@
     TimeOut waitTimeout = new TimeOut(5, TimeUnit.SECONDS, TimeSource.NANO_TIME);
 
     vinfo.lockForUpdate();
-    try {
-      synchronized (bucket) {
+    if (bucket.tryLock()) {
+      try {
         Long lookedUpVersion = vinfo.lookupVersion(cmd.getIndexedId());
-        lastFoundVersion = lookedUpVersion == null ? 0L: lookedUpVersion;
+        lastFoundVersion = lookedUpVersion == null ? 0L : lookedUpVersion;
 
         if (Math.abs(lastFoundVersion) < cmd.prevVersion) {
-          log.debug("Re-ordered inplace update. version={}, prevVersion={}, lastVersion={}, replayOrPeerSync={}, id={}", 
-              (cmd.getVersion() == 0 ? versionOnUpdate : cmd.getVersion()), cmd.prevVersion, lastFoundVersion, isReplayOrPeersync, cmd.getPrintableId());
+          log.debug("Re-ordered inplace update. version={}, prevVersion={}, lastVersion={}, replayOrPeerSync={}, id={}",
+              (cmd.getVersion() == 0 ? versionOnUpdate : cmd.getVersion()), cmd.prevVersion, lastFoundVersion,
+              isReplayOrPeersync, cmd.getPrintableId());
         }
 
-        while (Math.abs(lastFoundVersion) < cmd.prevVersion && !waitTimeout.hasTimedOut())  {
-          try {
-            long timeLeft = waitTimeout.timeLeft(TimeUnit.MILLISECONDS);
-            if (timeLeft > 0) { // wait(0) waits forever until notified, but we don't want that.
-              bucket.wait(timeLeft);
-            }
-          } catch (InterruptedException ie) {
-            throw new RuntimeException(ie);
-          }
+        while (Math.abs(lastFoundVersion) < cmd.prevVersion && !waitTimeout.hasTimedOut()) {
+          bucket.awaitNanos(waitTimeout.timeLeft(TimeUnit.NANOSECONDS));
           lookedUpVersion = vinfo.lookupVersion(cmd.getIndexedId());
-          lastFoundVersion = lookedUpVersion == null ? 0L: lookedUpVersion;
+          lastFoundVersion = lookedUpVersion == null ? 0L : lookedUpVersion;
         }
+      } finally {
+
+        bucket.unlock();
+
+        vinfo.unlockForUpdate();
       }
-    } finally {
-      vinfo.unlockForUpdate();
+    } else {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
+          "Unable to get version bucket lock in " + bucket.getLockTimeoutMs() + " ms");
     }
 
     if (Math.abs(lastFoundVersion) > cmd.prevVersion) {

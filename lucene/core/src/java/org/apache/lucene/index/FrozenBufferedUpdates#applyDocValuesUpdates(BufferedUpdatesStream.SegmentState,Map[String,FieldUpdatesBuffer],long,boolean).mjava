@@ -3,9 +3,6 @@
                                             long delGen,
                                             boolean segmentPrivateDeletes) throws IOException {
 
-    TermsEnum termsEnum = null;
-    PostingsEnum postingsEnum = null;
-
     // TODO: we can process the updates per DV field, from last to first so that
     // if multiple terms affect same document for the same field, we add an update
     // only once (that of the last term). To do that, we can keep a bitset which
@@ -27,26 +24,8 @@
       boolean isNumeric = value.isNumeric();
       FieldUpdatesBuffer.BufferedUpdateIterator iterator = value.iterator();
       FieldUpdatesBuffer.BufferedUpdate bufferedUpdate;
-      String previousField = null;
+      TermDocsIterator termDocsIterator = new TermDocsIterator(segState.reader, false);
       while ((bufferedUpdate = iterator.next()) != null) {
-        if (previousField == null || previousField.equals(bufferedUpdate.termField) == false) {
-          previousField = bufferedUpdate.termField;
-          Terms terms = segState.reader.terms(previousField);
-          termsEnum = terms == null ? null : terms.iterator();
-        }
-        if (termsEnum == null) {
-          // no terms in this segment for this field
-          continue;
-        }
-
-        final int limit;
-        if (delGen == segState.delGen) {
-          assert segmentPrivateDeletes;
-          limit = bufferedUpdate.docUpTo;
-        } else {
-          limit = Integer.MAX_VALUE;
-        }
-        
         // TODO: we traverse the terms in update order (not term order) so that we
         // apply the updates in the correct order, i.e. if two terms update the
         // same document, the last one that came in wins, irrespective of the
@@ -56,23 +35,26 @@
         // that we cannot rely only on docIDUpto because an app may send two updates
         // which will get same docIDUpto, yet will still need to respect the order
         // those updates arrived.
-
         // TODO: we could at least *collate* by field?
-
-
-        final BytesRef binaryValue;
-        final long longValue;
-        if (bufferedUpdate.hasValue == false) {
-          longValue = -1;
-          binaryValue = null;
-        } else {
-          longValue = bufferedUpdate.numericValue;
-          binaryValue = bufferedUpdate.binaryValue;
-        }
-
-        if (termsEnum.seekExact(bufferedUpdate.termValue)) {
-          // we don't need term frequencies for this
-          postingsEnum = termsEnum.postings(postingsEnum, PostingsEnum.NONE);
+        final DocIdSetIterator docIdSetIterator = termDocsIterator.nextTerm(bufferedUpdate.termField, bufferedUpdate.termValue);
+        if (docIdSetIterator != null) {
+          final int limit;
+          if (delGen == segState.delGen) {
+            assert segmentPrivateDeletes;
+            limit = bufferedUpdate.docUpTo;
+          } else {
+            limit = Integer.MAX_VALUE;
+          }
+          final BytesRef binaryValue;
+          final long longValue;
+          if (bufferedUpdate.hasValue == false) {
+            longValue = -1;
+            binaryValue = null;
+          } else {
+            longValue = bufferedUpdate.numericValue;
+            binaryValue = bufferedUpdate.binaryValue;
+          }
+           termDocsIterator.getDocs();
           if (dvUpdates == null) {
             if (isNumeric) {
               if (value.hasSingleValue()) {
@@ -101,7 +83,7 @@
           if (segState.rld.sortMap != null && segmentPrivateDeletes) {
             // This segment was sorted on flush; we must apply seg-private deletes carefully in this case:
             int doc;
-            while ((doc = postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+            while ((doc = docIdSetIterator.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
               if (acceptDocs == null || acceptDocs.get(doc)) {
                 // The limit is in the pre-sorted doc space:
                 if (segState.rld.sortMap.newToOld(doc) < limit) {
@@ -112,7 +94,7 @@
             }
           } else {
             int doc;
-            while ((doc = postingsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+            while ((doc = docIdSetIterator.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
               if (doc >= limit) {
                 break; // no more docs that can be updated for this term
               }

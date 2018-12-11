@@ -4,17 +4,11 @@
       throw new IllegalStateException("already finished");
     }
     finished = true;
-
-    // Swaps and comparisons are quite costly with all these packed ints,
-    // so we use TimSorter instead of InPlaceMergeSorter, which has the nice
-    // property of doing fewer swaps/copies at the expense of a higher memory
-    // usage
-    final int tempSlotsOffset = size;
-    // we grow the current structures to get temporary storage
-    resize(Math.addExact(size, size / 2)); // 50% extra memory for temp slots
-    final int numTempSlots = Math.toIntExact(docs.size() - size);
-    new TimSorter(numTempSlots) {
-
+    // shrink wrap
+    if (size < docs.size()) {
+      resize(size);
+    }
+    new InPlaceMergeSorter() {
       @Override
       protected void swap(int i, int j) {
         DocValuesFieldUpdates.this.swap(i, j);
@@ -27,32 +21,6 @@
         // stable and preserving original order so the last update to that docID wins
         return Long.compare(docs.get(i)>>>1, docs.get(j)>>>1);
       }
-
-      @Override
-      protected void save(int i, int len) {
-        assert len <= numTempSlots;
-        for (int k = 0; k < len; ++k) {
-          copy(i + k, tempSlotsOffset + k);
-        }
-      }
-
-      @Override
-      protected void restore(int src, int dest) {
-        copy(tempSlotsOffset + src, dest);
-      }
-
-      @Override
-      protected void copy(int src, int dest) {
-        DocValuesFieldUpdates.this.copy(src, dest);
-      }
-
-      @Override
-      protected int compareSaved(int i, int j) {
-        return compare(tempSlotsOffset + i, j);
-      }
     }.sort(0, size);
-
-    // shrink wrap to save memory, this will also release temporary storage
-    resize(size);
   }
 

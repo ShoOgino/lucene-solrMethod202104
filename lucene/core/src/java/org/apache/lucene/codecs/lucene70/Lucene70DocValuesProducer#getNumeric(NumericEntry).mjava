@@ -12,18 +12,44 @@
           }
         };
       } else {
+        final RandomAccessInput slice = data.randomAccessSlice(entry.valuesOffset, entry.valuesLength);
         if (entry.blockShift >= 0) {
           // dense but split into blocks of different bits per value
+          final int shift = entry.blockShift;
+          final long mul = entry.gcd;
+          final int mask = (1 << shift) - 1;
           return new DenseNumericDocValues(maxDoc) {
-            final VaryingBPVReader vBPVReader = new VaryingBPVReader(entry);
+            int block = -1;
+            long delta;
+            long offset;
+            long blockEndOffset;
+            LongValues values;
 
             @Override
             public long longValue() throws IOException {
-              return vBPVReader.getLongValue(doc);
+              final int block = doc >>> shift;
+              if (this.block != block) {
+                int bitsPerValue;
+                do {
+                  offset = blockEndOffset;
+                  bitsPerValue = slice.readByte(offset++);
+                  delta = slice.readLong(offset);
+                  offset += Long.BYTES;
+                  if (bitsPerValue == 0) {
+                    blockEndOffset = offset;
+                  } else {
+                    final int length = slice.readInt(offset);
+                    offset += Integer.BYTES;
+                    blockEndOffset = offset + length;
+                  }
+                  this.block ++;
+                } while (this.block != block);
+                values = bitsPerValue == 0 ? LongValues.ZEROES : DirectReader.getInstance(slice, bitsPerValue, offset);
+              }
+              return mul * values.get(doc & mask) + delta;
             }
           };
         } else {
-          final RandomAccessInput slice = data.randomAccessSlice(entry.valuesOffset, entry.valuesLength);
           final LongValues values = DirectReader.getInstance(slice, entry.bitsPerValue);
           if (entry.table != null) {
             final long[] table = entry.table;
@@ -57,19 +83,45 @@
           }
         };
       } else {
+        final RandomAccessInput slice = data.randomAccessSlice(entry.valuesOffset, entry.valuesLength);
         if (entry.blockShift >= 0) {
           // sparse and split into blocks of different bits per value
+          final int shift = entry.blockShift;
+          final long mul = entry.gcd;
+          final int mask = (1 << shift) - 1;
           return new SparseNumericDocValues(disi) {
-            final VaryingBPVReader vBPVReader = new VaryingBPVReader(entry);
+            int block = -1;
+            long delta;
+            long offset;
+            long blockEndOffset;
+            LongValues values;
 
             @Override
             public long longValue() throws IOException {
               final int index = disi.index();
-              return vBPVReader.getLongValue(index);
+              final int block = index >>> shift;
+              if (this.block != block) {
+                int bitsPerValue;
+                do {
+                  offset = blockEndOffset;
+                  bitsPerValue = slice.readByte(offset++);
+                  delta = slice.readLong(offset);
+                  offset += Long.BYTES;
+                  if (bitsPerValue == 0) {
+                    blockEndOffset = offset;
+                  } else {
+                    final int length = slice.readInt(offset);
+                    offset += Integer.BYTES;
+                    blockEndOffset = offset + length;
+                  }
+                  this.block ++;
+                } while (this.block != block);
+                values = bitsPerValue == 0 ? LongValues.ZEROES : DirectReader.getInstance(slice, bitsPerValue, offset);
+              }
+              return mul * values.get(index & mask) + delta;
             }
           };
         } else {
-          final RandomAccessInput slice = data.randomAccessSlice(entry.valuesOffset, entry.valuesLength);
           final LongValues values = DirectReader.getInstance(slice, entry.bitsPerValue);
           if (entry.table != null) {
             final long[] table = entry.table;

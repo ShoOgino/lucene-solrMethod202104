@@ -1,0 +1,55 @@
+  public synchronized void blockUntilFinished() {
+    lock = new CountDownLatch(1);
+    try {
+
+      waitForEmptyQueue();
+      interruptRunnerThreadsPolling();
+
+      synchronized (runners) {
+
+        // NOTE: if the executor is shut down, runners may never become empty (a scheduled task may never be run,
+        // which means it would never remove itself from the runners list. This is why we don't wait forever
+        // and periodically check if the scheduler is shutting down.
+        int loopCount = 0;
+        while (!runners.isEmpty()) {
+
+          if (scheduler.isShutdown())
+            break;
+
+          loopCount++;
+
+          // Need to check if the queue is empty before really considering this is finished (SOLR-4260)
+          int queueSize = queue.size();
+          if (queueSize > 0 && runners.isEmpty()) {
+            // TODO: can this still happen?
+            log.warn("No more runners, but queue still has " +
+                queueSize + " adding more runners to process remaining requests on queue");
+            addRunner();
+          }
+
+          interruptRunnerThreadsPolling();
+
+          // try to avoid the worst case wait timeout
+          // without bad spin
+          int timeout;
+          if (loopCount < 3) {
+            timeout = 10;
+          } else if (loopCount < 10) {
+            timeout = 25;
+          } else {
+            timeout = 250;
+          }
+
+          try {
+            runners.wait(timeout);
+          } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+          }
+        }
+      }
+    } finally {
+      lock.countDown();
+      lock = null;
+    }
+  }
+

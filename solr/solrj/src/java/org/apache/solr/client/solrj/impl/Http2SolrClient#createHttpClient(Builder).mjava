@@ -1,0 +1,48 @@
+  private HttpClient createHttpClient(Builder builder) {
+    HttpClient httpClient;
+
+    BlockingArrayQueue<Runnable> queue = new BlockingArrayQueue<>(256, 256);
+    ThreadPoolExecutor httpClientExecutor = new ExecutorUtil.MDCAwareThreadPoolExecutor(32,
+        256, 60, TimeUnit.SECONDS, queue, new SolrjNamedThreadFactory("h2sc"));
+
+    SslContextFactory sslContextFactory;
+    boolean ssl;
+    if (builder.sslConfig == null) {
+      sslContextFactory = getDefaultSslContextFactory();
+      ssl = sslContextFactory.getTrustStore() != null || sslContextFactory.getTrustStorePath() != null;
+    } else {
+      sslContextFactory = builder.sslConfig.createContextFactory();
+      ssl = true;
+    }
+
+    boolean sslOnJava8OrLower = ssl && !Constants.JRE_IS_MINIMUM_JAVA9;
+    HttpClientTransport transport;
+    if (builder.useHttp1_1 || sslOnJava8OrLower) {
+      if (sslOnJava8OrLower && !builder.useHttp1_1) {
+        log.warn("Create Http2SolrClient with HTTP/1.1 transport since Java 8 or lower versions does not support SSL + HTTP/2");
+      } else {
+        log.debug("Create Http2SolrClient with HTTP/1.1 transport");
+      }
+      transport = new HttpClientTransportOverHTTP(2);
+      httpClient = new HttpClient(transport, sslContextFactory);
+      if (builder.maxConnectionsPerHost != null) httpClient.setMaxConnectionsPerDestination(builder.maxConnectionsPerHost);
+    } else {
+      log.debug("Create Http2SolrClient with HTTP/2 transport");
+      HTTP2Client http2client = new HTTP2Client();
+      transport = new HttpClientTransportOverHTTP2(http2client);
+      httpClient = new HttpClient(transport, sslContextFactory);
+      httpClient.setMaxConnectionsPerDestination(4);
+    }
+
+    httpClient.setExecutor(httpClientExecutor);
+    httpClient.setStrictEventOrdering(false);
+    httpClient.setConnectBlocking(true);
+    httpClient.setFollowRedirects(false);
+    httpClient.setMaxRequestsQueuedPerDestination(asyncTracker.getMaxRequestsQueuedPerDestination());
+    httpClient.setUserAgentField(new HttpField(HttpHeader.USER_AGENT, AGENT));
+
+    if (builder.idleTimeout != null) httpClient.setIdleTimeout(builder.idleTimeout);
+    if (builder.connectionTimeout != null) httpClient.setConnectTimeout(builder.connectionTimeout);
+    return httpClient;
+  }
+

@@ -2,7 +2,6 @@
   public void init(PluginInfo info) {
     StringBuilder sb = new StringBuilder();
     NamedList args = info.initArgs;
-    this.soTimeout = getParameter(args, HttpClientUtil.PROP_SO_TIMEOUT, soTimeout,sb);
     this.scheme = getParameter(args, INIT_URL_SCHEME, null,sb);
     if(StringUtils.endsWith(this.scheme, "://")) {
       this.scheme = StringUtils.removeEnd(this.scheme, "://");
@@ -15,9 +14,6 @@
           "Unknown metricNameStrategy: " + strategy + " found. Must be one of: " + KNOWN_METRIC_NAME_STRATEGIES.keySet());
     }
 
-    this.connectionTimeout = getParameter(args, HttpClientUtil.PROP_CONNECTION_TIMEOUT, connectionTimeout, sb);
-    this.maxConnectionsPerHost = getParameter(args, HttpClientUtil.PROP_MAX_CONNECTIONS_PER_HOST, maxConnectionsPerHost,sb);
-    this.maxConnections = getParameter(args, HttpClientUtil.PROP_MAX_CONNECTIONS, maxConnections,sb);
     this.corePoolSize = getParameter(args, INIT_CORE_POOL_SIZE, corePoolSize,sb);
     this.maximumPoolSize = getParameter(args, INIT_MAX_POOL_SIZE, maximumPoolSize,sb);
     this.keepAliveTime = getParameter(args, MAX_THREAD_IDLE_TIME, keepAliveTime,sb);
@@ -53,10 +49,19 @@
         new DefaultSolrThreadFactory("httpShardExecutor")
     );
 
-    ModifiableSolrParams clientParams = getClientParams();
-    httpRequestExecutor = new InstrumentedHttpRequestExecutor(this.metricNameStrategy);
-    clientConnectionManager = new InstrumentedPoolingHttpClientConnectionManager(HttpClientUtil.getSchemaRegisteryProvider().getSchemaRegistry());
-    this.defaultClient = HttpClientUtil.createClient(clientParams, clientConnectionManager, false, httpRequestExecutor);
-    this.loadbalancer = createLoadbalancer(defaultClient);
+    this.httpListenerFactory = new InstrumentedHttpListenerFactory(this.metricNameStrategy);
+    int connectionTimeout = getParameter(args, HttpClientUtil.PROP_CONNECTION_TIMEOUT,
+        HttpClientUtil.DEFAULT_CONNECT_TIMEOUT, sb);
+    int maxConnectionsPerHost = getParameter(args, HttpClientUtil.PROP_MAX_CONNECTIONS_PER_HOST,
+        HttpClientUtil.DEFAULT_MAXCONNECTIONSPERHOST, sb);
+    int soTimeout = getParameter(args, HttpClientUtil.PROP_SO_TIMEOUT,
+        HttpClientUtil.DEFAULT_SO_TIMEOUT, sb);
+
+    this.defaultClient = new Http2SolrClient.Builder()
+        .connectionTimeout(connectionTimeout)
+        .idleTimeout(soTimeout)
+        .maxConnectionsPerHost(maxConnectionsPerHost).build();
+    this.defaultClient.addListenerFactory(this.httpListenerFactory);
+    this.loadbalancer = new LBHttp2SolrClient(defaultClient);
   }
 

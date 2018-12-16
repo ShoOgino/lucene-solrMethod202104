@@ -1,0 +1,94 @@
+    //
+    // Pull from the queue multiple times and streams over a single connection.
+    // Exits on exception, interruption, or an empty queue to pull from.
+    //
+    void sendUpdateStream() throws Exception {
+
+      try {
+        while (!queue.isEmpty()) {
+          InputStream rspBody = null;
+          try {
+            Update update;
+            notifyQueueAndRunnersIfEmptyQueue();
+            update = queue.poll(pollQueueTime, TimeUnit.MILLISECONDS);
+
+            if (update == null) {
+              break;
+            }
+
+            InputStreamResponseListener responseListener = null;
+            try (Http2SolrClient.OutStream out = client.initOutStream(basePath, update.getRequest(),
+                update.getCollection())) {
+              Update upd = update;
+              while (upd != null) {
+                UpdateRequest req = upd.getRequest();
+                if (!out.belongToThisStream(req, upd.getCollection())) {
+                  queue.add(upd); // Request has different params or destination core/collection, return to queue
+                  break;
+                }
+                client.send(out, upd.getRequest(), upd.getCollection());
+                out.flush();
+
+                notifyQueueAndRunnersIfEmptyQueue();
+                upd = queue.poll(pollQueueTime, TimeUnit.MILLISECONDS);
+              }
+              responseListener = out.getResponseListener();
+            }
+
+            Response response = responseListener.get(client.getIdleTimeout(), TimeUnit.MILLISECONDS);
+            rspBody = responseListener.getInputStream();
+
+            int statusCode = response.getStatus();
+            if (statusCode != HttpStatus.OK_200) {
+              StringBuilder msg = new StringBuilder();
+              msg.append(response.getReason());
+              msg.append("\n\n\n\n");
+              msg.append("request: ").append(basePath);
+
+              SolrException solrExc;
+              NamedList<String> metadata = null;
+              // parse out the metadata from the SolrException
+              try {
+                String encoding = "UTF-8"; // default
+                NamedList<Object> resp = client.getParser().processResponse(rspBody, encoding);
+                NamedList<Object> error = (NamedList<Object>) resp.get("error");
+                if (error != null) {
+                  metadata = (NamedList<String>) error.get("metadata");
+                  String remoteMsg = (String) error.get("msg");
+                  if (remoteMsg != null) {
+                    msg.append("\nRemote error message: ");
+                    msg.append(remoteMsg);
+                  }
+                }
+              } catch (Exception exc) {
+                // don't want to fail to report error if parsing the response fails
+                log.warn("Failed to parse error response from " + basePath + " due to: " + exc);
+              } finally {
+                solrExc = new HttpSolrClient.RemoteSolrException(basePath , statusCode, msg.toString(), null);
+                if (metadata != null) {
+                  solrExc.setMetadata(metadata);
+                }
+              }
+
+              handleError(solrExc);
+            } else {
+              onSuccess(response, rspBody);
+            }
+
+          } finally {
+            try {
+              if (rspBody != null) {
+                while (rspBody.read() != -1) {}
+              }
+            } catch (Exception e) {
+              log.error("Error consuming and closing http response stream.", e);
+            }
+            notifyQueueAndRunnersIfEmptyQueue();
+          }
+        }
+      } catch (InterruptedException e) {
+        log.error("Interrupted on polling from queue", e);
+      }
+
+    }
+

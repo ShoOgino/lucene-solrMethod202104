@@ -2,6 +2,7 @@
     updateOnlyConnectionManager = new InstrumentedPoolingHttpClientConnectionManager(HttpClientUtil.getSchemaRegisteryProvider().getSchemaRegistry());
     recoveryOnlyConnectionManager = new InstrumentedPoolingHttpClientConnectionManager(HttpClientUtil.getSchemaRegisteryProvider().getSchemaRegistry());
     defaultConnectionManager = new InstrumentedPoolingHttpClientConnectionManager(HttpClientUtil.getSchemaRegisteryProvider().getSchemaRegistry());
+    ModifiableSolrParams clientParams = new ModifiableSolrParams();
     if (cfg != null ) {
       updateOnlyConnectionManager.setMaxTotal(cfg.getMaxUpdateConnections());
       updateOnlyConnectionManager.setDefaultMaxPerRoute(cfg.getMaxUpdateConnectionsPerHost());
@@ -9,38 +10,35 @@
       recoveryOnlyConnectionManager.setDefaultMaxPerRoute(cfg.getMaxUpdateConnectionsPerHost());
       defaultConnectionManager.setMaxTotal(cfg.getMaxUpdateConnections());
       defaultConnectionManager.setDefaultMaxPerRoute(cfg.getMaxUpdateConnectionsPerHost());
-    }
-
-    ModifiableSolrParams clientParams = new ModifiableSolrParams();
-    if (cfg != null)  {
       clientParams.set(HttpClientUtil.PROP_SO_TIMEOUT, cfg.getDistributedSocketTimeout());
       clientParams.set(HttpClientUtil.PROP_CONNECTION_TIMEOUT, cfg.getDistributedConnectionTimeout());
+      // following is done only for logging complete configuration.
+      // The maxConnections and maxConnectionsPerHost have already been specified on the connection manager
+      clientParams.set(HttpClientUtil.PROP_MAX_CONNECTIONS, cfg.getMaxUpdateConnections());
+      clientParams.set(HttpClientUtil.PROP_MAX_CONNECTIONS_PER_HOST, cfg.getMaxUpdateConnectionsPerHost());
       socketTimeout = cfg.getDistributedSocketTimeout();
       connectionTimeout = cfg.getDistributedConnectionTimeout();
     }
-    HttpClientMetricNameStrategy metricNameStrategy = KNOWN_METRIC_NAME_STRATEGIES.get(UpdateShardHandlerConfig.DEFAULT_METRICNAMESTRATEGY);
-    if (cfg != null)  {
-      metricNameStrategy = KNOWN_METRIC_NAME_STRATEGIES.get(cfg.getMetricNameStrategy());
-      if (metricNameStrategy == null) {
-        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
-            "Unknown metricNameStrategy: " + cfg.getMetricNameStrategy() + " found. Must be one of: " + KNOWN_METRIC_NAME_STRATEGIES.keySet());
-      }
-    }
+    log.debug("Created default UpdateShardHandler HTTP client with params: {}", clientParams);
 
-
-    httpRequestExecutor = new InstrumentedHttpRequestExecutor(metricNameStrategy);
-    updateOnlyClient = HttpClientUtil.createClient(clientParams, updateOnlyConnectionManager, false, httpRequestExecutor);
+    httpRequestExecutor = new InstrumentedHttpRequestExecutor(getMetricNameStrategy(cfg));
+    updateHttpListenerFactory = new InstrumentedHttpListenerFactory(getNameStrategy(cfg));
     recoveryOnlyClient = HttpClientUtil.createClient(clientParams, recoveryOnlyConnectionManager, false, httpRequestExecutor);
     defaultClient = HttpClientUtil.createClient(clientParams, defaultConnectionManager, false, httpRequestExecutor);
 
-    // following is done only for logging complete configuration.
-    // The maxConnections and maxConnectionsPerHost have already been specified on the connection manager
-    if (cfg != null)  {
-      clientParams.set(HttpClientUtil.PROP_MAX_CONNECTIONS, cfg.getMaxUpdateConnections());
-      clientParams.set(HttpClientUtil.PROP_MAX_CONNECTIONS_PER_HOST, cfg.getMaxUpdateConnectionsPerHost());
+    Http2SolrClient.Builder updateOnlyClientBuilder = new Http2SolrClient.Builder();
+    if (cfg != null) {
+      updateOnlyClientBuilder
+          .connectionTimeout(cfg.getDistributedConnectionTimeout())
+          .idleTimeout(cfg.getDistributedSocketTimeout())
+          .maxConnectionsPerHost(cfg.getMaxUpdateConnectionsPerHost());
     }
-    log.debug("Created default UpdateShardHandler HTTP client with params: {}", clientParams);
-    log.debug("Created update only UpdateShardHandler HTTP client with params: {}", clientParams);
+    updateOnlyClient = updateOnlyClientBuilder.build();
+    updateOnlyClient.addListenerFactory(updateHttpListenerFactory);
+    Set<String> queryParams = new HashSet<>(2);
+    queryParams.add(DistributedUpdateProcessor.DISTRIB_FROM);
+    queryParams.add(DistributingUpdateProcessorFactory.DISTRIB_UPDATE_PARAM);
+    updateOnlyClient.setQueryParams(queryParams);
 
     ThreadFactory recoveryThreadFactory = new SolrjNamedThreadFactory("recoveryExecutor");
     if (cfg != null && cfg.getMaxRecoveryThreads() > 0) {

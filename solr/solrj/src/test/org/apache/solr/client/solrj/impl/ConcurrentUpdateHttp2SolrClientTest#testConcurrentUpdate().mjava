@@ -1,0 +1,60 @@
+  @Test
+  public void testConcurrentUpdate() throws Exception {
+    ConcurrentUpdateSolrClientTest.TestServlet.clear();
+
+    String serverUrl = jetty.getBaseUrl().toString() + "/cuss/foo";
+
+    int cussThreadCount = 2;
+    int cussQueueSize = 100;
+
+    // for tracking callbacks from CUSS
+    final AtomicInteger successCounter = new AtomicInteger(0);
+    final AtomicInteger errorCounter = new AtomicInteger(0);
+    final StringBuilder errors = new StringBuilder();
+
+    try (Http2SolrClient http2Client = new Http2SolrClient.Builder().build();
+         ConcurrentUpdateHttp2SolrClient concurrentClient = new OutcomeCountingConcurrentUpdateSolrClient.Builder(serverUrl, http2Client, successCounter, errorCounter, errors)
+             .withQueueSize(cussQueueSize)
+             .withThreadCount(cussThreadCount)
+             .build()) {
+      concurrentClient.setPollQueueTime(0);
+
+      // ensure it doesn't block where there's nothing to do yet
+      concurrentClient.blockUntilFinished();
+
+      int poolSize = 5;
+      ExecutorService threadPool = ExecutorUtil.newMDCAwareFixedThreadPool(poolSize, new SolrjNamedThreadFactory("testCUSS"));
+
+      int numDocs = 100;
+      int numRunnables = 5;
+      for (int r=0; r < numRunnables; r++)
+        threadPool.execute(new ConcurrentUpdateSolrClientTest.SendDocsRunnable(String.valueOf(r), numDocs, concurrentClient));
+
+      // ensure all docs are sent
+      threadPool.awaitTermination(5, TimeUnit.SECONDS);
+      threadPool.shutdown();
+
+      // wait until all requests are processed by CUSS
+      concurrentClient.blockUntilFinished();
+      concurrentClient.shutdownNow();
+
+      assertEquals("post", ConcurrentUpdateSolrClientTest.TestServlet.lastMethod);
+
+      // expect all requests to be successful
+      int expectedSuccesses = ConcurrentUpdateSolrClientTest.TestServlet.numReqsRcvd.get();
+      assertTrue(expectedSuccesses > 0); // at least one request must have been sent
+
+      assertTrue("Expected no errors but got "+errorCounter.get()+
+          ", due to: "+errors.toString(), errorCounter.get() == 0);
+      assertTrue("Expected "+expectedSuccesses+" successes, but got "+successCounter.get(),
+          successCounter.get() == expectedSuccesses);
+
+      int expectedDocs = numDocs * numRunnables;
+      assertTrue("Expected CUSS to send "+expectedDocs+" but got "+ ConcurrentUpdateSolrClientTest.TestServlet.numDocsRcvd.get(),
+          ConcurrentUpdateSolrClientTest.TestServlet.numDocsRcvd.get() == expectedDocs);
+    }
+
+
+
+  }
+

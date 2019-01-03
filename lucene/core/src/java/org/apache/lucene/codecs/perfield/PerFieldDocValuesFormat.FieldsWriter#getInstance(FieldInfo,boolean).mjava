@@ -1,0 +1,76 @@
+    /**
+     * DocValuesConsumer for the given field.
+     * @param field - FieldInfo object.
+     * @param ignoreCurrentFormat - ignore the existing format attributes.
+     * @return DocValuesConsumer for the field.
+     * @throws IOException if there is a low-level IO error
+     */
+    private DocValuesConsumer getInstance(FieldInfo field, boolean ignoreCurrentFormat) throws IOException {
+      DocValuesFormat format = null;
+      if (field.getDocValuesGen() != -1) {
+        String formatName = null;
+        if (ignoreCurrentFormat == false) {
+          formatName = field.getAttribute(PER_FIELD_FORMAT_KEY);
+        }
+        // this means the field never existed in that segment, yet is applied updates
+        if (formatName != null) {
+          format = DocValuesFormat.forName(formatName);
+        }
+      }
+      if (format == null) {
+        format = getDocValuesFormatForField(field.name);
+      }
+      if (format == null) {
+        throw new IllegalStateException("invalid null DocValuesFormat for field=\"" + field.name + "\"");
+      }
+      final String formatName = format.getName();
+
+      field.putAttribute(PER_FIELD_FORMAT_KEY, formatName);
+      Integer suffix = null;
+
+      ConsumerAndSuffix consumer = formats.get(format);
+      if (consumer == null) {
+        // First time we are seeing this format; create a new instance
+
+        if (field.getDocValuesGen() != -1) {
+          String suffixAtt = null;
+          if (!ignoreCurrentFormat) {
+            suffixAtt = field.getAttribute(PER_FIELD_SUFFIX_KEY);
+          }
+          // even when dvGen is != -1, it can still be a new field, that never
+          // existed in the segment, and therefore doesn't have the recorded
+          // attributes yet.
+          if (suffixAtt != null) {
+            suffix = Integer.valueOf(suffixAtt);
+          }
+        }
+
+        if (suffix == null) {
+          // bump the suffix
+          suffix = suffixes.get(formatName);
+          if (suffix == null) {
+            suffix = 0;
+          } else {
+            suffix = suffix + 1;
+          }
+        }
+        suffixes.put(formatName, suffix);
+
+        final String segmentSuffix = getFullSegmentSuffix(segmentWriteState.segmentSuffix,
+                                                          getSuffix(formatName, Integer.toString(suffix)));
+        consumer = new ConsumerAndSuffix();
+        consumer.consumer = format.fieldsConsumer(new SegmentWriteState(segmentWriteState, segmentSuffix));
+        consumer.suffix = suffix;
+        formats.put(format, consumer);
+      } else {
+        // we've already seen this format, so just grab its suffix
+        assert suffixes.containsKey(formatName);
+        suffix = consumer.suffix;
+      }
+
+      field.putAttribute(PER_FIELD_SUFFIX_KEY, Integer.toString(suffix));
+      // TODO: we should only provide the "slice" of FIS
+      // that this DVF actually sees ...
+      return consumer.consumer;
+    }
+

@@ -5,32 +5,25 @@
     .addConfig("conf", configset("cloud-minimal"))
     .configure();
     
+    final Overseer overseer = cluster.getOpenOverseer();
+    assertNotNull(overseer);
+    cloudManager = overseer.getSolrCloudManager();
+    assertNotNull(cloudManager);
+      
     // disable .scheduled_maintenance (once it exists)
-    CloudTestUtils.waitForTriggerToBeScheduled(cluster.getOpenOverseer().getSolrCloudManager(), ".scheduled_maintenance");
-    CloudTestUtils.suspendTrigger(cluster.getOpenOverseer().getSolrCloudManager(), ".scheduled_maintenance");
+    CloudTestUtils.waitForTriggerToBeScheduled(cloudManager, ".scheduled_maintenance");
+    CloudTestUtils.suspendTrigger(cloudManager, ".scheduled_maintenance");
 
-    NamedList<Object> overSeerStatus = cluster.getSolrClient().request(CollectionAdminRequest.getOverseerStatus());
-    String overseerLeader = (String) overSeerStatus.get("leader");
-    int overseerLeaderIndex = 0;
-    for (int i = 0; i < cluster.getJettySolrRunners().size(); i++) {
-      JettySolrRunner jetty = cluster.getJettySolrRunner(i);
-      if (jetty.getNodeName().equals(overseerLeader)) {
-        overseerLeaderIndex = i;
-        break;
-      }
-    }
-    Overseer overseer = cluster.getJettySolrRunner(overseerLeaderIndex).getCoreContainer().getZkController().getOverseer();
-    ScheduledTriggers scheduledTriggers = ((OverseerTriggerThread) overseer.getTriggerThread().getThread()).getScheduledTriggers();
     // aggressively remove all active scheduled triggers
+    final ScheduledTriggers scheduledTriggers = ((OverseerTriggerThread) overseer.getTriggerThread().getThread()).getScheduledTriggers();
+    // TODO: is this really safe? is it possible overseer is still in process of adding some to schedule?
     scheduledTriggers.removeAll();
 
     // clear any persisted auto scaling configuration
     Stat stat = zkClient().setData(SOLR_AUTOSCALING_CONF_PATH, Utils.toJSON(new ZkNodeProps()), true);
     log.info(SOLR_AUTOSCALING_CONF_PATH + " reset, new znode version {}", stat.getVersion());
 
-
     cluster.getSolrClient().setDefaultCollection(null);
-
 
     waitForSeconds = 1 + random().nextInt(3);
     actionConstructorCalled = new CountDownLatch(1);
@@ -39,7 +32,6 @@
     triggerFired = new AtomicBoolean(false);
     events.clear();
 
-    cloudManager = cluster.getJettySolrRunner(0).getCoreContainer().getZkController().getSolrCloudManager();
     // clear any events or markers
     // todo: consider the impact of such cleanup on regular cluster restarts
     deleteChildrenRecursively(ZkStateReader.SOLR_AUTOSCALING_EVENTS_PATH);

@@ -1,5 +1,5 @@
   @Test
-  @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028")
+  //@BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-13072")
   public void testNodeMarkersRegistration() throws Exception {
     // for this test we want to create two triggers so we must assert that the actions were created twice
     actionInitCalled = new CountDownLatch(2);
@@ -9,8 +9,8 @@
 
     SolrClient solrClient = cluster.simGetSolrClient();
 
-    // pick overseer node
-    String overseerLeader = cluster.getSimClusterStateProvider().simGetRandomNode();
+    // get overseer node
+    String overseerLeader = cluster.getSimClusterStateProvider().simGetOverseerLeader();
 
     // add a node
     String node = cluster.simAddNode();
@@ -27,6 +27,8 @@
     // stop overseer
     log.info("====== KILL OVERSEER 1");
     cluster.simRestartOverseer(overseerLeader);
+    assertAutoscalingUpdateComplete();
+
     if (!listener.onChangeLatch.await(10000, TimeUnit.MILLISECONDS)) {
       fail("onChange listener didn't execute on cluster change");
     }
@@ -77,7 +79,8 @@
         "'actions' : [{'name':'test','class':'" + TestEventMarkerAction.class.getName() + "'}]" +
        "}}");
 
-    overseerLeader = cluster.getSimClusterStateProvider().simGetRandomNode();
+    assertAutoscalingUpdateComplete();
+    overseerLeader = cluster.getSimClusterStateProvider().simGetOverseerLeader();
 
     // create another node
     log.info("====== ADD NODE 1");
@@ -91,14 +94,10 @@
     pathAdded = ZkStateReader.SOLR_AUTOSCALING_NODE_ADDED_PATH + "/" + node1;
     assertTrue("Path " + pathAdded + " wasn't created", cluster.getDistribStateManager().hasData(pathAdded));
 
-    cluster.getTimeSource().sleep(60000);
-    // nodeAdded marker should be consumed now by nodeAdded trigger
-    assertFalse("Path " + pathAdded + " should have been deleted",
-        cluster.getDistribStateManager().hasData(pathAdded));
-
     listener.reset();
     events.clear();
-    triggerFiredLatch = new CountDownLatch(1);
+    // one nodeAdded (not cleared yet) and one nodeLost
+    triggerFiredLatch = new CountDownLatch(2);
     // kill overseer again
     log.info("====== KILL OVERSEER 2");
     cluster.simRestartOverseer(overseerLeader);
@@ -106,14 +105,31 @@
       fail("onChange listener didn't execute on cluster change");
     }
 
+    assertAutoscalingUpdateComplete();
 
     if (!triggerFiredLatch.await(120000 / SPEED, TimeUnit.MILLISECONDS)) {
       fail("Trigger should have fired by now");
     }
-    assertEquals(1, events.size());
-    TriggerEvent ev = events.iterator().next();
-    List<String> nodeNames = (List<String>)ev.getProperty(TriggerEvent.NODE_NAMES);
+    assertEquals(2, events.size());
+    TriggerEvent nodeAdded = null;
+    TriggerEvent nodeLost = null;
+    for (TriggerEvent ev : events) {
+      switch (ev.getEventType()) {
+        case NODEADDED:
+          nodeAdded = ev;
+          break;
+        case NODELOST:
+          nodeLost = ev;
+          break;
+        default:
+          fail("unexpected event type: " + ev);
+      }
+    }
+    assertNotNull("expected nodeAdded event", nodeAdded);
+    assertNotNull("expected nodeLost event", nodeLost);
+    List<String> nodeNames = (List<String>)nodeLost.getProperty(TriggerEvent.NODE_NAMES);
     assertTrue(nodeNames.contains(overseerLeader));
-    assertEquals(TriggerEventType.NODELOST, ev.getEventType());
+    nodeNames = (List<String>)nodeAdded.getProperty(TriggerEvent.NODE_NAMES);
+    assertTrue(nodeNames.contains(node1));
   }
 

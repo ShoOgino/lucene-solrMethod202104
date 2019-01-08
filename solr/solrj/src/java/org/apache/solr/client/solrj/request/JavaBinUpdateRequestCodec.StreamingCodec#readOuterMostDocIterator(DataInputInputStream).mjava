@@ -1,0 +1,52 @@
+    private List readOuterMostDocIterator(DataInputInputStream fis) throws IOException {
+      NamedList params = (NamedList) namedList[0].get("params");
+      updateRequest.setParams(new ModifiableSolrParams(params.toSolrParams()));
+      if (handler == null) return super.readIterator(fis);
+      Integer commitWithin = null;
+      Boolean overwrite = null;
+      Object o = null;
+      super.readStringAsCharSeq = true;
+      try {
+        while (true) {
+          if (o == null) {
+            o = readVal(fis);
+          }
+
+          if (o == END_OBJ) {
+            break;
+          }
+
+          SolrInputDocument sdoc = null;
+          if (o instanceof List) {
+            sdoc = listToSolrInputDocument((List<NamedList>) o);
+          } else if (o instanceof NamedList) {
+            UpdateRequest req = new UpdateRequest();
+            req.setParams(new ModifiableSolrParams(((NamedList) o).toSolrParams()));
+            handler.update(null, req, null, null);
+          } else if (o instanceof Map.Entry) {
+            sdoc = (SolrInputDocument) ((Entry) o).getKey();
+            Map p = (Map) ((Entry) o).getValue();
+            if (p != null) {
+              commitWithin = (Integer) p.get(UpdateRequest.COMMIT_WITHIN);
+              overwrite = (Boolean) p.get(UpdateRequest.OVERWRITE);
+            }
+          } else {
+            sdoc = (SolrInputDocument) o;
+          }
+
+          // peek at the next object to see if we're at the end
+          o = readVal(fis);
+          if (o == END_OBJ) {
+            // indicate that we've hit the last doc in the batch, used to enable optimizations when doing replication
+            updateRequest.lastDocInBatch();
+          }
+
+          handler.update(sdoc, updateRequest, commitWithin, overwrite);
+        }
+        return Collections.EMPTY_LIST;
+      } finally {
+        super.readStringAsCharSeq = false;
+
+      }
+    }
+

@@ -10,15 +10,6 @@
                      long[] leafBlockFPs,
                      List<Closeable> toCloseHeroically) throws IOException {
 
-    for (PathSlice slice : slices) {
-      assert slice.count == slices[0].count;
-    }
-
-    if (numDataDims == 1 && slices[0].writer instanceof OfflinePointWriter && slices[0].count <= maxPointsSortInHeap) {
-      // Special case for 1D, to cutover to heap once we recurse deeply enough:
-      slices[0] = switchToHeap(slices[0], toCloseHeroically);
-    }
-
     if (nodeID >= leafNodeOffset) {
 
       // Leaf node: write block
@@ -28,10 +19,20 @@
       int sortedDimCardinality = Integer.MAX_VALUE;
 
       for (int dim=0;dim<numIndexDims;dim++) {
+        //create a slice if it does not exist
+        boolean created = false;
+        if (slices[dim] == null) {
+          createPathSlice(slices, dim);
+          created = true;
+        }
         if (slices[dim].writer instanceof HeapPointWriter == false) {
           // Adversarial cases can cause this, e.g. very lopsided data, all equal points, such that we started
           // offline, but then kept splitting only in one dimension, and so never had to rewrite into heap writer
+          PathSlice slice = slices[dim];
           slices[dim] = switchToHeap(slices[dim], toCloseHeroically);
+          if (created) {
+            slice.writer.destroy();
+          }
         }
 
         PathSlice source = slices[dim];
@@ -152,6 +153,12 @@
         splitDim = 0;
       }
 
+      //We delete the created path slices at the same level
+      boolean deleteSplitDim = false;
+      if (slices[splitDim] == null) {
+        createPathSlice(slices, splitDim);
+        deleteSplitDim = true;
+      }
       PathSlice source = slices[splitDim];
 
       assert nodeID < splitPackedValues.length: "nodeID=" + nodeID + " splitValues.length=" + splitPackedValues.length;
@@ -160,7 +167,16 @@
       long rightCount = source.count / 2;
       long leftCount = source.count - rightCount;
 
-      byte[] splitValue = markRightTree(rightCount, splitDim, source, ordBitSet);
+      // When we are on this dim, below, we clear the ordBitSet:
+      int dimToClear = numIndexDims - 1;
+      while (dimToClear >= 0) {
+        if (slices[dimToClear] != null && splitDim != dimToClear) {
+          break;
+        }
+        dimToClear--;
+      }
+
+      byte[] splitValue = (dimToClear == -1) ? markRightTree(rightCount, splitDim, source, null) : markRightTree(rightCount, splitDim, source, ordBitSet);
       int address = nodeID * (1+bytesPerDim);
       splitPackedValues[address] = (byte) splitDim;
       System.arraycopy(splitValue, 0, splitPackedValues, address + 1, bytesPerDim);
@@ -176,16 +192,11 @@
       byte[] maxSplitPackedValue = new byte[packedIndexBytesLength];
       System.arraycopy(maxPackedValue, 0, maxSplitPackedValue, 0, packedIndexBytesLength);
 
-      // When we are on this dim, below, we clear the ordBitSet:
-      int dimToClear;
-      if (numIndexDims - 1 == splitDim) {
-        dimToClear = numIndexDims - 2;
-      } else {
-        dimToClear = numIndexDims - 1;
-      }
 
       for(int dim=0;dim<numIndexDims;dim++) {
-
+        if (slices[dim] == null) {
+          continue;
+        }
         if (dim == splitDim) {
           // No need to partition on this dim since it's a simple slice of the incoming already sorted slice, and we
           // will re-use its shared reader when visiting it as we recurse:
@@ -223,7 +234,7 @@
             splitPackedValues, leafBlockFPs, toCloseHeroically);
       for(int dim=0;dim<numIndexDims;dim++) {
         // Don't destroy the dim we split on because we just re-used what our caller above gave us for that dim:
-        if (dim != splitDim) {
+        if (dim != splitDim && slices[dim] != null) {
           leftSlices[dim].writer.destroy();
         }
       }
@@ -236,11 +247,14 @@
             splitPackedValues, leafBlockFPs, toCloseHeroically);
       for(int dim=0;dim<numIndexDims;dim++) {
         // Don't destroy the dim we split on because we just re-used what our caller above gave us for that dim:
-        if (dim != splitDim) {
+        if (dim != splitDim && slices[dim] != null) {
           rightSlices[dim].writer.destroy();
         }
       }
       parentSplits[splitDim]--;
+      if (deleteSplitDim) {
+        slices[splitDim].writer.destroy();
+      }
     }
   }
 

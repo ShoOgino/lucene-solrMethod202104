@@ -1,93 +1,25 @@
+  //return a new point writer sort by the provided dimension from input data
   private PointWriter sort(int dim) throws IOException {
     assert dim >= 0 && dim < numDataDims;
 
     if (heapPointWriter != null) {
-
       assert tempInput == null;
-
       // We never spilled the incoming points to disk, so now we sort in heap:
-      HeapPointWriter sorted;
-
-      if (dim == 0) {
-        // First dim can re-use the current heap writer
-        sorted = heapPointWriter;
-      } else {
-        // Subsequent dims need a private copy
-        sorted = new HeapPointWriter((int) pointCount, (int) pointCount, packedBytesLength, longOrds, singleValuePerDoc);
-        sorted.copyFrom(heapPointWriter);
-      }
-
+      HeapPointWriter sorted = heapPointWriter;
       //long t0 = System.nanoTime();
-      sortHeapPointWriter(sorted, dim);
+      sortHeapPointWriter(sorted, Math.toIntExact(this.pointCount), dim);
       //long t1 = System.nanoTime();
       //System.out.println("BKD: sort took " + ((t1-t0)/1000000.0) + " msec");
-
       sorted.close();
+      heapPointWriter = null;
       return sorted;
     } else {
-
       // Offline sort:
       assert tempInput != null;
-
-      final int offset = bytesPerDim * dim;
-
-      Comparator<BytesRef> cmp;
-      if (dim == numDataDims - 1) {
-        // in that case the bytes for the dimension and for the doc id are contiguous,
-        // so we don't need a branch
-        cmp = new BytesRefComparator(bytesPerDim + Integer.BYTES) {
-          @Override
-          protected int byteAt(BytesRef ref, int i) {
-            return ref.bytes[ref.offset + offset + i] & 0xff;
-          }
-        };
-      } else {
-        cmp = new BytesRefComparator(bytesPerDim + Integer.BYTES) {
-          @Override
-          protected int byteAt(BytesRef ref, int i) {
-            if (i < bytesPerDim) {
-              return ref.bytes[ref.offset + offset + i] & 0xff;
-            } else {
-              return ref.bytes[ref.offset + packedBytesLength + i - bytesPerDim] & 0xff;
-            }
-          }
-        };
-      }
-
-      OfflineSorter sorter = new OfflineSorter(tempDir, tempFileNamePrefix + "_bkd" + dim, cmp, offlineSorterBufferMB, offlineSorterMaxTempFiles, bytesPerDoc, null, 0) {
-
-          /** We write/read fixed-byte-width file that {@link OfflinePointReader} can read. */
-          @Override
-          protected ByteSequencesWriter getWriter(IndexOutput out, long count) {
-            return new ByteSequencesWriter(out) {
-              @Override
-              public void write(byte[] bytes, int off, int len) throws IOException {
-                assert len == bytesPerDoc: "len=" + len + " bytesPerDoc=" + bytesPerDoc;
-                out.writeBytes(bytes, off, len);
-              }
-            };
-          }
-
-          /** We write/read fixed-byte-width file that {@link OfflinePointReader} can read. */
-          @Override
-          protected ByteSequencesReader getReader(ChecksumIndexInput in, String name) throws IOException {
-            return new ByteSequencesReader(in, name) {
-              final BytesRef scratch = new BytesRef(new byte[bytesPerDoc]);
-              @Override
-              public BytesRef next() throws IOException {
-                if (in.getFilePointer() >= end) {
-                  return null;
-                }
-                in.readBytes(scratch.bytes, 0, bytesPerDoc);
-                return scratch;
-              }
-            };
-          }
-        };
-
-      String name = sorter.sort(tempInput.getName());
-
-      return new OfflinePointWriter(tempDir, name, packedBytesLength, pointCount, longOrds, singleValuePerDoc);
+      OfflinePointWriter sorted = sortOffLine(dim, tempInput.getName(), 0, pointCount);
+      tempDir.deleteFile(tempInput.getName());
+      tempInput = null;
+      return sorted;
     }
   }
 

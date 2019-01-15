@@ -1,5 +1,7 @@
   @Test
   public void testListeners() throws Exception {
+    listenerEventLatch = new CountDownLatch(4 + 5);
+    
     SolrClient solrClient = cluster.simGetSolrClient();
     assertAutoScalingRequest
       ("{" +
@@ -13,10 +15,6 @@
        "{'name':'test1','class':'" + TestDummyAction.class.getName() + "'}," +
        "]" +
        "}}");
-
-    if (!actionInitCalled.await(3000 / SPEED, TimeUnit.MILLISECONDS))  {
-      fail("The TriggerAction should have been created by now");
-    }
 
     assertAutoScalingRequest
       ("{" +
@@ -45,6 +43,8 @@
        "}");
 
     assertAutoscalingUpdateComplete();
+    assertTrue("The TriggerAction should have been init'ed w/in a reasonable amount of time",
+               actionInitCalled.await(10, TimeUnit.SECONDS));
 
     listenerEvents.clear();
     failDummyAction = false;
@@ -54,9 +54,9 @@
     assertTrue("The trigger did not fire at all", await);
     assertTrue(triggerFired.get());
 
-    assertEquals("both listeners should have fired", 2, listenerEvents.size());
-
-    cluster.getTimeSource().sleep(3000);
+    assertTrue("the listeners shou;d have recorded all events w/in a reasonable amount of time",
+               listenerEventLatch.await(10, TimeUnit.SECONDS));
+    assertEquals("at least 2 event types should have been recorded", 2, listenerEvents.size());
 
     // check foo events
     List<CapturedEvent> testEvents = listenerEvents.get("foo");
@@ -114,12 +114,15 @@
     triggerFiredLatch = new CountDownLatch(1);
     listenerEvents.clear();
     failDummyAction = true;
+    listenerEventLatch = new CountDownLatch(4 + 4); // fewer total due to failDummyAction
 
     newNode = cluster.simAddNode();
     await = triggerFiredLatch.await(20000 / SPEED, TimeUnit.MILLISECONDS);
     assertTrue("The trigger did not fire at all", await);
 
-    cluster.getTimeSource().sleep(3000);
+    assertTrue("the listeners shoud have recorded all events w/in a reasonable amount of time",
+               listenerEventLatch.await(10, TimeUnit.SECONDS));
+    assertEquals("at least 2 event types should have been recorded", 2, listenerEvents.size());
 
     // check foo events
     testEvents = listenerEvents.get("foo");

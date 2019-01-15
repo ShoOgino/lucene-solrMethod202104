@@ -1,13 +1,15 @@
-    public void compileIndex(List<PendingBlock> blocks, RAMOutputStream scratchBytes, IntsRefBuilder scratchIntsRef) throws IOException {
+    public void compileIndex(List<PendingBlock> blocks, ByteBuffersDataOutput scratchBytes, IntsRefBuilder scratchIntsRef) throws IOException {
 
       assert (isFloor && blocks.size() > 1) || (isFloor == false && blocks.size() == 1): "isFloor=" + isFloor + " blocks=" + blocks;
       assert this == blocks.get(0);
 
-      assert scratchBytes.getFilePointer() == 0;
+      assert scratchBytes.size() == 0;
 
       // TODO: try writing the leading vLong in MSB order
       // (opposite of what Lucene does today), for better
       // outputs sharing in the FST
+      long lastSumTotalTermCount = 0;
+      long sumTotalTermCount = totalTermCount;
       scratchBytes.writeVLong(encodeOutput(fp, hasTerms, isFloor));
       if (isFloor) {
         scratchBytes.writeVInt(blocks.size()-1);
@@ -18,37 +20,46 @@
           //  System.out.println("    write floorLeadByte=" + Integer.toHexString(sub.floorLeadByte&0xff));
           //}
           scratchBytes.writeByte((byte) sub.floorLeadByte);
+          // System.out.println("  write floor byte=" + (byte) sub.floorLeadByte + " ordShift=" + sumTotalTermCount);
+          scratchBytes.writeVLong(sumTotalTermCount - lastSumTotalTermCount);
+          lastSumTotalTermCount = sumTotalTermCount;
+          sumTotalTermCount += sub.totalTermCount;
           assert sub.fp > fp;
           scratchBytes.writeVLong((sub.fp - fp) << 1 | (sub.hasTerms ? 1 : 0));
         }
       }
 
-      final ByteSequenceOutputs outputs = ByteSequenceOutputs.getSingleton();
-      final Builder<BytesRef> indexBuilder = new Builder<>(FST.INPUT_TYPE.BYTE1,
-                                                           0, 0, true, false, Integer.MAX_VALUE,
-                                                           outputs, true, 15);
+      final Builder<Output> indexBuilder = new Builder<>(FST.INPUT_TYPE.BYTE1,
+                                                         0, 0, true, false, Integer.MAX_VALUE,
+                                                         FST_OUTPUTS, true, 15);
       //if (DEBUG) {
       //  System.out.println("  compile index for prefix=" + prefix);
       //}
       //indexBuilder.DEBUG = false;
-      final byte[] bytes = new byte[(int) scratchBytes.getFilePointer()];
+      final byte[] bytes = scratchBytes.toArrayCopy();
       assert bytes.length > 0;
-      scratchBytes.writeTo(bytes, 0);
-      indexBuilder.add(Util.toIntsRef(prefix, scratchIntsRef), new BytesRef(bytes, 0, bytes.length));
+      indexBuilder.add(Util.toIntsRef(prefix, scratchIntsRef),
+                       FST_OUTPUTS.newOutput(new BytesRef(bytes, 0, bytes.length),
+                                             0, Long.MAX_VALUE-(sumTotalTermCount-1)));
       scratchBytes.reset();
 
       // Copy over index for all sub-blocks
+
+      long termOrdOffset = 0;
       for(PendingBlock block : blocks) {
         if (block.subIndices != null) {
-          for(FST<BytesRef> subIndex : block.subIndices) {
-            append(indexBuilder, subIndex, scratchIntsRef);
+          for(SubIndex subIndex : block.subIndices) {
+            append(indexBuilder, subIndex.index, termOrdOffset + subIndex.termOrdStart, scratchIntsRef);
           }
           block.subIndices = null;
         }
+        termOrdOffset += block.totalTermCount;
       }
+      totFloorTermCount = termOrdOffset;
+
+      assert sumTotalTermCount == totFloorTermCount;
 
       index = indexBuilder.finish();
-
       assert subIndices == null;
 
       /*

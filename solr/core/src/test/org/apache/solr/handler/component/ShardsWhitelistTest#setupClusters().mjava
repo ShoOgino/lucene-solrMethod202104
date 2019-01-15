@@ -1,0 +1,55 @@
+  @BeforeClass
+  public static void setupClusters() throws Exception {
+
+    final String[] clusterIds = new String[] {IMPLICIT_CLUSTER_KEY, EXPLICIT_CLUSTER_KEY};
+
+    numShards = 2; // +random().nextInt(2);
+    numReplicas = 1; // +random().nextInt(2);
+    maxShardsPerNode = 1; // +random().nextInt(2);
+    nodesPerCluster = (numShards * numReplicas + (maxShardsPerNode - 1)) / maxShardsPerNode;
+
+    final StringBuilder sb = new StringBuilder();
+
+    doSetupClusters(clusterIds,
+        new DefaultClusterCreateFunction() {
+
+          @Override
+          public MiniSolrCloudCluster apply(String clusterId) {
+            try {
+              final MiniSolrCloudCluster cluster = new SolrCloudTestCase.Builder(nodesPerCluster(clusterId),
+                  createTempDir())
+                      .addConfig("conf", configset("cloud-dynamic"))
+                      .withSolrXml(MiniSolrCloudCluster.DEFAULT_CLOUD_SOLR_XML.replace(
+                          MiniSolrCloudCluster.SOLR_TESTS_SHARDS_WHITELIST, EXPLICIT_WHITELIST_PROPERTY + clusterId))
+                      .build();
+              return cluster;
+            } catch (Exception e) {
+              throw new RuntimeException(e);
+            }
+          }
+
+          @Override
+          protected int nodesPerCluster(String clusterId) {
+            return nodesPerCluster;
+          }
+        },
+        new DefaultClusterInitFunction(numShards, numReplicas, maxShardsPerNode) {
+          @Override
+          public void accept(String clusterId, MiniSolrCloudCluster cluster) {
+            appendClusterNodes(sb, ",", cluster);
+            if (clusterId.equals(EXPLICIT_CLUSTER_KEY)) {
+              System.setProperty(EXPLICIT_WHITELIST_PROPERTY + clusterId, sb.toString());
+              for (JettySolrRunner runner : cluster.getJettySolrRunners()) {
+                try {
+                  runner.stop();
+                  runner.start(true);
+                } catch (Exception e) {
+                  throw new RuntimeException("Unable to restart runner", e);
+                }
+              }
+            }
+            doAccept(COLLECTION_NAME, cluster);
+          }
+        });
+  }
+

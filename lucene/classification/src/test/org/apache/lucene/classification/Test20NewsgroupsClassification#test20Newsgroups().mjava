@@ -1,0 +1,157 @@
+  @Test
+  public void test20Newsgroups() throws Exception {
+
+    String indexProperty = System.getProperty("index");
+    if (indexProperty != null) {
+      try {
+        index = Boolean.valueOf(indexProperty);
+      } catch (Exception e) {
+        // ignore
+      }
+    }
+
+    String splitProperty = System.getProperty("split");
+    if (splitProperty != null) {
+      try {
+        split = Boolean.valueOf(splitProperty);
+      } catch (Exception e) {
+        // ignore
+      }
+    }
+
+    Path mainIndexPath = Paths.get(INDEX + "/original");
+    Directory directory = FSDirectory.open(mainIndexPath);
+    Path trainPath = Paths.get(INDEX + "/train");
+    Path testPath = Paths.get(INDEX + "/test");
+    Path cvPath = Paths.get(INDEX + "/cv");
+    FSDirectory cv = null;
+    FSDirectory test = null;
+    FSDirectory train = null;
+    IndexReader testReader = null;
+    if (split) {
+      cv = FSDirectory.open(cvPath);
+      test = FSDirectory.open(testPath);
+      train = FSDirectory.open(trainPath);
+    }
+
+    if (index) {
+      delete(mainIndexPath);
+      if (split) {
+        delete(trainPath, testPath, cvPath);
+      }
+    }
+
+    IndexReader reader = null;
+    List<Classifier<BytesRef>> classifiers = new LinkedList<>();
+    try {
+      Analyzer analyzer = new StandardAnalyzer();
+      if (index) {
+
+        System.out.format("Indexing 20 Newsgroups...%n");
+
+        long startIndex = System.currentTimeMillis();
+        IndexWriter indexWriter = new IndexWriter(directory, new IndexWriterConfig(analyzer));
+
+        int docsIndexed = buildIndex(new File(PATH_TO_20N), indexWriter);
+
+        long endIndex = System.currentTimeMillis();
+        System.out.format("Indexed %d pages in %ds %n", docsIndexed, (endIndex - startIndex) / 1000);
+
+        indexWriter.close();
+
+      }
+
+      if (split && !index) {
+        reader = DirectoryReader.open(train);
+      } else {
+        reader = DirectoryReader.open(directory);
+      }
+
+      if (index && split) {
+        // split the index
+        System.out.format("Splitting the index...%n");
+
+        long startSplit = System.currentTimeMillis();
+        DatasetSplitter datasetSplitter = new DatasetSplitter(0.2, 0);
+        datasetSplitter.split(reader, train, test, cv, analyzer, false, CATEGORY_FIELD, BODY_FIELD, SUBJECT_FIELD, CATEGORY_FIELD);
+        reader.close();
+        reader = DirectoryReader.open(train); // using the train index from now on
+        long endSplit = System.currentTimeMillis();
+        System.out.format("Splitting done in %ds %n", (endSplit - startSplit) / 1000);
+      }
+
+      final long startTime = System.currentTimeMillis();
+
+
+      classifiers.add(new KNearestNeighborClassifier(reader, new ClassicSimilarity(), analyzer, null, 1, 0, 0, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestNeighborClassifier(reader, null, analyzer, null, 1, 0, 0, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestNeighborClassifier(reader, new ClassicSimilarity(), analyzer, null, 3, 0, 0, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestNeighborClassifier(reader, new AxiomaticF1EXP(), analyzer, null, 3, 0, 0, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestNeighborClassifier(reader, new AxiomaticF1LOG(), analyzer, null, 3, 0, 0, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestNeighborClassifier(reader, new LMDirichletSimilarity(), analyzer, null, 3, 1, 1, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestNeighborClassifier(reader, new LMJelinekMercerSimilarity(0.3f), analyzer, null, 3, 1, 1, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestNeighborClassifier(reader, null, analyzer, null, 3, 1, 1, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestNeighborClassifier(reader, new DFRSimilarity(new BasicModelG(), new AfterEffectB(), new NormalizationH1()), analyzer, null, 3, 1, 1, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestNeighborClassifier(reader, new IBSimilarity(new DistributionSPL(), new LambdaDF(), new Normalization.NoNormalization()), analyzer, null, 3, 1, 1, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestNeighborClassifier(reader, new IBSimilarity(new DistributionLL(), new LambdaTTF(), new NormalizationH1()), analyzer, null, 3, 1, 1, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestFuzzyClassifier(reader, new LMJelinekMercerSimilarity(0.3f), analyzer, null, 1, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestFuzzyClassifier(reader, new IBSimilarity(new DistributionLL(), new LambdaTTF(), new NormalizationH1()), analyzer, null, 1, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestFuzzyClassifier(reader, new ClassicSimilarity(), analyzer, null, 1, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestFuzzyClassifier(reader, new ClassicSimilarity(), analyzer, null, 3, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestFuzzyClassifier(reader, null, analyzer, null, 1, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestFuzzyClassifier(reader, null, analyzer, null, 3, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestFuzzyClassifier(reader, new AxiomaticF1EXP(), analyzer, null, 3, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new KNearestFuzzyClassifier(reader, new AxiomaticF1LOG(), analyzer, null, 3, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new BM25NBClassifier(reader, analyzer, null, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new CachingNaiveBayesClassifier(reader, analyzer, null, CATEGORY_FIELD, BODY_FIELD));
+      classifiers.add(new SimpleNaiveBayesClassifier(reader, analyzer, null, CATEGORY_FIELD, BODY_FIELD));
+
+      int maxdoc;
+
+      if (split) {
+        testReader = DirectoryReader.open(test);
+        maxdoc = testReader.maxDoc();
+      } else {
+        maxdoc = reader.maxDoc();
+      }
+
+      System.out.format("Starting evaluation on %d docs...%n", maxdoc);
+
+      ExecutorService service = Executors.newCachedThreadPool();
+      List<Future<String>> futures = new LinkedList<>();
+      for (Classifier<BytesRef> classifier : classifiers) {
+        testClassifier(reader, startTime, testReader, service, futures, classifier);
+      }
+      for (Future<String> f : futures) {
+        System.out.println(f.get());
+      }
+
+      Thread.sleep(10000);
+      service.shutdown();
+
+    } finally {
+      if (reader != null) {
+        reader.close();
+      }
+      directory.close();
+      if (test != null) {
+        test.close();
+      }
+      if (train != null) {
+        train.close();
+      }
+      if (cv != null) {
+        cv.close();
+      }
+      if (testReader != null) {
+        testReader.close();
+      }
+
+      for (Classifier c : classifiers) {
+        if (c instanceof Closeable) {
+          ((Closeable) c).close();
+        }
+      }
+    }
+  }
+

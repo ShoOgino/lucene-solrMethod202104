@@ -22,80 +22,18 @@
       }
       seen.add(ob);
 
+      final long obSize;
       final Class<?> obClazz = ob.getClass();
       assert obClazz != null : "jvm bug detected (Object.getClass() == null). please report this to your vendor";
       if (obClazz.isArray()) {
-        /*
-         * Consider an array, possibly of primitive types. Push any of its references to
-         * the processing stack and accumulate this array's shallow size. 
-         */
-        final long shallowSize = RamUsageEstimator.shallowSizeOf(ob);
-        final int len = Array.getLength(ob);
-        final List<Object> values;
-        Class<?> componentClazz = obClazz.getComponentType();
-        if (componentClazz.isPrimitive()) {
-          values = Collections.emptyList();
-        } else {
-          values = new AbstractList<Object>() {
-
-            @Override
-            public Object get(int index) {
-              return Array.get(ob, index);
-            }
-
-            @Override
-            public int size() {
-              return len;
-            }
-            
-          };
-        }
-        totalSize += accumulator.accumulateArray(ob, shallowSize, values, stack);
+        obSize = handleArray(accumulator, stack, ob, obClazz);
       } else {
-        /*
-         * Consider an object. Push any references it has to the processing stack
-         * and accumulate this object's shallow size. 
-         */
-        try {
-          ClassCache cachedInfo = classCache.get(obClazz);
-          if (cachedInfo == null) {
-            classCache.put(obClazz, cachedInfo = createCacheEntry(obClazz));
-          }
-          
-          boolean needsReflection = true;
-          if (Constants.JRE_IS_MINIMUM_JAVA9 && obClazz.getName().startsWith("java.")) {
-            // Java 9: Best guess for some known types, as we cannot precisely look into runtime classes:
-            final ToLongFunction<Object> func = SIMPLE_TYPES.get(obClazz);
-            if (func != null) { // some simple type like String where the size is easy to get from public properties
-              totalSize += accumulator.accumulateObject(ob, cachedInfo.alignedShallowInstanceSize + func.applyAsLong(ob), 
-                  Collections.emptyMap(), stack);
-              needsReflection = false;
-            } else if (ob instanceof Iterable) {
-              final List<Object> values = StreamSupport.stream(((Iterable<?>) ob).spliterator(), false)
-                  .collect(Collectors.toList());
-              totalSize += accumulator.accumulateArray(ob, cachedInfo.alignedShallowInstanceSize + RamUsageEstimator.NUM_BYTES_ARRAY_HEADER, values, stack);
-              needsReflection = false;
-            }  else if (ob instanceof Map) {
-              final List<Object> values = ((Map<?,?>) ob).entrySet().stream()
-                  .flatMap(e -> Stream.of(e.getKey(), e.getValue()))
-                  .collect(Collectors.toList());
-              totalSize += accumulator.accumulateArray(ob, cachedInfo.alignedShallowInstanceSize + RamUsageEstimator.NUM_BYTES_ARRAY_HEADER, values, stack);
-              totalSize += RamUsageEstimator.NUM_BYTES_ARRAY_HEADER;
-              needsReflection = false;
-            }
-          }
-          if (needsReflection) {
-            final Map<Field, Object> fieldValues = new HashMap<>();
-            for (Field f : cachedInfo.referenceFields) {
-              fieldValues.put(f, f.get(ob));
-            }
-            totalSize += accumulator.accumulateObject(ob, cachedInfo.alignedShallowInstanceSize, fieldValues, stack);
-          }
-        } catch (IllegalAccessException e) {
-          // this should never happen as we enabled setAccessible().
-          throw new RuntimeException("Reflective field access failed?", e);
-        }
+        obSize = handleOther(accumulator, classCache, stack, ob, obClazz);
       }
+
+      totalSize += obSize;
+      // Dump size of each object for comparisons across JVMs and flags.
+      // System.out.println("  += " + obClazz + " | " + obSize);
     }
 
     // Help the GC (?).

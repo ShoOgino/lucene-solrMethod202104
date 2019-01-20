@@ -1,0 +1,27 @@
+  // Once we've done all the fiddling with the queues, check on the way out to see if all the active preferred
+  // leaders that we intended to change are in fact the leaders.
+  private void checkLeaderStatus() throws InterruptedException, KeeperException {
+    for (int idx = 0; pendingOps.size() > 0 && idx < 600; ++idx) {
+      ClusterState clusterState = coreContainer.getZkController().getClusterState();
+      Set<String> liveNodes = clusterState.getLiveNodes();
+      DocCollection dc = clusterState.getCollection(collectionName);
+      for (Slice slice : dc.getSlices()) {
+        for (Replica replica : slice.getReplicas()) {
+          if (replica.isActive(liveNodes) && replica.getBool(SliceMutator.PREFERRED_LEADER_PROP, false)) {
+            if (replica.getBool(LEADER_PROP, false)) {
+              if (pendingOps.containsKey(slice.getName())) {
+                // Record for return that the leader changed successfully
+                pendingOps.remove(slice.getName());
+                addToSuccesses(slice, replica);
+                break;
+              }
+            }
+          }
+        }
+      }
+      TimeUnit.MILLISECONDS.sleep(100);
+      coreContainer.getZkController().getZkStateReader().forciblyRefreshAllClusterStateSlow();
+    }
+    addAnyFailures();
+  }
+

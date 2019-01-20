@@ -1,0 +1,29 @@
+  private void doTestAllSingleJump(FixedBitSet set, Directory dir) throws IOException {
+    final int cardinality = set.cardinality();
+    final byte denseRankPower = rarely() ? -1 : (byte) (random().nextInt(7)+7); // sane + chance of disable
+    long length;
+    int jumpTableentryCount;
+    try (IndexOutput out = dir.createOutput("foo", IOContext.DEFAULT)) {
+      jumpTableentryCount = IndexedDISI.writeBitSet(new BitSetIterator(set, cardinality), out, denseRankPower);
+      length = out.getFilePointer();
+    }
+
+    try (IndexInput in = dir.openInput("foo", IOContext.DEFAULT)) {
+      for (int i = 0; i < set.length(); i++) {
+        IndexedDISI disi = new IndexedDISI(in, 0L, length, jumpTableentryCount, denseRankPower, cardinality);
+        assertEquals("The bit at " + i + " should be correct with advanceExact", set.get(i), disi.advanceExact(i));
+
+        IndexedDISI disi2 = new IndexedDISI(in, 0L, length, jumpTableentryCount, denseRankPower, cardinality);
+        disi2.advance(i);
+        // Proper sanity check with jump tables as an error could make them seek backwards
+        assertTrue("The docID should at least be " + i + " after advance(" + i + ") but was " + disi2.docID(),
+            i <= disi2.docID());
+        if (set.get(i)) {
+          assertEquals("The docID should be present with advance", i, disi2.docID());
+        } else {
+          assertNotSame("The docID should not be present with advance", i, disi2.docID());
+        }
+      }
+    }
+  }
+

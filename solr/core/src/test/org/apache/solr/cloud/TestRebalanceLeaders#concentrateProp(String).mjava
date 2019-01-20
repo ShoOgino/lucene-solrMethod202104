@@ -1,0 +1,32 @@
+  // use a simple heuristic to put as many replicas with the property on as few nodes as possible. The point is that
+  // then we can execute BALANCESHARDUNIQUE and be sure it worked correctly
+  private void concentrateProp(String prop) throws KeeperException, InterruptedException, IOException, SolrServerException {
+    // find all the live nodes
+    // for each slice, assign the leader to the first replica that is in the lowest position on live_nodes
+    List<String> liveNodes = new ArrayList<>(cluster.getSolrClient().getZkStateReader().getClusterState().getLiveNodes());
+    Collections.shuffle(liveNodes, random());
+
+    Map<String, String> uniquePropMap = new TreeMap<>();
+    forceUpdateCollectionStatus();
+    DocCollection docCollection = cluster.getSolrClient().getZkStateReader().getClusterState().getCollection(COLLECTION_NAME);
+    for (Slice slice : docCollection.getSlices()) {
+      Replica changedRep = null;
+      int livePos = Integer.MAX_VALUE;
+      for (Replica rep : slice.getReplicas()) {
+        int pos = liveNodes.indexOf(rep.getNodeName());
+        if (pos >= 0 && pos < livePos) {
+          livePos = pos;
+          changedRep = rep;
+        }
+      }
+      if (livePos == Integer.MAX_VALUE) {
+        fail("Invalid state! We should have a replica to add the property to! " + docCollection.toString());
+      }
+
+      uniquePropMap.put(slice.getName(), changedRep.getName());
+      // Now set the property on the "lowest" node in live_nodes.
+      setProp(slice, changedRep, prop);
+    }
+    verifyPropDistributedAsExpected(uniquePropMap, prop);
+  }
+

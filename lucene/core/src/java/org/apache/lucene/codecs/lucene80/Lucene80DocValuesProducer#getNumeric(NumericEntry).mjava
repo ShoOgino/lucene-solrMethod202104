@@ -1,0 +1,96 @@
+  private NumericDocValues getNumeric(NumericEntry entry) throws IOException {
+    if (entry.docsWithFieldOffset == -2) {
+      // empty
+      return DocValues.emptyNumeric();
+    } else if (entry.docsWithFieldOffset == -1) {
+      // dense
+      if (entry.bitsPerValue == 0) {
+        return new DenseNumericDocValues(maxDoc) {
+          @Override
+          public long longValue() throws IOException {
+            return entry.minValue;
+          }
+        };
+      } else {
+        final RandomAccessInput slice = data.randomAccessSlice(entry.valuesOffset, entry.valuesLength);
+        if (entry.blockShift >= 0) {
+          // dense but split into blocks of different bits per value
+          return new DenseNumericDocValues(maxDoc) {
+            final VaryingBPVReader vBPVReader = new VaryingBPVReader(entry, slice);
+
+            @Override
+            public long longValue() throws IOException {
+              return vBPVReader.getLongValue(doc);
+            }
+          };
+        } else {
+          final LongValues values = DirectReader.getInstance(slice, entry.bitsPerValue);
+          if (entry.table != null) {
+            final long[] table = entry.table;
+            return new DenseNumericDocValues(maxDoc) {
+              @Override
+              public long longValue() throws IOException {
+                return table[(int) values.get(doc)];
+              }
+            };
+          } else {
+            final long mul = entry.gcd;
+            final long delta = entry.minValue;
+            return new DenseNumericDocValues(maxDoc) {
+              @Override
+              public long longValue() throws IOException {
+                return mul * values.get(doc) + delta;
+              }
+            };
+          }
+        }
+      }
+    } else {
+      // sparse
+      final IndexedDISI disi = new IndexedDISI(data, entry.docsWithFieldOffset, entry.docsWithFieldLength,
+          entry.jumpTableEntryCount, entry.denseRankPower, entry.numValues);
+      if (entry.bitsPerValue == 0) {
+        return new SparseNumericDocValues(disi) {
+          @Override
+          public long longValue() throws IOException {
+            return entry.minValue;
+          }
+        };
+      } else {
+        final RandomAccessInput slice = data.randomAccessSlice(entry.valuesOffset, entry.valuesLength);
+        if (entry.blockShift >= 0) {
+          // sparse and split into blocks of different bits per value
+          return new SparseNumericDocValues(disi) {
+            final VaryingBPVReader vBPVReader = new VaryingBPVReader(entry, slice);
+
+            @Override
+            public long longValue() throws IOException {
+              final int index = disi.index();
+              return vBPVReader.getLongValue(index);
+            }
+          };
+        } else {
+          final LongValues values = DirectReader.getInstance(slice, entry.bitsPerValue);
+          if (entry.table != null) {
+            final long[] table = entry.table;
+            return new SparseNumericDocValues(disi) {
+              @Override
+              public long longValue() throws IOException {
+                return table[(int) values.get(disi.index())];
+              }
+            };
+          } else {
+            final long mul = entry.gcd;
+            final long delta = entry.minValue;
+            return new SparseNumericDocValues(disi) {
+              @Override
+              public long longValue() throws IOException {
+                return mul * values.get(disi.index()) + delta;
+              }
+            };
+          }
+        }
+      }
+    }
+  }
+

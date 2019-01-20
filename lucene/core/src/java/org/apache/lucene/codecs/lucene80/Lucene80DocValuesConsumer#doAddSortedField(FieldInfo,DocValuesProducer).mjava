@@ -1,0 +1,49 @@
+  private void doAddSortedField(FieldInfo field, DocValuesProducer valuesProducer) throws IOException {
+    SortedDocValues values = valuesProducer.getSorted(field);
+    int numDocsWithField = 0;
+    for (int doc = values.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = values.nextDoc()) {
+      numDocsWithField++;
+    }
+
+    if (numDocsWithField == 0) {
+      meta.writeLong(-2); // docsWithFieldOffset
+      meta.writeLong(0L); // docsWithFieldLength
+      meta.writeShort((short) -1); // jumpTableEntryCount
+      meta.writeByte((byte) -1);   // denseRankPower
+    } else if (numDocsWithField == maxDoc) {
+      meta.writeLong(-1); // docsWithFieldOffset
+      meta.writeLong(0L); // docsWithFieldLength
+      meta.writeShort((short) -1); // jumpTableEntryCount
+      meta.writeByte((byte) -1);   // denseRankPower
+    } else {
+      long offset = data.getFilePointer();
+      meta.writeLong(offset); // docsWithFieldOffset
+      values = valuesProducer.getSorted(field);
+      final short jumpTableentryCount = IndexedDISI.writeBitSet(values, data, IndexedDISI.DEFAULT_DENSE_RANK_POWER);
+      meta.writeLong(data.getFilePointer() - offset); // docsWithFieldLength
+      meta.writeShort(jumpTableentryCount);
+      meta.writeByte(IndexedDISI.DEFAULT_DENSE_RANK_POWER);
+    }
+
+    meta.writeInt(numDocsWithField);
+    if (values.getValueCount() <= 1) {
+      meta.writeByte((byte) 0); // bitsPerValue
+      meta.writeLong(0L); // ordsOffset
+      meta.writeLong(0L); // ordsLength
+    } else {
+      int numberOfBitsPerOrd = DirectWriter.unsignedBitsRequired(values.getValueCount() - 1);
+      meta.writeByte((byte) numberOfBitsPerOrd); // bitsPerValue
+      long start = data.getFilePointer();
+      meta.writeLong(start); // ordsOffset
+      DirectWriter writer = DirectWriter.getInstance(data, numDocsWithField, numberOfBitsPerOrd);
+      values = valuesProducer.getSorted(field);
+      for (int doc = values.nextDoc(); doc != DocIdSetIterator.NO_MORE_DOCS; doc = values.nextDoc()) {
+        writer.add(values.ordValue());
+      }
+      writer.finish();
+      meta.writeLong(data.getFilePointer() - start); // ordsLength
+    }
+
+    addTermsDict(DocValues.singleton(valuesProducer.getSorted(field)));
+  }
+

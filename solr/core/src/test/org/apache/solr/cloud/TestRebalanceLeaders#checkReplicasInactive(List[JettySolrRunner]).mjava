@@ -1,0 +1,37 @@
+  // Since we have to restart jettys, we don't want to try rebalancing etc. until we're sure all jettys that should
+  // be up are up and all replicas are active.
+  private void checkReplicasInactive(List<JettySolrRunner> downJettys) throws KeeperException, InterruptedException {
+    TimeOut timeout = new TimeOut(timeoutMs, TimeUnit.MILLISECONDS, TimeSource.NANO_TIME);
+    DocCollection docCollection = null;
+    Set<String> liveNodes = null;
+
+    Set<String> downJettyNodes = new TreeSet<>();
+    for (JettySolrRunner jetty : downJettys) {
+      downJettyNodes.add(jetty.getBaseUrl().getHost() + ":" + jetty.getBaseUrl().getPort() + "_solr");
+    }
+    while (timeout.hasTimedOut() == false) {
+      forceUpdateCollectionStatus();
+      docCollection = cluster.getSolrClient().getZkStateReader().getClusterState().getCollection(COLLECTION_NAME);
+      liveNodes = cluster.getSolrClient().getZkStateReader().getClusterState().getLiveNodes();
+      boolean expectedInactive = true;
+
+      for (Slice slice : docCollection.getSlices()) {
+        for (Replica rep : slice.getReplicas()) {
+          if (downJettyNodes.contains(rep.getNodeName()) == false) {
+            continue; // We are on a live node
+          }
+          // A replica on an allegedly down node is reported as active.
+          if (rep.isActive(liveNodes)) {
+            expectedInactive = false;
+          }
+        }
+      }
+      if (expectedInactive) {
+        return;
+      }
+      TimeUnit.MILLISECONDS.sleep(100);
+    }
+    fail("timed out waiting for all replicas to become inactive: livenodes: " + liveNodes +
+        " Collection state: " + docCollection.toString());
+  }
+

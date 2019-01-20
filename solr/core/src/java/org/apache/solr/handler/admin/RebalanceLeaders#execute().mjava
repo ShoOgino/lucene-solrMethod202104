@@ -1,42 +1,42 @@
   void execute() throws KeeperException, InterruptedException {
-    req.getParams().required().check(COLLECTION_PROP);
+    DocCollection dc = checkParams();
 
-    String collectionName = req.getParams().get(COLLECTION_PROP);
-    if (StringUtils.isBlank(collectionName)) {
-      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
-          String.format(Locale.ROOT, "The " + COLLECTION_PROP + " is required for the Rebalance Leaders command."));
-    }
-    coreContainer.getZkController().getZkStateReader().forceUpdateCollection(collectionName);
-    ClusterState clusterState = coreContainer.getZkController().getClusterState();
-    DocCollection dc = clusterState.getCollection(collectionName);
-    if (dc == null) {
-      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Collection '" + collectionName + "' does not exist, no action taken.");
-    }
-    Map<String, String> currentRequests = new HashMap<>();
+
     int max = req.getParams().getInt(MAX_AT_ONCE_PROP, Integer.MAX_VALUE);
     if (max <= 0) max = Integer.MAX_VALUE;
     int maxWaitSecs = req.getParams().getInt(MAX_WAIT_SECONDS_PROP, 60);
-    NamedList<Object> results = new NamedList<>();
 
+
+    // If there are a maximum number of simultaneous requests specified, we have to pause when we have that many
+    // outstanding requests and wait for at least one to finish before going on the the next rebalance.
     boolean keepGoing = true;
     for (Slice slice : dc.getSlices()) {
-      ensurePreferredIsLeader(results, slice, currentRequests);
-      if (currentRequests.size() == max) {
+      ensurePreferredIsLeader(slice);
+      if (asyncRequests.size() == max) {
         log.info("Queued " + max + " leader reassignments, waiting for some to complete.");
-        keepGoing = waitForLeaderChange(currentRequests, maxWaitSecs, false, results);
+        keepGoing = waitAsyncRequests(maxWaitSecs, false);
         if (keepGoing == false) {
           break; // If we've waited longer than specified, don't continue to wait!
         }
       }
     }
     if (keepGoing == true) {
-      keepGoing = waitForLeaderChange(currentRequests, maxWaitSecs, true, results);
+      keepGoing = waitAsyncRequests(maxWaitSecs, true);
     }
     if (keepGoing == true) {
       log.info("All leader reassignments completed.");
     } else {
       log.warn("Exceeded specified timeout of ." + maxWaitSecs + "' all leaders may not have been reassigned");
     }
+
+    checkLeaderStatus();
+    NamedList<Object> summary = new NamedList<>();
+    if (pendingOps.size() == 0) {
+      summary.add("Success", "All active replicas with the preferredLeader property set are leaders");
+    } else {
+      summary.add("Failure", "Not all active replicas with preferredLeader property are leaders");
+    }
+    rsp.getValues().add(SUMMARY, summary); // we want this first.
 
     rsp.getValues().addAll(results);
   }

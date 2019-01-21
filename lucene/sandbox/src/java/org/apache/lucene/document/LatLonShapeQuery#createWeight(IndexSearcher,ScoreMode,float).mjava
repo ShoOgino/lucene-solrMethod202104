@@ -21,20 +21,20 @@
 
           @Override
           public void visit(int docID, byte[] t) throws IOException {
-            if (queryMatches(t, scratchTriangle)) {
+            if (queryMatches(t, scratchTriangle, QueryRelation.INTERSECTS)) {
               adder.add(docID);
             }
           }
 
           @Override
           public Relation compare(byte[] minTriangle, byte[] maxTriangle) {
-            return relateRangeToQuery(minTriangle, maxTriangle);
+            return relateRangeToQuery(minTriangle, maxTriangle, QueryRelation.INTERSECTS);
           }
         };
       }
 
       /** create a visitor that adds documents that match the query using a dense bitset. (Used by WITHIN, DISJOINT) */
-      protected IntersectVisitor getDenseIntersectVisitor(FixedBitSet intersect, FixedBitSet disjoint) {
+      protected IntersectVisitor getDenseIntersectVisitor(FixedBitSet intersect, FixedBitSet disjoint, QueryRelation queryRelation) {
         return new IntersectVisitor() {
           final int[] scratchTriangle = new int[6];
           @Override
@@ -50,7 +50,7 @@
 
           @Override
           public void visit(int docID, byte[] t) throws IOException {
-            if (queryMatches(t, scratchTriangle)) {
+            if (queryMatches(t, scratchTriangle, queryRelation)) {
               intersect.set(docID);
             } else {
               disjoint.set(docID);
@@ -59,7 +59,7 @@
 
           @Override
           public Relation compare(byte[] minTriangle, byte[] maxTriangle) {
-            return relateRangeToQuery(minTriangle, maxTriangle);
+            return relateRangeToQuery(minTriangle, maxTriangle, queryRelation);
           }
         };
       }
@@ -68,7 +68,7 @@
       protected ScorerSupplier getIntersectScorerSupplier(LeafReader reader, PointValues values, Weight weight, ScoreMode scoreMode) throws IOException {
         DocIdSetBuilder result = new DocIdSetBuilder(reader.maxDoc(), values, field);
         IntersectVisitor visitor = getSparseIntersectVisitor(result);
-        return new RelationScorerSupplier(values, visitor) {
+        return new RelationScorerSupplier(values, visitor, null, queryRelation) {
           @Override
           public Scorer get(long leadCost) throws IOException {
             return getIntersectsScorer(LatLonShapeQuery.this, reader, weight, result, score(), scoreMode);
@@ -81,14 +81,15 @@
         if (queryRelation == QueryRelation.INTERSECTS) {
           return getIntersectScorerSupplier(reader, values, weight, scoreMode);
         }
-
-        FixedBitSet intersect = new FixedBitSet(reader.maxDoc());
+        //For within and disjoint we need two passes to remove false positives in case of multi-shapes.
+        FixedBitSet within = new FixedBitSet(reader.maxDoc());
         FixedBitSet disjoint = new FixedBitSet(reader.maxDoc());
-        IntersectVisitor visitor = getDenseIntersectVisitor(intersect, disjoint);
-        return new RelationScorerSupplier(values, visitor) {
+        IntersectVisitor withinVisitor = getDenseIntersectVisitor(within, disjoint, QueryRelation.WITHIN);
+        IntersectVisitor disjointVisitor = getDenseIntersectVisitor(within, disjoint, QueryRelation.DISJOINT);
+        return new RelationScorerSupplier(values, withinVisitor, disjointVisitor, queryRelation) {
           @Override
           public Scorer get(long leadCost) throws IOException {
-            return getScorer(LatLonShapeQuery.this, weight, intersect, disjoint, score(), scoreMode);
+            return getScorer(LatLonShapeQuery.this, weight, within, disjoint, score(), scoreMode);
           }
         };
       }
@@ -109,7 +110,7 @@
 
         boolean allDocsMatch = true;
         if (values.getDocCount() != reader.maxDoc() ||
-            relateRangeToQuery(values.getMinPackedValue(), values.getMaxPackedValue()) != Relation.CELL_INSIDE_QUERY) {
+            relateRangeToQuery(values.getMinPackedValue(), values.getMaxPackedValue(), queryRelation) != Relation.CELL_INSIDE_QUERY) {
           allDocsMatch = false;
         }
 

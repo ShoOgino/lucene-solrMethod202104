@@ -1,0 +1,39 @@
+  @Test
+  public void testMetrics() throws Exception {
+    boolean isUseV2Api = random().nextBoolean();
+    String authcPrefix = "/admin/authentication";
+    String authzPrefix = "/admin/authorization";
+    if(isUseV2Api){
+      authcPrefix = "/____v2/cluster/security/authentication";
+      authzPrefix = "/____v2/cluster/security/authorization";
+    }
+    String baseUrl = cluster.getRandomJetty(random()).getBaseUrl().toString();
+    CloseableHttpClient cl = HttpClientUtil.createClient(null);
+    
+    createCollection(COLLECTION);
+    
+    // Missing token
+    getAndFail(baseUrl + "/" + COLLECTION + "/query?q=*:*", null);
+    assertAuthMetricsMinimums(2, 1, 0, 0, 1, 0);
+    executeCommand(baseUrl + authcPrefix, cl, "{set-property : { blockUnknown: false}}", jws);
+    verifySecurityStatus(cl, baseUrl + authcPrefix, "authentication/blockUnknown", "false", 20, jws);
+    // Pass through
+    verifySecurityStatus(cl, baseUrl + "/admin/info/key", "key", NOT_NULL_PREDICATE, 20);
+    // Now succeeds since blockUnknown=false 
+    get(baseUrl + "/" + COLLECTION + "/query?q=*:*", null);
+    executeCommand(baseUrl + authcPrefix, cl, "{set-property : { blockUnknown: true}}", null);
+    verifySecurityStatus(cl, baseUrl + authcPrefix, "authentication/blockUnknown", "true", 20, jws);
+
+    assertAuthMetricsMinimums(9, 4, 4, 0, 1, 0);
+    
+    // Wrong Credentials
+    getAndFail(baseUrl + "/" + COLLECTION + "/query?q=*:*", jwtTokenWrongSignature);
+    assertAuthMetricsMinimums(10, 4, 4, 1, 1, 0);
+
+    // JWT parse error
+    getAndFail(baseUrl + "/" + COLLECTION + "/query?q=*:*", "foozzz");
+    assertAuthMetricsMinimums(11, 4, 4, 1, 1, 1);
+    
+    HttpClientUtil.close(cl);
+  }
+

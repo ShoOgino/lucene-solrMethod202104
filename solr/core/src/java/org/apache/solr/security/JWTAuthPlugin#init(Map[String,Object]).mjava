@@ -1,0 +1,86 @@
+  @Override
+  public void init(Map<String, Object> pluginConfig) {
+    List<String> unknownKeys = pluginConfig.keySet().stream().filter(k -> !PROPS.contains(k)).collect(Collectors.toList());
+    unknownKeys.remove("class");
+    unknownKeys.remove("");
+    if (!unknownKeys.isEmpty()) {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Invalid JwtAuth configuration parameter " + unknownKeys); 
+    }
+
+    blockUnknown = Boolean.parseBoolean(String.valueOf(pluginConfig.getOrDefault(PARAM_BLOCK_UNKNOWN, false)));
+    clientId = (String) pluginConfig.get(PARAM_CLIENT_ID);
+    requireSubject = Boolean.parseBoolean(String.valueOf(pluginConfig.getOrDefault(PARAM_REQUIRE_SUBJECT, "true")));
+    requireExpirationTime = Boolean.parseBoolean(String.valueOf(pluginConfig.getOrDefault(PARAM_REQUIRE_EXPIRATIONTIME, "true")));
+    principalClaim = (String) pluginConfig.getOrDefault(PARAM_PRINCIPAL_CLAIM, "sub");
+    confIdpConfigUrl = (String) pluginConfig.get(PARAM_WELL_KNOWN_URL);
+    Object redirectUrisObj = pluginConfig.get(PARAM_REDIRECT_URIS);
+    redirectUris = Collections.emptyList();
+    if (redirectUrisObj != null) {
+      if (redirectUrisObj instanceof String) {
+        redirectUris = Collections.singletonList((String) redirectUrisObj);
+      } else if (redirectUrisObj instanceof List) {
+        redirectUris = (List<String>) redirectUrisObj;
+      }
+    } 
+    
+    if (confIdpConfigUrl != null) {
+      log.debug("Initializing well-known oidc config from {}", confIdpConfigUrl);
+      oidcDiscoveryConfig = WellKnownDiscoveryConfig.parse(confIdpConfigUrl);
+      iss = oidcDiscoveryConfig.getIssuer();
+      authorizationEndpoint = oidcDiscoveryConfig.getAuthorizationEndpoint();
+    }
+    
+    if (pluginConfig.containsKey(PARAM_ISSUER)) {
+      if (iss != null) {
+        log.debug("Explicitly setting required issuer instead of using issuer from well-known config");
+      }
+      iss = (String) pluginConfig.get(PARAM_ISSUER);
+    }
+
+    if (pluginConfig.containsKey(PARAM_AUTHORIZATION_ENDPOINT)) {
+      if (authorizationEndpoint != null) {
+        log.debug("Explicitly setting authorizationEndpoint instead of using issuer from well-known config");
+      }
+      authorizationEndpoint = (String) pluginConfig.get(PARAM_AUTHORIZATION_ENDPOINT);
+    }
+    
+    if (pluginConfig.containsKey(PARAM_AUDIENCE)) {
+      if (clientId != null) {
+        log.debug("Explicitly setting required audience instead of using configured clientId");
+      }
+      aud = (String) pluginConfig.get(PARAM_AUDIENCE);
+    } else {
+      aud = clientId;
+    }
+    
+    algWhitelist = (List<String>) pluginConfig.get(PARAM_ALG_WHITELIST);
+
+    String requiredScopesStr = (String) pluginConfig.get(PARAM_SCOPE);
+    if (!StringUtils.isEmpty(requiredScopesStr)) {
+      requiredScopes = Arrays.asList(requiredScopesStr.split("\\s+"));
+    }
+    
+    adminUiScope = (String) pluginConfig.get(PARAM_ADMINUI_SCOPE);
+    if (adminUiScope == null && requiredScopes.size() > 0) {
+      adminUiScope = requiredScopes.get(0);
+      log.warn("No adminUiScope given, using first scope in 'scope' list as required scope for accessing Admin UI");
+    }
+    
+    if (adminUiScope == null) {
+      adminUiScope = "solr";
+      log.warn("Warning: No adminUiScope provided, fallback to 'solr' as required scope. If this is not correct, the Admin UI login may not work");
+    }
+    
+    Map<String, String> claimsMatch = (Map<String, String>) pluginConfig.get(PARAM_CLAIMS_MATCH);
+    claimsMatchCompiled = new HashMap<>();
+    if (claimsMatch != null) {
+      for (Map.Entry<String, String> entry : claimsMatch.entrySet()) {
+        claimsMatchCompiled.put(entry.getKey(), Pattern.compile(entry.getValue()));
+      }
+    }
+
+    initJwk(pluginConfig);
+
+    lastInitTime = Instant.now();
+  }
+

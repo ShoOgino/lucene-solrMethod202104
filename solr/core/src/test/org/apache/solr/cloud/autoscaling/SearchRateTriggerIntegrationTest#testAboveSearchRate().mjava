@@ -9,100 +9,94 @@
     CloudTestUtils.waitForState(cloudManager, COLL1, 60, TimeUnit.SECONDS,
         CloudTestUtils.clusterShape(1, 2));
 
-    // the trigger is initially disabled so that we have the time to set up listeners
-    // and generate the traffic
-    String setTriggerCommand = "{" +
-        "'set-trigger' : {" +
-        "'name' : 'search_rate_trigger1'," +
-        "'event' : 'searchRate'," +
-        "'waitFor' : '" + waitForSeconds + "s'," +
-        "'enabled' : false," +
-        "'collections' : '" + COLL1 + "'," +
-        "'aboveRate' : 1.0," +
-        "'belowRate' : 0.1," +
-        "'actions' : [" +
-        "{'name':'compute','class':'" + ComputePlanAction.class.getName() + "'}," +
-        "{'name':'execute','class':'" + ExecutePlanAction.class.getName() + "'}" +
-        "]" +
-        "}}";
-    SolrRequest req = AutoScalingRequest.create(SolrRequest.METHOD.POST, setTriggerCommand);
-    NamedList<Object> response = solrClient.request(req);
-    assertEquals(response.get("result").toString(), "success");
+    CloudTestUtils.assertAutoScalingRequest
+      (cloudManager, 
+       // the trigger is initially disabled so that we have the time to set up listeners
+       // and generate the traffic
+       "{" +
+       "'set-trigger' : {" +
+       "'name' : 'search_rate_trigger1'," +
+       "'event' : 'searchRate'," +
+       "'waitFor' : '" + waitForSeconds + "s'," +
+       "'enabled' : false," +
+       "'collections' : '" + COLL1 + "'," +
+       "'aboveRate' : 1.0," +
+       "'belowRate' : 0.1," +
+       "'actions' : [" +
+       "{'name':'compute','class':'" + ComputePlanAction.class.getName() + "'}," +
+       "{'name':'execute','class':'" + ExecutePlanAction.class.getName() + "'}" +
+       "]" +
+       "}}");
 
-    String setListenerCommand = "{" +
-        "'set-listener' : " +
-        "{" +
-        "'name' : 'started'," +
-        "'trigger' : 'search_rate_trigger1'," +
-        "'stage' : ['STARTED']," +
-        "'class' : '" + StartedProcessingListener.class.getName() + "'" +
-        "}" +
-        "}";
-    req = AutoScalingRequest.create(SolrRequest.METHOD.POST, setListenerCommand);
-    response = solrClient.request(req);
-    assertEquals(response.get("result").toString(), "success");
+    CloudTestUtils.assertAutoScalingRequest
+      (cloudManager, 
+       "{" +
+       "'set-listener' : " +
+       "{" +
+       "'name' : 'started'," +
+       "'trigger' : 'search_rate_trigger1'," +
+       "'stage' : ['STARTED']," +
+       "'class' : '" + StartedProcessingListener.class.getName() + "'" +
+       "}" +
+       "}");
 
-    setListenerCommand = "{" +
-        "'set-listener' : " +
-        "{" +
-        "'name' : 'srt'," +
-        "'trigger' : 'search_rate_trigger1'," +
-        "'stage' : ['FAILED','SUCCEEDED']," +
-        "'afterAction': ['compute', 'execute']," +
-        "'class' : '" + CapturingTriggerListener.class.getName() + "'" +
-        "}" +
-        "}";
-    req = AutoScalingRequest.create(SolrRequest.METHOD.POST, setListenerCommand);
-    response = solrClient.request(req);
-    assertEquals(response.get("result").toString(), "success");
+    CloudTestUtils.assertAutoScalingRequest
+      (cloudManager, 
+       "{" +
+       "'set-listener' : " +
+       "{" +
+       "'name' : 'srt'," +
+       "'trigger' : 'search_rate_trigger1'," +
+       "'stage' : ['FAILED','SUCCEEDED']," +
+       "'afterAction': ['compute', 'execute']," +
+       "'class' : '" + CapturingTriggerListener.class.getName() + "'" +
+       "}" +
+       "}");
+    listenerEventLatch = new CountDownLatch(3);
 
-    setListenerCommand = "{" +
-        "'set-listener' : " +
-        "{" +
-        "'name' : 'finished'," +
-        "'trigger' : 'search_rate_trigger1'," +
-        "'stage' : ['SUCCEEDED']," +
-        "'class' : '" + FinishedProcessingListener.class.getName() + "'" +
-        "}" +
-        "}";
-    req = AutoScalingRequest.create(SolrRequest.METHOD.POST, setListenerCommand);
-    response = solrClient.request(req);
-    assertEquals(response.get("result").toString(), "success");
+    CloudTestUtils.assertAutoScalingRequest
+      (cloudManager, 
+       "{" +
+       "'set-listener' : " +
+       "{" +
+       "'name' : 'finished'," +
+       "'trigger' : 'search_rate_trigger1'," +
+       "'stage' : ['SUCCEEDED']," +
+       "'class' : '" + FinishedProcessingListener.class.getName() + "'" +
+       "}" +
+       "}");
 
     SolrParams query = params(CommonParams.Q, "*:*");
     for (int i = 0; i < 500; i++) {
       solrClient.query(COLL1, query);
     }
-
+    
     // enable the trigger
-    String resumeTriggerCommand = "{" +
-        "'resume-trigger' : {" +
-        "'name' : 'search_rate_trigger1'" +
-        "}" +
-        "}";
-    req = AutoScalingRequest.create(SolrRequest.METHOD.POST, resumeTriggerCommand);
-    response = solrClient.request(req);
-    assertEquals(response.get("result").toString(), "success");
+    CloudTestUtils.assertAutoScalingRequest
+      (cloudManager, 
+       "{" +
+       "'resume-trigger' : {" +
+       "'name' : 'search_rate_trigger1'" +
+       "}" +
+       "}");
 
-    timeSource.sleep(TimeUnit.MILLISECONDS.convert(waitForSeconds + 1, TimeUnit.SECONDS));
-
-    boolean await = started.await(20, TimeUnit.SECONDS);
-    assertTrue("The trigger did not fire at all", await);
-
-    await = finished.await(60, TimeUnit.SECONDS);
-    assertTrue("The trigger did not finish processing", await);
+    assertTrue("The trigger did not start in a reasonable amount of time",
+               started.await(60, TimeUnit.SECONDS));
+    
+    assertTrue("The trigger did not finish in a reasonable amount of time",
+               started.await(60, TimeUnit.SECONDS));
+    
+    assertTrue("the listener should have recorded all events w/in a reasonable amount of time",
+               listenerEventLatch.await(60, TimeUnit.SECONDS));
 
     // suspend the trigger
-    String suspendTriggerCommand = "{" +
-        "'suspend-trigger' : {" +
-        "'name' : 'search_rate_trigger1'" +
-        "}" +
-        "}";
-    req = AutoScalingRequest.create(SolrRequest.METHOD.POST, suspendTriggerCommand);
-    response = solrClient.request(req);
-    assertEquals(response.get("result").toString(), "success");
-
-    timeSource.sleep(5000);
+    CloudTestUtils.assertAutoScalingRequest
+      (cloudManager, 
+       "{" +
+       "'suspend-trigger' : {" +
+       "'name' : 'search_rate_trigger1'" +
+       "}" +
+       "}");
 
     List<CapturedEvent> events = listenerEvents.get("srt");
     assertEquals(listenerEvents.toString(), 3, events.size());

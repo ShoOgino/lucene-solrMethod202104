@@ -1,0 +1,45 @@
+  private void deleteFilesInAdvance(Directory indexDir, String indexDirPath, long usableDiskSpace, long totalSpaceRequired) throws IOException {
+    long actualSpaceReqd = totalSpaceRequired;
+    List<String> filesTobeDeleted = new ArrayList<>();
+    long clearedSpace = 0;
+    //go through each file to check if this needs to be deleted
+    for (String f : indexDir.listAll()) {
+      for (Map<String, Object> fileInfo : filesToDownload) {
+        if (f.equals(fileInfo.get(NAME))) {
+          String filename = (String) fileInfo.get(NAME);
+          long size = (Long) fileInfo.get(SIZE);
+          CompareResult compareResult = compareFile(indexDir, filename, size, (Long) fileInfo.get(CHECKSUM));
+          if (!compareResult.equal || filesToAlwaysDownloadIfNoChecksums(f, size, compareResult)) {
+            filesTobeDeleted.add(f);
+            clearedSpace += size;
+          } else {
+            /*this file will not be downloaded*/
+            actualSpaceReqd -= size;
+          }
+        }
+      }
+    }
+    if (usableDiskSpace > getApproxTotalSpaceReqd(actualSpaceReqd)) {
+      // after considering the files actually available locally we really don't need to do any delete
+      return;
+    }
+    log.info("This disk does not have enough space to download the index from leader/master. So cleaning up the local index. " +
+        " This may lead to loss of data/or node if index replication fails in between");
+    //now we should disable searchers and index writers because this core will not have all the required files
+    this.clearLocalIndexFirst = true;
+    this.solrCore.searchEnabled = false;
+    this.solrCore.indexEnabled = false;
+    solrCore.getDirectoryFactory().doneWithDirectory(indexDir);
+    solrCore.deleteNonSnapshotIndexFiles(indexDirPath);
+    this.solrCore.closeSearcher();
+    assert testWait.getAsBoolean();
+    solrCore.getUpdateHandler().getSolrCoreState().closeIndexWriter(this.solrCore, false);
+    for (String f : filesTobeDeleted) {
+      try {
+        indexDir.deleteFile(f);
+      } catch (FileNotFoundException | NoSuchFileException e) {
+        //no problem , it was deleted by someone else
+      }
+    }
+  }
+

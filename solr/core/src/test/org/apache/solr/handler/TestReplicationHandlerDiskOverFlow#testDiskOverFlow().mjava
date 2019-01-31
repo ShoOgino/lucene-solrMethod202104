@@ -1,0 +1,77 @@
+  @Test
+  public void testDiskOverFlow() throws Exception {
+    invokeReplicationCommand(slaveJetty.getLocalPort(), "disablepoll");
+    //index docs
+    System.out.println("MASTER");
+    int docsInMaster = 1000;
+    long szMaster = indexDocs(masterClient, docsInMaster, 0);
+    System.out.println("SLAVE");
+    long szSlave = indexDocs(slaveClient, 1200, 1000);
+
+
+    Function<String, Long> originalDiskSpaceprovider = IndexFetcher.usableDiskSpaceProvider;
+    IndexFetcher.usableDiskSpaceProvider = new Function<String, Long>() {
+      @Override
+      public Long apply(String s) {
+        return szMaster;
+      }
+    };
+    QueryResponse response;
+    CountDownLatch latch = new CountDownLatch(1);
+    AtomicBoolean searchDisabledFound = new AtomicBoolean(false);
+    try {
+      IndexFetcher.testWait = new BooleanSupplier() {
+        @Override
+        public boolean getAsBoolean() {
+          try {
+            latch.await(5, TimeUnit.SECONDS);
+          } catch (InterruptedException e) {
+
+          }
+          return true;
+        }
+      };
+
+
+      new Thread(() -> {
+        for (int i = 0; i < 20; i++) {
+          try {
+            QueryResponse rsp = slaveClient.query(new SolrQuery()
+                .setQuery("*:*")
+                .setRows(0));
+            Thread.sleep(100);
+          } catch (Exception e) {
+            if (e.getMessage().contains("Search is temporarily disabled")) {
+              searchDisabledFound.set(true);
+            }
+            latch.countDown();
+            break;
+          }
+        }
+      }).start();
+
+      response = slaveClient.query(new SolrQuery()
+          .add("qt", "/replication")
+          .add("command", CMD_FETCH_INDEX)
+          .add("wait", "true")
+      );
+
+    } finally {
+      IndexFetcher.usableDiskSpaceProvider = originalDiskSpaceprovider;
+    }
+    assertTrue(searchDisabledFound.get());
+    assertEquals("OK", response._getStr("status", null));
+//    System.out.println("MASTER INDEX: " + szMaster);
+//    System.out.println("SLAVE INDEX: " + szSlave);
+
+    response = slaveClient.query(new SolrQuery().setQuery("*:*").setRows(0));
+    assertEquals(docsInMaster, response.getResults().getNumFound());
+
+    response = slaveClient.query(new SolrQuery()
+        .add("qt", "/replication")
+        .add("command", ReplicationHandler.CMD_DETAILS)
+    );
+    System.out.println("DETAILS" + Utils.writeJson(response, new StringWriter(), true).toString());
+    assertEquals("true", response._getStr("details/slave/clearedLocalIndexFirst", null));
+  }
+

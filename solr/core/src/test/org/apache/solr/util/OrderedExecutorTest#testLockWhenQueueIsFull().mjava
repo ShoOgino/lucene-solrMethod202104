@@ -1,24 +1,49 @@
   @Test
   public void testLockWhenQueueIsFull() {
-    OrderedExecutor orderedExecutor = new OrderedExecutor(10, ExecutorUtil.newMDCAwareCachedThreadPool("testLockWhenQueueIsFull"));
-    IntBox intBox = new IntBox();
-    long t = System.nanoTime();
-    orderedExecutor.execute(1, () -> {
+    final ExecutorService controlExecutor = ExecutorUtil.newMDCAwareCachedThreadPool("testLockWhenQueueIsFull_control");
+    final OrderedExecutor orderedExecutor = new OrderedExecutor
+      (10, ExecutorUtil.newMDCAwareCachedThreadPool("testLockWhenQueueIsFull_test"));
+    
+    try {
+      // AAA and BBB events will both depend on the use of the same lockId
+      final BlockingQueue<String> events = new ArrayBlockingQueue<>(2);
+      final Integer lockId = 1;
+      
+      // AAA enters executor first so it should execute first (even though it's waiting on latch)
+      final CountDownLatch latchAAA = new CountDownLatch(1);
+      orderedExecutor.execute(lockId, () -> {
+          try {
+            if (latchAAA.await(120, TimeUnit.SECONDS)) {
+              events.add("AAA");
+            } else {
+              events.add("AAA Timed Out");
+            }
+          } catch (InterruptedException e) {
+            log.error("Interrupt in AAA worker", e);
+            Thread.currentThread().interrupt();
+          }
+        });
+      // BBB doesn't care about the latch, but because it uses the same lockId, it's blocked on AAA
+      // so we execute it in a background thread...
+      controlExecutor.execute(() -> {
+          orderedExecutor.execute(lockId, () -> {
+              events.add("BBB");
+            });
+        });
+      
+      // now if we release the latchAAA, AAA should be garunteed to fire first, then BBB
+      latchAAA.countDown();
       try {
-        Thread.sleep(500L);
+        assertEquals("AAA", events.poll(120, TimeUnit.SECONDS));
+        assertEquals("BBB", events.poll(120, TimeUnit.SECONDS));
       } catch (InterruptedException e) {
+        log.error("Interrupt polling event queue", e);
         Thread.currentThread().interrupt();
+        fail("interupt while trying to poll event queue");
       }
-      intBox.value++;
-    });
-    assertTrue(System.nanoTime() - t < 100 * 1000000);
-
-    t = System.nanoTime();
-    orderedExecutor.execute(1, () -> {
-      intBox.value++;
-    });
-    assertTrue(System.nanoTime() - t > 300 * 1000000);
-    orderedExecutor.shutdownAndAwaitTermination();
-    assertEquals(intBox.value, 2);
+    } finally {
+      ExecutorUtil.shutdownAndAwaitTermination(controlExecutor);
+      orderedExecutor.shutdownAndAwaitTermination();
+    }
   }
 

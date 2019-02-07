@@ -9,23 +9,18 @@
       throw new IllegalStateException("already finished");
     }
 
+    PointWriter writer;
     if (offlinePointWriter != null) {
       offlinePointWriter.close();
+      writer = offlinePointWriter;
+      tempInput = null;
+    } else {
+      writer = heapPointWriter;
+      heapPointWriter = null;
     }
 
     if (pointCount == 0) {
       throw new IllegalStateException("must index at least one point");
-    }
-
-    LongBitSet ordBitSet;
-    if (numIndexDims > 1) {
-      if (singleValuePerDoc) {
-        ordBitSet = new LongBitSet(maxDoc);
-      } else {
-        ordBitSet = new LongBitSet(pointCount);
-      }
-    } else {
-      ordBitSet = null;
     }
 
     long countPerLeaf = pointCount;
@@ -52,23 +47,19 @@
     // Make sure the math above "worked":
     assert pointCount / numLeaves <= maxPointsInLeafNode: "pointCount=" + pointCount + " numLeaves=" + numLeaves + " maxPointsInLeafNode=" + maxPointsInLeafNode;
 
-    // Slices are created as they are needed
-    PathSlice[] sortedPointWriters = new PathSlice[numIndexDims];
-
-    // This is only used on exception; on normal code paths we close all files we opened:
-    List<Closeable> toCloseHeroically = new ArrayList<>();
+    //We re-use the selector so we do not need to create an object every time.
+    BKDRadixSelector radixSelector = new BKDRadixSelector(numDataDims, bytesPerDim, maxPointsSortInHeap, tempDir, tempFileNamePrefix);
 
     boolean success = false;
     try {
 
       final int[] parentSplits = new int[numIndexDims];
-      build(1, numLeaves, sortedPointWriters,
-            ordBitSet, out,
+      build(1, numLeaves, writer,
+             out, radixSelector,
             minPackedValue, maxPackedValue,
             parentSplits,
             splitPackedValues,
-            leafBlockFPs,
-            toCloseHeroically);
+            leafBlockFPs);
       assert Arrays.equals(parentSplits, new int[numIndexDims]);
 
       // If no exception, we should have cleaned everything up:
@@ -80,7 +71,6 @@
     } finally {
       if (success == false) {
         IOUtils.deleteFilesIgnoringExceptions(tempDir, tempDir.getCreatedFiles());
-        IOUtils.closeWhileHandlingException(toCloseHeroically);
       }
     }
 

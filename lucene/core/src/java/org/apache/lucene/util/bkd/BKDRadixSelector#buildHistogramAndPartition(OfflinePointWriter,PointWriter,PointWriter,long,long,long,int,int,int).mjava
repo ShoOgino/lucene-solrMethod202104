@@ -1,0 +1,63 @@
+  private byte[] buildHistogramAndPartition(OfflinePointWriter points, PointWriter left, PointWriter right,
+                                            long from, long to, long partitionPoint, int iteration,  int commonPrefix, int dim) throws IOException {
+
+    long leftCount = 0;
+    long rightCount = 0;
+    //build histogram at the commonPrefix byte
+    try (OfflinePointReader reader = points.getReader(from, to - from, offlineBuffer)) {
+      while (reader.next()) {
+        reader.packedValueWithDocId(bytesRef1);
+        int bucket;
+        if (commonPrefix < bytesPerDim) {
+          bucket = bytesRef1.bytes[bytesRef1.offset + dim * bytesPerDim + commonPrefix] & 0xff;
+        } else {
+          bucket = bytesRef1.bytes[bytesRef1.offset + packedBytesLength + commonPrefix - bytesPerDim] & 0xff;
+        }
+        histogram[commonPrefix][bucket]++;
+      }
+    }
+    //Count left points and record the partition point
+    for(int i = 0; i < HISTOGRAM_SIZE; i++) {
+      long size = histogram[commonPrefix][i];
+      if (leftCount + size > partitionPoint - from) {
+        partitionBucket[commonPrefix] = i;
+        break;
+      }
+      leftCount += size;
+    }
+    //Count right points
+    for(int i = partitionBucket[commonPrefix] + 1; i < HISTOGRAM_SIZE; i++) {
+      rightCount += histogram[commonPrefix][i];
+    }
+
+    long delta = histogram[commonPrefix][partitionBucket[commonPrefix]];
+    assert leftCount + rightCount + delta == to - from;
+
+    //special case when be have lot of points that are equal
+    if (commonPrefix == bytesSorted - 1) {
+      long tieBreakCount =(partitionPoint - from - leftCount);
+      partition(points, left,  right, null, from, to, dim, commonPrefix, tieBreakCount);
+      return partitionPointFromCommonPrefix();
+    }
+
+    //create the delta points writer
+    PointWriter deltaPoints;
+    if (delta <= maxPointsSortInHeap) {
+      deltaPoints =  new HeapPointWriter(Math.toIntExact(delta), Math.toIntExact(delta), packedBytesLength);
+    } else {
+      deltaPoints = new OfflinePointWriter(tempDir, tempFileNamePrefix, packedBytesLength, "delta" + iteration, delta);
+    }
+    //divide the points. This actually destroys the current writer
+    partition(points, left, right, deltaPoints, from, to, dim, commonPrefix, 0);
+    //close delta point writer
+    deltaPoints.close();
+
+    long newPartitionPoint = partitionPoint - from - leftCount;
+
+    if (deltaPoints instanceof HeapPointWriter) {
+      return heapSelect((HeapPointWriter) deltaPoints, left, right, dim, 0, (int) deltaPoints.count(), Math.toIntExact(newPartitionPoint), ++commonPrefix);
+    } else {
+      return buildHistogramAndPartition((OfflinePointWriter) deltaPoints, left, right, 0, deltaPoints.count(), newPartitionPoint, ++iteration, ++commonPrefix, dim);
+    }
+  }
+

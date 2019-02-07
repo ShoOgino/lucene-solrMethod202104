@@ -1,0 +1,51 @@
+  public BKDWriter(int maxDoc, Directory tempDir, String tempFileNamePrefix, int numDataDims, int numIndexDims, int bytesPerDim,
+                      int maxPointsInLeafNode, double maxMBSortInHeap, long totalPointCount) throws IOException {
+    verifyParams(numDataDims, numIndexDims, maxPointsInLeafNode, maxMBSortInHeap, totalPointCount);
+    // We use tracking dir to deal with removing files on exception, so each place that
+    // creates temp files doesn't need crazy try/finally/sucess logic:
+    this.tempDir = new TrackingDirectoryWrapper(tempDir);
+    this.tempFileNamePrefix = tempFileNamePrefix;
+    this.maxPointsInLeafNode = maxPointsInLeafNode;
+    this.numDataDims = numDataDims;
+    this.numIndexDims = numIndexDims;
+    this.bytesPerDim = bytesPerDim;
+    this.totalPointCount = totalPointCount;
+    this.maxDoc = maxDoc;
+    docsSeen = new FixedBitSet(maxDoc);
+    packedBytesLength = numDataDims * bytesPerDim;
+    packedIndexBytesLength = numIndexDims * bytesPerDim;
+
+    scratchDiff = new byte[bytesPerDim];
+    scratch1 = new byte[packedBytesLength];
+    scratch2 = new byte[packedBytesLength];
+    commonPrefixLengths = new int[numDataDims];
+
+    minPackedValue = new byte[packedIndexBytesLength];
+    maxPackedValue = new byte[packedIndexBytesLength];
+
+    // dimensional values (numDims * bytesPerDim) + docID (int)
+    bytesPerDoc = packedBytesLength + Integer.BYTES;
+
+
+    // As we recurse, we compute temporary partitions of the data, halving the
+    // number of points at each recursion.  Once there are few enough points,
+    // we can switch to sorting in heap instead of offline (on disk).  At any
+    // time in the recursion, we hold the number of points at that level, plus
+    // all recursive halves (i.e. 16 + 8 + 4 + 2) so the memory usage is 2X
+    // what that level would consume, so we multiply by 0.5 to convert from
+    // bytes to points here.  In addition the radix partitioning may sort on memory
+    // double of this size so we multiply by another 0.5.
+
+    maxPointsSortInHeap = (int) (0.25 * (maxMBSortInHeap * 1024 * 1024) / (bytesPerDoc));
+
+    // Finally, we must be able to hold at least the leaf node in heap during build:
+    if (maxPointsSortInHeap < maxPointsInLeafNode) {
+      throw new IllegalArgumentException("maxMBSortInHeap=" + maxMBSortInHeap + " only allows for maxPointsSortInHeap=" + maxPointsSortInHeap + ", but this is less than maxPointsInLeafNode=" + maxPointsInLeafNode + "; either increase maxMBSortInHeap or decrease maxPointsInLeafNode");
+    }
+
+    // We write first maxPointsSortInHeap in heap, then cutover to offline for additional points:
+    heapPointWriter = new HeapPointWriter(16, maxPointsSortInHeap, packedBytesLength);
+
+    this.maxMBSortInHeap = maxMBSortInHeap;
+  }
+

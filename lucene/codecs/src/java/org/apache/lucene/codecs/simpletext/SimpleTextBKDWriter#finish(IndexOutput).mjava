@@ -9,23 +9,19 @@
       throw new IllegalStateException("already finished");
     }
 
+    PointWriter data;
+
     if (offlinePointWriter != null) {
       offlinePointWriter.close();
+      data = offlinePointWriter;
+      tempInput = null;
+    } else {
+      data = heapPointWriter;
+      heapPointWriter = null;
     }
 
     if (pointCount == 0) {
       throw new IllegalStateException("must index at least one point");
-    }
-
-    LongBitSet ordBitSet;
-    if (numDataDims > 1) {
-      if (singleValuePerDoc) {
-        ordBitSet = new LongBitSet(maxDoc);
-      } else {
-        ordBitSet = new LongBitSet(pointCount);
-      }
-    } else {
-      ordBitSet = null;
     }
 
     long countPerLeaf = pointCount;
@@ -52,39 +48,17 @@
     // Make sure the math above "worked":
     assert pointCount / numLeaves <= maxPointsInLeafNode: "pointCount=" + pointCount + " numLeaves=" + numLeaves + " maxPointsInLeafNode=" + maxPointsInLeafNode;
 
-    // Sort all docs once by each dimension:
-    PathSlice[] sortedPointWriters = new PathSlice[numDataDims];
-
-    // This is only used on exception; on normal code paths we close all files we opened:
-    List<Closeable> toCloseHeroically = new ArrayList<>();
+    //We re-use the selector so we do not need to create an object every time.
+    BKDRadixSelector radixSelector = new BKDRadixSelector(numDataDims, bytesPerDim, maxPointsSortInHeap, tempDir, tempFileNamePrefix);
 
     boolean success = false;
     try {
-      //long t0 = System.nanoTime();
-      for(int dim=0;dim<numDataDims;dim++) {
-        sortedPointWriters[dim] = new PathSlice(sort(dim), 0, pointCount);
-      }
-      //long t1 = System.nanoTime();
-      //System.out.println("sort time: " + ((t1-t0)/1000000.0) + " msec");
 
-      if (tempInput != null) {
-        tempDir.deleteFile(tempInput.getName());
-        tempInput = null;
-      } else {
-        assert heapPointWriter != null;
-        heapPointWriter = null;
-      }
 
-      build(1, numLeaves, sortedPointWriters,
-            ordBitSet, out,
-            minPackedValue, maxPackedValue,
-            splitPackedValues,
-            leafBlockFPs,
-            toCloseHeroically);
+      build(1, numLeaves, data, out,
+          radixSelector, minPackedValue, maxPackedValue,
+            splitPackedValues, leafBlockFPs);
 
-      for(PathSlice slice : sortedPointWriters) {
-        slice.writer.destroy();
-      }
 
       // If no exception, we should have cleaned everything up:
       assert tempDir.getCreatedFiles().isEmpty();
@@ -95,7 +69,6 @@
     } finally {
       if (success == false) {
         IOUtils.deleteFilesIgnoringExceptions(tempDir, tempDir.getCreatedFiles());
-        IOUtils.closeWhileHandlingException(toCloseHeroically);
       }
     }
 

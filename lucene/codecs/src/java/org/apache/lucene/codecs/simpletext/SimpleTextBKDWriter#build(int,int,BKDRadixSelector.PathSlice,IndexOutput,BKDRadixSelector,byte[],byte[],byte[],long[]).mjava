@@ -1,11 +1,9 @@
-  /** The point writer contains the data that is going to be splitted using radix selection.
-  /*  This method is used when we are merging previously written segments, in the numDims > 1 case. */
+  /** The array (sized numDims) of PathSlice describe the cell we have currently recursed to. */
   private void build(int nodeID, int leafNodeOffset,
-                     PointWriter points,
+                     BKDRadixSelector.PathSlice points,
                      IndexOutput out,
                      BKDRadixSelector radixSelector,
                      byte[] minPackedValue, byte[] maxPackedValue,
-                     int[] parentSplits,
                      byte[] splitPackedValues,
                      long[] leafBlockFPs) throws IOException {
 
@@ -15,14 +13,17 @@
       // We can write the block in any order so by default we write it sorted by the dimension that has the
       // least number of unique bytes at commonPrefixLengths[dim], which makes compression more efficient
 
-      if (points instanceof HeapPointWriter == false) {
+      HeapPointWriter heapSource;
+      if (points.writer instanceof HeapPointWriter == false) {
         // Adversarial cases can cause this, e.g. very lopsided data, all equal points, such that we started
         // offline, but then kept splitting only in one dimension, and so never had to rewrite into heap writer
-        points = switchToHeap(points);
+        heapSource  = switchToHeap(points.writer);
+      } else {
+        heapSource = (HeapPointWriter) points.writer;
       }
 
-      // We ensured that maxPointsSortInHeap was >= maxPointsInLeafNode, so we better be in heap at this point:
-      HeapPointWriter heapSource = (HeapPointWriter) points;
+      int from = Math.toIntExact(points.start);
+      int to = Math.toIntExact(points.start + points.count);
 
       //we store common prefix on scratch1
       computeCommonPrefixLength(heapSource, scratch1);
@@ -45,7 +46,7 @@
             int bucket = scratchBytesRef1.bytes[scratchBytesRef1.offset + offset + prefix] & 0xff;
             usedBytes[dim].set(bucket);
           }
-          int cardinality =usedBytes[dim].cardinality();
+          int cardinality = usedBytes[dim].cardinality();
           if (cardinality < sortedDimCardinality) {
             sortedDim = dim;
             sortedDimCardinality = cardinality;
@@ -54,7 +55,7 @@
       }
 
       // sort the chosen dimension
-      sortHeapPointWriter(heapSource, Math.toIntExact(heapSource.count()), sortedDim, commonPrefixLengths[sortedDim]);
+      sortHeapPointWriter(heapSource, from, to, sortedDim, commonPrefixLengths[sortedDim]);
 
       // Save the block file pointer:
       leafBlockFPs[nodeID - leafNodeOffset] = out.getFilePointer();
@@ -62,15 +63,12 @@
 
       // Write docIDs first, as their own chunk, so that at intersect time we can add all docIDs w/o
       // loading the values:
-      int count = Math.toIntExact(heapSource.count());
+      int count = to - from;
       assert count > 0: "nodeID=" + nodeID + " leafNodeOffset=" + leafNodeOffset;
-      writeLeafBlockDocs(out, heapSource.docIDs, Math.toIntExact(0), count);
+      writeLeafBlockDocs(out, heapSource.docIDs, from, count);
 
       // TODO: minor opto: we don't really have to write the actual common prefixes, because BKDReader on recursing can regenerate it for us
       // from the index, much like how terms dict does so from the FST:
-
-      // Write the common prefixes:
-      writeCommonPrefixes(out, commonPrefixLengths, scratch1);
 
       // Write the full values:
       IntFunction<BytesRef> packedValues = new IntFunction<BytesRef>() {
@@ -82,12 +80,12 @@
 
         @Override
         public BytesRef apply(int i) {
-          heapSource.getPackedValueSlice(Math.toIntExact(i), scratch);
+          heapSource.getPackedValueSlice(from + i, scratch);
           return scratch;
         }
       };
       assert valuesInOrderAndBounds(count, sortedDim, minPackedValue, maxPackedValue, packedValues,
-          heapSource.docIDs, Math.toIntExact(0));
+          heapSource.docIDs, from);
       writeLeafBlockPackedValues(out, commonPrefixLengths, count, sortedDim, packedValues);
 
     } else {
@@ -95,29 +93,27 @@
 
       int splitDim;
       if (numIndexDims > 1) {
-        splitDim = split(minPackedValue, maxPackedValue, parentSplits);
+        splitDim = split(minPackedValue, maxPackedValue);
       } else {
         splitDim = 0;
       }
 
-
       assert nodeID < splitPackedValues.length : "nodeID=" + nodeID + " splitValues.length=" + splitPackedValues.length;
 
       // How many points will be in the left tree:
-      long rightCount = points.count() / 2;
-      long leftCount = points.count() - rightCount;
+      long rightCount = points.count / 2;
+      long leftCount = points.count - rightCount;
 
-      PointWriter leftPointWriter;
-      PointWriter rightPointWriter;
-      byte[] splitValue;
-      try (PointWriter tempLeftPointWriter = getPointWriter(leftCount, "left" + splitDim);
-           PointWriter tempRightPointWriter = getPointWriter(rightCount, "right" + splitDim)) {
-        splitValue = radixSelector.select(points, tempLeftPointWriter, tempRightPointWriter, 0, points.count(),  leftCount, splitDim);
-        leftPointWriter = tempLeftPointWriter;
-        rightPointWriter = tempRightPointWriter;
-      } catch (Throwable t) {
-        throw verifyChecksum(t, points);
+      int commonPrefixLen = FutureArrays.mismatch(minPackedValue, splitDim * bytesPerDim,
+          splitDim * bytesPerDim + bytesPerDim, maxPackedValue, splitDim * bytesPerDim,
+          splitDim * bytesPerDim + bytesPerDim);
+      if (commonPrefixLen == -1) {
+        commonPrefixLen = bytesPerDim;
       }
+
+      BKDRadixSelector.PathSlice[] pathSlices = new BKDRadixSelector.PathSlice[2];
+
+      byte[] splitValue =  radixSelector.select(points, pathSlices, points.start, points.start + points.count,  points.start + leftCount, splitDim, commonPrefixLen);
 
       int address = nodeID * (1 + bytesPerDim);
       splitPackedValues[address] = (byte) splitDim;
@@ -132,18 +128,14 @@
       System.arraycopy(splitValue, 0, minSplitPackedValue, splitDim * bytesPerDim, bytesPerDim);
       System.arraycopy(splitValue, 0, maxSplitPackedValue, splitDim * bytesPerDim, bytesPerDim);
 
-      parentSplits[splitDim]++;
       // Recurse on left tree:
-      build(2 * nodeID, leafNodeOffset, leftPointWriter,
-          out, radixSelector, minPackedValue, maxSplitPackedValue,
-          parentSplits, splitPackedValues, leafBlockFPs);
+      build(2*nodeID, leafNodeOffset, pathSlices[0], out, radixSelector,
+            minPackedValue, maxSplitPackedValue, splitPackedValues, leafBlockFPs);
 
+      // TODO: we could "tail recurse" here?  have our parent discard its refs as we recurse right?
       // Recurse on right tree:
-      build(2 * nodeID + 1, leafNodeOffset, rightPointWriter,
-          out, radixSelector, minSplitPackedValue, maxPackedValue
-          , parentSplits, splitPackedValues, leafBlockFPs);
-
-      parentSplits[splitDim]--;
+      build(2*nodeID+1, leafNodeOffset, pathSlices[1], out, radixSelector,
+            minSplitPackedValue, maxPackedValue, splitPackedValues, leafBlockFPs);
     }
   }
 

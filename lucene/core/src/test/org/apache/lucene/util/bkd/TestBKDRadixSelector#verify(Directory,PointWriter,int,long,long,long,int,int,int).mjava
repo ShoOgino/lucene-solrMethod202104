@@ -1,24 +1,31 @@
   private void verify(Directory dir, PointWriter points, int dimensions, long start, long end, long middle, int packedLength, int bytesPerDimensions, int sortedOnHeap) throws IOException{
     for (int splitDim =0; splitDim < dimensions; splitDim++) {
       PointWriter copy = copyPoints(dir, points, packedLength);
-      PointWriter leftPointWriter = getRandomPointWriter(dir, middle - start, packedLength);
-      PointWriter rightPointWriter = getRandomPointWriter(dir, end - middle, packedLength);
+      BKDRadixSelector.PathSlice[] slices = new BKDRadixSelector.PathSlice[2];
       BKDRadixSelector radixSelector = new BKDRadixSelector(dimensions, bytesPerDimensions, sortedOnHeap, dir, "test");
-      byte[] partitionPoint = radixSelector.select(copy, leftPointWriter, rightPointWriter, start, end, middle, splitDim);
-      leftPointWriter.close();
-      rightPointWriter.close();
-      byte[] max = getMax(leftPointWriter, middle - start, bytesPerDimensions, splitDim);
-      byte[] min = getMin(rightPointWriter, end - middle, bytesPerDimensions, splitDim);
+      BKDRadixSelector.PathSlice copySlice = new BKDRadixSelector.PathSlice(copy, 0, copy.count());
+      byte[] pointsMax = getMax(copySlice, bytesPerDimensions, splitDim);
+      byte[] pointsMin = getMin(copySlice, bytesPerDimensions, splitDim);
+      int commonPrefixLength = FutureArrays.mismatch(pointsMin, 0, bytesPerDimensions, pointsMax, 0, bytesPerDimensions);
+      if (commonPrefixLength == -1) {
+        commonPrefixLength = bytesPerDimensions;
+      }
+      int commonPrefixLengthInput = (random().nextBoolean()) ? commonPrefixLength : commonPrefixLength == 0 ? 0 : random().nextInt(commonPrefixLength);
+      byte[] partitionPoint = radixSelector.select(copySlice, slices, start, end, middle, splitDim, commonPrefixLengthInput);
+      assertEquals(middle - start, slices[0].count);
+      assertEquals(end - middle, slices[1].count);
+      byte[] max = getMax(slices[0], bytesPerDimensions, splitDim);
+      byte[] min = getMin(slices[1], bytesPerDimensions, splitDim);
       int cmp = FutureArrays.compareUnsigned(max, 0, bytesPerDimensions, min, 0, bytesPerDimensions);
       assertTrue(cmp <= 0);
       if (cmp == 0) {
-        int maxDocID = getMaxDocId(leftPointWriter, middle - start, bytesPerDimensions, splitDim, partitionPoint);
-        int minDocId = getMinDocId(rightPointWriter, end - middle, bytesPerDimensions, splitDim, partitionPoint);
+        int maxDocID = getMaxDocId(slices[0], bytesPerDimensions, splitDim, partitionPoint);
+        int minDocId = getMinDocId(slices[1], bytesPerDimensions, splitDim, partitionPoint);
         assertTrue(minDocId >= maxDocID);
       }
       assertTrue(Arrays.equals(partitionPoint, min));
-      leftPointWriter.destroy();
-      rightPointWriter.destroy();
+      slices[0].writer.destroy();
+      slices[1].writer.destroy();
     }
     points.destroy();
   }

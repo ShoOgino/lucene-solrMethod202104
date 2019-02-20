@@ -1,12 +1,29 @@
   @BeforeClass
   public static void setupCluster() throws Exception {
-    configureCluster(2)
-        .addConfig("conf", TEST_PATH().resolve("configsets").resolve("exitable-directory").resolve("conf"))
+    Builder clusterBuilder = configureCluster(2)
+        .addConfig("conf", TEST_PATH().resolve("configsets").resolve("exitable-directory").resolve("conf"));
+    clusterBuilder.withMetrics(true);
+    clusterBuilder
         .configure();
 
     CollectionAdminRequest.createCollection(COLLECTION, "conf", 2, 1)
         .processAndWait(cluster.getSolrClient(), DEFAULT_TIMEOUT);
     cluster.getSolrClient().waitForState(COLLECTION, DEFAULT_TIMEOUT, TimeUnit.SECONDS,
         (n, c) -> DocCollection.isFullyActive(n, c, 2, 1));
+
+    fiveHundredsByNode = new LinkedHashMap<>(); 
+    for (JettySolrRunner jetty: cluster.getJettySolrRunners()) {
+      MetricRegistry metricRegistry = ((JettySolrRunnerWithMetrics)jetty).getMetricRegistry();
+      Metered httpOk = (Metered) metricRegistry.getMetrics()
+          .get("org.eclipse.jetty.servlet.ServletContextHandler.2xx-responses");
+      assertTrue("expeting some http activity during collection creation",httpOk.getCount()>0);
+      
+      Metered old = fiveHundredsByNode.put(jetty.getNodeName(),
+          (Metered) metricRegistry.getMetrics()
+             .get("org.eclipse.jetty.servlet.ServletContextHandler.5xx-responses"));
+      assertNull("expecting uniq nodenames",old);
+    }
+    
+    indexDocs();
   }
 

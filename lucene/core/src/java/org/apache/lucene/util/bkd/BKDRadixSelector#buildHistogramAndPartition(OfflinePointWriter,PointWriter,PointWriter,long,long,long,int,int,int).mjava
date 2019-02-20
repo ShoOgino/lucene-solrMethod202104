@@ -1,24 +1,20 @@
   private byte[] buildHistogramAndPartition(OfflinePointWriter points, PointWriter left, PointWriter right,
-                                            long from, long to, long partitionPoint, int iteration,  int commonPrefix, int dim) throws IOException {
+                                            long from, long to, long partitionPoint, int iteration,  int baseCommonPrefix, int dim) throws IOException {
+    //find common prefix from baseCommonPrefix and build histogram
+    int commonPrefix = findCommonPrefixAndHistogram(points, from, to, dim, baseCommonPrefix);
+
+    //if all equals we just partition the points
+    if (commonPrefix == bytesSorted) {
+      offlinePartition(points, left, right, null, from, to, dim, commonPrefix - 1, partitionPoint);
+      return partitionPointFromCommonPrefix();
+    }
 
     long leftCount = 0;
     long rightCount = 0;
-    //build histogram at the commonPrefix byte
-    try (OfflinePointReader reader = points.getReader(from, to - from, offlineBuffer)) {
-      while (reader.next()) {
-        reader.packedValueWithDocId(bytesRef1);
-        int bucket;
-        if (commonPrefix < bytesPerDim) {
-          bucket = bytesRef1.bytes[bytesRef1.offset + dim * bytesPerDim + commonPrefix] & 0xff;
-        } else {
-          bucket = bytesRef1.bytes[bytesRef1.offset + packedBytesLength + commonPrefix - bytesPerDim] & 0xff;
-        }
-        histogram[commonPrefix][bucket]++;
-      }
-    }
+
     //Count left points and record the partition point
     for(int i = 0; i < HISTOGRAM_SIZE; i++) {
-      long size = histogram[commonPrefix][i];
+      long size = histogram[i];
       if (leftCount + size > partitionPoint - from) {
         partitionBucket[commonPrefix] = i;
         break;
@@ -27,13 +23,13 @@
     }
     //Count right points
     for(int i = partitionBucket[commonPrefix] + 1; i < HISTOGRAM_SIZE; i++) {
-      rightCount += histogram[commonPrefix][i];
+      rightCount += histogram[i];
     }
 
-    long delta = histogram[commonPrefix][partitionBucket[commonPrefix]];
-    assert leftCount + rightCount + delta == to - from;
+    long delta = histogram[partitionBucket[commonPrefix]];
+    assert leftCount + rightCount + delta == to - from : (leftCount + rightCount + delta) + " / " + (to - from);
 
-    //special case when be have lot of points that are equal
+    //special case when points are equal except last byte, we can just tie-break
     if (commonPrefix == bytesSorted - 1) {
       long tieBreakCount =(partitionPoint - from - leftCount);
       offlinePartition(points, left,  right, null, from, to, dim, commonPrefix, tieBreakCount);

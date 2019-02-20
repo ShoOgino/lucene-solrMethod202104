@@ -1,0 +1,63 @@
+  private int findCommonPrefixAndHistogram(OfflinePointWriter points, long from, long to, int dim, int dimCommonPrefix) throws IOException{
+    //find common prefix
+    int commonPrefixPosition = bytesSorted;
+    final int offset = dim * bytesPerDim;
+    try (OfflinePointReader reader = points.getReader(from, to - from, offlineBuffer)) {
+      assert commonPrefixPosition > dimCommonPrefix;
+      reader.next();
+      PointValue pointValue = reader.pointValue();
+      // copy dimension
+      BytesRef packedValue = pointValue.packedValue();
+      System.arraycopy(packedValue.bytes, packedValue.offset + offset, scratch, 0, bytesPerDim);
+      // copy docID
+      BytesRef docIDBytes = pointValue.docIDBytes();
+      System.arraycopy(docIDBytes.bytes, docIDBytes.offset, scratch, bytesPerDim, Integer.BYTES);
+      for (long i = from + 1; i < to; i++) {
+        reader.next();
+        pointValue = reader.pointValue();
+        if (commonPrefixPosition == dimCommonPrefix) {
+          histogram[getBucket(offset, commonPrefixPosition, pointValue)]++;
+          // we do not need to check for common prefix anymore,
+          // just finish the histogram and break
+          for (long j = i + 1; j < to; j++) {
+            reader.next();
+            pointValue = reader.pointValue();
+            histogram[getBucket(offset, commonPrefixPosition, pointValue)]++;
+          }
+          break;
+        } else {
+          //check common prefix and adjust histogram
+          final int startIndex = (dimCommonPrefix > bytesPerDim) ? bytesPerDim : dimCommonPrefix;
+          final int endIndex = (commonPrefixPosition > bytesPerDim) ? bytesPerDim : commonPrefixPosition;
+          packedValue = pointValue.packedValue();
+          int j = FutureArrays.mismatch(scratch, startIndex, endIndex, packedValue.bytes, packedValue.offset + offset + startIndex, packedValue.offset + offset + endIndex);
+          if (j == -1) {
+            if (commonPrefixPosition > bytesPerDim) {
+              //tie-break on docID
+              docIDBytes = pointValue.docIDBytes();
+              int k = FutureArrays.mismatch(scratch, bytesPerDim, commonPrefixPosition, docIDBytes.bytes, docIDBytes.offset, docIDBytes.offset + commonPrefixPosition - bytesPerDim);
+              if (k != -1) {
+                commonPrefixPosition = bytesPerDim + k;
+                Arrays.fill(histogram, 0);
+                histogram[scratch[commonPrefixPosition] & 0xff] = i - from;
+              }
+            }
+          } else {
+            commonPrefixPosition = dimCommonPrefix + j;
+            Arrays.fill(histogram, 0);
+            histogram[scratch[commonPrefixPosition] & 0xff] = i - from;
+          }
+          if (commonPrefixPosition != bytesSorted) {
+            histogram[getBucket(offset, commonPrefixPosition, pointValue)]++;
+          }
+        }
+      }
+    }
+
+    //build partition buckets up to commonPrefix
+    for (int i = 0; i < commonPrefixPosition; i++) {
+      partitionBucket[i] = scratch[i] & 0xff;
+    }
+    return commonPrefixPosition;
+  }
+

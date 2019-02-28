@@ -1,0 +1,39 @@
+  public HashRollupStream(StreamExpression expression, StreamFactory factory) throws IOException {
+    // grab all parameters out
+    List<StreamExpression> streamExpressions = factory.getExpressionOperandsRepresentingTypes(expression, Expressible.class, TupleStream.class);
+    List<StreamExpression> metricExpressions = factory.getExpressionOperandsRepresentingTypes(expression, Expressible.class, Metric.class);
+    StreamExpressionNamedParameter overExpression = factory.getNamedOperand(expression, "over");
+
+    // validate expression contains only what we want.
+    if(expression.getParameters().size() != streamExpressions.size() + metricExpressions.size() + 1){
+      throw new IOException(String.format(Locale.ROOT,"Invalid expression %s - unknown operands found", expression));
+    }
+
+    if(1 != streamExpressions.size()){
+      throw new IOException(String.format(Locale.ROOT,"Invalid expression %s - expecting a single stream but found %d",expression, streamExpressions.size()));
+    }
+
+    if(null == overExpression || !(overExpression.getParameter() instanceof StreamExpressionValue)){
+      throw new IOException(String.format(Locale.ROOT,"Invalid expression %s - expecting single 'over' parameter listing fields to rollup by but didn't find one",expression));
+    }
+
+    // Construct the metrics
+    Metric[] metrics = new Metric[metricExpressions.size()];
+    for(int idx = 0; idx < metricExpressions.size(); ++idx){
+      metrics[idx] = factory.constructMetric(metricExpressions.get(idx));
+    }
+
+    // Construct the buckets.
+    // Buckets are nothing more than equalitors (I think). We can use equalitors as helpers for creating the buckets, but because
+    // I feel I'm missing something wrt buckets I don't want to change the use of buckets in this class to instead be equalitors.
+    StreamEqualitor streamEqualitor = factory.constructEqualitor(((StreamExpressionValue)overExpression.getParameter()).getValue(), FieldEqualitor.class);
+    List<FieldEqualitor> flattenedEqualitors = flattenEqualitor(streamEqualitor);
+    Bucket[] buckets = new Bucket[flattenedEqualitors.size()];
+    for(int idx = 0; idx < flattenedEqualitors.size(); ++idx){
+      buckets[idx] = new Bucket(flattenedEqualitors.get(idx).getLeftFieldName());
+      // while we're using equalitors we don't support those of the form a=b. Only single field names.
+    }
+
+    init(factory.constructStream(streamExpressions.get(0)), buckets, metrics);
+  }
+

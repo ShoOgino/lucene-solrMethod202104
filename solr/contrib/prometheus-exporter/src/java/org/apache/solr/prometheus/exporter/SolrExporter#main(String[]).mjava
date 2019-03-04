@@ -1,8 +1,5 @@
-  /**
-   * Entry point of SolrExporter.
-   */
-  public static void main( String[] args ) {
-    ArgumentParser parser = ArgumentParsers.newArgumentParser(SolrCollector.class.getSimpleName())
+  public static void main(String[] args) {
+    ArgumentParser parser = ArgumentParsers.newFor(SolrExporter.class.getSimpleName()).build()
         .description("Prometheus exporter for Apache Solr.");
 
     parser.addArgument(ARG_PORT_FLAGS)
@@ -21,6 +18,10 @@
         .metavar(ARG_CONFIG_METAVAR).dest(ARG_CONFIG_DEST).type(String.class)
         .setDefault(ARG_CONFIG_DEFAULT).help(ARG_CONFIG_HELP);
 
+    parser.addArgument(ARG_SCRAPE_INTERVAL_FLAGS)
+        .metavar(ARG_SCRAPE_INTERVAL_METAVAR).dest(ARG_SCRAPE_INTERVAL_DEST).type(Integer.class)
+        .setDefault(ARG_SCRAPE_INTERVAL_DEFAULT).help(ARG_SCRAPE_INTERVAL_HELP);
+
     parser.addArgument(ARG_NUM_THREADS_FLAGS)
         .metavar(ARG_NUM_THREADS_METAVAR).dest(ARG_NUM_THREADS_DEST).type(Integer.class)
         .setDefault(ARG_NUM_THREADS_DEFAULT).help(ARG_NUM_THREADS_HELP);
@@ -28,23 +29,30 @@
     try {
       Namespace res = parser.parseArgs(args);
 
-      int port = res.getInt(ARG_PORT_DEST);
+      SolrScrapeConfiguration scrapeConfiguration = null;
 
-      String connStr = "http://localhost:8983/solr";
-      if (!res.getString(ARG_BASE_URL_DEST).equals("")) {
-        connStr = res.getString(ARG_BASE_URL_DEST);
-      } else if (!res.getString(ARG_ZK_HOST_DEST).equals("")) {
-        connStr = res.getString(ARG_ZK_HOST_DEST);
+      if (!res.getString(ARG_ZK_HOST_DEST).equals("")) {
+        scrapeConfiguration = SolrScrapeConfiguration.solrCloud(res.getString(ARG_ZK_HOST_DEST));
+      } else if (!res.getString(ARG_BASE_URL_DEST).equals("")) {
+        scrapeConfiguration = SolrScrapeConfiguration.standalone(res.getString(ARG_BASE_URL_DEST));
       }
 
-      Path configPath = Paths.get(res.getString(ARG_CONFIG_DEST));
-      int numThreads = res.getInt(ARG_NUM_THREADS_DEST);
+      if (scrapeConfiguration == null) {
+        log.error("Must provide either %s or %s", ARG_BASE_URL_FLAGS, ARG_ZK_HOST_FLAGS);
+      }
 
-      SolrExporter solrExporter = new SolrExporter(port, connStr, configPath, numThreads);
+      SolrExporter solrExporter = new SolrExporter(
+          res.getInt(ARG_PORT_DEST),
+          res.getInt(ARG_NUM_THREADS_DEST),
+          res.getInt(ARG_SCRAPE_INTERVAL_DEST),
+          scrapeConfiguration,
+          loadMetricsConfiguration(Paths.get(res.getString(ARG_CONFIG_DEST))));
+
+      log.info("Starting Solr Prometheus Exporting");
       solrExporter.start();
-      log.info("Start server");
-    } catch (ParserConfigurationException | SAXException | IOException e) {
-      log.error("Start server failed: " + e.toString());
+      log.info("Solr Prometheus Exporter is running");
+    } catch (IOException e) {
+      log.error("Failed to start Solr Prometheus Exporter: " + e.toString());
     } catch (ArgumentParserException e) {
       parser.handleError(e);
     }

@@ -1,0 +1,70 @@
+  private void queryWithPreferReplicaTypes(CloudHttp2SolrClient cloudClient,
+                                           String preferReplicaTypes,
+                                           boolean preferLocalShards,
+                                           String collectionName)
+      throws Exception
+  {
+    SolrQuery qRequest = new SolrQuery("*:*");
+    ModifiableSolrParams qParams = new ModifiableSolrParams();
+
+    final List<String> preferredTypes = Arrays.asList(preferReplicaTypes.split("\\|"));
+    StringBuilder rule = new StringBuilder();
+    preferredTypes.forEach(type -> {
+      if (rule.length() != 0) {
+        rule.append(',');
+      }
+      rule.append(ShardParams.SHARDS_PREFERENCE_REPLICA_TYPE);
+      rule.append(':');
+      rule.append(type);
+    });
+    if (preferLocalShards) {
+      if (rule.length() != 0) {
+        rule.append(',');
+      }
+      rule.append(ShardParams.SHARDS_PREFERENCE_REPLICA_LOCATION);
+      rule.append(":local");
+    }
+    qParams.add(ShardParams.SHARDS_PREFERENCE, rule.toString());  
+    qParams.add(ShardParams.SHARDS_INFO, "true");
+    qRequest.add(qParams);
+
+    // CloudSolrClient sends the request to some node.
+    // And since all the nodes are hosting cores from all shards, the
+    // distributed query formed by this node will select cores from the
+    // local shards only
+    QueryResponse qResponse = cloudClient.query(collectionName, qRequest);
+
+    Object shardsInfo = qResponse.getResponse().get(ShardParams.SHARDS_INFO);
+    assertNotNull("Unable to obtain "+ShardParams.SHARDS_INFO, shardsInfo);
+
+    Map<String, String> replicaTypeMap = new HashMap<>();
+    DocCollection collection = getCollectionState(collectionName);
+    for (Slice slice : collection.getSlices()) {
+      for (Replica replica : slice.getReplicas()) {
+        String coreUrl = replica.getCoreUrl();
+        // It seems replica reports its core URL with a trailing slash while shard
+        // info returned from the query doesn't. Oh well.
+        if (coreUrl.endsWith("/")) {
+          coreUrl = coreUrl.substring(0, coreUrl.length() - 1);
+        }
+        replicaTypeMap.put(coreUrl, replica.getType().toString());
+      }
+    }
+
+    // Iterate over shards-info and check that replicas of correct type responded
+    SimpleOrderedMap<?> shardsInfoMap = (SimpleOrderedMap<?>)shardsInfo;
+    Iterator<Map.Entry<String, ?>> itr = shardsInfoMap.asMap(100).entrySet().iterator();
+    List<String> shardAddresses = new ArrayList<String>();
+    while (itr.hasNext()) {
+      Map.Entry<String, ?> e = itr.next();
+      assertTrue("Did not find map-type value in "+ShardParams.SHARDS_INFO, e.getValue() instanceof Map);
+      String shardAddress = (String)((Map)e.getValue()).get("shardAddress");
+      assertNotNull(ShardParams.SHARDS_INFO+" did not return 'shardAddress' parameter", shardAddress);
+      assertTrue(replicaTypeMap.containsKey(shardAddress));
+      assertTrue(preferredTypes.indexOf(replicaTypeMap.get(shardAddress)) == 0);
+      shardAddresses.add(shardAddress);
+    }
+    assertTrue("No responses", shardAddresses.size() > 0);
+    log.info("Shards giving the response: " + Arrays.toString(shardAddresses.toArray()));
+  }
+

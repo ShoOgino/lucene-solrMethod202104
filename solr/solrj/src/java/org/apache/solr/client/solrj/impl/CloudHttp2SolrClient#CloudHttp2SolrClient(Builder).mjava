@@ -1,0 +1,35 @@
+  /**
+   * Create a new client object that connects to Zookeeper and is always aware
+   * of the SolrCloud state. If there is a fully redundant Zookeeper quorum and
+   * SolrCloud has enough replicas for every shard in a collection, there is no
+   * single point of failure. Updates will be sent to shard leaders by default.
+   *
+   * @param builder a {@link Http2SolrClient.Builder} with the options used to create the client.
+   */
+  protected CloudHttp2SolrClient(Builder builder) {
+    super(builder.shardLeadersOnly, builder.parallelUpdates, builder.directUpdatesToLeadersOnly);
+    this.clientIsInternal = builder.httpClient == null;
+    this.myClient = (builder.httpClient == null) ? new Http2SolrClient.Builder().build() : builder.httpClient;
+    if (builder.stateProvider == null) {
+      if (builder.zkHosts != null && builder.solrUrls != null) {
+        throw new IllegalArgumentException("Both zkHost(s) & solrUrl(s) have been specified. Only specify one.");
+      }
+      if (builder.zkHosts != null) {
+        this.stateProvider = new ZkClientClusterStateProvider(builder.zkHosts, builder.zkChroot);
+      } else if (builder.solrUrls != null && !builder.solrUrls.isEmpty()) {
+        try {
+          this.stateProvider = new Http2ClusterStateProvider(builder.solrUrls, builder.httpClient);
+        } catch (Exception e) {
+          throw new RuntimeException("Couldn't initialize a HttpClusterStateProvider (is/are the "
+              + "Solr server(s), "  + builder.solrUrls + ", down?)", e);
+        }
+      } else {
+        throw new IllegalArgumentException("Both zkHosts and solrUrl cannot be null.");
+      }
+    } else {
+      this.stateProvider = builder.stateProvider;
+    }
+    this.lbClient = new LBHttp2SolrClient(myClient);
+
+  }
+

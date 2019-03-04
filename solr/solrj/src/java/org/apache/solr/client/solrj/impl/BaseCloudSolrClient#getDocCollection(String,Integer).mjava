@@ -1,0 +1,45 @@
+  protected DocCollection getDocCollection(String collection, Integer expectedVersion) throws SolrException {
+    if (expectedVersion == null) expectedVersion = -1;
+    if (collection == null) return null;
+    ExpiringCachedDocCollection cacheEntry = collectionStateCache.get(collection);
+    DocCollection col = cacheEntry == null ? null : cacheEntry.cached;
+    if (col != null) {
+      if (expectedVersion <= col.getZNodeVersion()
+          && !cacheEntry.shouldRetry()) return col;
+    }
+
+    ClusterState.CollectionRef ref = getCollectionRef(collection);
+    if (ref == null) {
+      //no such collection exists
+      return null;
+    }
+    if (!ref.isLazilyLoaded()) {
+      //it is readily available just return it
+      return ref.get();
+    }
+    List locks = this.locks;
+    final Object lock = locks.get(Math.abs(Hash.murmurhash3_x86_32(collection, 0, collection.length(), 0) % locks.size()));
+    DocCollection fetchedCol = null;
+    synchronized (lock) {
+      /*we have waited for sometime just check once again*/
+      cacheEntry = collectionStateCache.get(collection);
+      col = cacheEntry == null ? null : cacheEntry.cached;
+      if (col != null) {
+        if (expectedVersion <= col.getZNodeVersion()
+            && !cacheEntry.shouldRetry()) return col;
+      }
+      // We are going to fetch a new version
+      // we MUST try to get a new version
+      fetchedCol = ref.get();//this is a call to ZK
+      if (fetchedCol == null) return null;// this collection no more exists
+      if (col != null && fetchedCol.getZNodeVersion() == col.getZNodeVersion()) {
+        cacheEntry.setRetriedAt();//we retried and found that it is the same version
+        cacheEntry.maybeStale = false;
+      } else {
+        if (fetchedCol.getStateFormat() > 1)
+          collectionStateCache.put(collection, new ExpiringCachedDocCollection(fetchedCol));
+      }
+      return fetchedCol;
+    }
+  }
+

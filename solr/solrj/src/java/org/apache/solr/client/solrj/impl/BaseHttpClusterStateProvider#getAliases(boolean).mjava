@@ -1,0 +1,41 @@
+  private Map<String, List<String>> getAliases(boolean forceFetch) {
+    if (this.liveNodes == null) {
+      throw new RuntimeException("We don't know of any live_nodes to fetch the"
+          + " latest aliases information from. "
+          + "If you think your Solr cluster is up and is accessible,"
+          + " you could try re-creating a new CloudSolrClient using working"
+          + " solrUrl(s) or zkHost(s).");
+    }
+
+    if (forceFetch || this.aliases == null ||
+        TimeUnit.SECONDS.convert((System.nanoTime() - aliasesTimestamp), TimeUnit.NANOSECONDS) > getCacheTimeout()) {
+      for (String nodeName: liveNodes) {
+        String baseUrl = Utils.getBaseUrlForNodeName(nodeName, urlScheme);
+        try (SolrClient client = getSolrClient(baseUrl)) {
+
+          this.aliases = new CollectionAdminRequest.ListAliases().process(client).getAliasesAsLists();
+          this.aliasesTimestamp = System.nanoTime();
+          return Collections.unmodifiableMap(this.aliases);
+        } catch (SolrServerException | RemoteSolrException | IOException e) {
+          // Situation where we're hitting an older Solr which doesn't have LISTALIASES
+          if (e instanceof RemoteSolrException && ((RemoteSolrException)e).code()==400) {
+            log.warn("LISTALIASES not found, possibly using older Solr server. Aliases won't work"
+                + " unless you re-create the CloudSolrClient using zkHost(s) or upgrade Solr server", e);
+            this.aliases = Collections.emptyMap();
+            this.aliasesTimestamp = System.nanoTime();
+            return aliases;
+          }
+          log.warn("Attempt to fetch cluster state from {} failed.", baseUrl, e);
+        }
+      }
+
+      throw new RuntimeException("Tried fetching aliases using all the node names we knew of, i.e. " + liveNodes +". However, "
+          + "succeeded in obtaining the cluster state from none of them."
+          + "If you think your Solr cluster is up and is accessible,"
+          + " you could try re-creating a new CloudSolrClient using a working"
+          + " solrUrl or zkHost.");
+    } else {
+      return Collections.unmodifiableMap(this.aliases); // cached copy is fresh enough
+    }
+  }
+

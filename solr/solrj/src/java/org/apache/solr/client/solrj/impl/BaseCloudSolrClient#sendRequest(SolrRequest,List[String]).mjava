@@ -1,0 +1,104 @@
+  protected NamedList<Object> sendRequest(SolrRequest request, List<String> inputCollections)
+      throws SolrServerException, IOException {
+    connect();
+
+    boolean sendToLeaders = false;
+
+    if (request instanceof IsUpdateRequest) {
+      if (request instanceof UpdateRequest) {
+        String collection = inputCollections.isEmpty() ? null : inputCollections.get(0); // getting first mimics HttpSolrCall
+        NamedList<Object> response = directUpdate((AbstractUpdateRequest) request, collection);
+        if (response != null) {
+          return response;
+        }
+      }
+      sendToLeaders = true;
+    }
+
+    SolrParams reqParams = request.getParams();
+    if (reqParams == null) { // TODO fix getParams to never return null!
+      reqParams = new ModifiableSolrParams();
+    }
+
+    final Set<String> liveNodes = getClusterStateProvider().getLiveNodes();
+
+    final List<String> theUrlList = new ArrayList<>(); // we populate this as follows...
+
+    if (request instanceof V2Request) {
+      if (!liveNodes.isEmpty()) {
+        List<String> liveNodesList = new ArrayList<>(liveNodes);
+        Collections.shuffle(liveNodesList, rand);
+        theUrlList.add(Utils.getBaseUrlForNodeName(liveNodesList.get(0),
+            getClusterStateProvider().getClusterProperty(ZkStateReader.URL_SCHEME,"http")));
+      }
+
+    } else if (ADMIN_PATHS.contains(request.getPath())) {
+      for (String liveNode : liveNodes) {
+        theUrlList.add(Utils.getBaseUrlForNodeName(liveNode,
+            getClusterStateProvider().getClusterProperty(ZkStateReader.URL_SCHEME,"http")));
+      }
+
+    } else { // Typical...
+      Set<String> collectionNames = resolveAliases(inputCollections);
+      if (collectionNames.isEmpty()) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+            "No collection param specified on request and no default collection has been set: " + inputCollections);
+      }
+
+      // TODO: not a big deal because of the caching, but we could avoid looking
+      //   at every shard when getting leaders if we tweaked some things
+
+      // Retrieve slices from the cloud state and, for each collection specified, add it to the Map of slices.
+      Map<String,Slice> slices = new HashMap<>();
+      String shardKeys = reqParams.get(ShardParams._ROUTE_);
+      for (String collectionName : collectionNames) {
+        DocCollection col = getDocCollection(collectionName, null);
+        if (col == null) {
+          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Collection not found: " + collectionName);
+        }
+        Collection<Slice> routeSlices = col.getRouter().getSearchSlices(shardKeys, reqParams , col);
+        ClientUtils.addSlices(slices, collectionName, routeSlices, true);
+      }
+
+      // Gather URLs, grouped by leader or replica
+      // TODO: allow filtering by group, role, etc
+      Set<String> seenNodes = new HashSet<>();
+      List<String> replicas = new ArrayList<>();
+      String joinedInputCollections = StrUtils.join(inputCollections, ',');
+      for (Slice slice : slices.values()) {
+        for (ZkNodeProps nodeProps : slice.getReplicasMap().values()) {
+          ZkCoreNodeProps coreNodeProps = new ZkCoreNodeProps(nodeProps);
+          String node = coreNodeProps.getNodeName();
+          if (!liveNodes.contains(node) // Must be a live node to continue
+              || Replica.State.getState(coreNodeProps.getState()) != Replica.State.ACTIVE) // Must be an ACTIVE replica to continue
+            continue;
+          if (seenNodes.add(node)) { // if we haven't yet collected a URL to this node...
+            String url = ZkCoreNodeProps.getCoreUrl(nodeProps.getStr(ZkStateReader.BASE_URL_PROP), joinedInputCollections);
+            if (sendToLeaders && coreNodeProps.isLeader()) {
+              theUrlList.add(url); // put leaders here eagerly (if sendToLeader mode)
+            } else {
+              replicas.add(url); // replicas here
+            }
+          }
+        }
+      }
+
+      // Shuffle the leaders, if any    (none if !sendToLeaders)
+      Collections.shuffle(theUrlList, rand);
+
+      // Shuffle the replicas, if any, and append to our list
+      Collections.shuffle(replicas, rand);
+      theUrlList.addAll(replicas);
+
+      if (theUrlList.isEmpty()) {
+        collectionStateCache.keySet().removeAll(collectionNames);
+        throw new SolrException(SolrException.ErrorCode.INVALID_STATE,
+            "Could not find a healthy node to handle the request.");
+      }
+    }
+
+    LBSolrClient.Req req = new LBSolrClient.Req(request, theUrlList);
+    LBSolrClient.Rsp rsp = getLbClient().request(req);
+    return rsp.getResponse();
+  }
+

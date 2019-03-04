@@ -1,0 +1,96 @@
+  protected <T extends RouteResponse> T condenseResponse(NamedList response, int timeMillis, Supplier<T> supplier) {
+    T condensed = supplier.get();
+    int status = 0;
+    Integer rf = null;
+    Integer minRf = null;
+
+    // TolerantUpdateProcessor
+    List<SimpleOrderedMap<String>> toleratedErrors = null;
+    int maxToleratedErrors = Integer.MAX_VALUE;
+
+    // For "adds", "deletes", "deleteByQuery" etc.
+    Map<String, NamedList> versions = new HashMap<>();
+
+    for(int i=0; i<response.size(); i++) {
+      NamedList shardResponse = (NamedList)response.getVal(i);
+      NamedList header = (NamedList)shardResponse.get("responseHeader");
+      Integer shardStatus = (Integer)header.get("status");
+      int s = shardStatus.intValue();
+      if(s > 0) {
+        status = s;
+      }
+      Object rfObj = header.get(UpdateRequest.REPFACT);
+      if (rfObj != null && rfObj instanceof Integer) {
+        Integer routeRf = (Integer)rfObj;
+        if (rf == null || routeRf < rf)
+          rf = routeRf;
+      }
+      minRf = (Integer)header.get(UpdateRequest.MIN_REPFACT);
+
+      List<SimpleOrderedMap<String>> shardTolerantErrors =
+          (List<SimpleOrderedMap<String>>) header.get("errors");
+      if (null != shardTolerantErrors) {
+        Integer shardMaxToleratedErrors = (Integer) header.get("maxErrors");
+        assert null != shardMaxToleratedErrors : "TolerantUpdateProcessor reported errors but not maxErrors";
+        // if we get into some weird state where the nodes disagree about the effective maxErrors,
+        // assume the min value seen to decide if we should fail.
+        maxToleratedErrors = Math.min(maxToleratedErrors,
+            ToleratedUpdateError.getEffectiveMaxErrors(shardMaxToleratedErrors.intValue()));
+
+        if (null == toleratedErrors) {
+          toleratedErrors = new ArrayList<SimpleOrderedMap<String>>(shardTolerantErrors.size());
+        }
+        for (SimpleOrderedMap<String> err : shardTolerantErrors) {
+          toleratedErrors.add(err);
+        }
+      }
+      for (String updateType: Arrays.asList("adds", "deletes", "deleteByQuery")) {
+        Object obj = shardResponse.get(updateType);
+        if (obj instanceof NamedList) {
+          NamedList versionsList = versions.containsKey(updateType) ?
+              versions.get(updateType): new NamedList();
+          versionsList.addAll((NamedList)obj);
+          versions.put(updateType, versionsList);
+        }
+      }
+    }
+
+    NamedList cheader = new NamedList();
+    cheader.add("status", status);
+    cheader.add("QTime", timeMillis);
+    if (rf != null)
+      cheader.add(UpdateRequest.REPFACT, rf);
+    if (minRf != null)
+      cheader.add(UpdateRequest.MIN_REPFACT, minRf);
+    if (null != toleratedErrors) {
+      cheader.add("maxErrors", ToleratedUpdateError.getUserFriendlyMaxErrors(maxToleratedErrors));
+      cheader.add("errors", toleratedErrors);
+      if (maxToleratedErrors < toleratedErrors.size()) {
+        // cumulative errors are too high, we need to throw a client exception w/correct metadata
+
+        // NOTE: it shouldn't be possible for 1 == toleratedErrors.size(), because if that were the case
+        // then at least one shard should have thrown a real error before this, so we don't worry
+        // about having a more "singular" exception msg for that situation
+        StringBuilder msgBuf =  new StringBuilder()
+            .append(toleratedErrors.size()).append(" Async failures during distributed update: ");
+
+        NamedList metadata = new NamedList<String>();
+        for (SimpleOrderedMap<String> err : toleratedErrors) {
+          ToleratedUpdateError te = ToleratedUpdateError.parseMap(err);
+          metadata.add(te.getMetadataKey(), te.getMetadataValue());
+
+          msgBuf.append("\n").append(te.getMessage());
+        }
+
+        SolrException toThrow = new SolrException(SolrException.ErrorCode.BAD_REQUEST, msgBuf.toString());
+        toThrow.setMetadata(metadata);
+        throw toThrow;
+      }
+    }
+    for (String updateType: versions.keySet()) {
+      condensed.add(updateType, versions.get(updateType));
+    }
+    condensed.add("responseHeader", cheader);
+    return condensed;
+  }
+

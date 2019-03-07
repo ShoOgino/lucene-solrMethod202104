@@ -22,7 +22,8 @@
 
     // now define the trigger. doing it earlier may cause partial events to be generated (where only some
     // nodes / replicas exceeded the threshold).
-    String setTriggerCommand = "{" +
+    assertAutoScalingRequest
+      ( "{" +
         "'set-trigger' : {" +
         "'name' : 'search_rate_trigger'," +
         "'event' : 'searchRate'," +
@@ -35,11 +36,13 @@
         "{'name':'execute','class':'" + ExecutePlanAction.class.getName() + "'}," +
         "{'name':'test','class':'" + FinishTriggerAction.class.getName() + "'}" +
         "]" +
-        "}}";
-    SolrRequest req = AutoScalingRequest.create(SolrRequest.METHOD.POST, setTriggerCommand);
-    NamedList<Object> response = solrClient.request(req);
-    assertEquals(response.get("result").toString(), "success");
-    String setListenerCommand1 = "{" +
+        "}}");
+
+
+    // we're going to expect our trigger listener to process exactly one captured event
+    listenerEventLatch = new CountDownLatch(1);
+    assertAutoScalingRequest
+      ( "{" +
         "'set-listener' : " +
         "{" +
         "'name' : 'srt'," +
@@ -47,23 +50,20 @@
         "'stage' : ['FAILED','SUCCEEDED']," +
         "'class' : '" + TestTriggerListener.class.getName() + "'" +
         "}" +
-        "}";
-    req = AutoScalingRequest.create(SolrRequest.METHOD.POST, setListenerCommand1);
-    response = solrClient.request(req);
-    assertEquals(response.get("result").toString(), "success");
+        "}");
 
     assertAutoscalingUpdateComplete();
 
-    boolean await = triggerFinishedLatch.await(waitForSeconds * 45000 / SPEED, TimeUnit.MILLISECONDS);
-    assertTrue("The trigger did not fire at all", await);
-    // wait for listener to capture the SUCCEEDED stage
-    cluster.getTimeSource().sleep(25000);
+    assertTrue("Trigger did not finish even after await()ing an excessive amount of time",
+               triggerFinishedLatch.await(60, TimeUnit.SECONDS));
     
-    assertNotNull(listenerEvents.entrySet().iterator().toString(), listenerEvents.get("srt"));
+    assertTrue("The listener didn't record the event even after await()ing an excessive amount of time",
+               listenerEventLatch.await(60, TimeUnit.SECONDS));
+    List<CapturedEvent> events = listenerEvents.get("srt");
+    assertNotNull("no srt events: " + listenerEvents.toString(), events);
+    assertEquals(events.toString(), 1, events.size());
 
-    assertTrue(listenerEvents.entrySet().iterator().toString(), listenerEvents.get("srt").size() >= 1);
-
-    CapturedEvent ev = listenerEvents.get("srt").get(0);
+    CapturedEvent ev = events.get(0);
     assertEquals(TriggerEventType.SEARCHRATE, ev.event.getEventType());
     Map<String, Number> m = (Map<String, Number>)ev.event.getProperty(SearchRateTrigger.HOT_NODES);
     assertNotNull(m);

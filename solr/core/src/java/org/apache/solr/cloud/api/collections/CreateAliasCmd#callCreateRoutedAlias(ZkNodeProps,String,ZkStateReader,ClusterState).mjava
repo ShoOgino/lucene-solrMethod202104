@@ -1,29 +1,33 @@
+  @SuppressWarnings("unchecked")
   private void callCreateRoutedAlias(ZkNodeProps message, String aliasName, ZkStateReader zkStateReader, ClusterState state) throws Exception {
-    // Validate we got everything we need
-    if (!message.getProperties().keySet().containsAll(TimeRoutedAlias.REQUIRED_ROUTER_PARAMS)) {
-      throw new SolrException(BAD_REQUEST, "A routed alias requires these params: " + TimeRoutedAlias.REQUIRED_ROUTER_PARAMS
+    // Validate we got a basic minimum
+    if (!message.getProperties().keySet().containsAll(RoutedAlias.MINIMAL_REQUIRED_PARAMS)) {
+      throw new SolrException(BAD_REQUEST, "A routed alias requires these params: " + RoutedAlias.MINIMAL_REQUIRED_PARAMS
       + " plus some create-collection prefixed ones.");
     }
 
-    Map<String, String> aliasProperties = new LinkedHashMap<>();
-    message.getProperties().entrySet().stream()
-        .filter(entry -> TimeRoutedAlias.PARAM_IS_PROP.test(entry.getKey()))
-        .forEach(entry -> aliasProperties.put(entry.getKey(), (String) entry.getValue())); // way easier than .collect
+    // convert values to strings
+    Map<String, String> props = new LinkedHashMap<>();
+    message.getProperties().forEach((key, value) -> props.put(key, String.valueOf(value)));
 
-    TimeRoutedAlias timeRoutedAlias = new TimeRoutedAlias(aliasName, aliasProperties); // validates as well
+    // Further validation happens here
+    RoutedAlias routedAlias = RoutedAlias.fromProps(aliasName, props);
+    if (routedAlias == null) {
+      // should never happen here, but keep static analysis in IDE's happy...
+      throw new SolrException(SERVER_ERROR,"Tried to create a routed alias with no type!");
+    }
 
-    String start = message.getStr(TimeRoutedAlias.ROUTER_START);
-    Instant startTime = parseStart(start, timeRoutedAlias.getTimeZone());
+    if (!props.keySet().containsAll(routedAlias.getRequiredParams())) {
+      throw new SolrException(BAD_REQUEST, "Not all required params were supplied. Missing params: " +
+          StrUtils.join(Sets.difference(routedAlias.getRequiredParams(), props.keySet()), ','));
+    }
 
-    String initialCollectionName = TimeRoutedAlias.formatCollectionNameFromInstant(aliasName, startTime);
-
-    // Create the collection
-    MaintainRoutedAliasCmd.createCollectionAndWait(state, aliasName, aliasProperties, initialCollectionName, ocmh);
-    validateAllCollectionsExistAndNoDups(Collections.singletonList(initialCollectionName), zkStateReader);
-
-    // Create/update the alias
-    zkStateReader.aliasesManager.applyModificationAndExportToZk(aliases -> aliases
-        .cloneWithCollectionAlias(aliasName, initialCollectionName)
-        .cloneWithCollectionAliasProperties(aliasName, aliasProperties));
+    // Create the first collection.
+    String initialColl = routedAlias.computeInitialCollectionName();
+      ensureAliasCollection(aliasName, zkStateReader, state, routedAlias.getAliasMetadata(), initialColl);
+      // Create/update the alias
+      zkStateReader.aliasesManager.applyModificationAndExportToZk(aliases -> aliases
+          .cloneWithCollectionAlias(aliasName, initialColl)
+          .cloneWithCollectionAliasProperties(aliasName, routedAlias.getAliasMetadata()));
   }
 

@@ -1,31 +1,33 @@
   // this method uses a simple cache in collectionsStatesRef. Operations that modify
   // cluster state should always reset this cache so that the changes become visible
   private Map<String, DocCollection> getCollectionStates() throws IOException {
-    Map<String, DocCollection> collectionStates = collectionsStatesRef.get();
-    if (collectionStates != null) {
-      return collectionStates;
-    }
     lock.lock();
-    collectionsStatesRef.set(null);
-    log.debug("** creating new collection states, currentVersion={}", clusterStateVersion);
     try {
+      Map<String, DocCollection> collectionStates = collectionsStatesRef.get();
+      if (collectionStates != null) {
+        return collectionStates;
+      }
+      collectionsStatesRef.set(null);
+      log.debug("** creating new collection states, currentVersion={}", clusterStateVersion);
       Map<String, Map<String, Map<String, Replica>>> collMap = new HashMap<>();
       nodeReplicaMap.forEach((n, replicas) -> {
-        replicas.forEach(ri -> {
-          Map<String, Object> props;
-          synchronized (ri) {
-            props = new HashMap<>(ri.getVariables());
+          synchronized (replicas) {
+            replicas.forEach(ri -> {
+                Map<String, Object> props;
+                synchronized (ri) {
+                  props = new HashMap<>(ri.getVariables());
+                }
+                props.put(ZkStateReader.NODE_NAME_PROP, n);
+                props.put(ZkStateReader.CORE_NAME_PROP, ri.getCore());
+                props.put(ZkStateReader.REPLICA_TYPE, ri.getType().toString());
+                props.put(ZkStateReader.STATE_PROP, ri.getState().toString());
+                Replica r = new Replica(ri.getName(), props);
+                collMap.computeIfAbsent(ri.getCollection(), c -> new HashMap<>())
+                  .computeIfAbsent(ri.getShard(), s -> new HashMap<>())
+                  .put(ri.getName(), r);
+              });
           }
-          props.put(ZkStateReader.NODE_NAME_PROP, n);
-          props.put(ZkStateReader.CORE_NAME_PROP, ri.getCore());
-          props.put(ZkStateReader.REPLICA_TYPE, ri.getType().toString());
-          props.put(ZkStateReader.STATE_PROP, ri.getState().toString());
-          Replica r = new Replica(ri.getName(), props);
-          collMap.computeIfAbsent(ri.getCollection(), c -> new HashMap<>())
-              .computeIfAbsent(ri.getShard(), s -> new HashMap<>())
-              .put(ri.getName(), r);
         });
-      });
 
       // add empty slices
       sliceProperties.forEach((c, perSliceProps) -> {

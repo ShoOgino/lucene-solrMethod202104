@@ -5,35 +5,40 @@
    */
   public void simRemoveReplica(String nodeId, String coreNodeName) throws Exception {
     ensureNotClosed();
+    
     lock.lockInterruptibly();
-    List<ReplicaInfo> replicas = nodeReplicaMap.computeIfAbsent(nodeId, n -> new ArrayList<>());
     try {
-      for (int i = 0; i < replicas.size(); i++) {
-        if (coreNodeName.equals(replicas.get(i).getName())) {
-          ReplicaInfo ri = replicas.remove(i);
-          colShardReplicaMap.computeIfAbsent(ri.getCollection(), c -> new ConcurrentHashMap<>())
+      final List<ReplicaInfo> replicas = nodeReplicaMap.computeIfAbsent
+        (nodeId, Utils.NEW_SYNCHRONIZED_ARRAYLIST_FUN);
+      synchronized (replicas) {
+        for (int i = 0; i < replicas.size(); i++) {
+          if (coreNodeName.equals(replicas.get(i).getName())) {
+            ReplicaInfo ri = replicas.remove(i);
+            colShardReplicaMap.computeIfAbsent(ri.getCollection(), c -> new ConcurrentHashMap<>())
               .computeIfAbsent(ri.getShard(), s -> new ArrayList<>())
               .remove(ri);
-          collectionsStatesRef.set(null);
+            collectionsStatesRef.set(null);
 
-          opDelay(ri.getCollection(), CollectionParams.CollectionAction.DELETEREPLICA.name());
+            opDelay(ri.getCollection(), CollectionParams.CollectionAction.DELETEREPLICA.name());
 
-          // update the number of cores in node values, if node is live
-          if (liveNodes.contains(nodeId)) {
-            Integer cores = (Integer)cloudManager.getSimNodeStateProvider().simGetNodeValue(nodeId, ImplicitSnitch.CORES);
-            if (cores == null || cores == 0) {
-              throw new Exception("Unexpected value of 'cores' (" + cores + ") on node: " + nodeId);
+            // update the number of cores in node values, if node is live
+            if (liveNodes.contains(nodeId)) {
+              Integer cores = (Integer)cloudManager.getSimNodeStateProvider().simGetNodeValue(nodeId, ImplicitSnitch.CORES);
+              if (cores == null || cores == 0) {
+                throw new Exception("Unexpected value of 'cores' (" + cores + ") on node: " + nodeId);
+              }
+              cloudManager.getSimNodeStateProvider().simSetNodeValue(nodeId, ImplicitSnitch.CORES, cores - 1);
+              Integer disk = (Integer)cloudManager.getSimNodeStateProvider().simGetNodeValue(nodeId, ImplicitSnitch.DISK);
+              if (disk == null || disk == 0) {
+                throw new Exception("Unexpected value of 'freedisk' (" + disk + ") on node: " + nodeId);
+              }
+              cloudManager.getSimNodeStateProvider().simSetNodeValue(nodeId, ImplicitSnitch.DISK, disk + 1);
             }
-            cloudManager.getSimNodeStateProvider().simSetNodeValue(nodeId, ImplicitSnitch.CORES, cores - 1);
-            Integer disk = (Integer)cloudManager.getSimNodeStateProvider().simGetNodeValue(nodeId, ImplicitSnitch.DISK);
-            if (disk == null || disk == 0) {
-              throw new Exception("Unexpected value of 'freedisk' (" + disk + ") on node: " + nodeId);
-            }
-            cloudManager.getSimNodeStateProvider().simSetNodeValue(nodeId, ImplicitSnitch.DISK, disk + 1);
+            log.trace("-- simRemoveReplica {}", ri);
+            simRunLeaderElection(ri.getCollection(), ri.getShard(), true);
+                                 
+            return;
           }
-          log.trace("-- simRemoveReplica {}", ri);
-          simRunLeaderElection(Collections.singleton(ri.getCollection()), true);
-          return;
         }
       }
       throw new Exception("Replica " + coreNodeName + " not found on node " + nodeId);

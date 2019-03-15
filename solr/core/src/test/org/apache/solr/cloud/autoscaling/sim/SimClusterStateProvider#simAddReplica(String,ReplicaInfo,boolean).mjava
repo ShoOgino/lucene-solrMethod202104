@@ -7,42 +7,44 @@
    */
   public void simAddReplica(String nodeId, ReplicaInfo replicaInfo, boolean runLeaderElection) throws Exception {
     ensureNotClosed();
-    // make sure SolrCore name is unique across cluster and coreNodeName within collection
-    for (Map.Entry<String, List<ReplicaInfo>> e : nodeReplicaMap.entrySet()) {
-      for (ReplicaInfo ri : e.getValue()) {
-        if (ri.getCore().equals(replicaInfo.getCore())) {
-          throw new Exception("Duplicate SolrCore name for existing=" + ri + " on node " + e.getKey() + " and new=" + replicaInfo);
-        }
-        if (ri.getName().equals(replicaInfo.getName()) && ri.getCollection().equals(replicaInfo.getCollection())) {
-          throw new Exception("Duplicate coreNode name for existing=" + ri + " on node " + e.getKey() + " and new=" + replicaInfo);
-        }
-      }
-    }
-    if (!liveNodes.contains(nodeId)) {
-      throw new Exception("Target node " + nodeId + " is not live: " + liveNodes);
-    }
-    // verify info
-    if (replicaInfo.getCore() == null) {
-      throw new Exception("Missing core: " + replicaInfo);
-    }
-    // XXX replica info is not supposed to have this as a variable
-    replicaInfo.getVariables().remove(ZkStateReader.SHARD_ID_PROP);
-    if (replicaInfo.getName() == null) {
-      throw new Exception("Missing name: " + replicaInfo);
-    }
-    if (replicaInfo.getNode() == null) {
-      throw new Exception("Missing node: " + replicaInfo);
-    }
-    if (!replicaInfo.getNode().equals(nodeId)) {
-      throw new Exception("Wrong node (not " + nodeId + "): " + replicaInfo);
-    }
-
     lock.lockInterruptibly();
     try {
 
+      // make sure SolrCore name is unique across cluster and coreNodeName within collection
+      for (Map.Entry<String, List<ReplicaInfo>> e : nodeReplicaMap.entrySet()) {
+        final List<ReplicaInfo> replicas = e.getValue();
+        synchronized (replicas) {
+          for (ReplicaInfo ri : replicas) {
+            if (ri.getCore().equals(replicaInfo.getCore())) {
+              throw new Exception("Duplicate SolrCore name for existing=" + ri + " on node " + e.getKey() + " and new=" + replicaInfo);
+            }
+            if (ri.getName().equals(replicaInfo.getName()) && ri.getCollection().equals(replicaInfo.getCollection())) {
+              throw new Exception("Duplicate coreNode name for existing=" + ri + " on node " + e.getKey() + " and new=" + replicaInfo);
+            }
+          }
+        }
+      }
+      if (!liveNodes.contains(nodeId)) {
+        throw new Exception("Target node " + nodeId + " is not live: " + liveNodes);
+      }
+      // verify info
+      if (replicaInfo.getCore() == null) {
+        throw new Exception("Missing core: " + replicaInfo);
+      }
+      // XXX replica info is not supposed to have this as a variable
+      replicaInfo.getVariables().remove(ZkStateReader.SHARD_ID_PROP);
+      if (replicaInfo.getName() == null) {
+        throw new Exception("Missing name: " + replicaInfo);
+      }
+      if (replicaInfo.getNode() == null) {
+        throw new Exception("Missing node: " + replicaInfo);
+      }
+      if (!replicaInfo.getNode().equals(nodeId)) {
+        throw new Exception("Wrong node (not " + nodeId + "): " + replicaInfo);
+      }
+      
       opDelay(replicaInfo.getCollection(), CollectionParams.CollectionAction.ADDREPLICA.name());
 
-      List<ReplicaInfo> replicas = nodeReplicaMap.computeIfAbsent(nodeId, n -> new ArrayList<>());
       // mark replica as active
       replicaInfo.getVariables().put(ZkStateReader.STATE_PROP, Replica.State.ACTIVE.toString());
       // add a property expected in Policy calculations, if missing
@@ -51,8 +53,7 @@
         replicaInfo.getVariables().put(Variable.coreidxsize,
             new AtomicDouble((Double)Type.CORE_IDX.convertVal(SimCloudManager.DEFAULT_IDX_SIZE_BYTES)));
       }
-
-      replicas.add(replicaInfo);
+      nodeReplicaMap.computeIfAbsent(nodeId, Utils.NEW_SYNCHRONIZED_ARRAYLIST_FUN).add(replicaInfo);
       colShardReplicaMap.computeIfAbsent(replicaInfo.getCollection(), c -> new ConcurrentHashMap<>())
           .computeIfAbsent(replicaInfo.getShard(), s -> new ArrayList<>())
           .add(replicaInfo);
@@ -83,7 +84,7 @@
       collectionsStatesRef.set(null);
       log.trace("-- simAddReplica {}", replicaInfo);
       if (runLeaderElection) {
-        simRunLeaderElection(Collections.singleton(replicaInfo.getCollection()), true);
+        simRunLeaderElection(replicaInfo.getCollection(), replicaInfo.getShard(), true);
       }
     } finally {
       lock.unlock();

@@ -1,0 +1,41 @@
+  public void systemCollectionCompatCheck(final BiConsumer<String, Object> consumer) {
+    ClusterState clusterState = zkController.getClusterState();
+    if (clusterState == null) {
+      log.warn("Unable to check back-compat of .system collection - can't obtain ClusterState.");
+      return;
+    }
+    DocCollection coll = clusterState.getCollectionOrNull(CollectionAdminParams.SYSTEM_COLL);
+    if (coll == null) {
+      return;
+    }
+    // check that all shard leaders are active
+    boolean allActive = true;
+    for (Slice s : coll.getActiveSlices()) {
+      if (s.getLeader() == null || !s.getLeader().isActive(clusterState.getLiveNodes())) {
+        allActive = false;
+        break;
+      }
+    }
+    if (allActive) {
+      doCompatCheck(consumer);
+    } else {
+      // wait for all leaders to become active and then check
+      zkController.zkStateReader.registerCollectionStateWatcher(CollectionAdminParams.SYSTEM_COLL, (liveNodes, state) -> {
+        boolean active = true;
+        if (state == null || liveNodes.isEmpty()) {
+          return true;
+        }
+        for (Slice s : state.getActiveSlices()) {
+          if (s.getLeader() == null || !s.getLeader().isActive(liveNodes)) {
+            active = false;
+            break;
+          }
+        }
+        if (active) {
+          doCompatCheck(consumer);
+        }
+        return active;
+      });
+    }
+  }
+

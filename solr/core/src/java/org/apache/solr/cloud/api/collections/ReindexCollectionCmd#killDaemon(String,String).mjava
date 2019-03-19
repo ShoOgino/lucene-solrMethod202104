@@ -1,0 +1,86 @@
+  private void killDaemon(String daemonName, String daemonUrl) throws Exception {
+    log.debug("-- killing daemon " + daemonName + " at " + daemonUrl);
+    HttpClient client = ocmh.overseer.getCoreContainer().getUpdateShardHandler().getDefaultHttpClient();
+    try (HttpSolrClient solrClient = new HttpSolrClient.Builder()
+        .withHttpClient(client)
+        .withBaseSolrUrl(daemonUrl).build()) {
+      ModifiableSolrParams q = new ModifiableSolrParams();
+      q.set(CommonParams.QT, "/stream");
+      // we should really use 'kill' here, but then we will never
+      // know when the daemon actually finishes running - 'kill' only
+      // sets a flag that may be noticed much later
+      q.set("action", "stop");
+      q.set(CommonParams.ID, daemonName);
+      q.set(CommonParams.DISTRIB, false);
+      QueryRequest req = new QueryRequest(q);
+      NamedList<Object> rsp = solrClient.request(req);
+      // /result-set/docs/[0]/DaemonOp : Deamon:id killed on coreName
+      log.debug(" -- stop daemon response: " + Utils.toJSONString(rsp));
+      Map<String, Object> rs = (Map<String, Object>) rsp.get("result-set");
+      if (rs == null || rs.isEmpty()) {
+        log.warn("Problem killing daemon " + daemonName + ": missing result-set: " + Utils.toJSONString(rsp));
+        return;
+      }
+      List<Object> list = (List<Object>) rs.get("docs");
+      if (list == null) {
+        log.warn("Problem killing daemon " + daemonName + ": missing result-set: " + Utils.toJSONString(rsp));
+        return;
+      }
+      if (list.isEmpty()) { // already finished?
+        return;
+      }
+      for (Object o : list) {
+        Map<String, Object> map = (Map<String, Object>) o;
+        String op = (String) map.get("DaemonOp");
+        if (op == null) {
+          continue;
+        }
+        if (op.contains(daemonName) && op.contains("stopped")) {
+          // now wait for the daemon to really stop
+          q.set("action", "list");
+          req = new QueryRequest(q);
+          TimeOut timeOut = new TimeOut(60, TimeUnit.SECONDS, ocmh.timeSource);
+          while (!timeOut.hasTimedOut()) {
+            rsp = solrClient.request(req);
+            rs = (Map<String, Object>) rsp.get("result-set");
+            if (rs == null || rs.isEmpty()) {
+              log.warn("Problem killing daemon " + daemonName + ": missing result-set: " + Utils.toJSONString(rsp));
+              break;
+            }
+            List<Object> list2 = (List<Object>) rs.get("docs");
+            if (list2 == null) {
+              log.warn("Problem killing daemon " + daemonName + ": missing result-set: " + Utils.toJSONString(rsp));
+              break;
+            }
+            if (list2.isEmpty()) { // already finished?
+              break;
+            }
+            Map<String, Object> status2 = null;
+            for (Object o2 : list2) {
+              Map<String, Object> map2 = (Map<String, Object>)o2;
+              if (daemonName.equals(map2.get("id"))) {
+                status2 = map2;
+                break;
+              }
+            }
+            if (status2 == null) { // finished?
+              break;
+            }
+            Number stopTime = (Number)status2.get("stopTime");
+            if (stopTime.longValue() > 0) {
+              break;
+            }
+          }
+          if (timeOut.hasTimedOut()) {
+            log.warn("Problem killing daemon " + daemonName + ": timed out waiting for daemon to stop.");
+            // proceed anyway
+          }
+        }
+      }
+      // now kill it - it's already stopped, this simply removes its status
+      q.set("action", "kill");
+      req = new QueryRequest(q);
+      solrClient.request(req);
+    }
+  }
+

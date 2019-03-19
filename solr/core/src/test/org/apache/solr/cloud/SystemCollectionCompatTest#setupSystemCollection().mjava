@@ -1,0 +1,50 @@
+  @Before
+  public void setupSystemCollection() throws Exception {
+    CollectionAdminRequest.createCollection(CollectionAdminParams.SYSTEM_COLL, null, 1, 2)
+        .process(cluster.getSolrClient());
+    cluster.waitForActiveCollection(CollectionAdminParams.SYSTEM_COLL,  1, 2);
+    ZkController zkController = cluster.getJettySolrRunner(0).getCoreContainer().getZkController();
+    cloudManager = zkController.getSolrCloudManager();
+    solrClient = new CloudSolrClientBuilder(Collections.singletonList(zkController.getZkServerAddress()),
+        Optional.empty()).build();
+    // send a dummy doc to the .system collection
+    SolrInputDocument doc = new SolrInputDocument(
+        "id", IdUtils.timeRandomId(),
+        CommonParams.TYPE, "dummy");
+    doc.addField("time_l", cloudManager.getTimeSource().getEpochTimeNs());
+    doc.addField("timestamp", new Date());
+    solrClient.add(CollectionAdminParams.SYSTEM_COLL, doc);
+    solrClient.commit(CollectionAdminParams.SYSTEM_COLL);
+
+    Replica leader
+        = solrClient.getZkStateReader().getLeaderRetry(CollectionAdminParams.SYSTEM_COLL, "shard1", DEFAULT_TIMEOUT);
+    final AtomicReference<Long> coreStartTime = new AtomicReference<>(getCoreStatus(leader).getCoreStartTime().getTime());
+    // trigger compat report by changing the schema
+    SchemaRequest req = new SchemaRequest();
+    SchemaResponse rsp = req.process(solrClient, CollectionAdminParams.SYSTEM_COLL);
+    Map<String, Object> field = getSchemaField("timestamp", rsp);
+    // make some obviously incompatible changes
+    field.put("type", "string");
+    field.put("docValues", false);
+    SchemaRequest.ReplaceField replaceFieldRequest = new SchemaRequest.ReplaceField(field);
+    SchemaResponse.UpdateResponse replaceFieldResponse = replaceFieldRequest.process(solrClient, CollectionAdminParams.SYSTEM_COLL);
+    assertEquals(replaceFieldResponse.toString(), 0, replaceFieldResponse.getStatus());
+    CollectionAdminRequest.Reload reloadRequest = CollectionAdminRequest.reloadCollection(CollectionAdminParams.SYSTEM_COLL);
+    CollectionAdminResponse response = reloadRequest.process(solrClient);
+    assertEquals(0, response.getStatus());
+    assertTrue(response.isSuccess());
+    // wait for the reload to complete
+    RetryUtil.retryUntil("Timed out waiting for core to reload", 30, 1000, TimeUnit.MILLISECONDS, () -> {
+      long restartTime = 0;
+      try {
+        restartTime = getCoreStatus(leader).getCoreStartTime().getTime();
+      } catch (Exception e) {
+        log.warn("Exception getting core start time: {}", e.getMessage());
+        return false;
+      }
+      return restartTime > coreStartTime.get();
+    });
+    cluster.waitForActiveCollection(CollectionAdminParams.SYSTEM_COLL,  1, 2);
+
+  }
+

@@ -1,0 +1,66 @@
+  @Test
+  public void testBackCompat() throws Exception {
+    CollectionAdminRequest.OverseerStatus status = new CollectionAdminRequest.OverseerStatus();
+    CloudSolrClient solrClient = cluster.getSolrClient();
+    CollectionAdminResponse adminResponse = status.process(solrClient);
+    NamedList<Object> response = adminResponse.getResponse();
+    String leader = (String) response.get("leader");
+    JettySolrRunner overseerNode = null;
+    int index = -1;
+    List<JettySolrRunner> jettySolrRunners = cluster.getJettySolrRunners();
+    for (int i = 0; i < jettySolrRunners.size(); i++) {
+      JettySolrRunner runner = jettySolrRunners.get(i);
+      if (runner.getNodeName().equals(leader)) {
+        overseerNode = runner;
+        index = i;
+        break;
+      }
+    }
+    assertNotNull(overseerNode);
+    LogWatcherConfig watcherCfg = new LogWatcherConfig(true, null, "WARN", 100);
+    LogWatcher watcher = LogWatcher.newRegisteredLogWatcher(watcherCfg, null);
+
+    watcher.reset();
+
+    // restart Overseer to trigger the back-compat check
+    cluster.stopJettySolrRunner(index);
+    TimeOut timeOut = new TimeOut(30, TimeUnit.SECONDS, cloudManager.getTimeSource());
+    while (!timeOut.hasTimedOut()) {
+      adminResponse = status.process(solrClient);
+      response = adminResponse.getResponse();
+      String newLeader = (String) response.get("leader");
+      if (newLeader != null && !leader.equals(newLeader)) {
+        break;
+      }
+      timeOut.sleep(200);
+    }
+    if (timeOut.hasTimedOut()) {
+      fail("time out waiting for new Overseer leader");
+    }
+
+    TimeOut timeOut1 = new TimeOut(60, TimeUnit.SECONDS, cloudManager.getTimeSource());
+    boolean foundWarning = false;
+    boolean foundSchemaWarning = false;
+    while (!timeOut1.hasTimedOut()) {
+      timeOut1.sleep(1000);
+      SolrDocumentList history = watcher.getHistory(-1, null);
+      for (SolrDocument doc : history) {
+        if (!Overseer.class.getName().equals(doc.getFieldValue("logger"))) {
+          continue;
+        }
+        if (doc.getFieldValue("message").toString().contains("re-indexing")) {
+          foundWarning = true;
+        }
+        if (doc.getFieldValue("message").toString().contains("timestamp")) {
+          foundSchemaWarning = true;
+        }
+      }
+      if (foundWarning && foundSchemaWarning) {
+        break;
+      }
+    }
+    assertTrue("re-indexing warning not found", foundWarning);
+    assertTrue("timestamp field incompatibility warning not found", foundSchemaWarning);
+
+  }
+

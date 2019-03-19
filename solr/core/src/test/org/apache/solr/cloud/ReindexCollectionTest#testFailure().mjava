@@ -1,0 +1,49 @@
+  @Test
+  public void testFailure() throws Exception {
+    final String sourceCollection = "failReindexing";
+    final String targetCollection = "failReindexingTarget";
+    final String aliasTarget = "failAlias";
+    createCollection(sourceCollection, "conf1", 2, 2);
+    createCollection(targetCollection, "conf1", 1, 1);
+    CollectionAdminRequest.createAlias(aliasTarget, targetCollection).process(solrClient);
+    indexDocs(sourceCollection, NUM_DOCS,
+        i -> new SolrInputDocument(
+            "id", String.valueOf(i),
+            "string_s", String.valueOf(i)));
+
+    CollectionAdminRequest.ReindexCollection req = CollectionAdminRequest.reindexCollection(sourceCollection)
+        .setTarget(targetCollection);
+    CollectionAdminResponse rsp = req.process(solrClient);
+    assertNotNull(rsp.getResponse().get("error"));
+    assertTrue(rsp.toString(), rsp.getResponse().get("error").toString().contains("already exists"));
+
+    req = CollectionAdminRequest.reindexCollection(sourceCollection)
+        .setTarget(aliasTarget);
+    rsp = req.process(solrClient);
+    assertNotNull(rsp.getResponse().get("error"));
+    assertTrue(rsp.toString(), rsp.getResponse().get("error").toString().contains("already exists"));
+
+    CollectionAdminRequest.deleteAlias(aliasTarget).process(solrClient);
+    CollectionAdminRequest.deleteCollection(targetCollection).process(solrClient);
+
+    req = CollectionAdminRequest.reindexCollection(sourceCollection)
+        .setTarget(targetCollection);
+
+    TestInjection.reindexFailure = "true:100";
+    rsp = req.process(solrClient);
+    assertNotNull(rsp.getResponse().get("error"));
+    assertTrue(rsp.toString(), rsp.getResponse().get("error").toString().contains("waiting for daemon"));
+
+    // verify that the target and checkpoint collections don't exist
+    cloudManager.getClusterStateProvider().getClusterState().forEachCollection(coll -> {
+      assertFalse(coll.getName() + " still exists", coll.getName().startsWith(ReindexCollectionCmd.TARGET_COL_PREFIX));
+      assertFalse(coll.getName() + " still exists", coll.getName().startsWith(ReindexCollectionCmd.CHK_COL_PREFIX));
+    });
+    // verify that the source collection is read-write and has no reindexing flags
+    CloudTestUtils.waitForState(cloudManager, "collection state is incorrect", sourceCollection,
+        ((liveNodes, collectionState) ->
+            !collectionState.isReadOnly() &&
+            collectionState.getStr(ReindexCollectionCmd.REINDEXING_STATE) == null &&
+            getState(sourceCollection) == null));
+  }
+

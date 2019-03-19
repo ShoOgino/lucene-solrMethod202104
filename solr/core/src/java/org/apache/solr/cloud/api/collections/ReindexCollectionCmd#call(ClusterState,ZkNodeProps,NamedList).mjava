@@ -1,0 +1,347 @@
+  @Override
+  public void call(ClusterState clusterState, ZkNodeProps message, NamedList results) throws Exception {
+
+    log.debug("*** called: {}", message);
+
+    String collection = message.getStr(CommonParams.NAME);
+    // before resolving aliases
+    String originalCollection = collection;
+    Aliases aliases = ocmh.zkStateReader.getAliases();
+    if (collection != null) {
+      // resolve aliases - the source may be an alias
+      List<String> aliasList = aliases.resolveAliases(collection);
+      if (aliasList != null && !aliasList.isEmpty()) {
+        collection = aliasList.get(0);
+      }
+    }
+
+    if (collection == null || !clusterState.hasCollection(collection)) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Source collection name must be specified and must exist");
+    }
+    String target = message.getStr(TARGET);
+    if (target == null) {
+      target = collection;
+    } else {
+      // resolve aliases
+      List<String> aliasList = aliases.resolveAliases(target);
+      if (aliasList != null && !aliasList.isEmpty()) {
+        target = aliasList.get(0);
+      }
+    }
+    boolean sameTarget = target.equals(collection) || target.equals(originalCollection);
+    boolean removeSource = message.getBool(REMOVE_SOURCE, false);
+    Cmd command = Cmd.get(message.getStr(COMMAND, Cmd.START.toLower()));
+    if (command == null) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Unknown command: " + message.getStr(COMMAND));
+    }
+    Map<String, Object> reindexingState = getReindexingState(ocmh.cloudManager.getDistribStateManager(), collection);
+    if (!reindexingState.containsKey(STATE)) {
+      reindexingState.put(STATE, State.IDLE.toLower());
+    }
+    State state = State.get(reindexingState.get(STATE));
+    if (command == Cmd.ABORT) {
+      log.info("Abort requested for collection {}, setting the state to ABORTED.", collection);
+      // check that it's running
+      if (state != State.RUNNING) {
+        log.debug("Abort requested for collection {} but command is not running: {}", collection, state);
+        return;
+      }
+      setReindexingState(collection, State.ABORTED, null);
+      reindexingState.put(STATE, "aborting");
+      results.add(REINDEX_STATUS, reindexingState);
+      // if needed the cleanup will be performed by the running instance of the command
+      return;
+    } else if (command == Cmd.STATUS) {
+      results.add(REINDEX_STATUS, reindexingState);
+      return;
+    }
+    // command == Cmd.START
+
+    // check it's not already running
+    if (state == State.RUNNING) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Reindex is already running for collection " + collection +
+          ". If you are sure this is not the case you can issue &cmd=abort to clean up this state.");
+    }
+
+    DocCollection coll = clusterState.getCollection(collection);
+    boolean aborted = false;
+    int batchSize = message.getInt(CommonParams.ROWS, 100);
+    String query = message.getStr(CommonParams.Q, "*:*");
+    String fl = message.getStr(CommonParams.FL, "*");
+    Integer rf = message.getInt(ZkStateReader.REPLICATION_FACTOR, coll.getReplicationFactor());
+    Integer numNrt = message.getInt(ZkStateReader.NRT_REPLICAS, coll.getNumNrtReplicas());
+    Integer numTlog = message.getInt(ZkStateReader.TLOG_REPLICAS, coll.getNumTlogReplicas());
+    Integer numPull = message.getInt(ZkStateReader.PULL_REPLICAS, coll.getNumPullReplicas());
+    int numShards = message.getInt(ZkStateReader.NUM_SHARDS_PROP, coll.getActiveSlices().size());
+    int maxShardsPerNode = message.getInt(ZkStateReader.MAX_SHARDS_PER_NODE, coll.getMaxShardsPerNode());
+    DocRouter router = coll.getRouter();
+    if (router == null) {
+      router = DocRouter.DEFAULT;
+    }
+
+    String configName = message.getStr(ZkStateReader.CONFIGNAME_PROP, ocmh.zkStateReader.readConfigName(collection));
+    String targetCollection;
+    int seq = tmpCollectionSeq.getAndIncrement();
+    if (sameTarget) {
+      do {
+        targetCollection = TARGET_COL_PREFIX + originalCollection + "_" + seq;
+        if (!clusterState.hasCollection(targetCollection)) {
+          break;
+        }
+        seq = tmpCollectionSeq.getAndIncrement();
+      } while (clusterState.hasCollection(targetCollection));
+    } else {
+      targetCollection = target;
+    }
+    String chkCollection = CHK_COL_PREFIX + originalCollection;
+    String daemonUrl = null;
+    Exception exc = null;
+    boolean createdTarget = false;
+    try {
+      solrClientCache = new SolrClientCache(ocmh.overseer.getCoreContainer().getUpdateShardHandler().getDefaultHttpClient());
+      zkHost = ocmh.zkStateReader.getZkClient().getZkServerAddress();
+      // set the running flag
+      reindexingState.clear();
+      reindexingState.put("actualSourceCollection", collection);
+      reindexingState.put("actualTargetCollection", targetCollection);
+      reindexingState.put("checkpointCollection", chkCollection);
+      reindexingState.put("inputDocs", getNumberOfDocs(collection));
+      reindexingState.put(PHASE, "creating target and checkpoint collections");
+      setReindexingState(collection, State.RUNNING, reindexingState);
+
+      // 0. set up target and checkpoint collections
+      NamedList<Object> cmdResults = new NamedList<>();
+      ZkNodeProps cmd;
+      if (clusterState.hasCollection(targetCollection)) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Target collection " + targetCollection + " already exists! Delete it first.");
+      }
+      if (clusterState.hasCollection(chkCollection)) {
+        // delete the checkpoint collection
+        cmd = new ZkNodeProps(
+            Overseer.QUEUE_OPERATION, CollectionParams.CollectionAction.DELETE.toLower(),
+            CommonParams.NAME, chkCollection,
+            CoreAdminParams.DELETE_METRICS_HISTORY, "true"
+        );
+        ocmh.commandMap.get(CollectionParams.CollectionAction.DELETE).call(clusterState, cmd, cmdResults);
+        checkResults("deleting old checkpoint collection " + chkCollection, cmdResults, true);
+      }
+
+      if (maybeAbort(collection)) {
+        aborted = true;
+        return;
+      }
+
+      Map<String, Object> propMap = new HashMap<>();
+      propMap.put(Overseer.QUEUE_OPERATION, CollectionParams.CollectionAction.CREATE.toLower());
+      propMap.put(CommonParams.NAME, targetCollection);
+      propMap.put(ZkStateReader.NUM_SHARDS_PROP, numShards);
+      propMap.put(CollectionAdminParams.COLL_CONF, configName);
+      // init first from the same router
+      propMap.put("router.name", router.getName());
+      for (String key : coll.keySet()) {
+        if (key.startsWith("router.")) {
+          propMap.put(key, coll.get(key));
+        }
+      }
+      // then apply overrides if present
+      for (String key : message.keySet()) {
+        if (key.startsWith("router.")) {
+          propMap.put(key, message.getStr(key));
+        } else if (COLLECTION_PARAMS.contains(key)) {
+          propMap.put(key, message.get(key));
+        }
+      }
+
+      propMap.put(ZkStateReader.MAX_SHARDS_PER_NODE, maxShardsPerNode);
+      propMap.put(CommonAdminParams.WAIT_FOR_FINAL_STATE, true);
+      propMap.put(DocCollection.STATE_FORMAT, message.getInt(DocCollection.STATE_FORMAT, coll.getStateFormat()));
+      if (rf != null) {
+        propMap.put(ZkStateReader.REPLICATION_FACTOR, rf);
+      }
+      if (numNrt != null) {
+        propMap.put(ZkStateReader.NRT_REPLICAS, numNrt);
+      }
+      if (numTlog != null) {
+        propMap.put(ZkStateReader.TLOG_REPLICAS, numTlog);
+      }
+      if (numPull != null) {
+        propMap.put(ZkStateReader.PULL_REPLICAS, numPull);
+      }
+      // create the target collection
+      cmd = new ZkNodeProps(propMap);
+      cmdResults = new NamedList<>();
+      ocmh.commandMap.get(CollectionParams.CollectionAction.CREATE).call(clusterState, cmd, cmdResults);
+      createdTarget = true;
+      checkResults("creating target collection " + targetCollection, cmdResults, true);
+
+      // create the checkpoint collection - use RF=1 and 1 shard
+      cmd = new ZkNodeProps(
+          Overseer.QUEUE_OPERATION, CollectionParams.CollectionAction.CREATE.toLower(),
+          CommonParams.NAME, chkCollection,
+          ZkStateReader.NUM_SHARDS_PROP, "1",
+          ZkStateReader.REPLICATION_FACTOR, "1",
+          DocCollection.STATE_FORMAT, "2",
+          CollectionAdminParams.COLL_CONF, "_default",
+          CommonAdminParams.WAIT_FOR_FINAL_STATE, "true"
+      );
+      cmdResults = new NamedList<>();
+      ocmh.commandMap.get(CollectionParams.CollectionAction.CREATE).call(clusterState, cmd, cmdResults);
+      checkResults("creating checkpoint collection " + chkCollection, cmdResults, true);
+      // wait for a while until we see both collections
+      TimeOut waitUntil = new TimeOut(30, TimeUnit.SECONDS, ocmh.timeSource);
+      boolean created = false;
+      while (!waitUntil.hasTimedOut()) {
+        waitUntil.sleep(100);
+        // this also refreshes our local var clusterState
+        clusterState = ocmh.cloudManager.getClusterStateProvider().getClusterState();
+        created = clusterState.hasCollection(targetCollection) && clusterState.hasCollection(chkCollection);
+        if (created) break;
+      }
+      if (!created) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Could not fully create temporary collection(s)");
+      }
+      if (maybeAbort(collection)) {
+        aborted = true;
+        return;
+      }
+
+      // 1. put the source collection in read-only mode
+      cmd = new ZkNodeProps(
+          Overseer.QUEUE_OPERATION, CollectionParams.CollectionAction.MODIFYCOLLECTION.toLower(),
+          ZkStateReader.COLLECTION_PROP, collection,
+          ZkStateReader.READ_ONLY, "true");
+      ocmh.overseer.offerStateUpdate(Utils.toJSON(cmd));
+
+      TestInjection.injectReindexLatch();
+
+      if (maybeAbort(collection)) {
+        aborted = true;
+        return;
+      }
+
+      // 2. copy the documents to target
+      // Recipe taken from: http://joelsolr.blogspot.com/2016/10/solr-63-batch-jobs-parallel-etl-and.html
+      ModifiableSolrParams q = new ModifiableSolrParams();
+      q.set(CommonParams.QT, "/stream");
+      q.set("collection", collection);
+      q.set("expr",
+          "daemon(id=\"" + targetCollection + "\"," +
+              "terminate=\"true\"," +
+              "commit(" + targetCollection + "," +
+                "update(" + targetCollection + "," +
+                  "batchSize=" + batchSize + "," +
+                  "topic(" + chkCollection + "," +
+                    collection + "," +
+                    "q=\"" + query + "\"," +
+                    "fl=\"" + fl + "\"," +
+                    "id=\"topic_" + targetCollection + "\"," +
+                    // some of the documents eg. in .system contain large blobs
+                    "rows=\"" + batchSize + "\"," +
+                    "initialCheckpoint=\"0\"))))");
+      log.debug("- starting copying documents from " + collection + " to " + targetCollection);
+      SolrResponse rsp = null;
+      try {
+        rsp = ocmh.cloudManager.request(new QueryRequest(q));
+      } catch (Exception e) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Unable to copy documents from " +
+            collection + " to " + targetCollection, e);
+      }
+      daemonUrl = getDaemonUrl(rsp, coll);
+      if (daemonUrl == null) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Unable to copy documents from " +
+            collection + " to " + targetCollection + ": " + Utils.toJSONString(rsp));
+      }
+      reindexingState.put("daemonUrl", daemonUrl);
+      reindexingState.put("daemonName", targetCollection);
+      reindexingState.put(PHASE, "copying documents");
+      setReindexingState(collection, State.RUNNING, reindexingState);
+
+      // wait for the daemon to finish
+      waitForDaemon(targetCollection, daemonUrl, collection, targetCollection, reindexingState);
+      if (maybeAbort(collection)) {
+        aborted = true;
+        return;
+      }
+      log.debug("- finished copying from " + collection + " to " + targetCollection);
+      // fail here or earlier during daemon run
+      TestInjection.injectReindexFailure();
+
+      // 5. if (sameTarget) set up an alias to use targetCollection as the source name
+      if (sameTarget) {
+        log.debug("- setting up alias from " + originalCollection + " to " + targetCollection);
+        cmd = new ZkNodeProps(
+            CommonParams.NAME, originalCollection,
+            "collections", targetCollection);
+        cmdResults = new NamedList<>();
+        ocmh.commandMap.get(CollectionParams.CollectionAction.CREATEALIAS).call(clusterState, cmd, results);
+        checkResults("setting up alias " + originalCollection + " -> " + targetCollection, cmdResults, true);
+        reindexingState.put("alias", originalCollection + " -> " + targetCollection);
+      }
+
+      reindexingState.remove("daemonUrl");
+      reindexingState.remove("daemonName");
+      reindexingState.put("processedDocs", getNumberOfDocs(targetCollection));
+      reindexingState.put(PHASE, "copying done, finalizing");
+      setReindexingState(collection, State.RUNNING, reindexingState);
+
+      if (maybeAbort(collection)) {
+        aborted = true;
+        return;
+      }
+      // 6. delete the checkpoint collection
+      log.debug("- deleting " + chkCollection);
+      cmd = new ZkNodeProps(
+          Overseer.QUEUE_OPERATION, CollectionParams.CollectionAction.DELETE.toLower(),
+          CommonParams.NAME, chkCollection,
+          CoreAdminParams.DELETE_METRICS_HISTORY, "true"
+      );
+      cmdResults = new NamedList<>();
+      ocmh.commandMap.get(CollectionParams.CollectionAction.DELETE).call(clusterState, cmd, cmdResults);
+      checkResults("deleting checkpoint collection " + chkCollection, cmdResults, true);
+
+      // 7. optionally delete the source collection
+      if (removeSource) {
+        log.debug("- deleting source collection");
+        cmd = new ZkNodeProps(
+            Overseer.QUEUE_OPERATION, CollectionParams.CollectionAction.DELETE.toLower(),
+            CommonParams.NAME, collection,
+            CoreAdminParams.DELETE_METRICS_HISTORY, "true"
+        );
+        cmdResults = new NamedList<>();
+        ocmh.commandMap.get(CollectionParams.CollectionAction.DELETE).call(clusterState, cmd, cmdResults);
+        checkResults("deleting source collection " + collection, cmdResults, true);
+      } else {
+        // 8. clear readOnly on source
+        ZkNodeProps props = new ZkNodeProps(
+            Overseer.QUEUE_OPERATION, CollectionParams.CollectionAction.MODIFYCOLLECTION.toLower(),
+            ZkStateReader.COLLECTION_PROP, collection,
+            ZkStateReader.READ_ONLY, null);
+        ocmh.overseer.offerStateUpdate(Utils.toJSON(props));
+      }
+      // 9. set FINISHED state on the target and clear the state on the source
+      ZkNodeProps props = new ZkNodeProps(
+          Overseer.QUEUE_OPERATION, CollectionParams.CollectionAction.MODIFYCOLLECTION.toLower(),
+          ZkStateReader.COLLECTION_PROP, targetCollection,
+          REINDEXING_STATE, State.FINISHED.toLower());
+      ocmh.overseer.offerStateUpdate(Utils.toJSON(props));
+
+      reindexingState.put(STATE, State.FINISHED.toLower());
+      reindexingState.put(PHASE, "done");
+      removeReindexingState(collection);
+    } catch (Exception e) {
+      log.warn("Error during reindexing of " + originalCollection, e);
+      exc = e;
+      aborted = true;
+    } finally {
+      solrClientCache.close();
+      if (aborted) {
+        cleanup(collection, targetCollection, chkCollection, daemonUrl, targetCollection, createdTarget);
+        if (exc != null) {
+          results.add("error", exc.toString());
+        }
+        reindexingState.put(STATE, State.ABORTED.toLower());
+      }
+      results.add(REINDEX_STATUS, reindexingState);
+    }
+  }
+

@@ -2,17 +2,9 @@
   // have any documents specified by those IDs, the request is not forwarded to any other replicas on that shard. Thus
   // we have to spoof the replicationTracker and set the achieved rf to the number of active replicas.
   //
-  private void doDeleteById(DeleteUpdateCommand cmd) throws IOException {
-    if (zkEnabled) {
-      zkCheck();
-      nodes = setupRequest(cmd.getId(), null, cmd.getRoute());
-    } else {
-      isLeader = getNonZkLeaderAssumption(req);
-    }
+  protected void doDeleteById(DeleteUpdateCommand cmd) throws IOException {
 
-    // check if client has requested minimum replication factor information. will set replicationTracker to null if
-    // we aren't the leader or subShardLeader
-    checkReplicationTracker(cmd);
+    setupRequest(cmd);
 
     boolean dropCmd = false;
     if (!forwardToLeader) {
@@ -24,45 +16,7 @@
       return;
     }
 
-    if (zkEnabled && isLeader && !isSubShardLeader)  {
-      DocCollection coll = zkController.getClusterState().getCollection(collection);
-      List<Node> subShardLeaders = getSubShardLeaders(coll, cloudDesc.getShardId(), cmd.getId(), null);
-      // the list<node> will actually have only one element for an add request
-      if (subShardLeaders != null && !subShardLeaders.isEmpty()) {
-        ModifiableSolrParams params = new ModifiableSolrParams(filterParams(req.getParams()));
-        params.set(DISTRIB_UPDATE_PARAM, DistribPhase.FROMLEADER.toString());
-        params.set(DISTRIB_FROM, ZkCoreNodeProps.getCoreUrl(
-            zkController.getBaseUrl(), req.getCore().getName()));
-        params.set(DISTRIB_FROM_PARENT, cloudDesc.getShardId());
-        cmdDistrib.distribDelete(cmd, subShardLeaders, params, true, null, null);
-      }
-
-      final List<Node> nodesByRoutingRules = getNodesByRoutingRules(zkController.getClusterState(), coll, cmd.getId(), null);
-      if (nodesByRoutingRules != null && !nodesByRoutingRules.isEmpty())  {
-        ModifiableSolrParams params = new ModifiableSolrParams(filterParams(req.getParams()));
-        params.set(DISTRIB_UPDATE_PARAM, DistribPhase.FROMLEADER.toString());
-        params.set(DISTRIB_FROM, ZkCoreNodeProps.getCoreUrl(
-            zkController.getBaseUrl(), req.getCore().getName()));
-        params.set(DISTRIB_FROM_COLLECTION, collection);
-        params.set(DISTRIB_FROM_SHARD, cloudDesc.getShardId());
-        cmdDistrib.distribDelete(cmd, nodesByRoutingRules, params, true, null, null);
-      }
-    }
-
-    if (nodes != null) {
-      ModifiableSolrParams params = new ModifiableSolrParams(filterParams(req.getParams()));
-      params.set(DISTRIB_UPDATE_PARAM,
-          (isLeader || isSubShardLeader ? DistribPhase.FROMLEADER.toString()
-              : DistribPhase.TOLEADER.toString()));
-      params.set(DISTRIB_FROM, ZkCoreNodeProps.getCoreUrl(
-          zkController.getBaseUrl(), req.getCore().getName()));
-
-      if (req.getParams().get(UpdateRequest.MIN_REPFACT) != null) {
-        // TODO: Kept for rolling upgrades only. Remove in Solr 9
-        params.add(UpdateRequest.MIN_REPFACT, req.getParams().get(UpdateRequest.MIN_REPFACT));
-      }
-      cmdDistrib.distribDelete(cmd, nodes, params, false, rollupReplicationTracker, leaderReplicationTracker);
-    }
+    doDistribDeleteById(cmd);
 
     // cmd.getIndexId == null when delete by query
     // TODO: what to do when no idField?

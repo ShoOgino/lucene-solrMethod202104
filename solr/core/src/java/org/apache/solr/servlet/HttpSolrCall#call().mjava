@@ -12,6 +12,9 @@
 
     if (solrDispatchFilter.abortErrorMessage != null) {
       sendError(500, solrDispatchFilter.abortErrorMessage);
+      if (shouldAudit(EventType.ERROR)) {
+        cores.getAuditLoggerPlugin().doAudit(new AuditEvent(EventType.ERROR, getReq()));
+      }
       return RETURN;
     }
 
@@ -31,12 +34,21 @@
             for (Map.Entry<String, String> e : headers.entrySet()) response.setHeader(e.getKey(), e.getValue());
           }
           log.debug("USER_REQUIRED "+req.getHeader("Authorization")+" "+ req.getUserPrincipal());
+          if (shouldAudit(EventType.REJECTED)) {
+            cores.getAuditLoggerPlugin().doAudit(new AuditEvent(EventType.REJECTED, req, context));
+          }
         }
         if (!(authResponse.statusCode == HttpStatus.SC_ACCEPTED) && !(authResponse.statusCode == HttpStatus.SC_OK)) {
           log.info("USER_REQUIRED auth header {} context : {} ", req.getHeader("Authorization"), context);
           sendError(authResponse.statusCode,
               "Unauthorized request, Response code: " + authResponse.statusCode);
+          if (shouldAudit(EventType.UNAUTHORIZED)) {
+            cores.getAuditLoggerPlugin().doAudit(new AuditEvent(EventType.UNAUTHORIZED, req, context));
+          }
           return RETURN;
+        }
+        if (shouldAudit(EventType.AUTHORIZED)) {
+          cores.getAuditLoggerPlugin().doAudit(new AuditEvent(EventType.AUTHORIZED, req, context));
         }
       }
 
@@ -64,6 +76,13 @@
                */
             SolrRequestInfo.setRequestInfo(new SolrRequestInfo(solrReq, solrRsp));
             execute(solrRsp);
+            if (shouldAudit()) {
+              EventType eventType = solrRsp.getException() == null ? EventType.COMPLETED : EventType.ERROR;
+              if (shouldAudit(eventType)) {
+                cores.getAuditLoggerPlugin().doAudit(
+                    new AuditEvent(eventType, req, getAuthCtx(), solrReq.getRequestTimer().getTime(), solrRsp.getException()));
+              }
+            }
             HttpCacheHeaderUtil.checkHttpCachingVeto(solrRsp, resp, reqMethod);
             Iterator<Map.Entry<String, String>> headers = solrRsp.httpHeaders();
             while (headers.hasNext()) {
@@ -78,6 +97,9 @@
         default: return action;
       }
     } catch (Throwable ex) {
+      if (shouldAudit(EventType.ERROR)) {
+        cores.getAuditLoggerPlugin().doAudit(new AuditEvent(EventType.ERROR, ex, req));
+      }
       sendError(ex);
       // walk the the entire cause chain to search for an Error
       Throwable t = ex;

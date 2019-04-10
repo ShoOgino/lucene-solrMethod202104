@@ -1,0 +1,82 @@
+  /**
+   * Obtains the latest document for a given id from the tlog or through the realtime searcher (if not found in the tlog). 
+   * @param versionReturned If a non-null AtomicLong is passed in, it is set to the version of the update returned from the TLog.
+   * @param onlyTheseNonStoredDVs If not-null, populate only these DV fields in the document fetched through the realtime searcher. 
+   *                  If this is null, decorate all non-stored  DVs (that are not targets of copy fields) from the searcher.
+   *                  When non-null, stored fields are not fetched.
+   * @param resolveStrategy The strategy to resolve the the document.
+   * @see Resolution
+   */
+  public static SolrInputDocument getInputDocument(SolrCore core, BytesRef idBytes, AtomicLong versionReturned,
+      Set<String> onlyTheseNonStoredDVs, Resolution resolveStrategy) throws IOException {
+    SolrInputDocument sid = null;
+    RefCounted<SolrIndexSearcher> searcherHolder = null;
+    try {
+      SolrIndexSearcher searcher = null;
+      sid = getInputDocumentFromTlog(core, idBytes, versionReturned, onlyTheseNonStoredDVs, true);
+      if (sid == DELETED) {
+        return null;
+      }
+
+      if (sid == null) {
+        // didn't find it in the update log, so it should be in the newest searcher opened
+        if (searcher == null) {
+          searcherHolder = core.getRealtimeSearcher();
+          searcher = searcherHolder.get();
+        }
+
+        // SolrCore.verbose("RealTimeGet using searcher ", searcher);
+        final IndexSchema schema = core.getLatestSchema();
+        SchemaField idField = schema.getUniqueKeyField();
+
+        int docid = searcher.getFirstMatch(new Term(idField.getName(), idBytes));
+        if (docid < 0) return null;
+
+        SolrDocumentFetcher docFetcher = searcher.getDocFetcher();
+        if (onlyTheseNonStoredDVs != null) {
+          sid = new SolrInputDocument();
+        } else {
+          Document luceneDocument = docFetcher.doc(docid);
+          sid = toSolrInputDocument(luceneDocument, schema);
+        }
+        final boolean isNestedRequest = resolveStrategy == Resolution.DOC_WITH_CHILDREN || resolveStrategy == Resolution.ROOT_WITH_CHILDREN;
+        decorateDocValueFields(docFetcher, sid, docid, onlyTheseNonStoredDVs, isNestedRequest || schema.hasExplicitField(IndexSchema.NEST_PATH_FIELD_NAME));
+        SolrInputField rootField = sid.getField(IndexSchema.ROOT_FIELD_NAME);
+        if((isNestedRequest) && schema.isUsableForChildDocs() && schema.hasExplicitField(IndexSchema.NEST_PATH_FIELD_NAME) && rootField!=null) {
+          // doc is part of a nested structure
+          final boolean resolveRootDoc = resolveStrategy == Resolution.ROOT_WITH_CHILDREN;
+          String id = resolveRootDoc? (String) rootField.getFirstValue(): (String) sid.getField(idField.getName()).getFirstValue();
+          ModifiableSolrParams params = new ModifiableSolrParams()
+              .set("fl", "*, _nest_path_, [child]")
+              .set("limit", "-1");
+          SolrQueryRequest nestedReq = new LocalSolrQueryRequest(core, params);
+          final BytesRef rootIdBytes = new BytesRef(id);
+          final int rootDocId = searcher.getFirstMatch(new Term(idField.getName(), rootIdBytes));
+          final DocTransformer childDocTransformer = core.getTransformerFactory("child").create("child", params, nestedReq);
+          final ResultContext resultContext = new RTGResultContext(new SolrReturnFields(nestedReq), searcher, nestedReq);
+          childDocTransformer.setContext(resultContext);
+          final SolrDocument nestedDoc;
+          if(resolveRootDoc && rootIdBytes.equals(idBytes)) {
+            nestedDoc = toSolrDoc(sid, schema);
+          } else {
+            nestedDoc = toSolrDoc(docFetcher.doc(rootDocId), schema);
+            decorateDocValueFields(docFetcher, nestedDoc, rootDocId, onlyTheseNonStoredDVs, true);
+          }
+          childDocTransformer.transform(nestedDoc, rootDocId);
+          sid = toSolrInputDocument(nestedDoc, schema);
+        }
+      }
+    } finally {
+      if (searcherHolder != null) {
+        searcherHolder.decref();
+      }
+    }
+
+    if (versionReturned != null) {
+      if (sid.containsKey(VERSION_FIELD)) {
+        versionReturned.set((long)sid.getFieldValue(VERSION_FIELD));
+      }
+    }
+    return sid;
+  }
+

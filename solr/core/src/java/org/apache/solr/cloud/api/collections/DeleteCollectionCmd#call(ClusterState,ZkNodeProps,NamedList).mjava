@@ -1,9 +1,17 @@
   @Override
   public void call(ClusterState state, ZkNodeProps message, NamedList results) throws Exception {
-    final String collection = message.getStr(NAME);
+    final String extCollection = message.getStr(NAME);
     ZkStateReader zkStateReader = ocmh.zkStateReader;
 
-    checkNotReferencedByAlias(zkStateReader, collection);
+    if (zkStateReader.aliasesManager != null) { // not a mock ZkStateReader
+      zkStateReader.aliasesManager.update(); // aliases may have been stale; get latest from ZK
+    }
+
+    String aliasReference = checkAliasReference(zkStateReader, extCollection);
+
+    Aliases aliases = zkStateReader.getAliases();
+    String collection = aliases.resolveSimpleAlias(extCollection);
+
     checkNotColocatedWith(zkStateReader, collection);
 
     final boolean deleteHistory = message.getBool(CoreAdminParams.DELETE_METRICS_HISTORY, true);
@@ -47,8 +55,8 @@
       okayExceptions.add(NonExistentCoreException.class.getName());
 
       List<Replica> failedReplicas = ocmh.collectionCmd(message, params, results, null, asyncId, requestMap, okayExceptions);
-      for (Replica failedRepilca : failedReplicas) {
-        boolean isSharedFS = failedRepilca.getBool(ZkStateReader.SHARED_STORAGE_PROP, false) && failedRepilca.get("dataDir") != null;
+      for (Replica failedReplica : failedReplicas) {
+        boolean isSharedFS = failedReplica.getBool(ZkStateReader.SHARED_STORAGE_PROP, false) && failedReplica.get("dataDir") != null;
         if (isSharedFS) {
           // if the replica use a shared FS and it did not receive the unload message, then counter node should not be removed
           // because when a new collection with same name is created, new replicas may reuse the old dataDir
@@ -62,7 +70,12 @@
 
       // wait for a while until we don't see the collection
       zkStateReader.waitForState(collection, 60, TimeUnit.SECONDS, (liveNodes, collectionState) -> collectionState == null);
-      
+
+      // we can delete any remaining unique alias
+      if (aliasReference != null) {
+        ocmh.zkStateReader.aliasesManager.applyModificationAndExportToZk(a -> a.cloneWithCollectionAlias(aliasReference, null));
+      }
+
 //      TimeOut timeout = new TimeOut(60, TimeUnit.SECONDS, timeSource);
 //      boolean removed = false;
 //      while (! timeout.hasTimedOut()) {

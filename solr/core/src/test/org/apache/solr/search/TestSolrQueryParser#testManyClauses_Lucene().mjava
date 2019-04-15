@@ -1,0 +1,37 @@
+  @Test
+  public void testManyClauses_Lucene() throws Exception {
+    final int numZ = BooleanQuery.getMaxClauseCount();
+    
+    final String a = "1 a 2 b 3 c 10 d 11 12 "; // 10 terms
+    final StringBuilder sb = new StringBuilder("id:(");
+    for (int i = 0; i < numZ; i++) {
+      sb.append('z').append(i).append(' ');
+    }
+    sb.append(a);
+    sb.append(")");
+    
+    // this should trip the lucene level global BooleanQuery.getMaxClauseCount() limit,
+    // causing a parsing error, before Solr even get's a chance to enforce it's lower level limit
+    final String way_too_long = sb.toString();
+
+    final String expectedMsg = "too many boolean clauses";
+    ignoreException(expectedMsg);
+    SolrException e = expectThrows(SolrException.class, "expected SolrException",
+                                   () -> assertJQ(req("q", way_too_long), "/response/numFound==6"));
+    assertThat(e.getMessage(), containsString(expectedMsg));
+    
+    assertNotNull(e.getCause());
+    assertEquals(SyntaxError.class, e.getCause().getClass());
+    
+    assertNotNull(e.getCause().getCause());
+    assertEquals(BooleanQuery.TooManyClauses.class, e.getCause().getCause().getClass());
+
+    // but should still work as a filter query since TermsQuery can be used...
+    assertJQ(req("q","*:*", "fq", way_too_long)
+        ,"/response/numFound==6");
+    assertJQ(req("q","*:*", "fq", way_too_long, "sow", "false")
+        ,"/response/numFound==6");
+    assertJQ(req("q","*:*", "fq", way_too_long, "sow", "true")
+        ,"/response/numFound==6");
+  }
+

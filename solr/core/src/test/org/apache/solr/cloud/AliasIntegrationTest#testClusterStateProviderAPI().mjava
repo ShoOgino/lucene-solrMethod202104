@@ -1,0 +1,37 @@
+  @Test
+  public void testClusterStateProviderAPI() throws Exception {
+    final String aliasName = getSaferTestName();
+    ZkStateReader zkStateReader = createColectionsAndAlias(aliasName);
+    CollectionAdminRequest.SetAliasProperty setAliasProperty = CollectionAdminRequest.setAliasProperty(aliasName);
+    setAliasProperty.addProperty("foo","baz");
+    setAliasProperty.addProperty("bar","bam");
+    setAliasProperty.process(cluster.getSolrClient());
+    checkFooAndBarMeta(aliasName, zkStateReader);
+    SolrCloudManager cloudManager = cluster.getJettySolrRunner(0).getCoreContainer().getZkController().getSolrCloudManager();
+    ClusterStateProvider stateProvider = cloudManager.getClusterStateProvider();
+    List<String> collections = stateProvider.resolveAlias(aliasName);
+    assertEquals(collections.toString(), 2, collections.size());
+    assertTrue(collections.toString(), collections.contains("collection1meta"));
+    assertTrue(collections.toString(), collections.contains("collection2meta"));
+    Map<String, String> props = stateProvider.getAliasProperties(aliasName);
+    assertEquals(props.toString(), 2, props.size());
+    assertEquals(props.toString(), "baz", props.get("foo"));
+    assertEquals(props.toString(), "bam", props.get("bar"));
+
+    assertFalse("should not be a routed alias", stateProvider.isRoutedAlias(aliasName));
+    // now make it a routed alias, according to the criteria in the API
+    setAliasProperty = CollectionAdminRequest.setAliasProperty(aliasName);
+    setAliasProperty.addProperty(CollectionAdminParams.ROUTER_PREFIX + "foo","baz");
+    setAliasProperty.process(cluster.getSolrClient());
+    // refresh
+    stateProvider = cloudManager.getClusterStateProvider();
+    assertTrue("should be a routed alias", stateProvider.isRoutedAlias(aliasName));
+
+    try {
+      String resolved = stateProvider.resolveSimpleAlias(aliasName);
+      fail("this is not a simple alias but it resolved to " + resolved);
+    } catch (IllegalArgumentException e) {
+      // expected
+    }
+  }
+

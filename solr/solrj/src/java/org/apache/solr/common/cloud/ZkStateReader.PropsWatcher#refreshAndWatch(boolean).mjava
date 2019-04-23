@@ -4,18 +4,17 @@
      */
     void refreshAndWatch(boolean notifyWatchers) {
       try {
-        synchronized (coll) { // We only have one PropsWatcher instance per collection, so it's fine to sync on coll
-          Map<String, String> properties = fetchCollectionProperties(coll, this);
-          watchedCollectionProps.put(coll, properties);
-          /*
-           * Note that if two events were fired close to each other and the second one arrived first, we would read the collectionprops.json
-           * twice for the same data and notify watchers (in case of notifyWatchers==true) twice for the same data, however it's guaranteed
-           * that after processing both events, watchedCollectionProps will have the latest data written to ZooKeeper and that the watchers
-           * won't be called with out of order data
-           * 
-           */
-          if (notifyWatchers) {
-            notifyPropsWatchers(coll, properties);
+        synchronized (watchedCollectionProps) { // making decisions based on the result of a get...
+          VersionedCollectionProps vcp = fetchCollectionProperties(coll, this);
+          Map<String, String> properties = vcp.props;
+          VersionedCollectionProps existingVcp = watchedCollectionProps.get(coll);
+          if (existingVcp == null ||                   // never called before, record what we found
+              vcp.zkVersion > existingVcp.zkVersion || // newer info we should update
+              vcp.zkVersion == -1) {                   // node was deleted start over
+            watchedCollectionProps.put(coll, vcp);
+            if (notifyWatchers) {
+              notifyPropsWatchers(coll, properties);
+            }
           }
         }
       } catch (KeeperException.SessionExpiredException | KeeperException.ConnectionLossException e) {

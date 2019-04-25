@@ -1,0 +1,41 @@
+  @Test
+  public void testUpdatingDocValuesWithRouteField() throws Exception {
+
+     new UpdateRequest()
+      .deleteByQuery("*:*").commit(cluster.getSolrClient(), COLLECTION);
+    
+     new UpdateRequest().add(createDocs(NUMBER_OF_DOCS)).commit(cluster.getSolrClient(), COLLECTION);
+
+    int id = TestUtil.nextInt(random(), 1, NUMBER_OF_DOCS - 1);
+    SolrDocument solrDocument = queryDoc(id);
+    Long initialVersion = (Long) solrDocument.get("_version_");
+    Integer luceneDocId = (Integer) solrDocument.get("[docid]");
+    String shardName = (String) solrDocument.get("shardName");
+    Assert.assertThat(solrDocument.get("inplace_updatable_int"), is(id));
+
+    int newDocValue = TestUtil.nextInt(random(), 1, 2 * NUMBER_OF_DOCS - 1);
+    SolrInputDocument sdoc = sdoc("id", ""+id,
+        // use route field in update command
+        "shardName", shardName,
+        "inplace_updatable_int", map("set", newDocValue));
+    
+    UpdateRequest updateRequest = new UpdateRequest()
+        .add(sdoc);
+    updateRequest.commit(cluster.getSolrClient(), COLLECTION);
+    solrDocument = queryDoc(id);
+    Long newVersion = (Long) solrDocument.get("_version_");
+    Assert.assertTrue("Version of updated document must be greater than original one",
+        newVersion > initialVersion);
+    Assert.assertThat( "Doc value must be updated", solrDocument.get("inplace_updatable_int"), is(newDocValue));
+    Assert.assertThat("Lucene doc id should not be changed for In-Place Updates.", solrDocument.get("[docid]"), is(luceneDocId));
+    
+    try {
+      sdoc.remove("shardName");
+      new UpdateRequest()
+         .add(sdoc).process(cluster.getSolrClient(), COLLECTION);
+      fail("expect  an exception w/o route field");
+    }catch(SolrException ex) {
+      assertThat("expecting 400 in "+ex.getMessage(), ex.code(), is(400));
+    }
+  }
+

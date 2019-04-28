@@ -1,4 +1,4 @@
-  public boolean split(ClusterState clusterState, ZkNodeProps message, NamedList results) throws Exception {
+  public boolean split(ClusterState clusterState, ZkNodeProps message, NamedList<Object> results) throws Exception {
     boolean waitForFinalState = message.getBool(CommonAdminParams.WAIT_FOR_FINAL_STATE, false);
     String methodStr = message.getStr(CommonAdminParams.SPLIT_METHOD, SolrIndexSplitter.SplitMethod.REWRITE.toLower());
     SolrIndexSplitter.SplitMethod splitMethod = SolrIndexSplitter.SplitMethod.get(methodStr);
@@ -134,7 +134,6 @@
       }
 
       final String asyncId = message.getStr(ASYNC);
-      Map<String, String> requestMap = new HashMap<>();
       String nodeName = parentShardLeader.getNodeName();
 
       t = timings.sub("createSubSlicesAndLeadersInState");
@@ -186,30 +185,34 @@
         ocmh.addReplica(clusterState, new ZkNodeProps(propMap), results, null);
       }
 
+      @SuppressWarnings("deprecation")
       ShardHandler shardHandler = ocmh.shardHandlerFactory.getShardHandler(ocmh.overseer.getCoreContainer().getUpdateShardHandler().getDefaultHttpClient());
-
-      ocmh.processResponses(results, shardHandler, true, "SPLITSHARD failed to create subshard leaders", asyncId, requestMap);
-
+      {
+        final ShardRequestTracker syncRequestTracker = ocmh.syncRequestTracker();
+        syncRequestTracker.processResponses(results, shardHandler, true, "SPLITSHARD failed to create subshard leaders");
+      }
       t.stop();
       t = timings.sub("waitForSubSliceLeadersAlive");
-      for (String subShardName : subShardNames) {
-        // wait for parent leader to acknowledge the sub-shard core
-        log.debug("Asking parent leader to wait for: " + subShardName + " to be alive on: " + nodeName);
-        String coreNodeName = ocmh.waitForCoreNodeName(collectionName, nodeName, subShardName);
-        CoreAdminRequest.WaitForState cmd = new CoreAdminRequest.WaitForState();
-        cmd.setCoreName(subShardName);
-        cmd.setNodeName(nodeName);
-        cmd.setCoreNodeName(coreNodeName);
-        cmd.setState(Replica.State.ACTIVE);
-        cmd.setCheckLive(true);
-        cmd.setOnlyIfLeader(true);
+      {
+        final ShardRequestTracker shardRequestTracker = ocmh.asyncRequestTracker(asyncId);
+        for (String subShardName : subShardNames) {
+          // wait for parent leader to acknowledge the sub-shard core
+          log.debug("Asking parent leader to wait for: " + subShardName + " to be alive on: " + nodeName);
+          String coreNodeName = ocmh.waitForCoreNodeName(collectionName, nodeName, subShardName);
+          CoreAdminRequest.WaitForState cmd = new CoreAdminRequest.WaitForState();
+          cmd.setCoreName(subShardName);
+          cmd.setNodeName(nodeName);
+          cmd.setCoreNodeName(coreNodeName);
+          cmd.setState(Replica.State.ACTIVE);
+          cmd.setCheckLive(true);
+          cmd.setOnlyIfLeader(true);
 
-        ModifiableSolrParams p = new ModifiableSolrParams(cmd.getParams());
-        ocmh.sendShardRequest(nodeName, p, shardHandler, asyncId, requestMap);
+          ModifiableSolrParams p = new ModifiableSolrParams(cmd.getParams());
+          shardRequestTracker.sendShardRequest(nodeName, p, shardHandler);
+        }
+
+        shardRequestTracker.processResponses(results, shardHandler, true, "SPLITSHARD timed out waiting for subshard leaders to come up");
       }
-
-      ocmh.processResponses(results, shardHandler, true, "SPLITSHARD timed out waiting for subshard leaders to come up",
-          asyncId, requestMap);
       t.stop();
 
       log.debug("Successfully created all sub-shards for collection " + collectionName + " parent shard: " + slice
@@ -229,31 +232,37 @@
       params.set(CoreAdminParams.RANGES, rangesStr);
 
       t = timings.sub("splitParentCore");
+      {
+        final ShardRequestTracker shardRequestTracker = ocmh.asyncRequestTracker(asyncId);
+        shardRequestTracker.sendShardRequest(parentShardLeader.getNodeName(), params, shardHandler);
 
-      ocmh.sendShardRequest(parentShardLeader.getNodeName(), params, shardHandler, asyncId, requestMap);
-
-      ocmh.processResponses(results, shardHandler, true, "SPLITSHARD failed to invoke SPLIT core admin command", asyncId,
-          requestMap);
+        shardRequestTracker.processResponses(results, shardHandler, true, "SPLITSHARD failed to invoke SPLIT core admin command");
+      }
       t.stop();
 
       log.debug("Index on shard: {} split into {} successfully", nodeName, subShardNames.size());
 
       t = timings.sub("applyBufferedUpdates");
       // apply buffered updates on sub-shards
-      for (int i = 0; i < subShardNames.size(); i++) {
-        String subShardName = subShardNames.get(i);
+      {
+        final ShardRequestTracker shardRequestTracker = ocmh.asyncRequestTracker(asyncId);
 
-        log.debug("Applying buffered updates on : " + subShardName);
+        for (int i = 0; i < subShardNames.size(); i++) {
+          String subShardName = subShardNames.get(i);
 
-        params = new ModifiableSolrParams();
-        params.set(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.REQUESTAPPLYUPDATES.toString());
-        params.set(CoreAdminParams.NAME, subShardName);
+          log.debug("Applying buffered updates on : " + subShardName);
 
-        ocmh.sendShardRequest(nodeName, params, shardHandler, asyncId, requestMap);
+          params = new ModifiableSolrParams();
+          params.set(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.REQUESTAPPLYUPDATES.toString());
+          params.set(CoreAdminParams.NAME, subShardName);
+
+          shardRequestTracker.sendShardRequest(nodeName, params, shardHandler);
+        }
+
+        shardRequestTracker.processResponses(results, shardHandler, true,
+            "SPLITSHARD failed while asking sub shard leaders" +
+                " to apply buffered updates");
       }
-
-      ocmh.processResponses(results, shardHandler, true, "SPLITSHARD failed while asking sub shard leaders" +
-          " to apply buffered updates", asyncId, requestMap);
       t.stop();
 
       log.debug("Successfully applied buffered updates on : " + subShardNames);
@@ -408,7 +417,10 @@
 
       assert TestInjection.injectSplitFailureAfterReplicaCreation();
 
-      ocmh.processResponses(results, shardHandler, true, "SPLITSHARD failed to create subshard replicas", asyncId, requestMap);
+      {
+        final ShardRequestTracker syncRequestTracker = ocmh.syncRequestTracker();
+        syncRequestTracker.processResponses(results, shardHandler, true, "SPLITSHARD failed to create subshard replicas");
+      }
       t.stop();
 
       log.info("Successfully created all replica shards for all sub-slices " + subSlices);

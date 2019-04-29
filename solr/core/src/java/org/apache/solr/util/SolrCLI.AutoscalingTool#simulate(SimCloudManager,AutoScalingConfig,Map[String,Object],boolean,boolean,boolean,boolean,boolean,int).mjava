@@ -1,0 +1,43 @@
+    private void simulate(SimCloudManager simCloudManager,
+                          AutoScalingConfig config,
+                          Map<String, Object> results,
+                          boolean withClusterState,
+                          boolean withStats,
+                          boolean withSuggestions,
+                          boolean withSortedNodes,
+                          boolean withDiagnostics, int iterations) throws Exception {
+      int loop = iterations;
+      List<Suggester.SuggestionInfo> suggestions = Collections.emptyList();
+      Map<String, Object> intermediate = new LinkedHashMap<>();
+      results.put("intermediateSuggestions", intermediate);
+      while (loop-- > 0) {
+        suggestions = PolicyHelper.getSuggestions(config, simCloudManager);
+        log.info("-- step " + (iterations - loop) + ", " + suggestions.size() + " suggestions.");
+        if (suggestions.isEmpty()) {
+          break;
+        }
+        intermediate.put("step" + (iterations - loop), suggestions);
+        int unresolvedCount = 0;
+        for (Suggester.SuggestionInfo suggestion : suggestions) {
+          SolrRequest operation = suggestion.getOperation();
+          if (operation == null) {
+            unresolvedCount++;
+            if (suggestion.getViolation() == null) {
+              log.info("   - ignoring suggestion without violation and without operation: " + suggestion);
+            }
+            continue;
+          }
+          simCloudManager.request(operation);
+        }
+        if (unresolvedCount == suggestions.size()) {
+          log.info("--- aborting simulation, only unresolved violations remain");
+          break;
+        }
+      }
+      if (loop == 0 && !suggestions.isEmpty()) {
+        CLIO.err("### Failed to apply all suggestions in " + iterations + " steps. Remaining suggestions: " + suggestions + "\n");
+      }
+      results.put("finalState", prepareResults(simCloudManager, config, withClusterState, withStats,
+          withSuggestions, withSortedNodes, withDiagnostics));
+    }
+

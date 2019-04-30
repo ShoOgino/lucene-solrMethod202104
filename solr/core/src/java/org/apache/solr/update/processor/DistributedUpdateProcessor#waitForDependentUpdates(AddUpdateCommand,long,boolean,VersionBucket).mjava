@@ -12,31 +12,10 @@
     TimeOut waitTimeout = new TimeOut(5, TimeUnit.SECONDS, TimeSource.NANO_TIME);
 
     vinfo.lockForUpdate();
-    if (bucket.tryLock()) {
-      try {
-        Long lookedUpVersion = vinfo.lookupVersion(cmd.getIndexedId());
-        lastFoundVersion = lookedUpVersion == null ? 0L : lookedUpVersion;
-
-        if (Math.abs(lastFoundVersion) < cmd.prevVersion) {
-          log.debug("Re-ordered inplace update. version={}, prevVersion={}, lastVersion={}, replayOrPeerSync={}, id={}",
-              (cmd.getVersion() == 0 ? versionOnUpdate : cmd.getVersion()), cmd.prevVersion, lastFoundVersion,
-              isReplayOrPeersync, cmd.getPrintableId());
-        }
-
-        while (Math.abs(lastFoundVersion) < cmd.prevVersion && !waitTimeout.hasTimedOut()) {
-          bucket.awaitNanos(waitTimeout.timeLeft(TimeUnit.NANOSECONDS));
-          lookedUpVersion = vinfo.lookupVersion(cmd.getIndexedId());
-          lastFoundVersion = lookedUpVersion == null ? 0L : lookedUpVersion;
-        }
-      } finally {
-
-        bucket.unlock();
-
-        vinfo.unlockForUpdate();
-      }
-    } else {
-      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
-          "Unable to get version bucket lock in " + bucket.getLockTimeoutMs() + " ms");
+    try {
+      lastFoundVersion = bucket.runWithLock(vinfo.getVersionBucketLockTimeoutMs(), () -> doWaitForDependentUpdates(cmd, versionOnUpdate, isReplayOrPeersync, bucket, waitTimeout));
+    } finally {
+      vinfo.unlockForUpdate();
     }
 
     if (Math.abs(lastFoundVersion) > cmd.prevVersion) {

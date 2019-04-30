@@ -1,0 +1,57 @@
+  /**
+   * @return how many requests succeeded
+   */
+  private int runCommands(int threads, int versionBucketLockTimeoutMs, SolrQueryRequest req,
+      Function<DistributedUpdateProcessor,Boolean> function)
+      throws IOException {
+    try (DistributedUpdateProcessor processor = new DistributedUpdateProcessor(
+        req, null, null, null)) {
+      if (versionBucketLockTimeoutMs > 0) {
+        // use TimedVersionBucket with versionBucketLockTimeoutMs
+        VersionInfo vinfo = Mockito.spy(processor.vinfo);
+        processor.vinfo = vinfo;
+
+        doReturn(new TimedVersionBucket() {
+          /**
+           * simulate the case: it takes 5 seconds to add the doc
+           * 
+           */
+          @Override
+          protected boolean tryLock(int lockTimeoutMs) {
+            boolean locked = super.tryLock(versionBucketLockTimeoutMs);
+            if (locked) {
+              try {
+                Thread.sleep(5000);
+              } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+              }
+            }
+            return locked;
+          }
+        }).when(vinfo).bucket(anyInt());
+      }
+      CountDownLatch latch = new CountDownLatch(1);
+      Collection<Future<Boolean>> futures = new ArrayList<>();
+      for (int t = 0; t < threads; ++t) {
+        futures.add(executor.submit(() -> {
+          latch.await();
+          return function.apply(processor);
+        }));
+      }
+      latch.countDown();
+
+      int succeeded = 0;
+      for (Future<Boolean> f : futures) {
+        try {
+          f.get();
+          succeeded++;
+        } catch (InterruptedException e) {
+          throw new RuntimeException(e);
+        } catch (ExecutionException e) {
+          // do nothing
+        }
+      }
+      return succeeded;
+    }
+  }
+

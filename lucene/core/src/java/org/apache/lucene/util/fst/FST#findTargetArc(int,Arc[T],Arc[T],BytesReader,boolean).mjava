@@ -43,18 +43,47 @@
 
     // System.out.println("fta label=" + (char) labelToMatch);
 
-    if (in.readByte() == ARCS_AS_FIXED_ARRAY) {
-      // Arcs are full array; do binary search:
+    byte flags = in.readByte();
+    if (flags == ARCS_AS_ARRAY_WITH_GAPS) {
       arc.numArcs = in.readVInt();
       arc.bytesPerArc = in.readVInt();
       arc.posArcsStart = in.getPosition();
+
+      // Array is direct; address by label
+      in.skipBytes(1);
+      int firstLabel = readLabel(in);
+      int arcPos = labelToMatch - firstLabel;
+      if (arcPos == 0) {
+        arc.nextArc = arc.posArcsStart;
+      } else if (arcPos > 0) {
+        if (arcPos >= arc.numArcs) {
+          return null;
+        }
+        in.setPosition(arc.posArcsStart - arc.bytesPerArc * arcPos);
+        flags = in.readByte();
+        if (flag(flags, BIT_MISSING_ARC)) {
+          return null;
+        }
+        // point to flags that we just read
+        arc.nextArc = in.getPosition() + 1;
+      } else {
+        return null;
+      }
+      arc.arcIdx = Integer.MIN_VALUE;
+      return readNextRealArc(arc, in);
+    } else if (flags == ARCS_AS_ARRAY_PACKED) {
+      arc.numArcs = in.readVInt();
+      arc.bytesPerArc = in.readVInt();
+      arc.posArcsStart = in.getPosition();
+
+      // Array is sparse; do binary search:
       int low = 0;
-      int high = arc.numArcs-1;
+      int high = arc.numArcs - 1;
       while (low <= high) {
         //System.out.println("    cycle");
         int mid = (low + high) >>> 1;
-        in.setPosition(arc.posArcsStart);
-        in.skipBytes(arc.bytesPerArc*mid + 1);
+        // +1 to skip over flags
+        in.setPosition(arc.posArcsStart - (arc.bytesPerArc * mid + 1));
         int midLabel = readLabel(in);
         final int cmp = midLabel - labelToMatch;
         if (cmp < 0) {
@@ -62,12 +91,11 @@
         } else if (cmp > 0) {
           high = mid - 1;
         } else {
-          arc.arcIdx = mid-1;
+          arc.arcIdx = mid - 1;
           //System.out.println("    found!");
           return readNextRealArc(arc, in);
         }
       }
-
       return null;
     }
 

@@ -29,7 +29,7 @@
 
     long lastArcStart = builder.bytes.getPosition();
     int maxBytesPerArc = 0;
-    for(int arcIdx=0;arcIdx<nodeIn.numArcs;arcIdx++) {
+    for(int arcIdx=0; arcIdx < nodeIn.numArcs; arcIdx++) {
       final Builder.Arc<T> arc = nodeIn.arcs[arcIdx];
       final Builder.CompiledNode target = (Builder.CompiledNode) arc.target;
       int flags = 0;
@@ -86,9 +86,8 @@
         builder.bytes.writeVLong(target.node);
       }
 
-      // just write the arcs "like normal" on first pass,
-      // but record how many bytes each one took, and max
-      // byte size:
+      // just write the arcs "like normal" on first pass, but record how many bytes each one took
+      // and max byte size:
       if (doFixedArray) {
         builder.reusedBytesPerArc[arcIdx] = (int) (builder.bytes.getPosition() - lastArcStart);
         lastArcStart = builder.bytes.getPosition();
@@ -96,7 +95,7 @@
         //System.out.println("    bytes=" + builder.reusedBytesPerArc[arcIdx]);
       }
     }
-    
+
     // TODO: try to avoid wasteful cases: disable doFixedArray in that case
     /* 
      * 
@@ -120,8 +119,14 @@
     if (doFixedArray) {
       final int MAX_HEADER_SIZE = 11; // header(byte) + numArcs(vint) + numBytes(vint)
       assert maxBytesPerArc > 0;
-      // 2nd pass just "expands" all arcs to take up a fixed
-      // byte size
+      // 2nd pass just "expands" all arcs to take up a fixed byte size
+
+      // If more than (1 / DIRECT_ARC_LOAD_FACTOR) of the "slots" would be occupied, write an arc
+      // array that may have holes in it so that we can address the arcs directly by label without
+      // binary search
+      int labelRange = nodeIn.arcs[nodeIn.numArcs - 1].label - nodeIn.arcs[0].label + 1;
+      boolean writeDirectly = builder.useDirectArcAddressing && labelRange > 0
+          && labelRange < Builder.DIRECT_ARC_LOAD_FACTOR * nodeIn.numArcs;
 
       //System.out.println("write int @pos=" + (fixedArrayStart-4) + " numArcs=" + nodeIn.numArcs);
       // create the header
@@ -129,29 +134,22 @@
       byte header[] = new byte[MAX_HEADER_SIZE]; 
       ByteArrayDataOutput bad = new ByteArrayDataOutput(header);
       // write a "false" first arc:
-      bad.writeByte(ARCS_AS_FIXED_ARRAY);
-      bad.writeVInt(nodeIn.numArcs);
+      if (writeDirectly) {
+        bad.writeByte(ARCS_AS_ARRAY_WITH_GAPS);
+        bad.writeVInt(labelRange);
+      } else {
+        bad.writeByte(ARCS_AS_ARRAY_PACKED);
+        bad.writeVInt(nodeIn.numArcs);
+      }
       bad.writeVInt(maxBytesPerArc);
       int headerLen = bad.getPosition();
       
       final long fixedArrayStart = startAddress + headerLen;
 
-      // expand the arcs in place, backwards
-      long srcPos = builder.bytes.getPosition();
-      long destPos = fixedArrayStart + nodeIn.numArcs*maxBytesPerArc;
-      assert destPos >= srcPos;
-      if (destPos > srcPos) {
-        builder.bytes.skipBytes((int) (destPos - srcPos));
-        for(int arcIdx=nodeIn.numArcs-1;arcIdx>=0;arcIdx--) {
-          destPos -= maxBytesPerArc;
-          srcPos -= builder.reusedBytesPerArc[arcIdx];
-          //System.out.println("  repack arcIdx=" + arcIdx + " srcPos=" + srcPos + " destPos=" + destPos);
-          if (srcPos != destPos) {
-            //System.out.println("  copy len=" + builder.reusedBytesPerArc[arcIdx]);
-            assert destPos > srcPos: "destPos=" + destPos + " srcPos=" + srcPos + " arcIdx=" + arcIdx + " maxBytesPerArc=" + maxBytesPerArc + " reusedBytesPerArc[arcIdx]=" + builder.reusedBytesPerArc[arcIdx] + " nodeIn.numArcs=" + nodeIn.numArcs;
-            builder.bytes.copyBytes(srcPos, destPos, builder.reusedBytesPerArc[arcIdx]);
-          }
-        }
+      if (writeDirectly) {
+        writeArrayWithGaps(builder, nodeIn, fixedArrayStart, maxBytesPerArc, labelRange);
+      } else {
+        writeArrayPacked(builder, nodeIn, fixedArrayStart, maxBytesPerArc);
       }
       
       // now write the header

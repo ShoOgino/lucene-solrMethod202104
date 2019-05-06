@@ -7,16 +7,28 @@
 
     // this is a continuing arc in a fixed array
     if (arc.bytesPerArc != 0) {
-      // arcs are at fixed entries
-      arc.arcIdx++;
-      assert arc.arcIdx < arc.numArcs;
-      in.setPosition(arc.posArcsStart);
-      in.skipBytes(arc.arcIdx*arc.bytesPerArc);
+      // arcs are in an array
+      if (arc.arcIdx > Integer.MIN_VALUE) {
+        arc.arcIdx++;
+        assert arc.arcIdx < arc.numArcs;
+        in.setPosition(arc.posArcsStart - arc.arcIdx * arc.bytesPerArc);
+        arc.flags = in.readByte();
+      } else {
+        assert arc.nextArc <= arc.posArcsStart && arc.nextArc > arc.posArcsStart - arc.numArcs * arc.bytesPerArc;
+        in.setPosition(arc.nextArc);
+        arc.flags = in.readByte();
+        while (flag(arc.flags, BIT_MISSING_ARC)) {
+          // skip empty arcs
+          arc.nextArc -= arc.bytesPerArc;
+          in.skipBytes(arc.bytesPerArc - 1);
+          arc.flags = in.readByte();
+        }
+      }
     } else {
       // arcs are packed
       in.setPosition(arc.nextArc);
+      arc.flags = in.readByte();
     }
-    arc.flags = in.readByte();
     arc.label = readLabel(in);
 
     if (arc.flag(BIT_ARC_HAS_OUTPUT)) {
@@ -37,7 +49,11 @@
       } else {
         arc.target = NON_FINAL_END_NODE;
       }
-      arc.nextArc = in.getPosition();
+      if (arc.bytesPerArc == 0) {
+        arc.nextArc = in.getPosition();
+      } else {
+        arc.nextArc -= arc.bytesPerArc;
+      }
     } else if (arc.flag(BIT_TARGET_NEXT)) {
       arc.nextArc = in.getPosition();
       // TODO: would be nice to make this lazy -- maybe
@@ -54,7 +70,14 @@
       arc.target = in.getPosition();
     } else {
       arc.target = readUnpackedNodeTarget(in);
-      arc.nextArc = in.getPosition();
+      if (arc.bytesPerArc > 0 && arc.arcIdx == Integer.MIN_VALUE) {
+        // nextArc was pointing to *this* arc when we entered; advance to the next
+        // if it is a missing arc, we will skip it later
+        arc.nextArc -= arc.bytesPerArc;
+      } else {
+        // in list and fixed table encodings, the next arc always follows this one
+        arc.nextArc = in.getPosition();
+      }
     }
     return arc;
   }

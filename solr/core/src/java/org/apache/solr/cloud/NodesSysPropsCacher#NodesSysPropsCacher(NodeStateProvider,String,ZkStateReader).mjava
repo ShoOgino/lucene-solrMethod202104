@@ -1,0 +1,38 @@
+  NodesSysPropsCacher(NodeStateProvider nodeStateProvider,
+                      String currentNode,
+                      ZkStateReader stateReader) {
+    this.nodeStateProvider = nodeStateProvider;
+    this.currentNode = currentNode;
+
+    stateReader.registerClusterPropertiesListener(properties -> {
+      Collection<String> tags = new ArrayList<>();
+      String shardPreferences = (String) properties.getOrDefault(ZkStateReader.DEFAULT_SHARD_PREFERENCES, "");
+      if (shardPreferences.contains(ShardParams.SHARDS_PREFERENCE_NODE_WITH_SAME_SYSPROP)) {
+        try {
+          tags = PreferenceRule
+              .from(shardPreferences)
+              .stream()
+              .filter(r -> ShardParams.SHARDS_PREFERENCE_NODE_WITH_SAME_SYSPROP.equals(r.name))
+              .map(r -> r.value)
+              .collect(Collectors.toSet());
+        } catch (Exception e) {
+          log.info("Error on parsing shards preference:{}", shardPreferences);
+        }
+      }
+
+      if (tags.isEmpty()) {
+        pause();
+      } else {
+        start(tags);
+        // start fetching now
+        fetchSysProps(stateReader.getClusterState().getLiveNodes());
+      }
+      return isClosed;
+    });
+
+    stateReader.registerLiveNodesListener((oldLiveNodes, newLiveNodes) -> {
+      fetchSysProps(newLiveNodes);
+      return isClosed;
+    });
+  }
+

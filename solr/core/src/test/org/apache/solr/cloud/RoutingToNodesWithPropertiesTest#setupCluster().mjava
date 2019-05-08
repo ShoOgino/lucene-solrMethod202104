@@ -1,0 +1,73 @@
+  @BeforeClass
+  public static void setupCluster() throws Exception {
+    TestInjection.additionalSystemProps = ImmutableMap.of("zone", "us-west1");
+    configureCluster(2)
+        .withSolrXml(TEST_PATH().resolve("solr-trackingshardhandler.xml"))
+        .addConfig("config", TEST_PATH().resolve("configsets").resolve("cloud-minimal").resolve("conf"))
+        .configure();
+
+    ZONE1_NODES.addAll(cluster.getJettySolrRunners().stream().map(JettySolrRunner::getNodeName).collect(Collectors.toSet()));
+    TestInjection.additionalSystemProps = ImmutableMap.of("zone", "us-west2");
+    ZONE2_NODES.add(cluster.startJettySolrRunner().getNodeName());
+    ZONE2_NODES.add(cluster.startJettySolrRunner().getNodeName());
+
+    String commands =  "{set-cluster-policy :[{" +
+        "    'replica':'#EQUAL'," +
+        "    'shard':'#EACH'," +
+        "    'sysprop.zone':'#EACH'}]}";
+
+    SolrRequest req = CloudTestUtils.AutoScalingRequest.create(SolrRequest.METHOD.POST, commands);
+    NamedList<Object> response = cluster.getSolrClient().request(req);
+
+    CollectionAdminRequest.createCollection(COLLECTION, 2, 2)
+        .process(cluster.getSolrClient());
+    cluster.waitForActiveCollection(COLLECTION, 2, 4);
+
+    // Checking putting replicas
+    for (Slice slice : getCollectionState(COLLECTION).getSlices()) {
+      int numReplicaInZone1 = 0;
+      int numReplicaInZone2 = 0;
+      for (Replica replica : slice.getReplicas()) {
+        if (ZONE1_NODES.contains(replica.getNodeName()))
+          numReplicaInZone1++;
+        if (ZONE2_NODES.contains(replica.getNodeName()))
+          numReplicaInZone2++;
+      }
+
+      assertEquals(1, numReplicaInZone1);
+      assertEquals(1, numReplicaInZone2);
+    }
+
+    // check inject props
+    SolrCloudManager cloudManager = new SolrClientCloudManager(new ZkDistributedQueueFactory(cluster.getZkClient()),
+        cluster.getSolrClient());
+    for (String zone1Node: ZONE1_NODES) {
+      NodeStateProvider nodeStateProvider = cloudManager.getNodeStateProvider();
+      Map<String, Object> map  = nodeStateProvider.getNodeValues(zone1Node, Collections.singletonList(PROP_NAME));
+      assertEquals("us-west1", map.get(PROP_NAME));
+    }
+
+    for (String zone1Node: ZONE2_NODES) {
+      NodeStateProvider nodeStateProvider = cloudManager.getNodeStateProvider();
+      Map<String, Object> map = nodeStateProvider.getNodeValues(zone1Node, Collections.singletonList(PROP_NAME));
+      assertEquals("us-west2", map.get(PROP_NAME));
+    }
+
+    for (JettySolrRunner jetty : cluster.getJettySolrRunners()) {
+      if (ZONE1_NODES.contains(jetty.getNodeName())) {
+        ((TrackingShardHandlerFactory)jetty.getCoreContainer().getShardHandlerFactory()).setTrackingQueue(ZONE1_QUEUE);
+      } else {
+        ((TrackingShardHandlerFactory)jetty.getCoreContainer().getShardHandlerFactory()).setTrackingQueue(ZONE2_QUEUE);
+      }
+    }
+
+    for (int i = 0; i < 20; i++) {
+      new UpdateRequest()
+          .add("id", String.valueOf(i))
+          .process(cluster.getSolrClient(), COLLECTION);
+    }
+
+    new UpdateRequest()
+        .commit(cluster.getSolrClient(), COLLECTION);
+  }
+

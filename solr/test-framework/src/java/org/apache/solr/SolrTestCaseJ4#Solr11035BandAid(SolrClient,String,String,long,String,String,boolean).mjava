@@ -1,0 +1,46 @@
+  // Pass true for failAnyway to have this bandaid fail if
+  // 1> it had to attempt the repair
+  // 2> it would have successfully repaired it
+  //
+  // This is useful for verifying that SOLR-11035.
+  //
+  public static void Solr11035BandAid(SolrClient client, String collection, String idField,
+                                      long expectedDocCount, String query, String tag,
+                                      boolean failAnyway) throws IOException, SolrServerException {
+
+    final SolrQuery solrQuery = new SolrQuery(query);
+    QueryResponse rsp = client.query(collection, solrQuery);
+    long found = rsp.getResults().getNumFound();
+
+    if (rsp.getResults().getNumFound() == expectedDocCount) {
+      return;
+    }
+
+    // OK, our counts differ. Insert a document _guaranteed_ to be unique, then delete it so whatever is counting
+    // anything has the correct counts.
+    log.warn("Solr11035BandAid attempting repair, found is {}, expected is {}", found, expectedDocCount);
+
+    String bogusID = java.util.UUID.randomUUID().toString();
+    SolrInputDocument bogus = new SolrInputDocument();
+    bogus.addField(idField, bogusID);
+
+    // Add the bogus doc
+    new UpdateRequest().add(bogus).commit(client, collection);
+
+    // Then remove it, we should be OK now since new searchers have been opened.
+    new UpdateRequest().deleteById(bogusID).commit(client, collection);
+    // Let's check again to see if we succeeded
+    rsp = client.query(collection, solrQuery);
+    found = rsp.getResults().getNumFound();
+
+    if (found != expectedDocCount) {
+      // It's good to see the total response. NOTE: some larger responses are over 10240,
+      // so change the pattern in log4j2.xml if you need to see the whole thing.
+      log.error("Dumping response" + rsp.toString());
+      assertEquals("Solr11035BandAid failed, counts differ after updates:", found, expectedDocCount);
+    } else if (failAnyway) {
+      fail("failAnyway == true, would have successfully repaired the collection: '" + collection
+          + "' extra info: '" + tag + "'");
+    }
+  }
+

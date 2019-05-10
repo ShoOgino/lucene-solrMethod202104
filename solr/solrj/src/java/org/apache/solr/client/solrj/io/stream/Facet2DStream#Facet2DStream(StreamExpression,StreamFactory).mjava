@@ -1,0 +1,89 @@
+  public Facet2DStream(StreamExpression expression, StreamFactory factory) throws IOException {
+
+    String collectionName = factory.getValueOperand(expression, 0);
+
+    if (collectionName.indexOf('"') > -1) {
+      collectionName = collectionName.replaceAll("\"", "").replaceAll(" ", "");
+    }
+
+    List<StreamExpressionNamedParameter> namedParams = factory.getNamedOperands(expression);
+    StreamExpressionNamedParameter bucketXExpression = factory.getNamedOperand(expression, "x");
+    StreamExpressionNamedParameter bucketYExpression = factory.getNamedOperand(expression, "y");
+    StreamExpressionNamedParameter dimensionsExpression = factory.getNamedOperand(expression, "dimensions");
+    List <StreamExpression> metricExpression = factory.getExpressionOperandsRepresentingTypes(expression, Expressible.class, Metric.class);
+    StreamExpressionNamedParameter zkHostExpression = factory.getNamedOperand(expression, "zkHost");
+
+    if (collectionName == null) {
+      throw new IOException(String.format(Locale.ROOT, "invalid expression %s - collectionName expected as first operand", expression));
+    }
+
+    ModifiableSolrParams params = new ModifiableSolrParams();
+    for (StreamExpressionNamedParameter namedParam : namedParams) {
+      if (!namedParam.getName().equals("x") && !namedParam.getName().equals("y") &&
+          !namedParam.getName().equals("dimensions") && !namedParam.getName().equals("zkHost")){
+        params.add(namedParam.getName(), namedParam.getParameter().toString().trim());
+      }
+    }
+    Bucket x = null;
+    if (bucketXExpression != null) {
+      if (bucketXExpression.getParameter() instanceof StreamExpressionValue) {
+        String keyX = ((StreamExpressionValue) bucketXExpression.getParameter()).getValue();
+        if(keyX != null && !keyX.equals("")){
+          x = new Bucket(keyX.trim());
+        }
+      }
+    }
+    Bucket y = null;
+    if (bucketYExpression != null) {
+      if (bucketYExpression.getParameter() instanceof StreamExpressionValue) {
+        String keyY = ((StreamExpressionValue) bucketYExpression.getParameter()).getValue();
+        if(keyY != null && !keyY.equals("")){
+          y = new Bucket(keyY.trim());
+        }
+      }
+    }
+
+    if (x == null || y == null) {
+      throw new IOException(String.format(Locale.ROOT, "invalid expression %s - x and y buckets expected. eg. 'x=\"name\"'", expression, collectionName));
+    }
+
+    Metric metric = null;
+    if(metricExpression == null || metricExpression.size() == 0){
+      metric = new CountMetric();
+    } else {
+      metric = factory.constructMetric(metricExpression.get(0));
+    }
+
+    String bucketSortString = metric.getIdentifier() + " desc";
+    FieldComparator bucketSort = parseBucketSort(bucketSortString, x, y);
+
+    int dimensionX = 0;
+    int dimensionY = 0;
+    if (dimensionsExpression != null) {
+      if (dimensionsExpression.getParameter() instanceof StreamExpressionValue) {
+        String[] strDimensions = ((StreamExpressionValue) dimensionsExpression.getParameter()).getValue().split(",");
+        if (strDimensions.length != 2) {
+          throw new IOException(String.format(Locale.ROOT, "invalid expression %s - two dimension values expected"));
+        }
+        dimensionX = Integer.parseInt(strDimensions[0]);
+        dimensionY = Integer.parseInt(strDimensions[1]);
+      }
+    }
+
+    String zkHost = null;
+    if (zkHostExpression == null) {
+      zkHost = factory.getCollectionZkHost(collectionName);
+      if (zkHost == null) {
+        zkHost = factory.getDefaultZkHost();
+      }
+    } else if (zkHostExpression.getParameter() instanceof StreamExpressionValue) {
+      zkHost = ((StreamExpressionValue) zkHostExpression.getParameter()).getValue();
+    }
+
+    if (zkHost == null) {
+      throw new IOException(String.format(Locale.ROOT, "invalid expression %s - zkHost not found for collection '%s'", expression, collectionName));
+    }
+
+    init(collectionName, params, x, y, bucketSort, dimensionX, dimensionY, metric, zkHost);
+  }
+

@@ -6,6 +6,7 @@
     lock.lockInterruptibly();
     try {
       collProperties.clear();
+      colShardReplicaMap.clear();
       sliceProperties.clear();
       nodeReplicaMap.clear();
       liveNodes.clear();
@@ -15,6 +16,9 @@
         }
         if (stateManager.hasData(ZkStateReader.SOLR_AUTOSCALING_NODE_ADDED_PATH + "/" + nodeId)) {
           stateManager.removeData(ZkStateReader.SOLR_AUTOSCALING_NODE_ADDED_PATH + "/" + nodeId, -1);
+        }
+        if (stateManager.hasData(ZkStateReader.SOLR_AUTOSCALING_NODE_LOST_PATH + "/" + nodeId)) {
+          stateManager.removeData(ZkStateReader.SOLR_AUTOSCALING_NODE_LOST_PATH + "/" + nodeId, -1);
         }
       }
       liveNodes.addAll(initialState.getLiveNodes());
@@ -27,10 +31,22 @@
         dc.getSlices().forEach(s -> {
           sliceProperties.computeIfAbsent(dc.getName(), name -> new ConcurrentHashMap<>())
               .computeIfAbsent(s.getName(), Utils.NEW_HASHMAP_FUN).putAll(s.getProperties());
+          Replica leader = s.getLeader();
           s.getReplicas().forEach(r -> {
-            ReplicaInfo ri = new ReplicaInfo(r.getName(), r.getCoreName(), dc.getName(), s.getName(), r.getType(), r.getNodeName(), r.getProperties());
+            Map<String, Object> props = new HashMap<>(r.getProperties());
+            if (leader != null && r.getName().equals(leader.getName())) {
+              props.put("leader", "true");
+            }
+            ReplicaInfo ri = new ReplicaInfo(r.getName(), r.getCoreName(), dc.getName(), s.getName(), r.getType(), r.getNodeName(), props);
+            if (leader != null && r.getName().equals(leader.getName())) {
+              ri.getVariables().put("leader", "true");
+            }
             if (liveNodes.get().contains(r.getNodeName())) {
               nodeReplicaMap.computeIfAbsent(r.getNodeName(), Utils.NEW_SYNCHRONIZED_ARRAYLIST_FUN).add(ri);
+              colShardReplicaMap.computeIfAbsent(ri.getCollection(), name -> new ConcurrentHashMap<>())
+                  .computeIfAbsent(ri.getShard(), shard -> new ArrayList<>()).add(ri);
+            } else {
+              log.warn("- dropping replica because its node " + r.getNodeName() + " is not live: " + r);
             }
           });
         });

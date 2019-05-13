@@ -1,0 +1,43 @@
+  public Map<String, Object> getSnapshot(boolean withAutoscaling) throws Exception {
+    Map<String, Object> snapshot = new LinkedHashMap<>(4);
+    Map<String, Object> managerState = new HashMap<>();
+    managerState.put("timeSource", timeSource.toString());
+    snapshot.put(MANAGER_STATE_KEY, managerState);
+
+    snapshot.put(CLUSTER_STATE_KEY, clusterStateProvider.getSnapshot());
+    snapshot.put(NODE_STATE_KEY, nodeStateProvider.getSnapshot());
+    snapshot.put(DISTRIB_STATE_KEY, distribStateManager.getSnapshot());
+    if (withAutoscaling) {
+      AutoScalingConfig config = distribStateManager.getAutoScalingConfig();
+      Policy.Session session = config.getPolicy().createSession(this);
+      List<Suggester.SuggestionInfo> suggestions = PolicyHelper.getSuggestions(config, this);
+      Map<String, Object> diagnostics = new LinkedHashMap<>();
+      PolicyHelper.getDiagnostics(session).toMap(diagnostics);
+      List<Map<String, Object>> suggestionDetails = new ArrayList<>(suggestions.size());
+      suggestions.forEach(s -> {
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("suggestion", s);
+        if (s.getOperation() != null) {
+          SolrParams params = s.getOperation().getParams();
+          if (s.getOperation() instanceof V2Request) {
+            params = SimUtils.v2AdminRequestToV1Params((V2Request)s.getOperation());
+          }
+          ReplicaInfo info = nodeStateProvider.getReplicaInfo(
+              params.get(CollectionAdminParams.COLLECTION), params.get("replica"));
+          if (info == null) {
+            log.warn("Can't find ReplicaInfo for suggested operation: " + s);
+          } else {
+            map.put("replica", info);
+          }
+        }
+        suggestionDetails.add(map);
+      });
+      Map<String, Object> autoscaling = new LinkedHashMap<>();
+      autoscaling.put("suggestions", suggestionDetails);
+      autoscaling.put("diagnostics", diagnostics);
+      snapshot.put(AUTOSCALING_STATE_KEY, autoscaling);
+    }
+    snapshot.put(STATISTICS_STATE_KEY, SimUtils.calculateStats(this, distribStateManager.getAutoScalingConfig(), true));
+    return snapshot;
+  }
+

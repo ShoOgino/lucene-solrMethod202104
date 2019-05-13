@@ -1,0 +1,50 @@
+  /**
+   * Populate this instance from another instance of {@link SolrCloudManager}.
+   * @param other another instance
+   * @param config optional {@link AutoScalingConfig}, which will be used to determine what node and
+   *               replica tags to retrieve. If this is null then the other instance's config will be used.
+   */
+  public SnapshotNodeStateProvider(SolrCloudManager other, AutoScalingConfig config) throws Exception {
+    if (config == null) {
+      config = other.getDistribStateManager().getAutoScalingConfig();
+    }
+    Set<String> nodeTags = new HashSet<>(SimUtils.COMMON_NODE_TAGS);
+    nodeTags.addAll(config.getPolicy().getParams());
+    Set<String> replicaTags = new HashSet<>(SimUtils.COMMON_REPLICA_TAGS);
+    replicaTags.addAll(config.getPolicy().getPerReplicaAttributes());
+    for (String node : other.getClusterStateProvider().getLiveNodes()) {
+      nodeValues.put(node, new LinkedHashMap<>(other.getNodeStateProvider().getNodeValues(node, nodeTags)));
+      Map<String, Map<String, List<ReplicaInfo>>> infos = other.getNodeStateProvider().getReplicaInfo(node, replicaTags);
+      infos.forEach((collection, shards) -> {
+        shards.forEach((shard, replicas) -> {
+          replicas.forEach(r -> {
+            List<ReplicaInfo> myReplicas = replicaInfos
+                .computeIfAbsent(node, n -> new LinkedHashMap<>())
+                .computeIfAbsent(collection, c -> new LinkedHashMap<>())
+                .computeIfAbsent(shard, s -> new ArrayList<>());
+            Map<String, Object> rMap = new LinkedHashMap<>();
+            r.toMap(rMap);
+            if (r.isLeader) { // ReplicaInfo.toMap doesn't write this!!!
+              ((Map<String, Object>)rMap.values().iterator().next()).put("leader", "true");
+            }
+            ReplicaInfo ri = new ReplicaInfo(rMap);
+            // put in "leader" again if present
+            if (r.isLeader) {
+              ri.getVariables().put("leader", "true");
+            }
+            // externally produced snapshots may not include the right units
+            if (ri.getVariable(Variable.Type.CORE_IDX.metricsAttribute) == null) {
+              if (ri.getVariable(Variable.Type.CORE_IDX.tagName) != null) {
+                Number indexSizeGB = (Number) ri.getVariable(Variable.Type.CORE_IDX.tagName);
+                ri.getVariables().put(Variable.Type.CORE_IDX.metricsAttribute, indexSizeGB.doubleValue() * GB);
+              } else {
+                throw new RuntimeException("Missing size information for replica: " + ri);
+              }
+            }
+            myReplicas.add(ri);
+          });
+        });
+      });
+    }
+  }
+

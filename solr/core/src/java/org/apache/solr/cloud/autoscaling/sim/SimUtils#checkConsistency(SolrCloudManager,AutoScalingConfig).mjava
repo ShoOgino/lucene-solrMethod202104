@@ -1,0 +1,77 @@
+  /**
+   * Check consistency of data in a {@link SolrCloudManager}. This may be needed when constructing a simulated
+   * instance from potentially inconsistent data (eg. partial snapshots taken at different points in time).
+   * @param solrCloudManager source manager
+   * @param config optional {@link AutoScalingConfig} instance used to determine what node and replica metrics to check.
+   */
+  public static void checkConsistency(SolrCloudManager solrCloudManager, AutoScalingConfig config) throws Exception {
+    if (config == null) {
+      config = solrCloudManager.getDistribStateManager().getAutoScalingConfig();
+    }
+    Set<String> replicaTags = new HashSet<>(COMMON_REPLICA_TAGS);
+    replicaTags.addAll(config.getPolicy().getPerReplicaAttributes());
+
+    // verify replicas are consistent and data is available
+    Map<String, Map<String, Replica>> allReplicas = new HashMap<>();
+    solrCloudManager.getClusterStateProvider().getClusterState().forEachCollection(coll -> {
+      coll.getReplicas().forEach(r -> {
+        if (allReplicas.containsKey(r.getName())) {
+          throw new RuntimeException("duplicate core_node name in clusterState: " + allReplicas.get(r.getName()) + " versus " + r);
+        } else {
+          allReplicas.computeIfAbsent(coll.getName(), c -> new HashMap<>()).put(r.getName(), r);
+        }
+      });
+    });
+    Map<String, Map<String, ReplicaInfo>> allReplicaInfos = new HashMap<>();
+    solrCloudManager.getClusterStateProvider().getLiveNodes().forEach(n -> {
+      Map<String, Map<String, List<ReplicaInfo>>> infos = solrCloudManager.getNodeStateProvider().getReplicaInfo(n, replicaTags);
+      infos.forEach((coll, shards) -> shards.forEach((shard, replicas) -> replicas.forEach(r -> {
+        if (allReplicaInfos.containsKey(r.getName())) {
+          throw new RuntimeException("duplicate core_node name in NodeStateProvider: " + allReplicaInfos.get(r.getName()) + " versus " + r);
+        } else {
+          allReplicaInfos.computeIfAbsent(coll, c -> new HashMap<>()).put(r.getName(), r);
+        }
+      })));
+    });
+    if (!allReplicaInfos.keySet().equals(allReplicas.keySet())) {
+      Set<String> notInClusterState = allReplicaInfos.keySet().stream()
+          .filter(k -> !allReplicas.containsKey(k))
+          .collect(Collectors.toSet());
+      Set<String> notInNodeProvider = allReplicas.keySet().stream()
+          .filter(k -> !allReplicaInfos.containsKey(k))
+          .collect(Collectors.toSet());
+      throw new RuntimeException("Mismatched replica data between ClusterState and NodeStateProvider:\n\t" +
+          "collection not in ClusterState: " + notInClusterState + "\n\t" +
+          "collection not in NodeStateProvider: " + notInNodeProvider);
+    }
+    allReplicaInfos.keySet().forEach(collection -> {
+      Set<String> infosCores = allReplicaInfos.getOrDefault(collection, Collections.emptyMap()).keySet();
+      Set<String> csCores = allReplicas.getOrDefault(collection, Collections.emptyMap()).keySet();
+      if (!infosCores.equals(csCores)) {
+        Set<String> notInClusterState = infosCores.stream()
+            .filter(k -> !csCores.contains(k))
+            .collect(Collectors.toSet());
+        Set<String> notInNodeProvider = csCores.stream()
+            .filter(k -> !infosCores.contains(k))
+            .collect(Collectors.toSet());
+        throw new RuntimeException("Mismatched replica data between ClusterState and NodeStateProvider:\n\t" +
+            "replica not in ClusterState: " + notInClusterState + "\n\t" +
+            "replica not in NodeStateProvider: " + notInNodeProvider);
+      }
+    });
+    // verify all replicas have size info
+    allReplicaInfos.forEach((coll, replicas) -> replicas.forEach((core, ri) -> {
+          Number size = (Number) ri.getVariable(Variable.Type.CORE_IDX.metricsAttribute);
+          if (size == null) {
+            size = (Number) ri.getVariable(Variable.Type.CORE_IDX.tagName);
+            if (size == null) {
+//              for (String node : solrCloudManager.getClusterStateProvider().getLiveNodes()) {
+//                log.error("Check for missing values: {}: {}", node, solrCloudManager.getNodeStateProvider().getReplicaInfo(node, SnapshotNodeStateProvider.REPLICA_TAGS));
+//              }
+              throw new RuntimeException("missing replica size information: " + ri);
+            }
+          }
+        }
+    ));
+  }
+

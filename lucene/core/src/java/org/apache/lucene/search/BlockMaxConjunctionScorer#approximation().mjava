@@ -1,0 +1,102 @@
+  private DocIdSetIterator approximation() {
+    final DocIdSetIterator lead = approximations[0];
+
+    return new DocIdSetIterator() {
+
+      float maxScore;
+      int upTo = -1;
+
+      @Override
+      public int docID() {
+        return lead.docID();
+      }
+
+      @Override
+      public long cost() {
+        return lead.cost();
+      }
+
+      private void moveToNextBlock(int target) throws IOException {
+        upTo = advanceShallow(target);
+        maxScore = getMaxScore(upTo);
+      }
+
+      private int advanceTarget(int target) throws IOException {
+        if (target > upTo) {
+          moveToNextBlock(target);
+        }
+
+        while (true) {
+          assert upTo >= target;
+
+          if (maxScore >= minScore) {
+            return target;
+          }
+
+          if (upTo == NO_MORE_DOCS) {
+            return NO_MORE_DOCS;
+          }
+
+          target = upTo + 1;
+
+          moveToNextBlock(target);
+        }
+      }
+
+      @Override
+      public int nextDoc() throws IOException {
+        return advance(docID() + 1);
+      }
+
+      @Override
+      public int advance(int target) throws IOException {
+        return doNext(lead.advance(advanceTarget(target)));
+      }
+
+      private int doNext(int doc) throws IOException {
+        advanceHead: for(;;) {
+          assert doc == lead.docID();
+
+          if (doc == NO_MORE_DOCS) {
+            return NO_MORE_DOCS;
+          }
+
+          if (doc > upTo) {
+            // This check is useful when scorers return information about blocks
+            // that do not actually have any matches. Otherwise `doc` will always
+            // be in the current block already since it is always the result of
+            // lead.advance(advanceTarget(some_doc_id))
+            final int nextTarget = advanceTarget(doc);
+            if (nextTarget != doc) {
+              doc = lead.advance(nextTarget);
+              continue;
+            }
+          }
+
+          assert doc <= upTo;
+
+          // then find agreement with other iterators
+          for (int i = 1; i < approximations.length; ++i) {
+            final DocIdSetIterator other = approximations[i];
+            // other.doc may already be equal to doc if we "continued advanceHead"
+            // on the previous iteration and the advance on the lead scorer exactly matched.
+            if (other.docID() < doc) {
+              final int next = other.advance(doc);
+
+              if (next > doc) {
+                // iterator beyond the current doc - advance lead and continue to the new highest doc.
+                doc = lead.advance(advanceTarget(next));
+                continue advanceHead;
+              }
+            }
+
+            assert other.docID() == doc;
+          }
+
+          // success - all iterators are on the same doc and the score is competitive
+          return doc;
+        }
+      }
+    };
+  }
+

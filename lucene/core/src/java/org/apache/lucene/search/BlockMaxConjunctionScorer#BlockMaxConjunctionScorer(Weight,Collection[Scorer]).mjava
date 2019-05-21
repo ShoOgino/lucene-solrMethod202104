@@ -2,26 +2,24 @@
   BlockMaxConjunctionScorer(Weight weight, Collection<Scorer> scorersList) throws IOException {
     super(weight);
     this.scorers = scorersList.toArray(new Scorer[scorersList.size()]);
-    for (Scorer scorer : scorers) {
+    // Sort scorer by cost
+    Arrays.sort(this.scorers, Comparator.comparingLong(s -> s.iterator().cost()));
+    this.maxScorePropagator = new MaxScoreSumPropagator(Arrays.asList(scorers));
+
+    this.approximations = new DocIdSetIterator[scorers.length];
+    List<TwoPhaseIterator> twoPhaseList = new ArrayList<>();
+    for (int i = 0; i < scorers.length; i++) {
+      Scorer scorer = scorers[i];
+      TwoPhaseIterator twoPhase = scorer.twoPhaseIterator();
+      if (twoPhase != null) {
+        twoPhaseList.add(twoPhase);
+        approximations[i] = twoPhase.approximation();
+      } else {
+        approximations[i] = scorer.iterator();
+      }
       scorer.advanceShallow(0);
     }
-    this.maxScorePropagator = new MaxScoreSumPropagator(scorersList);
-
-    // Put scorers with the higher max scores first
-    // We tie-break on cost
-    Comparator<Scorer> comparator = (s1, s2) -> {
-      int cmp;
-      try {
-        cmp = Float.compare(s2.getMaxScore(DocIdSetIterator.NO_MORE_DOCS), s1.getMaxScore(DocIdSetIterator.NO_MORE_DOCS));
-      } catch (IOException e) {
-        throw new RuntimeException(e);
-      }
-      if (cmp == 0) {
-        cmp = Long.compare(s1.iterator().cost(), s2.iterator().cost());
-      }
-      return cmp;
-    };
-    Arrays.sort(this.scorers, comparator);
-    minScores = new double[this.scorers.length];
+    this.twoPhases = twoPhaseList.toArray(new TwoPhaseIterator[twoPhaseList.size()]);
+    Arrays.sort(this.twoPhases, Comparator.comparingDouble(TwoPhaseIterator::matchCost));
   }
 

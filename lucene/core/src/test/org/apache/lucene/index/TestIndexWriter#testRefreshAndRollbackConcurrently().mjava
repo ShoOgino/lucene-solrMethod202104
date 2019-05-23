@@ -1,0 +1,47 @@
+  public void testRefreshAndRollbackConcurrently() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+    AtomicBoolean stopped = new AtomicBoolean();
+    Semaphore indexedDocs = new Semaphore(0);
+    Thread indexer = new Thread(() -> {
+      while (stopped.get() == false) {
+        try {
+          String id = Integer.toString(random().nextInt(100));
+          Document doc = new Document();
+          doc.add(new StringField("id", id, Field.Store.YES));
+          w.updateDocument(new Term("id", id), doc);
+          indexedDocs.release(1);
+        } catch (IOException e) {
+          throw new AssertionError(e);
+        } catch (AlreadyClosedException ignored) {
+          return;
+        }
+      }
+    });
+
+    SearcherManager sm = new SearcherManager(w, new SearcherFactory());
+    Thread refresher = new Thread(() -> {
+      while (stopped.get() == false) {
+        try {
+          sm.maybeRefreshBlocking();
+        } catch (IOException e) {
+          throw new AssertionError(e);
+        } catch (AlreadyClosedException ignored) {
+          return;
+        }
+      }
+    });
+
+    try {
+      indexer.start();
+      refresher.start();
+      indexedDocs.acquire(1 + random().nextInt(100));
+      w.rollback();
+    } finally {
+      stopped.set(true);
+      indexer.join();
+      refresher.join();
+      IOUtils.close(sm, dir);
+    }
+  }
+

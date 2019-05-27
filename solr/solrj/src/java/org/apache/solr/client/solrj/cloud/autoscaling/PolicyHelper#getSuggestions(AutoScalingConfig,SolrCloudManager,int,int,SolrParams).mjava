@@ -1,0 +1,47 @@
+  public static List<Suggester.SuggestionInfo> getSuggestions(AutoScalingConfig autoScalingConf,
+                                                              SolrCloudManager cloudManager, int max, int timeoutInSecs, SolrParams params) {
+    Policy policy = autoScalingConf.getPolicy();
+    Suggestion.Ctx ctx = new Suggestion.Ctx();
+    ctx.endTime = cloudManager.getTimeSource().getTimeNs() + TimeUnit.SECONDS.toNanos(timeoutInSecs);
+    ctx.max = max;
+    ctx.session = policy.createSession(cloudManager);
+    String[] t = params == null ? null : params.getParams("type");
+    List<String> types = t == null? Collections.EMPTY_LIST: Arrays.asList(t);
+
+    if(types.isEmpty() || types.contains(violation.name())) {
+      List<Violation> violations = ctx.session.getViolations();
+      for (Violation violation : violations) {
+        violation.getClause().getThirdTag().varType.getSuggestions(ctx.setViolation(violation));
+        ctx.violation = null;
+      }
+
+      for (Violation current : ctx.session.getViolations()) {
+        for (Violation old : violations) {
+          if (!ctx.needMore()) return ctx.getSuggestions();
+          if (current.equals(old)) {
+            //could not be resolved
+            ctx.suggestions.add(new Suggester.SuggestionInfo(current, null, unresolved_violation));
+            break;
+          }
+        }
+      }
+    }
+
+    if(types.isEmpty() || types.contains(repair.name())) {
+      if (ctx.needMore()) {
+        try {
+          addMissingReplicas(cloudManager, ctx);
+        } catch (IOException e) {
+          log.error("Unable to fetch cluster state", e);
+        }
+      }
+    }
+
+    if(types.isEmpty() || types.contains(improvement.name())) {
+      if (ctx.needMore()) {
+        suggestOptimizations(ctx, Math.min(ctx.max - ctx.getSuggestions().size(), 10));
+      }
+    }
+    return ctx.getSuggestions();
+  }
+

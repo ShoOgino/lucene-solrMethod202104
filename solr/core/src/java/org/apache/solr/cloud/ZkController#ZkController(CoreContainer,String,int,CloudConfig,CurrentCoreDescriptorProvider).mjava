@@ -45,10 +45,11 @@
         new OnReconnect() {
 
           @Override
-          public void command() {
+          public void command() throws SessionExpiredException {
             log.info("ZooKeeper session re-connected ... refreshing core states after session expiration.");
             clearZkCollectionTerms();
             try {
+              // recreate our watchers first so that they exist even on any problems below
               zkStateReader.createClusterStateWatchersAndUpdate();
 
               // this is troublesome - we dont want to kill anything the old
@@ -78,8 +79,17 @@
               }
 
               cc.cancelCoreRecoveries();
-
-              registerAllCoresAsDown(registerOnReconnect, false);
+              
+              try {
+                registerAllCoresAsDown(registerOnReconnect, false);
+              } catch (SessionExpiredException e) {
+                // zk has to reconnect and this will all be tried again
+                throw e;
+              } catch (Exception e) {
+                // this is really best effort - in case of races or failure cases where we now need to be the leader, if anything fails,
+                // just continue
+                log.warn("Exception while trying to register all cores as DOWN", e);
+              } 
 
               // we have to register as live first to pick up docs in the buffer
               createEphemeralLiveNode();
@@ -132,6 +142,8 @@
               Thread.currentThread().interrupt();
               throw new ZooKeeperException(
                   SolrException.ErrorCode.SERVER_ERROR, "", e);
+            } catch (SessionExpiredException e) {
+              throw e;
             } catch (Exception e) {
               SolrException.log(log, "", e);
               throw new ZooKeeperException(

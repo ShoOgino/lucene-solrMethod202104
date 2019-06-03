@@ -1,5 +1,5 @@
   private ZkCoreNodeProps waitForLeaderToSeeDownState(
-      CoreDescriptor descriptor, final String coreZkNodeName) {
+      CoreDescriptor descriptor, final String coreZkNodeName) throws SessionExpiredException {
     // try not to wait too long here - if we are waiting too long, we should probably
     // move along and join the election
 
@@ -19,8 +19,10 @@
         // go straight to zk, not the cloud state - we want current info
         leaderProps = getLeaderProps(collection, shard, 5000);
         break;
+      } catch (SessionExpiredException e) {
+        throw e;
       } catch (Exception e) {
-        SolrException.log(log, "There was a problem finding the leader in zk", e);
+        log.info("Did not find the leader in Zookeeper", e);
         try {
           Thread.sleep(2000);
         } catch (InterruptedException e1) {
@@ -46,11 +48,11 @@
             " is already less than leader, so not waiting for leader to see down state.");
       } else {
 
-        log.info("Replica need to wait for leader to see down state.");
+        log.info("replica={} is making a best effort attempt to wait for leader={} to see it's DOWN state.", myCoreNodeName, leaderProps.getCoreUrl());
 
         try (HttpSolrClient client = new Builder(leaderBaseUrl)
-            .withConnectionTimeout(15000)
-            .withSocketTimeout(120000)
+            .withConnectionTimeout(8000) // short timeouts, we may be in a storm and this is best effort and maybe we should be the leader now
+            .withSocketTimeout(30000)
             .build()) {
           WaitForState prepCmd = new WaitForState();
           prepCmd.setCoreName(leaderCoreName);
@@ -58,9 +60,8 @@
           prepCmd.setCoreNodeName(coreZkNodeName);
           prepCmd.setState(Replica.State.DOWN);
 
-          // let's retry a couple times - perhaps the leader just went down,
-          // or perhaps he is just not quite ready for us yet
-          retries = 2;
+          // lets give it another chance, but without taking too long
+          retries = 3;
           for (int i = 0; i < retries; i++) {
             if (isClosed) {
               throw new SolrException(ErrorCode.SERVICE_UNAVAILABLE,

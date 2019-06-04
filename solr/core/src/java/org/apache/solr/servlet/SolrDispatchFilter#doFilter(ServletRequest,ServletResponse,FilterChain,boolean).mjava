@@ -2,7 +2,8 @@
     if (!(_request instanceof HttpServletRequest)) return;
     HttpServletRequest request = closeShield((HttpServletRequest)_request, retry);
     HttpServletResponse response = closeShield((HttpServletResponse)_response, retry);
-    
+    Scope scope = null;
+    Span span = null;
     try {
 
       if (cores == null || cores.isShutDown()) {
@@ -17,9 +18,9 @@
         }
       }
 
+      String requestPath = request.getServletPath();
       // No need to even create the HttpSolrCall object if this path is excluded.
       if (excludePatterns != null) {
-        String requestPath = request.getServletPath();
         String extraPath = request.getPathInfo();
         if (extraPath != null) {
           // In embedded mode, servlet path is empty - include all post-context path here for testing
@@ -33,6 +34,24 @@
           }
         }
       }
+
+      SpanContext parentSpan = GlobalTracer.get().extract(request);
+      Tracer tracer = GlobalTracer.getTracer();
+
+      Tracer.SpanBuilder spanBuilder = null;
+      String hostAndPort = request.getServerName() + "_" + request.getServerPort();
+      if (parentSpan == null) {
+        spanBuilder = tracer.buildSpan(request.getMethod() + ":" + hostAndPort);
+      } else {
+        spanBuilder = tracer.buildSpan(request.getMethod() + ":" + hostAndPort)
+            .asChildOf(parentSpan);
+      }
+
+      spanBuilder
+          .withTag(Tags.SPAN_KIND.getKey(), Tags.SPAN_KIND_SERVER)
+          .withTag(Tags.HTTP_URL.getKey(), request.getRequestURL().toString());
+      span = spanBuilder.start();
+      scope = tracer.scopeManager().activate(span);
 
       AtomicReference<HttpServletRequest> wrappedRequest = new AtomicReference<>();
       if (!authenticateRequest(request, response, wrappedRequest)) { // the response and status code have already been sent
@@ -71,6 +90,10 @@
         ExecutorUtil.setServerThreadFlag(null);
       }
     } finally {
+      if (span != null) span.finish();
+      if (scope != null) scope.close();
+
+      GlobalTracer.get().clearContext();
       consumeInputFully(request);
     }
   }

@@ -1,0 +1,58 @@
+  private void estimateTermStats(String field, Terms terms, Map<String, Map<String, Object>> stats, boolean isSampling) throws IOException {
+    Map<String, Object> perField = stats.computeIfAbsent(field, n -> new HashMap<>());
+    SummaryStatistics lengthSummary = (SummaryStatistics)perField.computeIfAbsent("lengths_terms", s -> new MapWriterSummaryStatistics());
+    SummaryStatistics docFreqSummary = (SummaryStatistics)perField.computeIfAbsent("docFreqs", s -> new MapWriterSummaryStatistics());
+    SummaryStatistics totalFreqSummary = (SummaryStatistics)perField.computeIfAbsent("lengths_postings", s -> new MapWriterSummaryStatistics());
+    // TODO: add this at some point
+    //SummaryStatistics impactsSummary = (SummaryStatistics)perField.computeIfAbsent("lengths_impacts", s -> new MapWriterSummaryStatistics());
+    SummaryStatistics payloadSummary = null;
+    if (terms.hasPayloads()) {
+      payloadSummary = (SummaryStatistics)perField.computeIfAbsent("lengths_payloads", s -> new MapWriterSummaryStatistics());
+    }
+    ItemPriorityQueue topLen = (ItemPriorityQueue)perField.computeIfAbsent("topLen", s -> new ItemPriorityQueue(topN));
+    ItemPriorityQueue topTotalFreq = (ItemPriorityQueue)perField.computeIfAbsent("topTotalFreq", s -> new ItemPriorityQueue(topN));
+    TermsEnum termsEnum = terms.iterator();
+    BytesRef term;
+    PostingsEnum postings = null;
+    while ((term = termsEnum.next()) != null) {
+      if (isSampling) {
+        for (int i = 0; i < samplingStep; i++) {
+          lengthSummary.addValue(term.length);
+          docFreqSummary.addValue(termsEnum.docFreq());
+          totalFreqSummary.addValue(termsEnum.totalTermFreq());
+        }
+      } else {
+        lengthSummary.addValue(term.length);
+        docFreqSummary.addValue(termsEnum.docFreq());
+        totalFreqSummary.addValue(termsEnum.totalTermFreq());
+      }
+      if (terms.hasPayloads()) {
+        postings = termsEnum.postings(postings, PostingsEnum.ALL);
+        while (postings.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
+          int freq = postings.freq();
+          for (int i = 0; i < freq; i++) {
+            if (postings.nextPosition() < 0) {
+              break;
+            }
+            BytesRef payload = postings.getPayload();
+            if (payload != null) {
+              if (isSampling) {
+                for (int k = 0; k < samplingStep; k++) {
+                  payloadSummary.addValue(payload.length);
+                }
+              } else {
+                payloadSummary.addValue(payload.length);
+              }
+            }
+          }
+        }
+      }
+      String value = term.utf8ToString();
+      if (value.length() > maxLength) {
+        value = value.substring(0, maxLength);
+      }
+      topLen.insertWithOverflow(new Item(value, term.length));
+      topTotalFreq.insertWithOverflow(new Item(value, termsEnum.totalTermFreq()));
+    }
+  }
+

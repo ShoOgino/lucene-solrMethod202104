@@ -1,0 +1,50 @@
+  public Estimate estimate() throws Exception {
+    Map<String, Object> details = new LinkedHashMap<>();
+    Map<String, Object> summary = new LinkedHashMap<>();
+    estimateStoredFields(details);
+    estimateTerms(details);
+    estimateNorms(details);
+    estimatePoints(details);
+    estimateTermVectors(details);
+    estimateDocValues(details);
+    estimateSummary(details, summary);
+    if (samplingStep > 1) {
+      details.put("samplingPercent", samplingPercent);
+      details.put("samplingStep", samplingStep);
+    }
+    ItemPriorityQueue fieldSizeQueue = new ItemPriorityQueue(summary.size());
+    summary.forEach((field, perField) -> {
+      long size = ((AtomicLong)((Map<String, Object>)perField).get("totalSize")).get();
+      if (size > 0) {
+        fieldSizeQueue.insertWithOverflow(new Item(field, size));
+      }
+    });
+    Map<String, Long> fieldsBySize = new LinkedHashMap<>();
+    fieldSizeQueue._forEachEntry((k, v) -> fieldsBySize.put((String)k, (Long)v));
+    Map<String, AtomicLong> typeSizes = new HashMap<>();
+    summary.forEach((field, perField) -> {
+      Map<String, Object> perType = (Map<String, Object>)((Map<String, Object>)perField).get("perType");
+      perType.forEach((type, size) -> {
+        if (type.contains("_lengths")) {
+          AtomicLong totalSize = typeSizes.computeIfAbsent(type.replace("_lengths", ""), t -> new AtomicLong());
+          totalSize.addAndGet(((AtomicLong)size).get());
+        }
+      });
+    });
+    ItemPriorityQueue typesSizeQueue = new ItemPriorityQueue(typeSizes.size());
+    typeSizes.forEach((type, size) -> {
+      if (size.get() > 0) {
+        typesSizeQueue.insertWithOverflow(new Item(type, size.get()));
+      }
+    });
+    Map<String, Long> typesBySize = new LinkedHashMap<>();
+    typesSizeQueue._forEachEntry((k, v) -> typesBySize.put((String)k, (Long)v));
+    // sort summary by field size
+    Map<String, Object> newSummary = new LinkedHashMap<>();
+    fieldsBySize.keySet().forEach(k -> newSummary.put(String.valueOf(k), summary.get(k)));
+    // convert everything to maps and primitives
+    convert(newSummary);
+    convert(details);
+    return new Estimate(fieldsBySize, typesBySize, withSummary ? newSummary : null, withDetails ? details : null);
+  }
+

@@ -1,0 +1,53 @@
+  /**
+   * Get and cache collection properties for a given collection. If the collection is watched, or still cached
+   * simply return it from the cache, otherwise fetch it directly from zookeeper and retain the value for at
+   * least cacheForMillis milliseconds. Cached properties are watched in zookeeper and updated automatically.
+   * This version of {@code getCollectionProperties} should be used when properties need to be consulted
+   * frequently in the absence of an active {@link CollectionPropsWatcher}.
+   *
+   * @param collection The collection for which properties are desired
+   * @param cacheForMillis The minimum number of milliseconds to maintain a cache for the specified collection's
+   *                       properties. Setting a {@code CollectionPropsWatcher} will override this value and retain
+   *                       the cache for the life of the watcher. A lack of changes in zookeeper may allow the
+   *                       caching to remain for a greater duration up to the cycle time of {@link CacheCleaner}.
+   *                       Passing zero for this value will explicitly remove the cached copy if and only if it is
+   *                       due to expire and no watch exists. Any positive value will extend the expiration time
+   *                       if required.
+   * @return a map representing the key/value properties for the collection.
+   */
+  public Map<String, String> getCollectionProperties(final String collection, long cacheForMillis) {
+    synchronized (watchedCollectionProps) { // making decisions based on the result of a get...
+      Watcher watcher = null;
+      if (cacheForMillis > 0) {
+        watcher = collectionPropsWatchers.compute(collection,
+            (c, w) -> w == null ? new PropsWatcher(c, cacheForMillis) : w.renew(cacheForMillis));
+      }
+      VersionedCollectionProps vprops = watchedCollectionProps.get(collection);
+      boolean haveUnexpiredProps = vprops != null && vprops.cacheUntilNs > System.nanoTime();
+      long untilNs = System.nanoTime() + TimeUnit.NANOSECONDS.convert(cacheForMillis, TimeUnit.MILLISECONDS);
+      Map<String, String> properties;
+      if (haveUnexpiredProps) {
+        properties = vprops.props;
+        vprops.cacheUntilNs = Math.max(vprops.cacheUntilNs, untilNs);
+      } else {
+        try {
+          VersionedCollectionProps vcp = fetchCollectionProperties(collection, watcher);
+          properties = vcp.props;
+          if (cacheForMillis > 0) {
+            vcp.cacheUntilNs = untilNs;
+            watchedCollectionProps.put(collection,vcp);
+          } else {
+            // we're synchronized on watchedCollectionProps and we can only get here if we have found an expired
+            // vprops above, so it is safe to remove the cached value and let the GC free up some mem a bit sooner.
+            if (!collectionPropsObservers.containsKey(collection)) {
+              watchedCollectionProps.remove(collection);
+            }
+          }
+        } catch (Exception e) {
+          throw new SolrException(ErrorCode.SERVER_ERROR, "Error reading collection properties", SolrZkClient.checkInterrupted(e));
+        }
+      }
+      return properties;
+    }
+  }
+

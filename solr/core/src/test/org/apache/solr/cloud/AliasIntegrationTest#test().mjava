@@ -22,12 +22,15 @@
 
     ///////////////
     // make sure there's only one level of alias
+    ZkStateReader zkStateReader = cluster.getSolrClient().getZkStateReader();
+    int lastVersion = zkStateReader.aliasesManager.getAliases().getZNodeVersion();
+
     CollectionAdminRequest.deleteAlias("collection1").process(cluster.getSolrClient());
     CollectionAdminRequest.createAlias("testalias1", "collection1").process(cluster.getSolrClient());
 
     // verify proper resolution on the server-side
-    ZkStateReader zkStateReader = cluster.getSolrClient().getZkStateReader();
-    zkStateReader.aliasesManager.update();
+    lastVersion = waitForAliasesUpdate(lastVersion, zkStateReader);
+
     Aliases aliases = zkStateReader.getAliases();
     List<String> collections = aliases.resolveAliases("testalias1");
     assertEquals(collections.toString(), 1, collections.size());
@@ -47,27 +50,29 @@
     // test alias pointing to two collections.  collection2 first because it's not on every node
     CollectionAdminRequest.createAlias("testalias2", "collection2,collection1").process(cluster.getSolrClient());
 
-    Thread.sleep(100);
+    lastVersion = waitForAliasesUpdate(lastVersion, zkStateReader);
     
     searchSeveralWays("testalias2", new SolrQuery("*:*"), 5);
 
     ///////////////
     // update alias
     CollectionAdminRequest.createAlias("testalias2", "collection2").process(cluster.getSolrClient());
-    sleepToAllowZkPropagation();
+    lastVersion = waitForAliasesUpdate(lastVersion, zkStateReader);
 
     searchSeveralWays("testalias2", new SolrQuery("*:*"), 2);
 
     ///////////////
     // alias pointing to alias.  One level of indirection is supported; more than that is not (may or may not work)
-    // TODO dubious; remove?
     CollectionAdminRequest.createAlias("testalias3", "testalias2").process(cluster.getSolrClient());
+    lastVersion = waitForAliasesUpdate(lastVersion, zkStateReader);
     searchSeveralWays("testalias3", new SolrQuery("*:*"), 2);
 
     ///////////////
     // Test 2 aliases pointing to the same collection
     CollectionAdminRequest.createAlias("testalias4", "collection2").process(cluster.getSolrClient());
+    lastVersion = waitForAliasesUpdate(lastVersion, zkStateReader);
     CollectionAdminRequest.createAlias("testalias5", "collection2").process(cluster.getSolrClient());
+    lastVersion = waitForAliasesUpdate(lastVersion, zkStateReader);
 
     // add one document to testalias4, thus to collection2
     new UpdateRequest()
@@ -100,8 +105,8 @@
     ///////////////
     for (int i = 1; i <= 6 ; i++) {
       CollectionAdminRequest.deleteAlias("testalias" + i).process(cluster.getSolrClient());
+      lastVersion = waitForAliasesUpdate(lastVersion, zkStateReader);
     }
-    sleepToAllowZkPropagation();
 
     SolrException e = expectThrows(SolrException.class, () -> {
       SolrQuery q = new SolrQuery("*:*");

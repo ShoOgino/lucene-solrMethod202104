@@ -1,0 +1,38 @@
+  // See  SOLR-12013. We should report something back if the configset has mysteriously disappeared.
+  private void testNoConfigset() throws Exception {
+    String configSet = "delete_config";
+
+    final String collection = "deleted_collection";
+    try (CloudSolrClient client = createCloudClient(null)) {
+      copyConfigUp(TEST_PATH().resolve("configsets"), "cloud-minimal", configSet, client.getZkHost());
+
+      ModifiableSolrParams params = new ModifiableSolrParams();
+      params.set("action", CollectionParams.CollectionAction.CREATE.toString());
+      params.set("name", collection);
+      params.set("numShards", "1");
+      params.set("replicationFactor", "1");
+      params.set("collection.configName", configSet);
+      SolrRequest request = new QueryRequest(params);
+      request.setPath("/admin/collections");
+
+      client.request(request);
+
+      waitForCollection(cloudClient.getZkStateReader(), collection, 1);
+      waitForRecoveriesToFinish(collection, false);
+
+      // Now try deleting the configset and doing a clusterstatus.
+      String parent = ZkConfigManager.CONFIGS_ZKNODE + "/" + configSet;
+      deleteThemAll(client.getZkStateReader().getZkClient(), parent);
+      client.getZkStateReader().forciblyRefreshAllClusterStateSlow();
+
+      final CollectionAdminRequest.ClusterStatus req = CollectionAdminRequest.getClusterStatus();
+      NamedList<Object> rsp = client.request(req);
+      NamedList<Object> cluster = (NamedList<Object>) rsp.get("cluster");
+      assertNotNull("Cluster state should not be null", cluster);
+      NamedList<Object> collections = (NamedList<Object>) cluster.get("collections");
+      assertNotNull("Collections should not be null in cluster state", collections);
+      assertNotNull("Testing to insure collections are returned", collections.get(COLLECTION_NAME1));
+      assertNull("Should have failed to find: " + collection + " because the configset was delted. ", collections.get(collection));
+    }
+  }
+

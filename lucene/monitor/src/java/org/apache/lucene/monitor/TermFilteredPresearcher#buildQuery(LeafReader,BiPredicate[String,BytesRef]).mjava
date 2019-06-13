@@ -1,0 +1,48 @@
+  @Override
+  public final Query buildQuery(LeafReader reader, BiPredicate<String, BytesRef> termAcceptor) {
+    try {
+      DocumentQueryBuilder queryBuilder = getQueryBuilder();
+      for (FieldInfo field : reader.getFieldInfos()) {
+
+        TokenStream ts = new TermsEnumTokenStream(reader.terms(field.name).iterator());
+        for (CustomQueryHandler handler : queryHandlers) {
+          ts = handler.wrapTermStream(field.name, ts);
+        }
+
+        ts = new FilteringTokenFilter(ts) {
+          TermToBytesRefAttribute termAtt = addAttribute(TermToBytesRefAttribute.class);
+          @Override
+          protected boolean accept() {
+            return filterFields.contains(field.name) == false && termAcceptor.test(field.name, termAtt.getBytesRef());
+          }
+        };
+
+        TermToBytesRefAttribute termAtt = ts.addAttribute(TermToBytesRefAttribute.class);
+        while (ts.incrementToken()) {
+          queryBuilder.addTerm(field.name, BytesRef.deepCopyOf(termAtt.getBytesRef()));
+        }
+        ts.close();
+
+      }
+      Query presearcherQuery = queryBuilder.build();
+
+      BooleanQuery.Builder bq = new BooleanQuery.Builder();
+      bq.add(presearcherQuery, BooleanClause.Occur.SHOULD);
+      bq.add(new TermQuery(new Term(ANYTOKEN_FIELD, ANYTOKEN)), BooleanClause.Occur.SHOULD);
+      presearcherQuery = bq.build();
+      if (filterFields.isEmpty() == false) {
+        bq = new BooleanQuery.Builder();
+        bq.add(presearcherQuery, BooleanClause.Occur.MUST);
+        Query filterQuery = buildFilterFields(reader);
+        if (filterQuery != null) {
+          bq.add(filterQuery, BooleanClause.Occur.FILTER);
+          presearcherQuery = bq.build();
+        }
+      }
+      return presearcherQuery;
+    } catch (IOException e) {
+      // We're a MemoryIndex, so this shouldn't happen...
+      throw new RuntimeException(e);
+    }
+  }
+

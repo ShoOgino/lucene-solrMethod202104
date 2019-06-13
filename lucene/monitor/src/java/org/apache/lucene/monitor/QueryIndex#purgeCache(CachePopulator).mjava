@@ -1,0 +1,45 @@
+  /**
+   * Remove unused queries from the query cache.
+   * <p>
+   * This is normally called from a background thread at a rate set by configurePurgeFrequency().
+   *
+   * @throws IOException on IO errors
+   */
+  private synchronized void purgeCache(CachePopulator populator) throws IOException {
+
+    // Note on implementation
+
+    // The purge works by scanning the query index and creating a new query cache populated
+    // for each query in the index.  When the scan is complete, the old query cache is swapped
+    // for the new, allowing it to be garbage-collected.
+
+    // In order to not drop cached queries that have been added while a purge is ongoing,
+    // we use a ReadWriteLock to guard the creation and removal of an register log.  Commits take
+    // the read lock.  If the register log has been created, then a purge is ongoing, and queries
+    // are added to the register log within the read lock guard.
+
+    // The purge takes the write lock when creating the register log, and then when swapping out
+    // the old query cache.  Within the second write lock guard, the contents of the register log
+    // are added to the new query cache, and the register log itself is removed.
+
+    final ConcurrentMap<String, QueryCacheEntry> newCache = new ConcurrentHashMap<>();
+
+    purgeLock.writeLock().lock();
+    try {
+      purgeCache = new ConcurrentHashMap<>();
+    } finally {
+      purgeLock.writeLock().unlock();
+    }
+
+    populator.populateCacheWithIndex(newCache);
+
+    purgeLock.writeLock().lock();
+    try {
+      newCache.putAll(purgeCache);
+      purgeCache = null;
+      queries = newCache;
+    } finally {
+      purgeLock.writeLock().unlock();
+    }
+  }
+

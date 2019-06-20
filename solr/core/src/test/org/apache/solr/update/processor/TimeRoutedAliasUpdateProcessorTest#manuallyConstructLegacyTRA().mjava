@@ -1,0 +1,94 @@
+  // here we do things not to be emulated elsewhere to create a legacy condition and ensure that we can
+  // work with both old and new formats.
+  private void manuallyConstructLegacyTRA() throws Exception {
+    // first create a "modern" alias
+    String configName = getSaferTestName();
+    createConfigSet(configName);
+
+    final int numShards = 1 ;
+    final int numReplicas = 1 ;
+    CollectionAdminRequest.createTimeRoutedAlias(alias, "2017-10-23T00:00:00Z", "+1DAY", getTimeField(),
+        CollectionAdminRequest.createCollection("_unused_", configName, numShards, numReplicas)
+            .setMaxShardsPerNode(numReplicas)).setPreemptiveCreateWindow("3HOUR").setAutoDeleteAge("/DAY-3DAYS")
+        .process(solrClient);
+
+    // now create collections that look like the legacy (pre __TRA__) names...
+    String legacy23 = alias + "_" + "2017-10-23";
+    CollectionAdminRequest.createCollection(legacy23, configName, numShards,numReplicas).process(solrClient);
+    String legacy24 = alias + "_" + "2017-10-24";
+    CollectionAdminRequest.createCollection(legacy24, configName, numShards,numReplicas).process(solrClient);
+
+    waitCol(1,legacy23);
+    waitCol(1,legacy24);
+    // put some data in the legacy collections:
+    assertUpdateResponse(solrClient.add(legacy23,
+        sdoc("id","1","timestamp_dt", "2017-10-23T00:00:01Z")
+    ));
+    assertUpdateResponse(solrClient.add(legacy24,
+        sdoc("id","2","timestamp_dt", "2017-10-24T00:00:01Z")
+    ));
+
+    solrClient.commit(legacy23);
+    solrClient.commit(legacy24);
+
+    QueryResponse resp = solrClient.query(legacy23, params(
+        "q", "*:*",
+        "rows", "10"));
+    assertEquals(1,resp.getResults().getNumFound());
+
+    resp = solrClient.query(legacy24, params(
+        "q", "*:*",
+        "rows", "10"));
+    assertEquals(1,resp.getResults().getNumFound());
+
+    // now knock out the collection backing our alias
+    ZkStateReader zkStateReader = cluster.getSolrClient().getZkStateReader();
+    Aliases aliases = zkStateReader.getAliases();
+    List<String> collections = aliases.getCollectionAliasListMap().get(alias);
+    for (String collection : collections) {
+      CollectionAdminRequest.deleteCollection(collection);
+    }
+
+    // now grab the zk data so we can hack in our legacy collections..
+    byte[] data = zkStateReader.getZkClient().getData("/aliases.json", null, null, true);
+
+    // some tidbits for handling zk data here are swiped from Aliases.json
+    Map<String, Map> aliasMap;
+    if (data == null || data.length == 0) {
+      aliasMap = Collections.emptyMap();
+    } else {
+      //noinspection unchecked
+      aliasMap = (Map<String, Map>) Utils.fromJSON(data);
+    }
+    assertNotEquals(0, aliasMap.size());
+
+    Map colAliases = aliasMap.getOrDefault("collection", Collections.emptyMap());
+    assertNotEquals(0,colAliases.size());
+
+    String singleInitialCollection = (String) colAliases.get(alias);
+    assertFalse(singleInitialCollection.contains(","));
+
+    // replace with our two new collections... in asc order!
+    colAliases.put(alias,String.join(",",legacy24,legacy23));
+
+    data = Utils.toJSON(aliasMap);
+    zkStateReader.getZkClient().setData("/aliases.json",data,true);
+
+    zkStateReader.aliasesManager.update(); // make sure we've updated with the data we just sent
+
+    aliases = zkStateReader.aliasesManager.getAliases();
+    assertEquals(2,aliases.getCollectionAliasListMap().get(alias).size());
+
+    CollectionAdminRequest.deleteCollection(singleInitialCollection).process(solrClient);
+
+    waitCoreCount(singleInitialCollection,0);
+
+    // now make the legacy collections part of the alias
+    CollectionAdminRequest.setCollectionProperty(legacy23,RoutedAlias.ROUTED_ALIAS_NAME_CORE_PROP, alias).process(solrClient);
+    CollectionAdminRequest.setCollectionProperty(legacy24,RoutedAlias.ROUTED_ALIAS_NAME_CORE_PROP, alias).process(solrClient);
+    CollectionAdminRequest.reloadCollection(legacy23).process(solrClient);
+    CollectionAdminRequest.reloadCollection(legacy24).process(solrClient);
+
+    cluster.getOpenOverseer().getCoreContainer().getZkController().getZkStateReader().aliasesManager.update();
+  }
+

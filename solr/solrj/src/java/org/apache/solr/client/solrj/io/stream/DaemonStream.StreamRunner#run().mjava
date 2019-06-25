@@ -1,89 +1,10 @@
     public void run() {
-      int errors = 0;
-      setStartTime(new Date().getTime());
-      OUTER:
-      while (!getShutdown()) {
-        long now = new Date().getTime();
-        if ((now - lastRun) > this.runInterval) {
-          lastRun = now;
-          try {
-            tupleStream.open();
-            INNER:
-            while (true) {
-              Tuple tuple = tupleStream.read();
-              if (tuple.EOF) {
-                errors = 0; // Reset errors on successful run.
-                if (tuple.fields.containsKey("sleepMillis")) {
-                  this.sleepMillis = tuple.getLong("sleepMillis");
-
-                  if(terminate && sleepMillis > 0) {
-                    //TopicStream provides sleepMillis > 0 if the last run had no Tuples.
-                    //This means the topic queue is empty. Time to terminate.
-                    //Remove ourselves from the daemons map.
-                    if(daemons != null) {
-                      daemons.remove(id);
-                    }
-                    //Break out of the thread loop and end the run.
-                    break OUTER;
-                  }
-
-                  this.runInterval = -1;
-                }
-                break INNER;
-              } else if (!eatTuples) {
-                try {
-                  queue.put(tuple);
-                } catch (InterruptedException e) {
-                  break OUTER;
-                }
-              }
-            }
-          } catch (IOException e) {
-            exception = e;
-            log.error("Error in DaemonStream:" + id, e);
-            ++errors;
-            if (errors > 100) {
-              log.error("Too many consecutive errors. Stopping DaemonStream:" + id);
-              break OUTER;
-            }
-          } catch (Throwable t) {
-            log.error("Fatal Error in DaemonStream:" + id, t);
-            //For anything other then IOException break out of the loop and shutdown the thread.
-            break OUTER;
-          } finally {
-            try {
-              tupleStream.close();
-            } catch (IOException e1) {
-              if (exception == null) {
-                exception = e1;
-                log.error("Error in DaemonStream:" + id, e1);
-                break OUTER;
-              }
-            }
-          }
-        }
-        iterations.incrementAndGet();
-
-        if (sleepMillis > 0) {
-          try {
-            Thread.sleep(sleepMillis);
-          } catch (InterruptedException e) {
-            log.error("Error in DaemonStream:" + id, e);
-            break OUTER;
-          }
-        }
+      executingThread = Thread.currentThread();
+      try {
+        stream();
+      } finally {
+        setShutdown(true);
+        executingThread = null;
       }
-
-      if(!eatTuples) {
-        Map m = new HashMap();
-        m.put("EOF", true);
-        Tuple tuple = new Tuple(m);
-        try {
-          queue.put(tuple);
-        } catch (InterruptedException e) {
-          log.error("Error in DaemonStream:"+id, e);
-        }
-      }
-      setStopTime(new Date().getTime());
     }
 

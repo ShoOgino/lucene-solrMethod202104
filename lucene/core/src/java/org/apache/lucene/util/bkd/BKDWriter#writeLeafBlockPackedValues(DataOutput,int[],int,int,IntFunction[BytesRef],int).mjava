@@ -1,0 +1,40 @@
+  private void writeLeafBlockPackedValues(DataOutput out, int[] commonPrefixLengths, int count, int sortedDim, IntFunction<BytesRef> packedValues, int leafCardinality) throws IOException {
+    int prefixLenSum = Arrays.stream(commonPrefixLengths).sum();
+    if (prefixLenSum == packedBytesLength) {
+      // all values in this block are equal
+      out.writeByte((byte) -1);
+    } else {
+      assert commonPrefixLengths[sortedDim] < bytesPerDim;
+      // estimate if storing the values with cardinality is cheaper than storing all values.
+      int compressedByteOffset = sortedDim * bytesPerDim + commonPrefixLengths[sortedDim];
+      int highCardinalityCost;
+      int lowCardinalityCost;
+      if (count == leafCardinality) {
+        // all values in this block are different
+        highCardinalityCost = 0;
+        lowCardinalityCost = 1;
+      } else {
+        // compute cost of runLen compression
+        int numRunLens = 0;
+        for (int i = 0; i < count; ) {
+          // do run-length compression on the byte at compressedByteOffset
+          int runLen = runLen(packedValues, i, Math.min(i + 0xff, count), compressedByteOffset);
+          assert runLen <= 0xff;
+          numRunLens++;
+          i += runLen;
+        }
+        // Add cost of runLen compression
+        highCardinalityCost = count * (packedBytesLength - prefixLenSum - 1) + 2 * numRunLens;
+        // +1 is the byte needed for storing the cardinality
+        lowCardinalityCost = leafCardinality * (packedBytesLength - prefixLenSum + 1);
+      }
+      if (lowCardinalityCost <= highCardinalityCost) {
+        out.writeByte((byte) -2);
+        writeLowCardinalityLeafBlockPackedValues(out, commonPrefixLengths, count, packedValues);
+      } else {
+        out.writeByte((byte) sortedDim);
+        writeHighCardinalityLeafBlockPackedValues(out, commonPrefixLengths, count, sortedDim, packedValues, compressedByteOffset);
+      }
+    }
+  }
+

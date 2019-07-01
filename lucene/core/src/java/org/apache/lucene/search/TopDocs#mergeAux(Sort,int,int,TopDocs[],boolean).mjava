@@ -1,13 +1,12 @@
   /** Auxiliary method used by the {@link #merge} impls. A sort value of null
    *  is used to indicate that docs should be sorted by score. */
-  private static TopDocs mergeAux(Sort sort, int start, int size, TopDocs[] shardHits,
-                                  Comparator<ScoreDoc> tieBreaker) {
+  private static TopDocs mergeAux(Sort sort, int start, int size, TopDocs[] shardHits, boolean setShardIndex) {
 
     final PriorityQueue<ShardRef> queue;
     if (sort == null) {
-      queue = new ScoreMergeSortQueue(shardHits, tieBreaker);
+      queue = new ScoreMergeSortQueue(shardHits);
     } else {
-      queue = new MergeSortQueue(sort, shardHits, tieBreaker);
+      queue = new MergeSortQueue(sort, shardHits);
     }
 
     long totalHitCount = 0;
@@ -25,12 +24,11 @@
       }
       if (shard.scoreDocs != null && shard.scoreDocs.length > 0) {
         availHitCount += shard.scoreDocs.length;
-        queue.add(new ShardRef(shardIDX));
+        queue.add(new ShardRef(shardIDX, setShardIndex == false));
       }
     }
 
     final ScoreDoc[] hits;
-    boolean unsetShardIndex = false;
     if (availHitCount <= start) {
       hits = new ScoreDoc[0];
     } else {
@@ -42,16 +40,12 @@
         assert queue.size() > 0;
         ShardRef ref = queue.top();
         final ScoreDoc hit = shardHits[ref.shardIndex].scoreDocs[ref.hitIndex++];
-
-        // Irrespective of whether we use shard indices for tie breaking or not, we check for consistent
-        // order in shard indices to defend against potential bugs
-        if (hitUpto > 0) {
-          if (unsetShardIndex != (hit.shardIndex == -1)) {
-            throw new IllegalArgumentException("Inconsistent order of shard indices");
-          }
+        if (setShardIndex) {
+          // caller asked us to record shardIndex (index of the TopDocs array) this hit is coming from:
+          hit.shardIndex = ref.shardIndex;
+        } else if (hit.shardIndex == -1) {
+          throw new IllegalArgumentException("setShardIndex is false but TopDocs[" + ref.shardIndex + "].scoreDocs[" + (ref.hitIndex-1) + "] is not set");
         }
-
-        unsetShardIndex |= hit.shardIndex == -1;
           
         if (hitUpto >= start) {
           hits[hitUpto - start] = hit;

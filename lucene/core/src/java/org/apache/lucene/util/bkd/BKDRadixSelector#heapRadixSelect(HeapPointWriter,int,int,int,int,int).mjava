@@ -1,7 +1,8 @@
-  private byte[] heapRadixSelect(HeapPointWriter points, int dim, int from, int to, int partitionPoint, int commonPrefix) {
-    final int offset = dim * bytesPerDim + commonPrefix;
-    final int dimCmpBytes = bytesPerDim - commonPrefix;
-    new RadixSelector(bytesSorted - commonPrefix) {
+  private byte[] heapRadixSelect(HeapPointWriter points, int dim, int from, int to, int partitionPoint, int commonPrefixLength) {
+    final int dimOffset = dim * bytesPerDim + commonPrefixLength;
+    final int dimCmpBytes = bytesPerDim - commonPrefixLength;
+    final int dataOffset = numIndexDims * bytesPerDim - dimCmpBytes;
+    new RadixSelector(bytesSorted - commonPrefixLength) {
 
       @Override
       protected void swap(int i, int j) {
@@ -13,22 +14,22 @@
         assert k >= 0 : "negative prefix " + k;
         if (k  < dimCmpBytes) {
           // dim bytes
-          return points.block[i * packedBytesLength + offset + k] & 0xff;
+          return points.block[i * packedBytesDocIDLength + dimOffset + k] & 0xff;
         } else {
-          // doc id
-          int s = 3 - (k - dimCmpBytes);
-          return (points.docIDs[i] >>> (s * 8)) & 0xff;
+          // data bytes
+          return points.block[i * packedBytesDocIDLength + dataOffset + k] & 0xff;
         }
       }
 
       @Override
       protected Selector getFallbackSelector(int d) {
-        int skypedBytes = d + commonPrefix;
-        final int start = dim * bytesPerDim + skypedBytes;
-        final int end =  dim * bytesPerDim + bytesPerDim;
+        final int skypedBytes = d + commonPrefixLength;
+        final int dimStart = dim * bytesPerDim + skypedBytes;
+        final int dimEnd =  dim * bytesPerDim + bytesPerDim;
+        final int dataOffset = numIndexDims * bytesPerDim;
+        // data length is composed by the data dimensions plus the docID
+        final int dataLength = (numDataDims - numIndexDims) * bytesPerDim + Integer.BYTES;
         return new IntroSelector() {
-
-          int pivotDoc = -1;
 
           @Override
           protected void swap(int i, int j) {
@@ -38,36 +39,37 @@
           @Override
           protected void setPivot(int i) {
             if (skypedBytes < bytesPerDim) {
-              System.arraycopy(points.block, i * packedBytesLength + dim * bytesPerDim, scratch, 0, bytesPerDim);
+              System.arraycopy(points.block, i * packedBytesDocIDLength + dim * bytesPerDim, scratch, 0, bytesPerDim);
             }
-            pivotDoc = points.docIDs[i];
+            System.arraycopy(points.block, i * packedBytesDocIDLength + dataOffset, scratch, bytesPerDim, dataLength);
           }
 
           @Override
           protected int compare(int i, int j) {
             if (skypedBytes < bytesPerDim) {
-              int iOffset = i * packedBytesLength;
-              int jOffset = j * packedBytesLength;
-              int cmp = Arrays.compareUnsigned(points.block, iOffset + start, iOffset + end,
-                  points.block, jOffset + start, jOffset + end);
+              int iOffset = i * packedBytesDocIDLength;
+              int jOffset = j * packedBytesDocIDLength;
+              int cmp = Arrays.compareUnsigned(points.block, iOffset + dimStart, iOffset + dimEnd, points.block, jOffset + dimStart, jOffset + dimEnd);
               if (cmp != 0) {
                 return cmp;
               }
             }
-            return points.docIDs[i] - points.docIDs[j];
+            int iOffset = i * packedBytesDocIDLength + dataOffset;
+            int jOffset = j * packedBytesDocIDLength + dataOffset;
+            return Arrays.compareUnsigned(points.block, iOffset, iOffset + dataLength, points.block, jOffset, jOffset + dataLength);
           }
 
           @Override
           protected int comparePivot(int j) {
             if (skypedBytes < bytesPerDim) {
-              int jOffset = j * packedBytesLength;
-              int cmp = Arrays.compareUnsigned(scratch, skypedBytes, bytesPerDim,
-                  points.block, jOffset + start, jOffset + end);
+              int jOffset = j * packedBytesDocIDLength;
+              int cmp = Arrays.compareUnsigned(scratch, skypedBytes, bytesPerDim, points.block, jOffset + dimStart, jOffset + dimEnd);
               if (cmp != 0) {
                 return cmp;
               }
             }
-            return pivotDoc - points.docIDs[j];
+            int jOffset = j * packedBytesDocIDLength + dataOffset;
+            return Arrays.compareUnsigned(scratch, bytesPerDim, bytesPerDim + dataLength, points.block, jOffset, jOffset + dataLength);
           }
         };
       }

@@ -1,0 +1,58 @@
+  /** test we can search for a point with a standard number of vertices*/
+  public void testBasicIntersects() throws Exception {
+    int numVertices = TestUtil.nextInt(random(), 50, 100);
+    Directory dir = newDirectory();
+    RandomIndexWriter writer = new RandomIndexWriter(random(), dir);
+
+    // add a random polygon document
+    XYPolygon p = ShapeTestUtil.createRegularPolygon(0, 90, atLeast(1000000), numVertices);
+    Document document = new Document();
+    addPolygonsToDoc(FIELDNAME, document, p);
+    writer.addDocument(document);
+
+    // add a line document
+    document = new Document();
+    // add a line string
+    float x[] = new float[p.numPoints() - 1];
+    float y[] = new float[p.numPoints() - 1];
+    for (int i = 0; i < x.length; ++i) {
+      x[i] = (float)p.getPolyX(i);
+      y[i] = (float)p.getPolyY(i);
+    }
+    XYLine l = new XYLine(x, y);
+    addLineToDoc(FIELDNAME, document, l);
+    writer.addDocument(document);
+
+    ////// search /////
+    // search an intersecting bbox
+    IndexReader reader = writer.getReader();
+    writer.close();
+    IndexSearcher searcher = newSearcher(reader);
+    double minX = Math.min(x[0], x[1]);
+    double minY = Math.min(y[0], y[1]);
+    double maxX = Math.max(x[0], x[1]);
+    double maxY = Math.max(y[0], y[1]);
+    Query q = newRectQuery(FIELDNAME, minX, maxX, minY, maxY);
+    assertEquals(2, searcher.count(q));
+
+    // search a disjoint bbox
+    q = newRectQuery(FIELDNAME, p.minX-1d, p.minX+1, p.minY-1d, p.minY+1d);
+    assertEquals(0, searcher.count(q));
+
+    // search w/ an intersecting polygon
+    q = XYShape.newPolygonQuery(FIELDNAME, QueryRelation.INTERSECTS, new XYPolygon(
+        new float[] {(float)minX, (float)minX, (float)maxX, (float)maxX, (float)minX},
+        new float[] {(float)minY, (float)maxY, (float)maxY, (float)minY, (float)minY}
+    ));
+    assertEquals(2, searcher.count(q));
+
+    // search w/ an intersecting line
+    q = XYShape.newLineQuery(FIELDNAME, QueryRelation.INTERSECTS, new XYLine(
+       new float[] {(float)minX, (float)minX, (float)maxX, (float)maxX},
+       new float[] {(float)minY, (float)maxY, (float)maxY, (float)minY}
+    ));
+    assertEquals(2, searcher.count(q));
+
+    IOUtils.close(reader, dir);
+  }
+

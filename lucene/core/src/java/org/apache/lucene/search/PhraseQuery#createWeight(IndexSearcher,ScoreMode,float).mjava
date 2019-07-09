@@ -34,7 +34,7 @@
       }
 
       @Override
-      protected PhraseMatcher getPhraseMatcher(LeafReaderContext context, boolean exposeOffsets) throws IOException {
+      protected PhraseMatcher getPhraseMatcher(LeafReaderContext context, SimScorer scorer, boolean exposeOffsets) throws IOException {
         assert terms.length > 0;
         final LeafReader reader = context.reader();
         PostingsAndFreq[] postingsFreqs = new PostingsAndFreq[terms.length];
@@ -60,18 +60,25 @@
             return null;
           }
           te.seekExact(t.bytes(), state);
-          PostingsEnum postingsEnum = te.postings(null, exposeOffsets ? PostingsEnum.ALL : PostingsEnum.POSITIONS);
-          postingsFreqs[i] = new PostingsAndFreq(postingsEnum, positions[i], t);
+          PostingsEnum postingsEnum;
+          ImpactsEnum impactsEnum;
+          if (scoreMode == ScoreMode.TOP_SCORES) {
+            postingsEnum = impactsEnum = te.impacts(exposeOffsets ? PostingsEnum.OFFSETS : PostingsEnum.POSITIONS);
+          } else {
+            postingsEnum = te.postings(null, exposeOffsets ? PostingsEnum.OFFSETS : PostingsEnum.POSITIONS);
+            impactsEnum = new SlowImpactsEnum(postingsEnum);
+          }
+          postingsFreqs[i] = new PostingsAndFreq(postingsEnum, impactsEnum, positions[i], t);
           totalMatchCost += termPositionsCost(te);
         }
 
         // sort by increasing docFreq order
         if (slop == 0) {
           ArrayUtil.timSort(postingsFreqs);
-          return new ExactPhraseMatcher(postingsFreqs, totalMatchCost);
+          return new ExactPhraseMatcher(postingsFreqs, scoreMode, scorer, totalMatchCost);
         }
         else {
-          return new SloppyPhraseMatcher(postingsFreqs, slop, totalMatchCost, exposeOffsets);
+          return new SloppyPhraseMatcher(postingsFreqs, slop, scoreMode, scorer, totalMatchCost, exposeOffsets);
         }
       }
     };

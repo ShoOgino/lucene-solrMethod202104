@@ -1,46 +1,104 @@
   public void testCreateCollectionSplitShard() throws Exception  {
-    JettySolrRunner firstNode = cluster.getRandomJetty(random());
-    int firstNodePort = firstNode.getLocalPort();
 
-    JettySolrRunner secondNode = null;
-    while (true)  {
-      secondNode = cluster.getRandomJetty(random());
-      if (secondNode.getLocalPort() != firstNodePort)  break;
-    }
-    int secondNodePort = secondNode.getLocalPort();
+    final List<JettySolrRunner> shuffledJetties = new ArrayList<>(cluster.getJettySolrRunners());
+    Collections.shuffle(shuffledJetties, random());
+    assertTrue(2 < shuffledJetties.size()); // sanity check test setup
+    
+    final JettySolrRunner firstNode = shuffledJetties.get(0);
+    final JettySolrRunner secondNode = shuffledJetties.get(1);
 
-    String commands =  "{set-policy :{c1 : [{replica:1 , shard:'#EACH', port: '" + firstNodePort + "'}, {replica:1, shard:'#EACH', port:'" + secondNodePort + "'}]}}";
-    NamedList<Object> response = cluster.getSolrClient().request(AutoScalingRequest.create(SolrRequest.METHOD.POST, commands));
+    final int firstNodePort = firstNode.getLocalPort();
+    final int secondNodePort = secondNode.getLocalPort();
+    assertNotEquals(firstNodePort, secondNodePort);
+    
+    final String commands =  "{set-policy :{c1 : [{replica:1 , shard:'#EACH', port: '" +
+      firstNodePort + "'}, {replica:1, shard:'#EACH', port:'" + secondNodePort + "'}]}}";
+
+    final String firstNodeName = firstNode.getNodeName();
+    final String secondNodeName = secondNode.getNodeName();
+    assertNotEquals(firstNodeName, secondNodeName);
+
+    final NamedList<Object> response = cluster.getSolrClient()
+      .request(AutoScalingRequest.create(SolrRequest.METHOD.POST, commands));
     assertEquals("success", response.get("result"));
 
-    String collectionName = "testCreateCollectionSplitShard";
+    // through out the test, every shard shuld have 2 replicas, one on each of these two nodes
+    final Set<String> expectedNodeNames = ImmutableSet.of(firstNodeName, secondNodeName);
+    
+    final String collectionName = "testCreateCollectionSplitShard";
+    log.info("Creating collection {}", collectionName);
     CollectionAdminRequest.createCollection(collectionName, "conf", 1, 2)
         .setPolicy("c1")
         .process(cluster.getSolrClient());
-    cluster.waitForActiveCollection(collectionName, 1, 2);
-    DocCollection docCollection = getCollectionState(collectionName);
-    List<Replica> list = docCollection.getReplicas(firstNode.getNodeName());
-    int replicasOnNode1 = list != null ? list.size() : 0;
-    list = docCollection.getReplicas(secondNode.getNodeName());
-    int replicasOnNode2 = list != null ? list.size() : 0;
+                   
+    waitForState("Should have found exactly 1 slice w/2 live Replicas, one on each expected jetty: " +
+                 firstNodeName + "/" + firstNodePort + " & " +  secondNodeName + "/" + secondNodePort,
+                 collectionName, (liveNodes, collection) -> {
+                   // short circut if collection is deleted
+                   // or we some how have the wrong number of slices
+                   if (null == collection || 1 != collection.getSlices().size()) {
+                     return false;
+                   }
+                   // Note: only 1 slices, but simpler to loop then extract...
+                   for (Slice slice : collection.getSlices()) {
+                     // short circut if our slice isn't active, or has wrong # replicas
+                     if (Slice.State.ACTIVE != slice.getState()
+                         || 2 != slice.getReplicas().size()) {
+                       return false;
+                     }
+                     // make sure our replicas are fully live...
+                     final List<Replica> liveReplicas = slice.getReplicas
+                       ((r) -> r.isActive(liveNodes));
+                     if (2 != liveReplicas.size()) {
+                       return false;
+                     }
+                     // now the main check we care about: were the replicas split up on
+                     // the expected nodes...
+                     if (! expectedNodeNames.equals(ImmutableSet.of
+                                                  (liveReplicas.get(0).getNodeName(),
+                                                   liveReplicas.get(1).getNodeName()))) {
+                       return false;
+                     }
+                   }
+                   return true;
+                 });
 
-    assertEquals("Expected exactly one replica of collection on node with port: " + firstNodePort, 1, replicasOnNode1);
-    assertEquals("Expected exactly one replica of collection on node with port: " + secondNodePort, 1, replicasOnNode2);
+    log.info("Splitting (single) Shard on collection {}", collectionName);
+    CollectionAdminRequest.splitShard(collectionName).setShardName("shard1")
+      .process(cluster.getSolrClient());
 
-    CollectionAdminRequest.splitShard(collectionName).setShardName("shard1").process(cluster.getSolrClient());
-
-    waitForState("Timed out waiting to see 6 replicas for collection: " + collectionName,
-        collectionName, (liveNodes, collectionState) -> collectionState.getReplicas().size() == 6);
-
-    docCollection = getCollectionState(collectionName);
-    list = docCollection.getReplicas(firstNode.getNodeName());
-    replicasOnNode1 = list != null ? list.size() : 0;
-    list = docCollection.getReplicas(secondNode.getNodeName());
-    replicasOnNode2 = list != null ? list.size() : 0;
-
-    assertEquals("Expected exactly three replica of collection on node with port: " + firstNodePort, 3, replicasOnNode1);
-    assertEquals("Expected exactly three replica of collection on node with port: " + secondNodePort, 3, replicasOnNode2);
-    CollectionAdminRequest.deleteCollection(collectionName).process(cluster.getSolrClient());
-
+    waitForState("Should have found exactly 3 shards (1 inactive) each w/two live Replicas, " +
+                 "one on each expected jetty: " +
+                 firstNodeName + "/" + firstNodePort + " & " +  secondNodeName + "/" + secondNodePort,
+                 collectionName, (liveNodes, collection) -> {
+                   // short circut if collection is deleted
+                   // or we some how have the wrong number of (active) slices
+                   if (null == collection
+                       || 3 != collection.getSlices().size()
+                       || 2 != collection.getActiveSlices().size()) {
+                     return false;
+                   }
+                   // Note: we're checking all slices, even the inactive (split) slice...
+                   for (Slice slice : collection.getSlices()) {
+                     // short circut if our slice has wrong # replicas
+                     if (2 != slice.getReplicas().size()) {
+                       return false;
+                     }
+                     // make sure our replicas are fully live...
+                     final List<Replica> liveReplicas = slice.getReplicas
+                       ((r) -> r.isActive(liveNodes));
+                     if (2 != liveReplicas.size()) {
+                       return false;
+                     }
+                     // now the main check we care about: were the replicas split up on
+                     // the expected nodes...
+                     if (! expectedNodeNames.equals(ImmutableSet.of
+                                                    (liveReplicas.get(0).getNodeName(),
+                                                     liveReplicas.get(1).getNodeName()))) {
+                       return false;
+                     }
+                   }
+                   return true;
+                 });
   }
 

@@ -11,7 +11,11 @@
 
     DocCollection state = getCollectionState(collectionName);
     Slice shard = getRandomShard(state);
-    Replica replica = getRandomReplica(shard, (r) -> r.getState() == Replica.State.ACTIVE);
+    
+    // don't choose the leader to shutdown, it just complicates things unneccessarily
+    Replica replica = getRandomReplica(shard, (r) ->
+                                       ( r.getState() == Replica.State.ACTIVE &&
+                                         ! r.equals(shard.getLeader())));
 
     CoreStatus coreStatus = getCoreStatus(replica);
     Path dataDir = Paths.get(coreStatus.getDataDirectory());
@@ -26,15 +30,27 @@
 
     JettySolrRunner replicaJetty = cluster.getReplicaJetty(replica);
     ZkStateReaderAccessor accessor = new ZkStateReaderAccessor(replicaJetty.getCoreContainer().getZkController().getZkStateReader());
-    Set<DocCollectionWatcher> watchers = accessor.getStateWatchers(collectionName);
+
+    final long preDeleteWatcherCount = countUnloadCoreOnDeletedWatchers
+      (accessor.getStateWatchers(collectionName));
+    
     CollectionAdminRequest.deleteReplica(collectionName, shard.getName(), replica.getName())
         .process(cluster.getSolrClient());
     waitForState("Expected replica " + replica.getName() + " to have been removed", collectionName, (n, c) -> {
       Slice testShard = c.getSlice(shard.getName());
       return testShard.getReplica(replica.getName()) == null;
     });
-    // the core no longer watch collection state since it was removed
-    assertEquals(watchers.size() - 1, accessor.getStateWatchers(collectionName).size());
+    
+    // the core should no longer have a watch collection state since it was removed
+    // the core should no longer have a watch collection state since it was removed
+    TimeOut timeOut = new TimeOut(60, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+    timeOut.waitFor("Waiting for core's watcher to be removed", () -> {
+        final long postDeleteWatcherCount = countUnloadCoreOnDeletedWatchers
+          (accessor.getStateWatchers(collectionName));
+        log.info("preDeleteWatcherCount={} vs postDeleteWatcherCount={}",
+                 preDeleteWatcherCount, postDeleteWatcherCount);
+        return (preDeleteWatcherCount - 1L == postDeleteWatcherCount);
+      });
 
     assertFalse("Data directory for " + replica.getName() + " should have been removed", Files.exists(dataDir));
 

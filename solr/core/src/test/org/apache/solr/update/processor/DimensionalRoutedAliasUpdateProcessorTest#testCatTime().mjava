@@ -1,0 +1,260 @@
+  @Test
+  public void testCatTime() throws Exception {
+    String configName = getSaferTestName();
+    createConfigSet(configName);
+
+    CreateTimeRoutedAlias TRA_Dim = createTimeRoutedAlias(getAlias(), "2019-07-01T00:00:00Z", "+1DAY",
+        getTimeField(), null);
+    CreateCategoryRoutedAlias CRA_Dim = createCategoryRoutedAlias(null, getCatField(), 20, null);
+
+    CollectionAdminRequest.DimensionalRoutedAlias dra = CollectionAdminRequest.createDimensionalRoutedAlias(getAlias(),
+        CollectionAdminRequest.createCollection("_unused_", configName, 2, 2)
+            .setMaxShardsPerNode(2), CRA_Dim, TRA_Dim);
+
+    SolrParams params = dra.getParams();
+    assertEquals("Dimensional[CATEGORY,TIME]", params.get(CollectionAdminRequest.RoutedAliasAdminRequest.ROUTER_TYPE_NAME));
+    System.out.println(params);
+    assertEquals("20", params.get("router.0.maxCardinality"));
+    assertEquals("2019-07-01T00:00:00Z", params.get("router.1.start"));
+
+    dra.process(solrClient);
+
+    String firstCol = catTimeDraColFor(CategoryRoutedAlias.UNINITIALIZED, "2019-07-01");
+    cluster.waitForActiveCollection(firstCol, 2, 4);
+
+    // cat field... har har.. get it? ... category/cat... ...oh never mind.
+    addDocsAndCommit(true, newDoc("tabby", "2019-07-02T00:00:00Z"));
+
+    assertCatTimeInvariants(
+        ap(
+            firstCol,
+            catTimeDraColFor("tabby", "2019-07-01"),
+            catTimeDraColFor("tabby", "2019-07-02")
+        ),
+        ap(
+            "tabby"
+        )
+    );
+
+    addDocsAndCommit(true, newDoc("calico", "2019-07-02T00:00:00Z"));
+
+    // initial col should be removed
+    assertCatTimeInvariants(
+        ap(
+            catTimeDraColFor("calico", "2019-07-01"),
+            catTimeDraColFor("calico", "2019-07-02"),
+            catTimeDraColFor("tabby", "2019-07-01"),
+            catTimeDraColFor("tabby", "2019-07-02")
+        ),
+        ap(
+            "tabby",
+            "calico"
+        )
+    );
+
+    testFailedDocument("shorthair",     "2017-10-23T00:00:00Z", "couldn't be routed" );
+    testFailedDocument("shorthair",     "2020-10-23T00:00:00Z", "too far in the future" );
+    testFailedDocument(null,            "2019-07-02T00:00:00Z", "Route value is null");
+    testFailedDocument("foo__CRA__bar", "2019-07-02T00:00:00Z", "7 character sequence __CRA__");
+    testFailedDocument("fóóCRAóóbar",   "2019-07-02T00:00:00Z", "7 character sequence __CRA__");
+
+    // hopefully nothing changed
+    assertCatTimeInvariants(
+        ap(
+            catTimeDraColFor("calico", "2019-07-01"),
+            catTimeDraColFor("calico", "2019-07-02"),
+            catTimeDraColFor("tabby", "2019-07-01"),
+            catTimeDraColFor("tabby", "2019-07-02")
+        ),
+        ap(
+            "tabby",
+            "calico"
+        )
+    );
+
+    // 4 docs no new collections
+    addDocsAndCommit(true,
+        newDoc("calico", "2019-07-02T00:00:00Z"),
+        newDoc("tabby", "2019-07-01T00:00:00Z"),
+        newDoc("tabby", "2019-07-01T23:00:00Z"),
+        newDoc("calico", "2019-07-02T23:00:00Z")
+    );
+
+    // hopefully nothing changed
+    assertCatTimeInvariants(
+        ap(
+            catTimeDraColFor("calico", "2019-07-01"),
+            catTimeDraColFor("calico", "2019-07-02"),
+            catTimeDraColFor("tabby", "2019-07-01"),
+            catTimeDraColFor("tabby", "2019-07-02")
+        ),
+        ap(
+            "tabby",
+            "calico"
+        )
+    );
+
+    // 4 docs 2 new collections, in random order and maybe not using the alias
+    addDocsAndCommit(false,
+        newDoc("calico", "2019-07-04T00:00:00Z"),
+        newDoc("tabby", "2019-07-01T00:00:00Z"),
+        newDoc("tabby", "2019-07-01T23:00:00Z"),
+        newDoc("calico", "2019-07-03T23:00:00Z")
+    );
+
+    assertCatTimeInvariants(
+        ap(
+            catTimeDraColFor("calico", "2019-07-01"),
+            catTimeDraColFor("calico", "2019-07-02"),
+            catTimeDraColFor("calico", "2019-07-03"),
+            catTimeDraColFor("calico", "2019-07-04"),
+            catTimeDraColFor("tabby", "2019-07-01"),
+            catTimeDraColFor("tabby", "2019-07-02")
+            // tabby collections not filled in. No guarantee that time periods remain in sync
+            // across categories.
+        ),
+        ap(
+            "tabby",
+            "calico"
+        )
+    );
+
+    // now test with async pre-create.
+    CollectionAdminRequest.setAliasProperty(getAlias())
+        .addProperty("router.1.preemptiveCreateMath", "30MINUTE").process(solrClient);
+
+    addDocsAndCommit(false,
+        newDoc("shorthair", "2019-07-02T23:40:00Z"), // create 2 sync 1 async
+        newDoc("calico", "2019-07-03T23:00:00Z")     // does not create
+    );
+
+    waitColAndAlias(getAlias(), "", CRA + "shorthair" + TRA + "2019-07-03", 2);
+
+    assertCatTimeInvariants(
+        ap(
+            catTimeDraColFor("calico", "2019-07-01"),
+            catTimeDraColFor("calico", "2019-07-02"),
+            catTimeDraColFor("calico", "2019-07-03"),
+            catTimeDraColFor("calico", "2019-07-04"),
+            catTimeDraColFor("shorthair", "2019-07-01"),
+            catTimeDraColFor("shorthair", "2019-07-02"),
+            catTimeDraColFor("shorthair", "2019-07-03"),
+            catTimeDraColFor("tabby", "2019-07-01"),
+            catTimeDraColFor("tabby", "2019-07-02")
+        ),
+        ap(
+            "shorthair",
+            "tabby",
+            "calico"
+        )
+    );
+
+    addDocsAndCommit(false,
+        newDoc("shorthair", "2019-07-02T23:40:00Z"), // should be no change
+        newDoc("calico", "2019-07-03T23:00:00Z")
+    );
+
+    /*
+     Here we need to be testing that something that should not be created (extra preemptive async collections)
+     didn't get created (a bug that actually got killed during development, and caused later asserts to
+     fail due to wrong number of collections). There's no way to set a watch for something that doesn't and
+     should never exist... Thus, the only choice is to sleep and make sure nothing appeared while we were asleep.
+    */
+    Thread.sleep(5000);
+
+    assertCatTimeInvariants(
+        ap(
+            catTimeDraColFor("calico", "2019-07-01"),
+            catTimeDraColFor("calico", "2019-07-02"),
+            catTimeDraColFor("calico", "2019-07-03"),
+            catTimeDraColFor("calico", "2019-07-04"),
+            catTimeDraColFor("shorthair", "2019-07-01"),
+            catTimeDraColFor("shorthair", "2019-07-02"),
+            catTimeDraColFor("shorthair", "2019-07-03"),
+            catTimeDraColFor("tabby", "2019-07-01"),
+            catTimeDraColFor("tabby", "2019-07-02")
+        ),
+        ap(
+            "shorthair",
+            "tabby",
+            "calico"
+        )
+    );
+
+    // now test with auto-delete.
+    CollectionAdminRequest.setAliasProperty(getAlias())
+        .addProperty("router.1.autoDeleteAge", "/DAY-5DAY").process(solrClient);
+
+    // this one should not yet cause deletion
+    addDocsAndCommit(false,
+        newDoc("shorthair", "2019-07-02T23:00:00Z"), // no effect expected
+        newDoc("calico", "2019-07-05T23:00:00Z")     // create 1
+    );
+
+    assertCatTimeInvariants(
+        ap(
+            catTimeDraColFor("calico", "2019-07-01"),
+            catTimeDraColFor("calico", "2019-07-02"),
+            catTimeDraColFor("calico", "2019-07-03"),
+            catTimeDraColFor("calico", "2019-07-04"),
+            catTimeDraColFor("calico", "2019-07-05"),
+            catTimeDraColFor("shorthair", "2019-07-01"),
+            catTimeDraColFor("shorthair", "2019-07-02"),
+            catTimeDraColFor("shorthair", "2019-07-03"),
+            catTimeDraColFor("tabby", "2019-07-01"),
+            catTimeDraColFor("tabby", "2019-07-02")
+        ),
+        ap(
+            "shorthair",
+            "tabby",
+            "calico"
+        )
+    );
+
+    addDocsAndCommit(false,
+        newDoc("shorthair", "2019-07-02T23:00:00Z"), // no effect expected
+        newDoc("calico", "2019-07-06T00:00:00Z")     // create July 6, delete July 1
+    );
+    waitCoreCount(getAlias() + CRA + "calico" + TRA + "2019-07-01", 0);
+
+    assertCatTimeInvariants(
+        ap(
+            catTimeDraColFor("calico", "2019-07-02"),
+            catTimeDraColFor("calico", "2019-07-03"),
+            catTimeDraColFor("calico", "2019-07-04"),
+            catTimeDraColFor("calico", "2019-07-05"),
+            catTimeDraColFor("calico", "2019-07-06"),
+            // note that other categories are unaffected
+            catTimeDraColFor("shorthair", "2019-07-01"),
+            catTimeDraColFor("shorthair", "2019-07-02"),
+            catTimeDraColFor("shorthair", "2019-07-03"),
+            catTimeDraColFor("tabby", "2019-07-01"),
+            catTimeDraColFor("tabby", "2019-07-02")
+        ),
+        ap(
+            "shorthair",
+            "tabby",
+            "calico"
+        )
+    );
+
+    // verify that all the documents ended up in the right collections.
+    QueryResponse resp = solrClient.query(getAlias(), params(
+        "q", "*:*",
+        "rows", "100",
+        "fl","*,[shard]",
+        "sort", "id asc"
+    ));
+    SolrDocumentList results = resp.getResults();
+    assertEquals(18, results.getNumFound());
+    for (SolrDocument result : results) {
+      String shard = String.valueOf(result.getFieldValue("[shard]"));
+      String cat = String.valueOf(result.getFieldValue("cat_s"));
+      Date date = (Date) result.getFieldValue("timestamp_dt");
+      String day = date.toInstant().toString().split("T")[0];
+      assertTrue(shard.contains(cat));
+      assertTrue(shard.contains(day));
+    }
+
+  }
+

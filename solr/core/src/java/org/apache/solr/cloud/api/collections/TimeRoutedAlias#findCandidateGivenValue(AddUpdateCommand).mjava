@@ -1,0 +1,27 @@
+  /**
+   * Given the route key, finds the correct collection and an indication of any collection that needs to be created.
+   * Future docs will potentially cause creation of a collection that does not yet exist. This method presumes that the
+   * doc time stamp has already been checked to not exceed maxFutureMs
+   *
+   * @throws SolrException if the doc is too old to be stored in the TRA
+   */
+  @Override
+  public CandidateCollection findCandidateGivenValue(AddUpdateCommand cmd) {
+    Object value = cmd.getSolrInputDocument().getFieldValue(getRouteField());
+    ZkStateReader zkStateReader = cmd.getReq().getCore().getCoreContainer().getZkController().zkStateReader;
+    String printableId = cmd.getPrintableId();
+    updateParsedCollectionAliases(zkStateReader, true);
+
+    final Instant docTimestamp = parseRouteKey(value);
+
+    // reparse explicitly such that if we are a dimension in a DRA, the list gets culled by our context
+    // This does not normally happen with the above updateParsedCollectionAliases, because at that point the aliases
+    // should be up to date and updateParsedCollectionAliases will short circuit
+    this.parsedCollectionsDesc = parseCollections(zkStateReader.getAliases());
+    CandidateCollection next1 = calcCandidateCollection(docTimestamp);
+    if (next1 != null) return next1;
+
+    throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+        "Doc " + printableId + " couldn't be routed with " + getRouteField() + "=" + docTimestamp);
+  }
+

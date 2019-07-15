@@ -7,30 +7,81 @@
    * @return An implementation appropriate for the supplied properties, or null if no type is specified.
    * @throws SolrException If the properties are invalid or the router type is unknown.
    */
-  static RoutedAlias fromProps(String aliasName, Map<String, String> props) throws SolrException {
+  public static RoutedAlias fromProps(String aliasName, Map<String, String> props) throws SolrException {
 
     String typeStr = props.get(ROUTER_TYPE_NAME);
     if (typeStr == null) {
       return null; // non-routed aliases are being created
     }
-    SupportedRouterTypes routerType;
-    try {
-       routerType = SupportedRouterTypes.valueOf(typeStr.toUpperCase(Locale.ENGLISH));
-    } catch (IllegalArgumentException e) {
-      throw new SolrException(BAD_REQUEST, "Router name: " + typeStr + " is not in supported types, "
-          + Arrays.asList(SupportedRouterTypes.values()));
-    }
-    switch (routerType) {
-      case TIME:
-        return new TimeRoutedAlias(aliasName, props);
-      case CATEGORY:
-        return new CategoryRoutedAlias(aliasName, props);
-      default:
-        // if we got a type not handled by the switch there's been a bogus implementation.
-        throw new SolrException(SERVER_ERROR, "Router " + routerType + " is not fully implemented. If you see this" +
-            "error in an official release please file a bug report. Available types were:"
-            + Arrays.asList(SupportedRouterTypes.values()));
+    List<RoutedAliasTypes> routerTypes = new ArrayList<>();
+    // check for Dimensional[foo,bar,baz]
+    if (typeStr.startsWith(DIMENSIONAL)) {
+      // multi-dimensional routed alias
+      typeStr = typeStr.substring(DIMENSIONAL.length(), typeStr.length() - 1);
+      String[] types = typeStr.split(",");
+      java.util.List<String> fields = new ArrayList<>();
+      if (types.length > 2) {
+        throw new SolrException(BAD_REQUEST,"More than 2 dimensions is not supported yet. " +
+            "Please monitor SOLR-13628 for progress");
+      }
+      for (int i = 0; i < types.length; i++) {
+        String type = types[i];
+        addRouterTypeOf(type, routerTypes);
 
+        // v2 api case - the v2 -> v1 mapping mechanisms can't handle this conversion because they expect
+        // strings or arrays of strings, not lists of objects.
+        if (props.containsKey("router.routerList")) {
+          @SuppressWarnings("unchecked")  // working around solrparams inability to express lists of objects
+              HashMap tmp = new HashMap(props);
+          @SuppressWarnings("unchecked")  // working around solrparams inability to express lists of objects
+              List<Map<String, Object>> v2RouterList = (List<Map<String, Object>>) tmp.get("router.routerList");
+          Map<String, Object> o = v2RouterList.get(i);
+          for (Map.Entry<String, Object> entry : o.entrySet()) {
+            props.put(ROUTER_PREFIX + i + "." + entry.getKey(), String.valueOf(entry.getValue()));
+          }
+        }
+        // Here we need to push the type into each dimension's params. We could have eschewed the
+        // "Dimensional[dim1,dim2]" style notation, to simplify this case but I think it's nice
+        // to be able to understand the dimensionality at a glance without having to hunt for name properties
+        // in the list of properties for each dimension.
+        String typeName = ROUTER_PREFIX + i + ".name";
+        // can't use computeIfAbsent because the non-dimensional case where typeName is present
+        // happens to be an unmodifiable map and will fail.
+        if (!props.containsKey(typeName)) {
+          props.put(typeName, type);
+        }
+        fields.add(props.get(ROUTER_PREFIX + i + ".field"));
+      }
+      // this next remove is checked for key because when we build from aliases.json's data it we get an
+      // immutable map which would cause  UnsupportedOperationException to be thrown. This remove is here
+      // to prevent this property from making it into aliases.json
+      //noinspection RedundantCollectionOperation
+      if (props.containsKey("router.routerList")) {
+        props.remove("router.routerList");
+      }
+      // Keep code that handles single dimensions happy by providing this value, otherwise ignored.
+      if (!props.containsKey(ROUTER_FIELD)) {
+        props.put(ROUTER_FIELD, String.join(",", fields));
+      }
+    } else {
+      // non-dimensional case
+      addRouterTypeOf(typeStr, routerTypes);
+    }
+    if (routerTypes.size() == 1) {
+      RoutedAliasTypes routerType = routerTypes.get(0);
+      return routedAliasForType(aliasName, props, routerType);
+    } else {
+      List<RoutedAlias> dimensions = new ArrayList<>();
+      // this array allows us to get past the chicken/egg problem of needing access to the
+      // DRA inside the dimensions, but needing the dimensions to create the DRA
+      DimensionalRoutedAlias[] dra = new DimensionalRoutedAlias[1];
+      for (int i = 0; i < routerTypes.size(); i++) {
+        RoutedAliasTypes routerType = routerTypes.get(i);
+        // NOTE setting the name to empty string is very important here, as that allows us to simply
+        // concatenate the "names" of the parts to get the correct collection name for the DRA
+        dimensions.add(DimensionalRoutedAlias.dimensionForType( selectForIndex(i, props), routerType, i, () -> dra[0]));
+      }
+      return dra[0] = new DimensionalRoutedAlias(dimensions, props.get(CommonParams.NAME), props);
     }
   }
 

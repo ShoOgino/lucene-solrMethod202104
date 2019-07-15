@@ -1,0 +1,60 @@
+  private CandidateCollection calcCandidateCollection(Instant docTimestamp) {
+    // Lookup targetCollection given route key.  Iterates in reverse chronological order.
+    //    We're O(N) here but N should be small, the loop is fast, and usually looking for 1st.
+    Instant next = null;
+    if (this.parsedCollectionsDesc.isEmpty()) {
+      String firstCol = computeInitialCollectionName();
+      return new CandidateCollection(SYNCHRONOUS, firstCol);
+    } else {
+      Instant mostRecentCol = parsedCollectionsDesc.get(0).getKey();
+
+      // despite most logic hinging on the first element, we must loop so we can complain if the doc
+      // is too old and there's no valid collection.
+      for (int i = 0; i < parsedCollectionsDesc.size(); i++) {
+        Map.Entry<Instant, String> entry = parsedCollectionsDesc.get(i);
+        Instant colStartTime = entry.getKey();
+        if (i == 0) {
+          next = computeNextCollTimestamp(colStartTime);
+        }
+        if (!docTimestamp.isBefore(colStartTime)) {  // (inclusive lower bound)
+          CandidateCollection candidate;
+          if (i == 0) {
+            if (docTimestamp.isBefore(next)) {       // (exclusive upper bound)
+              candidate = new CandidateCollection(NONE, entry.getValue()); //found it
+              // simply goes to head collection no action required
+            } else {
+              // Although we create collections one at a time, this calculation of the ultimate destination is
+              // useful for contextualizing TRA's used as dimensions in DRA's
+              String creationCol = calcNextCollection(colStartTime);
+              Instant colDestTime = colStartTime;
+              Instant possibleDestTime = colDestTime;
+              while (!docTimestamp.isBefore(possibleDestTime) || docTimestamp.equals(possibleDestTime)) {
+                colDestTime = possibleDestTime;
+                possibleDestTime = computeNextCollTimestamp(colDestTime);
+              }
+              String destCol = TimeRoutedAlias.formatCollectionNameFromInstant(getAliasName(),colDestTime);
+              candidate = new CandidateCollection(SYNCHRONOUS, destCol, creationCol); //found it
+            }
+          } else {
+            // older document simply goes to existing collection, nothing created.
+            candidate = new CandidateCollection(NONE, entry.getValue()); //found it
+          }
+
+          if (candidate.getCreationType() == NONE && isNotBlank(getPreemptiveCreateWindow()) && !this.preemptiveCreateOnceAlready) {
+            // are we getting close enough to the (as yet uncreated) next collection to warrant preemptive creation?
+            Instant time2Create = calcPreemptNextColCreateTime(getPreemptiveCreateWindow(), computeNextCollTimestamp(mostRecentCol));
+            if (!docTimestamp.isBefore(time2Create)) {
+              String destinationCollection = candidate.getDestinationCollection(); // dest doesn't change
+              String creationCollection = calcNextCollection(mostRecentCol);
+              return new CandidateCollection(ASYNC_PREEMPTIVE, // add next collection
+                  destinationCollection,
+                  creationCollection);
+            }
+          }
+          return candidate;
+        }
+      }
+    }
+    return null;
+  }
+

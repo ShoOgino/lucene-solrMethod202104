@@ -76,6 +76,11 @@
     waitColAndAlias(alias, TRA, "2017-10-26", numShards);
     waitColAndAlias(alias2, TRA, "2017-10-26", numShards);
 
+    // these next checks will be checking that a collection DID NOT get created asynchronously, there's
+    // no way to wait for something that should never exist to not exist... so all we can do is sleep
+    // a good while before checking
+    Thread.sleep(5000);
+
     // after this we can ignore alias2
     checkPreemptiveCase1(alias);
     checkPreemptiveCase1(alias2);
@@ -89,21 +94,21 @@
     //
     // Start and stop some cores that have TRA's... 2x2 used to ensure every jetty gets at least one
 
-    CollectionAdminRequest.createTimeRoutedAlias("foo", "2017-10-23T00:00:00Z", "+1DAY", getTimeField(),
+    CollectionAdminRequest.createTimeRoutedAlias(getSaferTestName() + "foo", "2017-10-23T00:00:00Z", "+1DAY", getTimeField(),
         CollectionAdminRequest.createCollection("_unused_", configName, 2, 2)
             .setMaxShardsPerNode(numReplicas)).setPreemptiveCreateWindow("3HOUR")
         .process(solrClient);
 
-    waitColAndAlias("foo", TRA, "2017-10-23",2);
-    waitCoreCount("foo" + TRA + "2017-10-23", 4); // prove this works, for confidence in deletion checking below.
-    assertUpdateResponse(solrClient.add("foo",
+    waitColAndAlias(getSaferTestName() + "foo", TRA, "2017-10-23",2);
+    waitCoreCount(getSaferTestName() + "foo" + TRA + "2017-10-23", 4); // prove this works, for confidence in deletion checking below.
+    assertUpdateResponse(solrClient.add(getSaferTestName() + "foo",
         sdoc("id","1","timestamp_dt", "2017-10-23T00:00:00Z") // no extra collections should be created
     ));
-    assertUpdateResponse(solrClient.commit("foo"));
+    assertUpdateResponse(solrClient.commit(getSaferTestName() + "foo"));
 
-    List<String> foo = solrClient.getClusterStateProvider().resolveAlias("foo");
+    List<String> foo = solrClient.getClusterStateProvider().resolveAlias(getSaferTestName() + "foo");
 
-    CollectionAdminRequest.deleteAlias("foo").process(solrClient);
+    CollectionAdminRequest.deleteAlias(getSaferTestName() + "foo").process(solrClient);
 
     for (String colName : foo) {
       CollectionAdminRequest.deleteCollection(colName).process(solrClient);
@@ -113,12 +118,16 @@
     // if the design for terminating our executor is correct create/delete above will not cause failures below
     // continue testing...
 
-    // now test with pre-create window longer than time slice, and forcing multiple creations.
+    cols = new CollectionAdminRequest.ListAliases().process(solrClient).getAliasesAsLists().get(alias);
+    assertEquals(4,cols.size()); // only one created in async case
+
+    // now test with pre-create window longer than time slice, only one creation per request
     CollectionAdminRequest.setAliasProperty(alias)
         .addProperty(TimeRoutedAlias.ROUTER_PREEMPTIVE_CREATE_MATH, "3DAY").process(solrClient);
 
-    assertUpdateResponse(add(alias, Collections.singletonList(
-        sdoc("id", "7", "timestamp_dt", "2017-10-25T23:01:00Z")), // should cause preemptive creation of 10-27 now
+    assertUpdateResponse(add(alias, Arrays.asList(
+        sdoc("id", "7", "timestamp_dt", "2017-10-25T23:01:00Z"), // should cause preemptive creation of 10-27 now
+        sdoc("id", "71", "timestamp_dt", "2017-10-25T23:02:00Z")), // should not cause preemptive creation of 10-28 now
         params));
     assertUpdateResponse(solrClient.commit(alias));
     waitColAndAlias(alias, TRA, "2017-10-27", numShards);
@@ -127,22 +136,22 @@
     assertEquals(5,cols.size()); // only one created in async case
     assertNumDocs("2017-10-23", 1, alias);
     assertNumDocs("2017-10-24", 1, alias);
-    assertNumDocs("2017-10-25", 5, alias);
+    assertNumDocs("2017-10-25", 6, alias);
     assertNumDocs("2017-10-26", 0, alias);
     assertNumDocs("2017-10-27", 0, alias);
+
 
     assertUpdateResponse(add(alias, Collections.singletonList(
         sdoc("id", "8", "timestamp_dt", "2017-10-25T23:01:00Z")), // should cause preemptive creation of 10-28 now
         params));
     assertUpdateResponse(solrClient.commit(alias));
-    waitColAndAlias(alias, TRA, "2017-10-27", numShards);
     waitColAndAlias(alias, TRA, "2017-10-28", numShards);
 
     cols = new CollectionAdminRequest.ListAliases().process(solrClient).getAliasesAsLists().get(alias);
-    assertEquals(6,cols.size()); // Subsequent documents continue to create up to limit
+    assertEquals(6,cols.size());
     assertNumDocs("2017-10-23", 1, alias);
     assertNumDocs("2017-10-24", 1, alias);
-    assertNumDocs("2017-10-25", 6, alias);
+    assertNumDocs("2017-10-25", 7, alias);
     assertNumDocs("2017-10-26", 0, alias);
     assertNumDocs("2017-10-27", 0, alias);
     assertNumDocs("2017-10-28", 0, alias);
@@ -151,7 +160,7 @@
     resp = solrClient.query(alias, params(
         "q", "*:*",
         "rows", "10"));
-    assertEquals(8, resp.getResults().getNumFound());
+    assertEquals(9, resp.getResults().getNumFound());
 
     assertUpdateResponse(add(alias, Arrays.asList(
         sdoc("id", "9", "timestamp_dt", "2017-10-27T23:01:00Z"), // should cause preemptive creation
@@ -174,7 +183,7 @@
     assertEquals(7,cols.size());
     assertNumDocs("2017-10-23", 1, alias);
     assertNumDocs("2017-10-24", 1, alias);
-    assertNumDocs("2017-10-25", 6, alias);
+    assertNumDocs("2017-10-25", 7, alias);
     assertNumDocs("2017-10-26", 0, alias);
     assertNumDocs("2017-10-27", 1, alias);
     assertNumDocs("2017-10-28", 3, alias); // should get through even though preemptive creation ignored it.
@@ -183,7 +192,7 @@
     resp = solrClient.query(alias, params(
         "q", "*:*",
         "rows", "0"));
-    assertEquals(12, resp.getResults().getNumFound());
+    assertEquals(13, resp.getResults().getNumFound());
 
     // Sych creation with an interval longer than the time slice for the alias..
     assertUpdateResponse(add(alias, Collections.singletonList(
@@ -191,51 +200,57 @@
         params));
     assertUpdateResponse(solrClient.commit(alias));
     waitColAndAlias(alias, TRA, "2017-10-30", numShards);
-    waitColAndAlias(alias, TRA, "2017-10-31", numShards); // spooky! async case arising in middle of sync creation!!
+
+    // removed support for this case because it created a LOT of complexity for the benefit of attempting to
+    // (maybe) not pause again after already hitting a synchronous creation (but only if asynch gets it done first,
+    // otherwise we have a race... not enough benefit to justify the support/complexity.
+    //
+    // Now we just let the next doc take care of it...
+    //
+    // waitColAndAlias(alias, TRA, "2017-10-31", numShards); // spooky! async case arising in middle of sync creation!!
 
     cols = new CollectionAdminRequest.ListAliases().process(solrClient).getAliasesAsLists().get(alias);
-    assertEquals(9,cols.size());
+    assertEquals(8,cols.size());
     assertNumDocs("2017-10-23", 1, alias);
     assertNumDocs("2017-10-24", 1, alias);
-    assertNumDocs("2017-10-25", 6, alias);
+    assertNumDocs("2017-10-25", 7, alias);
     assertNumDocs("2017-10-26", 0, alias);
     assertNumDocs("2017-10-27", 1, alias);
     assertNumDocs("2017-10-28", 3, alias); // should get through even though preemptive creation ignored it.
     assertNumDocs("2017-10-29", 0, alias);
     assertNumDocs("2017-10-30", 1, alias);
-    assertNumDocs("2017-10-31", 0, alias);
 
     resp = solrClient.query(alias, params(
         "q", "*:*",
         "rows", "0"));
-    assertEquals(13, resp.getResults().getNumFound());
+    assertEquals(14, resp.getResults().getNumFound());
 
     assertUpdateResponse(add(alias, Collections.singletonList(
-        sdoc("id", "14", "timestamp_dt", "2017-10-31T23:01:00Z")), // should cause preemptive creation 11-01
+        sdoc("id", "14", "timestamp_dt", "2017-10-30T23:01:00Z")), // should cause preemptive creation 10-31
+        params));
+    waitColAndAlias(alias, TRA, "2017-10-31", numShards);
+
+    assertUpdateResponse(add(alias, Collections.singletonList(
+        sdoc("id", "15", "timestamp_dt", "2017-10-30T23:01:00Z")), // should cause preemptive creation 11-01
         params));
     waitColAndAlias(alias, TRA, "2017-11-01", numShards);
 
     assertUpdateResponse(add(alias, Collections.singletonList(
-        sdoc("id", "15", "timestamp_dt", "2017-10-31T23:01:00Z")), // should cause preemptive creation 11-02
+        sdoc("id", "16", "timestamp_dt", "2017-10-30T23:01:00Z")), // should cause preemptive creation 11-02
         params));
     waitColAndAlias(alias, TRA, "2017-11-02", numShards);
 
     assertUpdateResponse(add(alias, Collections.singletonList(
-        sdoc("id", "16", "timestamp_dt", "2017-10-31T23:01:00Z")), // should cause preemptive creation 11-03
-        params));
-    waitColAndAlias(alias, TRA, "2017-11-03", numShards);
-
-    assertUpdateResponse(add(alias, Collections.singletonList(
-        sdoc("id", "17", "timestamp_dt", "2017-10-31T23:01:00Z")), // should NOT cause preemptive creation 11-04
+        sdoc("id", "17", "timestamp_dt", "2017-10-30T23:01:00Z")), // should NOT cause preemptive creation 11-03
         params));
 
     cols = new CollectionAdminRequest.ListAliases().process(solrClient).getAliasesAsLists().get(alias);
-    assertTrue("Preemptive creation beyond ROUTER_PREEMPTIVE_CREATE_MATH setting of 3DAY!",!cols.contains("myalias" + TRA + "2017-11-04"));
+    assertFalse(cols.contains("myalias" + TRA + "2017-11-03"));
 
     assertUpdateResponse(add(alias, Collections.singletonList(
-        sdoc("id", "18", "timestamp_dt", "2017-11-01T23:01:00Z")), // should cause preemptive creation 11-04
+        sdoc("id", "18", "timestamp_dt", "2017-10-31T23:01:00Z")), // should cause preemptive creation 11-03
         params));
-    waitColAndAlias(alias, TRA, "2017-11-04",numShards);
+    waitColAndAlias(alias, TRA, "2017-11-03",numShards);
 
   }
 

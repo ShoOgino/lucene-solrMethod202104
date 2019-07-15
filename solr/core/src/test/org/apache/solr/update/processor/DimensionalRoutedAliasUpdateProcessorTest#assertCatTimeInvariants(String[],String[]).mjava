@@ -1,0 +1,64 @@
+  /**
+   * Test for invariant conditions when dealing with a DRA that is category X time.
+   *
+   * @param expectedCols the collections we expect to see
+   * @param categories   the categories added thus far
+   */
+  private void assertCatTimeInvariants(String[] expectedCols, String[] categories) throws Exception {
+    final int expectNumFound = lastDocId - numDocsDeletedOrFailed; //lastDocId is effectively # generated docs
+    int totalNumFound = 0;
+
+    final List<String> cols = new CollectionAdminRequest.ListAliases().process(solrClient).getAliasesAsLists().get(getSaferTestName());
+    assert !cols.isEmpty();
+
+    for (String category : categories) {
+      List<String> cats = cols.stream().filter(c -> c.contains(category)).collect(Collectors.toList());
+      Object[] expectedColOrder = cats.stream().sorted(Collections.reverseOrder()).toArray();
+      Object[] actuals = cats.toArray();
+      assertArrayEquals("expected reverse sorted",
+          expectedColOrder,
+          actuals);
+
+      Instant colEndInstant = null; // exclusive end
+
+      for (String col : cats) { // ASSUMPTION: reverse sorted order
+        Instant colStartInstant;
+        try {
+          colStartInstant = TimeRoutedAlias.parseInstantFromCollectionName(getAlias(), col);
+        } catch (Exception e) {
+          String colTmp = col;
+          // special case for tests... all of which have no more than one TRA dimension
+          // This won't work if we decide to write a test with 2 time dimensions.
+          // (but that's an odd case so we'll wait)
+          int traIndex = colTmp.indexOf(TRA)+ TRA.length();
+          while (colTmp.lastIndexOf("__") > traIndex) {
+            colTmp = colTmp.substring(0,colTmp.lastIndexOf("__"));
+          }
+          colStartInstant = TimeRoutedAlias.parseInstantFromCollectionName(getAlias(), colTmp);
+        }
+        final QueryResponse colStatsResp = solrClient.query(col, params(
+            "q", "*:*",
+            "fq", catField + ":" + category,
+            "rows", "0",
+            "stats", "true",
+            "stats.field", getTimeField()));
+        long numFound = colStatsResp.getResults().getNumFound();
+        if (numFound > 0) {
+          totalNumFound += numFound;
+          final FieldStatsInfo timestampStats = colStatsResp.getFieldStatsInfo().get(getTimeField());
+          assertTrue(colStartInstant.toEpochMilli() <= ((Date) timestampStats.getMin()).getTime());
+          if (colEndInstant != null) {
+            assertTrue(colEndInstant.toEpochMilli() > ((Date) timestampStats.getMax()).getTime());
+          }
+        }
+
+        colEndInstant = colStartInstant; // next older segment will max out at our current start time
+      }
+
+    }
+
+    assertEquals(expectNumFound, totalNumFound);
+
+    assertEquals("COLS FOUND:" + cols, expectedCols.length, cols.size());
+  }
+

@@ -16,19 +16,26 @@
 
     if (random().nextBoolean()) {
       // Send in separate threads. Choose random collection & solrClient
+      ExecutorService exec = null;
       try (CloudSolrClient solrClient = getCloudSolrClient(cluster)) {
-        ExecutorService exec = ExecutorUtil.newMDCAwareFixedThreadPool(1 + random().nextInt(2),
-            new DefaultSolrThreadFactory(getSaferTestName()));
-        List<Future<UpdateResponse>> futures = new ArrayList<>(solrInputDocuments.length);
-        for (SolrInputDocument solrInputDocument : solrInputDocuments) {
-          String col = collections.get(random().nextInt(collections.size()));
-          futures.add(exec.submit(() -> solrClient.add(col, solrInputDocument, commitWithin)));
+        try {
+          exec = ExecutorUtil.newMDCAwareFixedThreadPool(1 + random().nextInt(2),
+              new DefaultSolrThreadFactory(getSaferTestName()));
+          List<Future<UpdateResponse>> futures = new ArrayList<>(solrInputDocuments.length);
+          for (SolrInputDocument solrInputDocument : solrInputDocuments) {
+            String col = collections.get(random().nextInt(collections.size()));
+            futures.add(exec.submit(() -> solrClient.add(col, solrInputDocument, commitWithin)));
+          }
+          for (Future<UpdateResponse> future : futures) {
+            assertUpdateResponse(future.get());
+          }
+          // at this point there shouldn't be any tasks running
+          assertEquals(0, exec.shutdownNow().size());
+        } finally {
+          if (exec != null) {
+            exec.shutdownNow();
+          }
         }
-        for (Future<UpdateResponse> future : futures) {
-          assertUpdateResponse(future.get());
-        }
-        // at this point there shouldn't be any tasks running
-        assertEquals(0, exec.shutdownNow().size());
       }
     } else {
       // send in a batch.

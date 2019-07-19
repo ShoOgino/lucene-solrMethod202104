@@ -1,0 +1,49 @@
+  // This is called when splitByPrefix is used.
+  // The overseer called us to get recommended splits taking into
+  // account actual document distribution over the hash space.
+  private void handleGetRanges(CoreAdminHandler.CallInfo it, String coreName) throws Exception {
+
+    SolrCore parentCore = it.handler.coreContainer.getCore(coreName);
+    if (parentCore == null) {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Unknown core " + coreName);
+    }
+
+    RefCounted<SolrIndexSearcher> searcherHolder = parentCore.getRealtimeSearcher();
+
+    try {
+      if (!it.handler.coreContainer.isZooKeeperAware()) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Shard splitByPrefix requires SolrCloud mode.");
+      } else {
+        String routeFieldName = "id";
+        String prefixField = "id_prefix";
+
+        ClusterState clusterState = it.handler.coreContainer.getZkController().getClusterState();
+        String collectionName = parentCore.getCoreDescriptor().getCloudDescriptor().getCollectionName();
+        DocCollection collection = clusterState.getCollection(collectionName);
+        String sliceName = parentCore.getCoreDescriptor().getCloudDescriptor().getShardId();
+        Slice slice = collection.getSlice(sliceName);
+        DocRouter router = collection.getRouter() != null ? collection.getRouter() : DocRouter.DEFAULT;
+        DocRouter.Range currentRange = slice.getRange();
+
+        Object routerObj = collection.get(DOC_ROUTER); // for back-compat with Solr 4.4
+        if (routerObj instanceof Map) {
+          Map routerProps = (Map) routerObj;
+          routeFieldName = (String) routerProps.get("field");
+        }
+
+        Collection<RangeCount> counts = getHashHistogram(searcherHolder.get(), prefixField, router, collection);
+        Collection<DocRouter.Range> splits = getSplits(counts, currentRange);
+        String splitString = toSplitString(splits);
+
+        if (splitString == null) {
+          return;
+        }
+
+        it.rsp.add(CoreAdminParams.RANGES, splitString);
+      }
+    } finally {
+      if (searcherHolder != null) searcherHolder.decref();
+      if (parentCore != null) parentCore.close();
+    }
+  }
+

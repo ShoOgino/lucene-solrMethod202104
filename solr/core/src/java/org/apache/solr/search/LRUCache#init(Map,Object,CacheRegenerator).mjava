@@ -1,50 +1,54 @@
   @Override
   public Object init(Map args, Object persistence, CacheRegenerator regenerator) {
     super.init(args, regenerator);
-    String str = (String)args.get("size");
-    final int limit = str==null ? 1024 : Integer.parseInt(str);
+    String str = (String)args.get(SIZE_PARAM);
+    this.sizeLimit = str==null ? 1024 : Integer.parseInt(str);
     str = (String)args.get("initialSize");
-    final int initialSize = Math.min(str==null ? 1024 : Integer.parseInt(str), limit);
-    str = (String) args.get("maxRamMB");
-    final long maxRamBytes = this.maxRamBytes = str == null ? Long.MAX_VALUE : (long) (Double.parseDouble(str) * 1024L * 1024L);
-    description = generateDescription(limit, initialSize);
+    initialSize = Math.min(str==null ? 1024 : Integer.parseInt(str), sizeLimit);
+    str = (String) args.get(MAX_RAM_MB_PARAM);
+    this.maxRamBytes = str == null ? Long.MAX_VALUE : (long) (Double.parseDouble(str) * 1024L * 1024L);
+    description = generateDescription();
 
     map = new LinkedHashMap<K,V>(initialSize, 0.75f, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry eldest) {
-          if (size() > limit || ramBytesUsed > maxRamBytes) {
-            if (maxRamBytes != Long.MAX_VALUE && ramBytesUsed > maxRamBytes) {
-              long bytesToDecrement = 0;
-
-              Iterator<Map.Entry<K, V>> iterator = entrySet().iterator();
-              do {
-                Map.Entry<K, V> entry = iterator.next();
-                if (entry.getKey() != null) {
-                  bytesToDecrement += RamUsageEstimator.sizeOfObject(entry.getKey(), QUERY_DEFAULT_RAM_BYTES_USED);
-                }
-                if (entry.getValue() != null) {
-                  bytesToDecrement += ((Accountable) entry.getValue()).ramBytesUsed();
-                }
-                bytesToDecrement += LINKED_HASHTABLE_RAM_BYTES_PER_ENTRY;
-                ramBytesUsed -= bytesToDecrement;
-                iterator.remove();
-                evictions++;
-                evictionsRamUsage++;
-                stats.evictions.increment();
-                stats.evictionsRamUsage.increment();
-              } while (iterator.hasNext() && ramBytesUsed > maxRamBytes);
-              // must return false according to javadocs of removeEldestEntry if we're modifying
-              // the map ourselves
-              return false;
-            } else  {
+          if (ramBytesUsed > getMaxRamBytes()) {
+            Iterator<Map.Entry<K, V>> iterator = entrySet().iterator();
+            do {
+              Map.Entry<K, V> entry = iterator.next();
+              long bytesToDecrement = RamUsageEstimator.sizeOfObject(entry.getKey(), QUERY_DEFAULT_RAM_BYTES_USED);
+              bytesToDecrement += RamUsageEstimator.sizeOfObject(entry.getValue(), QUERY_DEFAULT_RAM_BYTES_USED);
+              bytesToDecrement += LINKED_HASHTABLE_RAM_BYTES_PER_ENTRY;
+              ramBytesUsed -= bytesToDecrement;
+              iterator.remove();
+              evictions++;
+              evictionsRamUsage++;
+              stats.evictions.increment();
+              stats.evictionsRamUsage.increment();
+            } while (iterator.hasNext() && ramBytesUsed > getMaxRamBytes());
+            // must return false according to javadocs of removeEldestEntry if we're modifying
+            // the map ourselves
+            return false;
+          } else if (size() > getSizeLimit()) {
+            Iterator<Map.Entry<K, V>> iterator = entrySet().iterator();
+            do {
+              Map.Entry<K, V> entry = iterator.next();
+              long bytesToDecrement = RamUsageEstimator.sizeOfObject(entry.getKey(), QUERY_DEFAULT_RAM_BYTES_USED);
+              bytesToDecrement += RamUsageEstimator.sizeOfObject(entry.getValue(), QUERY_DEFAULT_RAM_BYTES_USED);
+              bytesToDecrement += LINKED_HASHTABLE_RAM_BYTES_PER_ENTRY;
+              ramBytesUsed -= bytesToDecrement;
               // increment evictions regardless of state.
               // this doesn't need to be synchronized because it will
               // only be called in the context of a higher level synchronized block.
+              iterator.remove();
               evictions++;
               stats.evictions.increment();
-              return true;
-            }
+            } while (iterator.hasNext() && size() > getSizeLimit());
+            // must return false according to javadocs of removeEldestEntry if we're modifying
+            // the map ourselves
+            return false;
           }
+          // neither size nor RAM exceeded - ok to keep the entry
           return false;
         }
       };

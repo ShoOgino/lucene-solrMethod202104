@@ -1,15 +1,22 @@
   protected void waitForActiveReplicaCount(CloudSolrClient client, String collection, int expectedNumReplicas) throws TimeoutException, NotInClusterStateException {
+    log.debug("Waiting to see {} active replicas in collection: {}", expectedNumReplicas, collection);
     AtomicInteger nReplicas = new AtomicInteger();
     try {
-      client.getZkStateReader().waitForState(collection, 30, TimeUnit.SECONDS, (c) -> {
-        if (c == null)
-          return false;
-        int numReplicas = getTotalReplicas(c, c.getName());
-        nReplicas.set(numReplicas);
-        if (numReplicas == expectedNumReplicas) return true;
-
-        return false;
-      });
+      client.getZkStateReader().waitForState(collection, 30, TimeUnit.SECONDS, (liveNodes, collectionState) -> {
+          if (collectionState == null) {
+            return false;
+          }
+          int activeReplicas = 0;
+          for (Slice slice : collectionState) {
+            for (Replica replica : slice) {
+              if (replica.isActive(liveNodes)) {
+                activeReplicas++;
+              }
+            }
+          }
+          nReplicas.set(activeReplicas);
+          return (activeReplicas == expectedNumReplicas);
+        });
     } catch (TimeoutException | InterruptedException e) {
       try {
         printLayout();

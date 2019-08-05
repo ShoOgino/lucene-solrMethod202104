@@ -9,7 +9,9 @@
         .setRule("cores:<4", "node:*,replica:<2", "freedisk:>"+minGB)
         .setSnitch("class:ImplicitSnitch")
         .process(cluster.getSolrClient());
-
+    
+    cluster.waitForActiveCollection(rulesColl, 1, 2);
+    
     DocCollection rulesCollection = getCollectionState(rulesColl);
 
     List list = (List) rulesCollection.get("rule");
@@ -24,5 +26,38 @@
     CollectionAdminRequest.createShard(rulesColl, "shard2").process(cluster.getSolrClient());
     CollectionAdminRequest.addReplicaToShard(rulesColl, "shard2").process(cluster.getSolrClient());
 
+    waitForState("Should have found shard1 w/2active replicas + shard2 w/1active replica",
+                 rulesColl, (liveNodes, collection) -> {
+                   // short circut if collection is deleted
+                   // or we don't yet have the correct number of slices
+                   if (null == collection || 2 != collection.getSlices().size()) {
+                     return false;
+                   }
+                   for (Slice slice : collection.getSlices()) {
+                     // short circut if our slice isn't active
+                     if (Slice.State.ACTIVE != slice.getState()) {
+                       return false;
+                     }
+                     if (slice.getName().equals("shard1")) {
+                       // for shard1, we should have 2 fully live replicas
+                       final List<Replica> liveReplicas = slice.getReplicas
+                         ((r) -> r.isActive(liveNodes));
+                       if (2 != liveReplicas.size()) {
+                         return false;
+                       }
+                     } else if (slice.getName().equals("shard2")) {
+                       // for shard2, we should have 1 fully live replicas
+                       final List<Replica> liveReplicas = slice.getReplicas
+                         ((r) -> r.isActive(liveNodes));
+                       if (1 != liveReplicas.size()) {
+                         return false;
+                       }
+                     } else {
+                       // WTF?
+                       return false;
+                     }
+                   }
+                   return true;
+                 });
   }
 

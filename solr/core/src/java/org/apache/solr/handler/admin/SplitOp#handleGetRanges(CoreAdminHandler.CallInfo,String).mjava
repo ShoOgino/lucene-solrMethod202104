@@ -1,6 +1,8 @@
-  // This is called when splitByPrefix is used.
-  // The overseer called us to get recommended splits taking into
-  // account actual document distribution over the hash space.
+  /**
+   *   This is called when splitByPrefix is used.
+   *   The overseer called us to get recommended splits taking into
+   *   account actual document distribution over the hash space.
+   */
   private void handleGetRanges(CoreAdminHandler.CallInfo it, String coreName) throws Exception {
 
     SolrCore parentCore = it.handler.coreContainer.getCore(coreName);
@@ -14,7 +16,9 @@
       if (!it.handler.coreContainer.isZooKeeperAware()) {
         throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Shard splitByPrefix requires SolrCloud mode.");
       } else {
-        String routeFieldName = "id";
+        SolrIndexSearcher searcher = searcherHolder.get();
+
+        String routeFieldName = null;
         String prefixField = "id_prefix";
 
         ClusterState clusterState = it.handler.coreContainer.getZkController().getClusterState();
@@ -30,8 +34,19 @@
           Map routerProps = (Map) routerObj;
           routeFieldName = (String) routerProps.get("field");
         }
+        if (routeFieldName == null) {
+          routeFieldName = searcher.getSchema().getUniqueKeyField().getName();
+        }
 
-        Collection<RangeCount> counts = getHashHistogram(searcherHolder.get(), prefixField, router, collection);
+        Collection<RangeCount> counts = getHashHistogram(searcher, prefixField, router, collection);
+
+        if (counts.size() == 0) {
+          // How to determine if we should look at the id field to figure out the prefix buckets?
+          // There may legitimately be no indexed terms in id_prefix if no ids have a prefix yet.
+          // For now, avoid using splitByPrefix unless you are actually using prefixes.
+          counts = getHashHistogramFromId(searcher, searcher.getSchema().getUniqueKeyField().getName(), router, collection);
+        }
+
         Collection<DocRouter.Range> splits = getSplits(counts, currentRange);
         String splitString = toSplitString(splits);
 

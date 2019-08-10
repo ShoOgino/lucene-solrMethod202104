@@ -1,0 +1,44 @@
+    void exportDocsWithCursorMark() throws SolrServerException, IOException {
+      DocsSink sink = getSink();
+      solrClient = new CloudSolrClient.Builder(Collections.singletonList(baseurl)).build();
+      NamedList<Object> rsp1 = solrClient.request(new GenericSolrRequest(SolrRequest.METHOD.GET, "/schema/uniquekey",
+          new MapSolrParams(Collections.singletonMap("collection", coll))));
+      String uniqueKey = (String) rsp1.get("uniqueKey");
+
+      sink.start();
+      try {
+        NamedList<Object> rsp;
+        SolrQuery q = (new SolrQuery(query))
+            .setParam("collection", coll)
+            .setRows(100)
+            .setSort(SolrQuery.SortClause.asc(uniqueKey));
+        if (fields != null) {
+          q.setParam(FL, fields);
+        }
+
+        String cursorMark = CursorMarkParams.CURSOR_MARK_START;
+        boolean done = false;
+        StreamingResponseCallback streamer = getStreamer(sink);
+
+        if(output!= null) output.println("Exporting data to : "+ out);
+        while (!done) {
+          if (docsWritten >= limit) break;
+          QueryRequest request = new QueryRequest(q);
+          request.setResponseParser(new StreamingBinaryResponseParser(streamer));
+          q.set(CursorMarkParams.CURSOR_MARK_PARAM, cursorMark);
+          rsp = solrClient.request(request);
+          String nextCursorMark = (String) rsp.get(CursorMarkParams.CURSOR_MARK_NEXT);
+          if (nextCursorMark == null || Objects.equals(cursorMark, nextCursorMark)) {
+            break;
+          }
+          cursorMark = nextCursorMark;
+          if(output!= null) output.print(".");
+        }
+        if(output!= null) output.println("\n DONE!");
+      } finally {
+        sink.end();
+        solrClient.close();
+
+      }
+    }
+

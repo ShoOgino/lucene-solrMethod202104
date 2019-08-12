@@ -1,4 +1,14 @@
-  private void executeCommand(String url, HttpClient cl, String payload, JsonWebSignature jws) throws IOException, JoseException {
+  private void executeCommand(String url, HttpClient cl, String payload, JsonWebSignature jws)
+    throws Exception {
+    
+    // HACK: work around for SOLR-13464...
+    //
+    // note the authz/authn objects in use on each node before executing the command,
+    // then wait until we see new objects on every node *after* executing the command
+    // before returning...
+    final Set<Map.Entry<String,Object>> initialPlugins
+      = getAuthPluginsInUseForCluster(url).entrySet();
+    
     HttpPost httpPost;
     HttpResponse r;
     httpPost = new HttpPost(url);
@@ -11,5 +21,16 @@
     assertEquals("Non-200 response code. Response was " + response, 200, r.getStatusLine().getStatusCode());
     assertFalse("Response contained errors: " + response, response.contains("errorMessages"));
     Utils.consumeFully(r.getEntity());
+
+    // HACK (continued)...
+    final TimeOut timeout = new TimeOut(30, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+    timeout.waitFor("core containers never fully updated their auth plugins",
+                    () -> {
+                      final Set<Map.Entry<String,Object>> tmpSet
+                        = getAuthPluginsInUseForCluster(url).entrySet();
+                      tmpSet.retainAll(initialPlugins);
+                      return tmpSet.isEmpty();
+                    });
+    
   }
 

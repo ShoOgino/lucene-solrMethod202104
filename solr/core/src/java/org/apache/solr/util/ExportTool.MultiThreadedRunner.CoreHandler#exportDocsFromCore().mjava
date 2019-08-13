@@ -1,0 +1,58 @@
+      boolean exportDocsFromCore()
+          throws IOException, SolrServerException {
+        HttpSolrClient client = new HttpSolrClient.Builder(baseurl).build();
+        try {
+          expectedDocs = getDocCount(replica.getCoreName(), client);
+          GenericSolrRequest request;
+          ModifiableSolrParams params = new ModifiableSolrParams();
+          params.add(Q, query);
+          if (fields != null) params.add(FL, fields);
+          params.add(SORT, uniqueKey + " asc");
+          params.add(CommonParams.DISTRIB, "false");
+          params.add(CommonParams.ROWS, "1000");
+          String cursorMark = CursorMarkParams.CURSOR_MARK_START;
+          Consumer<SolrDocument> wrapper = doc -> {
+            try {
+              queue.offer(doc, 10, TimeUnit.SECONDS);
+              receivedDocs.incrementAndGet();
+            } catch (InterruptedException e) {
+              failed = true;
+              if (output != null) output.println("Failed to write docs from" + e.getMessage());
+            }
+          };
+          StreamingBinaryResponseParser responseParser = new StreamingBinaryResponseParser(getStreamer(wrapper));
+          while (true) {
+            if (failed) return false;
+            if (docsWritten.get() > limit) return true;
+            params.set(CursorMarkParams.CURSOR_MARK_PARAM, cursorMark);
+            request = new GenericSolrRequest(SolrRequest.METHOD.GET,
+                "/" + replica.getCoreName() + "/select", params);
+            request.setResponseParser(responseParser);
+            try {
+              NamedList<Object> rsp = client.request(request);
+              String nextCursorMark = (String) rsp.get(CursorMarkParams.CURSOR_MARK_NEXT);
+              if (nextCursorMark == null || Objects.equals(cursorMark, nextCursorMark)) {
+                if (output != null)
+                  output.println(StrUtils.formatString("\nExport complete for : {0}, docs : {1}", replica.getCoreName(), receivedDocs.get()));
+                if (expectedDocs != receivedDocs.get()) {
+                  if (output != null) {
+                    output.println(StrUtils.formatString("Could not download all docs for core {0} , expected: {1} , actual",
+                        replica.getCoreName(), expectedDocs, receivedDocs));
+                    return false;
+                  }
+                }
+                return true;
+              }
+              cursorMark = nextCursorMark;
+              if (output != null) output.print(".");
+            } catch (SolrServerException e) {
+              if(output != null) output.println("Error reading from server "+ replica.getBaseUrl()+"/"+ replica.getCoreName());
+              failed = true;
+              return false;
+            }
+          }
+        } finally {
+          client.close();
+        }
+      }
+

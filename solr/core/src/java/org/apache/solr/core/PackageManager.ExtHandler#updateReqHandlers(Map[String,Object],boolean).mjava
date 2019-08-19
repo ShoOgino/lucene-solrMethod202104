@@ -1,0 +1,43 @@
+    private void updateReqHandlers(Map<String, Object> properties, boolean forceReload) {
+      Map m = (Map) properties.getOrDefault(SolrRequestHandler.TYPE, Collections.emptyMap());
+      if (m.isEmpty() && customHandlers.isEmpty()) return;
+      boolean hasChanged = true;
+      if (customHandlers.size() == m.size() && customHandlers.keySet().containsAll(m.keySet())) hasChanged = false;
+      if (forceReload || hasChanged) {
+        log.debug("RequestHandlers being reloaded : {}", m.keySet());
+        Map<String, Handler> newCustomHandlers = new HashMap<>();
+        m.forEach((k, v) -> {
+          if (v instanceof Map) {
+            Map metaData = (Map) v;
+            Handler existing = customHandlers.get(k);
+            String name = (String) k;
+            if (existing == null || existing.shouldReload(metaData, packageManager.pkgs)) {
+              String klas = (String) metaData.get(FieldType.CLASS_NAME);
+              if (klas != null) {
+                String pkg = (String) metaData.get(PACKAGE);
+                SolrRequestHandler inst = packageManager.newInstance(klas, SolrRequestHandler.class, pkg);
+                if (inst instanceof PluginInfoInitialized) {
+                  ((PluginInfoInitialized) inst).init(new PluginInfo(SolrRequestHandler.TYPE, metaData));
+                }
+                Package p = packageManager.pkgs.get(pkg);
+                newCustomHandlers.put(name, new Handler(inst, pkg, p == null ? -1 : p.lib.getZnodeVersion(), metaData, name));
+              } else {
+                log.error("Invalid requestHandler {}", Utils.toJSONString(v));
+              }
+
+            } else {
+              newCustomHandlers.put(name, existing);
+            }
+
+          } else {
+            log.error("Invalid data for requestHandler : {} , {}", k, v);
+          }
+        });
+
+        log.debug("Registering request handlers {} ", newCustomHandlers.keySet());
+        Map<String, Handler> old = customHandlers;
+        customHandlers = newCustomHandlers;
+        old.forEach((s, h) -> PluginBag.closeQuietly(h));
+      }
+    }
+

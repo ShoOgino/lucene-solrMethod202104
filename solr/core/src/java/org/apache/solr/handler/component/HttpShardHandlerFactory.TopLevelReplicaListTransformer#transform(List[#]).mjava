@@ -1,0 +1,52 @@
+    @Override
+    public void transform(List<?> choices) {
+      if (choices.size() > 1) {
+        if (log.isDebugEnabled()) {
+          log.debug("Applying the following sorting preferences to replicas: {}",
+              Arrays.toString(replicaComp.preferenceRules.toArray()));
+        }
+
+        // First, sort according to comparator rules.
+        try {
+          choices.sort(replicaComp);
+        } catch (IllegalArgumentException iae) {
+          throw new SolrException(
+              SolrException.ErrorCode.BAD_REQUEST,
+              iae.getMessage()
+          );
+        }
+
+        // Next determine all boundaries between replicas ranked as "equivalent" by the comparator
+        Iterator<?> iter = choices.iterator();
+        Object prev = iter.next();
+        Object current;
+        int idx = 1;
+        int boundaryCount = 0;
+        int[] boundaries = new int[choices.size() - 1];
+        do {
+          current = iter.next();
+          if (replicaComp.compare(prev, current) != 0) {
+            boundaries[boundaryCount++] = idx;
+          }
+          prev = current;
+          idx++;
+        } while (iter.hasNext());
+
+        // Finally inspect boundaries to apply base transformation, where necessary (separate phase to avoid ConcurrentModificationException)
+        int startIdx = 0;
+        int endIdx;
+        for (int i = 0; i < boundaryCount; i++) {
+          endIdx = boundaries[i];
+          if (endIdx - startIdx > 1) {
+            baseReplicaListTransformer.transform(choices.subList(startIdx, endIdx));
+          }
+          startIdx = endIdx;
+        }
+
+        if (log.isDebugEnabled()) {
+          log.debug("Applied sorting preferences to replica list: {}",
+              Arrays.toString(choices.toArray()));
+        }
+      }
+    }
+

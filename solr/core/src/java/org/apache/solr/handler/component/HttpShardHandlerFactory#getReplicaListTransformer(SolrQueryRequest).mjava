@@ -1,6 +1,7 @@
   protected ReplicaListTransformer getReplicaListTransformer(final SolrQueryRequest req) {
     final SolrParams params = req.getParams();
-    ZkController zkController = req.getCore().getCoreContainer().getZkController();
+    final SolrCore core = req.getCore(); // explicit check for null core (temporary?, for tests)
+    ZkController zkController = core == null ? null : core.getCoreContainer().getZkController();
     String defaultShardPreference = "";
     if (zkController != null) {
       defaultShardPreference = zkController.getZkStateReader().getClusterProperties()
@@ -25,33 +26,17 @@
         preferenceRules.add(new PreferenceRule(ShardParams.SHARDS_PREFERENCE_REPLICA_LOCATION, ShardParams.REPLICA_LOCAL));
       }
 
-      return new ShufflingReplicaListTransformer(r) {
-        @Override
-        public void transform(List<?> choices)
-        {
-          if (choices.size() > 1) {
-            super.transform(choices);
-            if (log.isDebugEnabled()) {
-              log.debug("Applying the following sorting preferences to replicas: {}",
-                  Arrays.toString(preferenceRules.toArray()));
-            }
-            try {
-              choices.sort(new NodePreferenceRulesComparator(preferenceRules, req));
-            } catch (IllegalArgumentException iae) {
-              throw new SolrException(
-                SolrException.ErrorCode.BAD_REQUEST,
-                iae.getMessage()
-              );
-            }
-            if (log.isDebugEnabled()) {
-              log.debug("Applied sorting preferences to replica list: {}",
-                  Arrays.toString(choices.toArray()));
-            }
-          }
-        }
-      };
+      NodePreferenceRulesComparator replicaComp = new NodePreferenceRulesComparator(preferenceRules, req,
+          defaultRltFactory, randomRltFactory, stableRltFactory);
+      ReplicaListTransformer baseReplicaListTransformer = replicaComp.getBaseReplicaListTransformer();
+      if (replicaComp.sortRules == null) {
+        // only applying base transformation
+        return baseReplicaListTransformer;
+      } else {
+        return new TopLevelReplicaListTransformer(replicaComp, baseReplicaListTransformer);
+      }
     }
 
-    return shufflingReplicaListTransformer;
+    return defaultRltFactory.getInstance(null, req, randomRltFactory);
   }
 

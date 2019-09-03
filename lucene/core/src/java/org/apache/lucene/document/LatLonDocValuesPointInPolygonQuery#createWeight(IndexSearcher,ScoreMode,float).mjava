@@ -1,0 +1,46 @@
+  @Override
+  public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
+
+    return new ConstantScoreWeight(this, boost) {
+
+      final Polygon2D tree = Polygon2D.create(polygons);
+      final GeoEncodingUtils.PolygonPredicate polygonPredicate = GeoEncodingUtils.createPolygonPredicate(polygons, tree);
+
+      @Override
+      public Scorer scorer(LeafReaderContext context) throws IOException {
+        final SortedNumericDocValues values = context.reader().getSortedNumericDocValues(field);
+        if (values == null) {
+          return null;
+        }
+
+        final TwoPhaseIterator iterator = new TwoPhaseIterator(values) {
+
+          @Override
+          public boolean matches() throws IOException {
+            for (int i = 0, count = values.docValueCount(); i < count; ++i) {
+              final long value = values.nextValue();
+              final int lat = (int) (value >>> 32);
+              final int lon = (int) (value & 0xFFFFFFFF);
+              if (polygonPredicate.test(lat, lon)) {
+                return true;
+              }
+            }
+            return false;
+          }
+
+          @Override
+          public float matchCost() {
+            return 1000f; // TODO: what should it be?
+          }
+        };
+        return new ConstantScoreScorer(this, boost, scoreMode, iterator);
+      }
+
+      @Override
+      public boolean isCacheable(LeafReaderContext ctx) {
+        return DocValues.isCacheable(ctx, field);
+      }
+
+    };
+  }
+

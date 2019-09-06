@@ -1,0 +1,42 @@
+    protected static void writeIncrementallyEncodedTerm(TermBytes termBytes, TermBytes previousTermBytes,
+                                                      boolean isIncrementalEncodingSeed, DataOutput blockOutput) throws IOException {
+      BytesRef term = termBytes.getTerm();
+      assert term.offset == 0;
+      if (isIncrementalEncodingSeed) {
+        // Mdp length is always 1 for an incremental encoding seed.
+        blockOutput.writeVLong(term.length);
+        blockOutput.writeBytes(term.bytes, 0, term.length);
+        return;
+      }
+      if (term.length == 0) {
+        // Empty term.
+        blockOutput.writeVLong(0);
+        return;
+      }
+
+      // For other lines we store:
+      // - Mdp length.
+      // - Suffix length.
+      // - Suffix bytes.
+      // Instead of writing mdp length and suffix length with 2 VInt, we can compress the storage
+      // by merging them in a single VLong. The idea is to leverage the information we have about
+      // the previous line. We know the previous line term length. And we know that
+      // new line mdp length <= (previous line term length + 1)
+      // So if numMdpBits = numBitsToEncode(previous line term length),
+      // then we know we can encode (new line mdp length - 1) in numMdpBits.
+      // Hence we encode (new line mdp length - 1) in the rightmost numMdpBits of the VLong.
+      // And we encode new line suffix length in the remaining left bits of the VLong.
+      // Most of the time both values will be encoded in a single byte.
+
+      assert previousTermBytes != null;
+      assert termBytes.getMdpLength() >= 1;
+
+      int numMdpBits = numBitsToEncode(previousTermBytes.getTerm().length);
+      assert numBitsToEncode(termBytes.getMdpLength() - 1) <= numMdpBits;
+
+      long mdpAndSuffixLengths = (((long) termBytes.getSuffixLength()) << numMdpBits) | (termBytes.getMdpLength() - 1);
+      assert mdpAndSuffixLengths != 0;
+      blockOutput.writeVLong(mdpAndSuffixLengths);
+      blockOutput.writeBytes(term.bytes, termBytes.getSuffixOffset(), termBytes.getSuffixLength());
+    }
+

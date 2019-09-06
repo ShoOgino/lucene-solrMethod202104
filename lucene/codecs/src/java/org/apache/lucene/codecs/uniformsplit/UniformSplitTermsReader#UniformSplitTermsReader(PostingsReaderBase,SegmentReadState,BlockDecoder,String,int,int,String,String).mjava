@@ -1,0 +1,47 @@
+  /**
+   * @param blockDecoder Optional block decoder, may be null if none.
+   *                     It can be used for decompression or decryption.
+   */
+  protected UniformSplitTermsReader(PostingsReaderBase postingsReader, SegmentReadState state, BlockDecoder blockDecoder,
+                                     String codecName, int versionStart, int versionCurrent, String termsBlocksExtension, String dictionaryExtension) throws IOException {
+     IndexInput dictionaryInput = null;
+     IndexInput blockInput = null;
+     boolean success = false;
+     try {
+       this.postingsReader = postingsReader;
+       String segmentName = state.segmentInfo.name;
+       String termsName = IndexFileNames.segmentFileName(segmentName, state.segmentSuffix, termsBlocksExtension);
+       blockInput = state.directory.openInput(termsName, state.context);
+
+       int version = CodecUtil.checkIndexHeader(blockInput, codecName, versionStart,
+           versionCurrent, state.segmentInfo.getId(), state.segmentSuffix);
+       String indexName = IndexFileNames.segmentFileName(segmentName, state.segmentSuffix, dictionaryExtension);
+       dictionaryInput = state.directory.openInput(indexName, state.context);
+
+       CodecUtil.checkIndexHeader(dictionaryInput, codecName, version, version, state.segmentInfo.getId(), state.segmentSuffix);
+       CodecUtil.checksumEntireFile(dictionaryInput);
+
+       postingsReader.init(blockInput, state);
+       CodecUtil.retrieveChecksum(blockInput);
+
+       seekFieldsMetadata(blockInput);
+       Collection<FieldMetadata> fieldMetadataCollection = parseFieldsMetadata(blockInput, state.fieldInfos);
+
+       fieldToTermsMap = new HashMap<>();
+       this.blockInput = blockInput;
+       this.dictionaryInput = dictionaryInput;
+
+       fillFieldMap(postingsReader, blockDecoder, dictionaryInput, blockInput, fieldMetadataCollection, state.fieldInfos);
+
+       List<String> fieldNames = new ArrayList<>(fieldToTermsMap.keySet());
+       Collections.sort(fieldNames);
+       sortedFieldNames = Collections.unmodifiableList(fieldNames);
+
+       success = true;
+     } finally {
+       if (!success) {
+         IOUtils.closeWhileHandlingException(blockInput, dictionaryInput);
+       }
+     }
+   }
+

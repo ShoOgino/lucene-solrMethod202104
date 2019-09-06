@@ -1,0 +1,78 @@
+    /**
+     * Returns the next String in lexicographic order that will not put
+     * the machine into a reject state.
+     *
+     * This method traverses the DFA from the given position in the String,
+     * starting at the given state.
+     *
+     * If this cannot satisfy the machine, returns false. This method will
+     * walk the minimal path, in lexicographic order, as long as possible.
+     *
+     * If this method returns false, then there might still be more solutions,
+     * it is necessary to backtrack to find out.
+     *
+     * @param state current non-reject state
+     * @param position useful portion of the string
+     * @return true if more possible solutions exist for the DFA from this
+     *         position
+     */
+    protected boolean nextString(int state, int position) {
+      /*
+       * the next lexicographic character must be greater than the existing
+       * character, if it exists.
+       */
+      int c = 0;
+      if (position < seekBytesRef.length()) {
+        c = seekBytesRef.byteAt(position) & 0xff;
+        // if the next byte is 0xff and is not part of the useful portion,
+        // then by definition it puts us in a reject state, and therefore this
+        // path is dead. there cannot be any higher transitions. backtrack.
+        if (c++ == 0xff)
+          return false;
+      }
+
+      seekBytesRef.setLength(position);
+      visited[state] = curGen;
+
+      final int numTransitions = automaton.getNumTransitions(state);
+      automaton.initTransition(state, transition);
+      // find the minimal path (lexicographic order) that is >= c
+
+      for (int i = 0; i < numTransitions; i++) {
+        automaton.getNextTransition(transition);
+        if (transition.max >= c) {
+          int nextChar = Math.max(c, transition.min);
+          // append either the next sequential char, or the minimum transition
+          seekBytesRef.grow(seekBytesRef.length() + 1);
+          seekBytesRef.append((byte) nextChar);
+          state = transition.dest;
+          /*
+           * as long as is possible, continue down the minimal path in
+           * lexicographic order. if a loop or accept state is encountered, stop.
+           */
+          while (visited[state] != curGen && !runAutomaton.isAccept(state)) {
+            visited[state] = curGen;
+            /*
+             * Note: we work with a DFA with no transitions to dead states.
+             * so the below is ok, if it is not an accept state,
+             * then there MUST be at least one transition.
+             */
+            automaton.initTransition(state, transition);
+            automaton.getNextTransition(transition);
+            state = transition.dest;
+
+            // append the minimum transition
+            seekBytesRef.grow(seekBytesRef.length() + 1);
+            seekBytesRef.append((byte) transition.min);
+
+            // we found a loop, record it for faster enumeration
+            if (!finite && !linear && visited[state] == curGen) {
+              setLinear(seekBytesRef.length()-1);
+            }
+          }
+          return true;
+        }
+      }
+      return false;
+    }
+

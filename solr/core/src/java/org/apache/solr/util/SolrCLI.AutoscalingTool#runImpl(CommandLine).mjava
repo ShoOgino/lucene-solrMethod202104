@@ -35,9 +35,10 @@
           }
         }
       }
+      boolean redact = cli.hasOption("r");
       if (cli.hasOption("save")) {
         File targetDir = new File(cli.getOptionValue("save"));
-        cloudManager.saveSnapshot(targetDir, true);
+        cloudManager.saveSnapshot(targetDir, true, redact);
         CLIO.err("- saved autoscaling snapshot to " + targetDir.getAbsolutePath());
       }
       HashSet<String> liveNodes = new HashSet<>();
@@ -47,7 +48,6 @@
       boolean withSortedNodes = cli.hasOption("n");
       boolean withClusterState = cli.hasOption("c");
       boolean withStats = cli.hasOption("stats");
-      boolean redact = cli.hasOption("r");
       if (cli.hasOption("all")) {
         withSuggestions = true;
         withDiagnostics = true;
@@ -56,25 +56,11 @@
         withStats = true;
       }
       // prepare to redact also host names / IPs in base_url and other properties
-      Set<String> redactNames = new HashSet<>();
-      for (String nodeName : liveNodes) {
-        String urlString = Utils.getBaseUrlForNodeName(nodeName, "http");
-        try {
-          URL u = new URL(urlString);
-          // protocol format
-          redactNames.add(u.getHost() + ":" + u.getPort());
-          // node name format
-          redactNames.add(u.getHost() + "_" + u.getPort() + "_");
-        } catch (MalformedURLException e) {
-          log.warn("Invalid URL for node name " + nodeName + ", replacing including protocol and path", e);
-          redactNames.add(urlString);
-          redactNames.add(Utils.getBaseUrlForNodeName(nodeName, "https"));
-        }
-      }
-      // redact collection names too
-      Set<String> redactCollections = new HashSet<>();
       ClusterState clusterState = cloudManager.getClusterStateProvider().getClusterState();
-      clusterState.forEachCollection(coll -> redactCollections.add(coll.getName()));
+      RedactionUtils.RedactionContext ctx = null;
+      if (redact) {
+        ctx = SimUtils.getRedactionContext(clusterState);
+      }
       if (!withSuggestions && !withDiagnostics) {
         withSuggestions = true;
       }
@@ -92,13 +78,12 @@
         }
         Map<String, Object> simulationResults = new HashMap<>();
         simulate(cloudManager, config, simulationResults, saveSimulated, withClusterState,
-            withStats, withSuggestions, withSortedNodes, withDiagnostics, iterations);
+            withStats, withSuggestions, withSortedNodes, withDiagnostics, iterations, redact);
         results.put("simulation", simulationResults);
       }
       String data = Utils.toJSONString(results);
       if (redact) {
-        data = RedactionUtils.redactNames(redactCollections, COLL_REDACTION_PREFIX, data);
-        data = RedactionUtils.redactNames(redactNames, NODE_REDACTION_PREFIX, data);
+        data = RedactionUtils.redactNames(ctx.getRedactions(), data);
       }
       stdout.println(data);
     }

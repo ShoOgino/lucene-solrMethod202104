@@ -1,9 +1,9 @@
   @SuppressWarnings("unchecked")
   private void initJwk(Map<String, Object> pluginConfig) {
     this.pluginConfig = pluginConfig;
-    String confJwkUrl = (String) pluginConfig.get(PARAM_JWK_URL);
+    Object confJwkUrl = pluginConfig.get(PARAM_JWK_URL);
     Map<String, Object> confJwk = (Map<String, Object>) pluginConfig.get(PARAM_JWK);
-    jwkCacheDuration = Long.parseLong((String) pluginConfig.getOrDefault(PARAM_JWK_CACHE_DURATION, "3600"));
+    long jwkCacheDuration = Long.parseLong((String) pluginConfig.getOrDefault(PARAM_JWK_CACHE_DURATION, "3600"));
 
     jwtConsumer = null;
     int jwkConfigured = confIdpConfigUrl != null ? 1 : 0;
@@ -16,19 +16,30 @@
     if (jwkConfigured == 0) {
       log.warn("Initialized JWTAuthPlugin without any JWK config. Requests with jwk header will fail.");
     }
-    if (oidcDiscoveryConfig != null) {
-      String jwkUrl = oidcDiscoveryConfig.getJwksUrl();
-      setupJwkUrl(jwkUrl);
-    } else if (confJwkUrl != null) {
-      setupJwkUrl(confJwkUrl);
+
+    HttpsJwksFactory httpsJwksFactory = new HttpsJwksFactory(jwkCacheDuration, DEFAULT_REFRESH_REPRIEVE_THRESHOLD);
+    if (confJwkUrl != null) {
+      try {
+        List<String> urls = (confJwkUrl instanceof List) ? (List<String>)confJwkUrl : Collections.singletonList((String) confJwkUrl);
+        issuerConfig = new IssuerConfig(iss, urls);
+        issuerConfig.setHttpsJwksFactory(httpsJwksFactory);
+        verificationKeyResolver = new JWTVerificationkeyResolver(issuerConfig);
+      } catch (ClassCastException e) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Parameter " + PARAM_JWK_URL + " must be either List or String");
+      }
     } else if (confJwk != null) {
       try {
         JsonWebKeySet jwks = parseJwkSet(confJwk);
+        issuerConfig = new IssuerConfig(iss, jwks);
         verificationKeyResolver = new JwksVerificationKeyResolver(jwks.getJsonWebKeys());
-        httpsJkws = null;
       } catch (JoseException e) {
         throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Invalid JWTAuthPlugin configuration, " + PARAM_JWK + " parse error", e);
       }
+    } else if (oidcDiscoveryConfig != null) {
+      List<String> urls = Collections.singletonList(oidcDiscoveryConfig.getJwksUrl());
+      issuerConfig = new IssuerConfig(iss, urls);
+      issuerConfig.setHttpsJwksFactory(httpsJwksFactory);
+      verificationKeyResolver = new JWTVerificationkeyResolver(issuerConfig);
     }
     initConsumer();
     log.debug("JWK configured");

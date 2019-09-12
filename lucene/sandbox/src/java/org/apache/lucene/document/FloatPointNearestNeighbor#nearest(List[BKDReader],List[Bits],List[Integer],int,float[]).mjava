@@ -33,33 +33,31 @@
       states.add(state);
 
       cellQueue.offer(new Cell(state.index, i, reader.getMinPackedValue(), reader.getMaxPackedValue(),
-          approxBestDistanceSquared(minPackedValue, maxPackedValue, origin)));
+          pointToRectangleDistanceSquared(minPackedValue, maxPackedValue, origin)));
     }
 
     while (cellQueue.size() > 0) {
       Cell cell = cellQueue.poll();
       // System.out.println("  visit " + cell);
 
-      // TODO: if we replace approxBestDistance with actualBestDistance, we can put an opto here to break once this "best" cell is fully outside of the hitQueue bottom's radius:
-      BKDReader reader = readers.get(cell.readerIndex);
+      if (cell.distanceSquared > visitor.bottomNearestDistanceSquared) {
+        break;
+      }
 
+      BKDReader reader = readers.get(cell.readerIndex);
       if (cell.index.isLeafNode()) {
         // System.out.println("    leaf");
         // Leaf block: visit all points and possibly collect them:
         visitor.curDocBase = docBases.get(cell.readerIndex);
         visitor.curLiveDocs = liveDocs.get(cell.readerIndex);
         reader.visitLeafBlockValues(cell.index, states.get(cell.readerIndex));
+
+        //assert hitQueue.peek().distanceSquared >= cell.distanceSquared;
         // System.out.println("    now " + hitQueue.size() + " hits");
       } else {
         // System.out.println("    non-leaf");
         // Non-leaf block: split into two cells and put them back into the queue:
 
-        if (hitQueue.size() == topN) {
-          if (visitor.compare(cell.minPacked, cell.maxPacked) == PointValues.Relation.CELL_OUTSIDE_QUERY) {
-            // this cell is outside our search radius; don't bother exploring any more
-            continue;
-          }
-        }
         BytesRef splitValue = BytesRef.deepCopyOf(cell.index.getSplitDimValue());
         int splitDim = cell.index.getSplitDim();
 
@@ -69,15 +67,19 @@
         System.arraycopy(splitValue.bytes, splitValue.offset, splitPackedValue, splitDim * bytesPerDim, bytesPerDim);
 
         cell.index.pushLeft();
-        cellQueue.offer(new Cell(cell.index, cell.readerIndex, cell.minPacked, splitPackedValue,
-            approxBestDistanceSquared(cell.minPacked, splitPackedValue, origin)));
+        double distanceLeft = pointToRectangleDistanceSquared(cell.minPacked, splitPackedValue, origin);
+        if (distanceLeft <= visitor.bottomNearestDistanceSquared) {
+          cellQueue.offer(new Cell(cell.index, cell.readerIndex, cell.minPacked, splitPackedValue, distanceLeft));
+        }
 
         splitPackedValue = cell.minPacked.clone();
         System.arraycopy(splitValue.bytes, splitValue.offset, splitPackedValue, splitDim * bytesPerDim, bytesPerDim);
 
         newIndex.pushRight();
-        cellQueue.offer(new Cell(newIndex, cell.readerIndex, splitPackedValue, cell.maxPacked,
-            approxBestDistanceSquared(splitPackedValue, cell.maxPacked, origin)));
+        double distanceRight = pointToRectangleDistanceSquared(splitPackedValue, cell.maxPacked, origin);
+        if (distanceRight <= visitor.bottomNearestDistanceSquared) {
+          cellQueue.offer(new Cell(newIndex, cell.readerIndex, splitPackedValue, cell.maxPacked, distanceRight));
+        }
       }
     }
 
@@ -87,6 +89,7 @@
       hits[downTo] = hitQueue.poll();
       downTo--;
     }
+    //System.out.println(visitor.comp);
     return hits;
   }
 

@@ -1,50 +1,42 @@
     @Override
     public void visit(int docID, byte[] packedValue) {
-      // System.out.println("visit docID=" + docID + " liveDocs=" + curLiveDocs);
-
+      // System.out.println("visit docID=" + docID + " liveDocs=" + curLiveDocs);;
       if (curLiveDocs != null && curLiveDocs.get(docID) == false) {
         return;
       }
 
-      float[] docPoint = new float[dims];
+      double distanceSquared = 0.0d;
       for (int d = 0, offset = 0 ; d < dims ; ++d, offset += Float.BYTES) {
-        docPoint[d] = FloatPoint.decodeDimension(packedValue, offset);
-        if (docPoint[d] > max[d] || docPoint[d] < min[d]) {
-
-          // if (docPoint[d] > max[d]) {
-          //   System.out.println("  skipped because docPoint[" + d + "] (" + docPoint[d] + ") > max[" + d + "] (" + max[d] + ")");
-          // } else {
-          //   System.out.println("  skipped because docPoint[" + d + "] (" + docPoint[d] + ") < min[" + d + "] (" + min[d] + ")");
-          // }
-
+        double diff = (double) FloatPoint.decodeDimension(packedValue, offset) - (double) origin[d];
+        distanceSquared += diff * diff;
+        if (distanceSquared > bottomNearestDistanceSquared) {
           return;
         }
       }
-        
-      double distanceSquared = euclideanDistanceSquared(origin, docPoint);
 
       // System.out.println("    visit docID=" + docID + " distanceSquared=" + distanceSquared + " value: " + Arrays.toString(docPoint));
 
       int fullDocID = curDocBase + docID;
 
       if (hitQueue.size() == topN) { // queue already full
-        NearestHit bottom = hitQueue.peek();
-        // System.out.println("      bottom distanceSquared=" + bottom.distanceSquared);
-        if (distanceSquared < bottom.distanceSquared
-            // we don't collect docs in order here, so we must also test the tie-break case ourselves:
-            || (distanceSquared == bottom.distanceSquared && fullDocID < bottom.docID)) {
-          hitQueue.poll();
-          bottom.docID = fullDocID;
-          bottom.distanceSquared = distanceSquared;
-          hitQueue.offer(bottom);
-          // System.out.println("      ** keep1, now bottom=" + bottom);
-          maybeUpdateMinMax();
+        if (distanceSquared == bottomNearestDistanceSquared && fullDocID > bottomNearestDistanceDoc) {
+          return;
         }
+        NearestHit bottom = hitQueue.poll();
+        // System.out.println("      bottom distanceSquared=" + bottom.distanceSquared);
+        bottom.docID = fullDocID;
+        bottom.distanceSquared = distanceSquared;
+        hitQueue.offer(bottom);
+        updateBottomNearestDistance();
+          // System.out.println("      ** keep1, now bottom=" + bottom);
       } else {
         NearestHit hit = new NearestHit();
         hit.docID = fullDocID;
         hit.distanceSquared = distanceSquared;
         hitQueue.offer(hit);
+        if (hitQueue.size() == topN) {
+          updateBottomNearestDistance();
+        }
         // System.out.println("      ** keep2, new addition=" + hit);
       }
     }

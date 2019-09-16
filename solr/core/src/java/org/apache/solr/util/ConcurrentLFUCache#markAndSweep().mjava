@@ -1,7 +1,9 @@
   /**
    * Removes items from the cache to bring the size down to the lowerWaterMark.
+   * <p>Visible for unit testing.</p>
+   * @lucene.internal
    */
-  private void markAndSweep() {
+  public void markAndSweep() {
     if (!markAndSweepLock.tryLock()) return;
     try {
       long lowHitCount = this.lowHitCount;
@@ -9,18 +11,47 @@
       this.lowHitCount = lowHitCount; // volatile write to make isCleaning visible
       
       int sz = stats.size.get();
-      if (sz <= upperWaterMark) {
+      boolean evictByIdleTime = maxIdleTimeNs != Long.MAX_VALUE;
+      long idleCutoff = evictByIdleTime ? timeSource.getEpochTimeNs() - maxIdleTimeNs : -1L;
+      if (sz <= upperWaterMark && (evictByIdleTime && oldestEntry.get() > idleCutoff)) {
         /* SOLR-7585: Even though we acquired a lock, multiple threads might detect a need for calling this method.
          * Locking keeps these from executing at the same time, so they run sequentially.  The second and subsequent
          * sequential runs of this method don't need to be done, since there are no elements to remove.
         */
         return;
       }
-      
+
+      // first evict by idleTime - it's less costly to do an additional pass over the
+      // map than to manage the outdated entries in a TreeSet
+      if (evictByIdleTime) {
+        long currentOldestEntry = Long.MAX_VALUE;
+        Iterator<Map.Entry<Object, CacheEntry<K, V>>> iterator = map.entrySet().iterator();
+        while (iterator.hasNext()) {
+          Map.Entry<Object, CacheEntry<K, V>> entry = iterator.next();
+          entry.getValue().lastAccessedCopy = entry.getValue().lastAccessed;
+          if (entry.getValue().lastAccessedCopy < idleCutoff) {
+            iterator.remove();
+            postRemoveEntry(entry.getValue());
+            stats.evictionIdleCounter.incrementAndGet();
+          } else {
+            if (entry.getValue().lastAccessedCopy < currentOldestEntry) {
+              currentOldestEntry = entry.getValue().lastAccessedCopy;
+            }
+          }
+        }
+        if (currentOldestEntry != Long.MAX_VALUE) {
+          oldestEntry.set(currentOldestEntry);
+        }
+        // refresh size and maybe return
+        sz = stats.size.get();
+        if (sz <= upperWaterMark) {
+          return;
+        }
+      }
       int wantToRemove = sz - lowerWaterMark;
-      
+
       TreeSet<CacheEntry<K, V>> tree = new TreeSet<>();
-      
+
       for (CacheEntry<K, V> ce : map.values()) {
         // set hitsCopy to avoid later Atomic reads.  Primitive types are faster than the atomic get().
         ce.hitsCopy = ce.hits.get();
@@ -28,7 +59,6 @@
         if (timeDecay) {
           ce.hits.set(ce.hitsCopy >>> 1);
         }
-        
         if (tree.size() < wantToRemove) {
           tree.add(ce);
         } else {
@@ -54,6 +84,18 @@
       
       for (CacheEntry<K, V> e : tree) {
         evictEntry(e.key);
+      }
+      if (evictByIdleTime) {
+        // do a full pass because we don't what is the max. age of remaining items
+        long currentOldestEntry = Long.MAX_VALUE;
+        for (CacheEntry<K, V> e : map.values()) {
+          if (e.lastAccessedCopy < currentOldestEntry) {
+            currentOldestEntry = e.lastAccessedCopy;
+          }
+        }
+        if (currentOldestEntry != Long.MAX_VALUE) {
+          oldestEntry.set(currentOldestEntry);
+        }
       }
     } finally {
       isCleaning = false; // set before markAndSweep.unlock() for visibility

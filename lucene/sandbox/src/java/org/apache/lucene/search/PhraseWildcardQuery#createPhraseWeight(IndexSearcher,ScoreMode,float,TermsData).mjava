@@ -1,0 +1,62 @@
+  PhraseWeight createPhraseWeight(IndexSearcher searcher, ScoreMode scoreMode,
+                                            float boost, TermsData termsData) throws IOException {
+    return new PhraseWeight(this, field, searcher, scoreMode) {
+
+      @Override
+      protected Similarity.SimScorer getStats(IndexSearcher searcher) throws IOException {
+        if (termsData.termStatsList.isEmpty()) {
+          return null;
+        }
+        return searcher.getSimilarity().scorer(
+            boost,
+            searcher.collectionStatistics(field),
+            termsData.termStatsList.toArray(new TermStatistics[0]));
+      }
+
+      @Override
+      protected PhraseMatcher getPhraseMatcher(LeafReaderContext leafReaderContext, Similarity.SimScorer scorer, boolean exposeOffsets) throws IOException {
+        Terms fieldTerms = leafReaderContext.reader().terms(field);
+        if (fieldTerms == null) {
+          return null;
+        }
+        TermsEnum termsEnum = fieldTerms.iterator();
+        float totalMatchCost = 0;
+
+        PhraseQuery.PostingsAndFreq[] postingsFreqs = new PhraseQuery.PostingsAndFreq[phraseTerms.size()];
+        for (int termPosition = 0; termPosition < postingsFreqs.length; termPosition++) {
+          TermData termData = termsData.getTermData(termPosition);
+          assert termData != null;
+          List<TermBytesTermState> termStates = termData.getTermStatesForSegment(leafReaderContext);
+          if (termStates == null) {
+            // If the current phrase term does not match in the segment, then the phrase cannot match on the segment.
+            // So early stop by returning a null scorer.
+            return null;
+          }
+          assert !termStates.isEmpty();
+
+          List<PostingsEnum> postingsEnums = new ArrayList<>(termStates.size());
+          for (TermBytesTermState termBytesTermState : termStates) {
+            termsEnum.seekExact(termBytesTermState.termBytes, termBytesTermState.termState);
+            postingsEnums.add(termsEnum.postings(null, exposeOffsets ? PostingsEnum.ALL : PostingsEnum.POSITIONS));
+            totalMatchCost += PhraseQuery.termPositionsCost(termsEnum);
+          }
+          PostingsEnum unionPostingsEnum;
+          if (postingsEnums.size() == 1) {
+            unionPostingsEnum = postingsEnums.get(0);
+          } else {
+            unionPostingsEnum = exposeOffsets ? new MultiPhraseQuery.UnionFullPostingsEnum(postingsEnums) : new MultiPhraseQuery.UnionPostingsEnum(postingsEnums);
+          }
+          postingsFreqs[termPosition] = new PhraseQuery.PostingsAndFreq(unionPostingsEnum, new SlowImpactsEnum(unionPostingsEnum), termPosition, termData.terms);
+        }
+
+        if (slop == 0) {
+          // Sort by increasing docFreq order.
+          ArrayUtil.timSort(postingsFreqs);
+          return new ExactPhraseMatcher(postingsFreqs, scoreMode, scorer, totalMatchCost);
+        } else {
+          return new SloppyPhraseMatcher(postingsFreqs, slop, scoreMode, scorer, totalMatchCost, exposeOffsets);
+        }
+      }
+    };
+  }
+

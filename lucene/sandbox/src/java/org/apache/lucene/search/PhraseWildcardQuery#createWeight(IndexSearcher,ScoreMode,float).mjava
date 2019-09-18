@@ -1,0 +1,74 @@
+  @Override
+  public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
+    IndexReader reader = searcher.getIndexReader();
+
+    // Build a list of segments ordered by terms size (number of terms).
+    // The first segments to be searched are the smaller ones, which are by
+    // design containing the most recent documents. Any segment in this list
+    // may also be removed in the PhraseTerm.collectTermData() calls below
+    // if one of the phrase term does not match in the segment. This allows
+    // to early stop expanding multi-terms on removed segments.
+    // Additionally there is a global multi-term expansion limit across all multi-terms
+    // and all segments. So this is important to first start with the smallest
+    // segments to give back non-used expansion credits to the next multi-terms,
+    // as this is more probable with the small segments.
+    List<LeafReaderContext> sizeSortedSegments =
+        new SegmentTermsSizeComparator().createTermsSizeSortedCopyOf(reader.leaves());
+
+    // TermsData will contain the collected TermState and TermStatistics for all the terms
+    // of the phrase. It is filled during PhraseTerm.collectTermData() calls below.
+    TermsData termsData = createTermsData(sizeSortedSegments.size());
+
+    // Iterate the phrase terms, and collect the TermState for single-terms.
+    // - Early stop if a single term does not match.
+    int numMultiTerms = 0;
+    for (PhraseTerm phraseTerm : phraseTerms) {
+      if (phraseTerm.hasExpansions()) {
+        numMultiTerms++;
+      } else {
+        assert TestCounters.get().incSingleTermAnalysisCount();
+        int numMatches = phraseTerm.collectTermData(this, searcher, sizeSortedSegments, termsData);
+        if (numMatches == 0) {
+          // Early stop here because the single term does not match in any segment.
+          // So the whole phrase query cannot match.
+          return earlyStopWeight();
+        }
+      }
+    }
+
+    // Iterate the phrase terms and collect the TermState for multi-terms.
+    // - Early stop if a multi-term does not match.
+    // - Expand the multi-terms only when required.
+    int remainingExpansions = maxMultiTermExpansions;
+    int remainingMultiTerms = numMultiTerms;
+    for (PhraseTerm phraseTerm : phraseTerms) {
+      if (phraseTerm.hasExpansions()) {
+        assert TestCounters.get().incMultiTermAnalysisCount();
+        assert remainingExpansions >= 0 && remainingExpansions <= maxMultiTermExpansions;
+        assert remainingMultiTerms > 0;
+        // Consider the remaining expansions allowed for all remaining multi-terms.
+        // Divide it evenly to get the expansion limit for the current multi-term.
+        int maxExpansionsForTerm = remainingExpansions / remainingMultiTerms;
+        int numExpansions = phraseTerm.collectTermData(this, searcher, sizeSortedSegments, remainingMultiTerms, maxExpansionsForTerm, termsData);
+        assert numExpansions >= 0 && numExpansions <= maxExpansionsForTerm;
+        if (numExpansions == 0) {
+          // Early stop here because the multi-term does not match in any segment.
+          // So the whole phrase query cannot match.
+          return earlyStopWeight();
+        }
+        // Deduct the effectively used expansions. This may give more expansion
+        // credits to the next multi-terms.
+        remainingExpansions -= numExpansions;
+        remainingMultiTerms--;
+      }
+    }
+    assert remainingMultiTerms == 0;
+    assert remainingExpansions >= 0;
+
+//    TestCounters.get().printTestCounters(termsData);
+
+    return termsData.areAllTermsMatching() ?
+        createPhraseWeight(searcher, scoreMode, boost, termsData)
+        : noMatchWeight();
+  }
+

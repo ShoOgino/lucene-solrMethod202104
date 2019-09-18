@@ -1,0 +1,46 @@
+  /**
+   * Collects the {@link TermState} and {@link TermStatistics} for a single-term
+   * without expansion.
+   *
+   * @param termsData receives the collected data.
+   */
+  protected int collectSingleTermData(
+      SingleTerm singleTerm,
+      IndexSearcher searcher,
+      List<LeafReaderContext> segments,
+      TermsData termsData) throws IOException {
+    TermData termData = termsData.getOrCreateTermData(singleTerm.termPosition);
+    Term term = singleTerm.term;
+    termData.terms.add(term);
+    TermStates termStates = TermStates.build(searcher.getIndexReader().getContext(), term, true);
+
+    // Collect TermState per segment.
+    int numMatches = 0;
+    Iterator<LeafReaderContext> segmentIterator = segments.iterator();
+    while (segmentIterator.hasNext()) {
+      LeafReaderContext leafReaderContext = segmentIterator.next();
+      assert TestCounters.get().incSegmentUseCount();
+      boolean termMatchesInSegment = false;
+      Terms terms = leafReaderContext.reader().terms(term.field());
+      if (terms != null) {
+        checkTermsHavePositions(terms);
+        TermState termState = termStates.get(leafReaderContext);
+        if (termState != null) {
+          termMatchesInSegment = true;
+          numMatches++;
+          termData.setTermStatesForSegment(leafReaderContext, Collections.singletonList(new TermBytesTermState(term.bytes(), termState)));
+        }
+      }
+      if (!termMatchesInSegment && shouldOptimizeSegments()) {
+        // Remove this segment from the list because the phrase cannot match on it.
+        segmentIterator.remove();
+        assert TestCounters.get().incSegmentSkipCount();
+      }
+    }
+    // Collect the term stats across all segments.
+    if (termStates.docFreq() > 0) {
+      termsData.termStatsList.add(searcher.termStatistics(term, termStates.docFreq(), termStates.totalTermFreq()));
+    }
+    return numMatches;
+  }
+

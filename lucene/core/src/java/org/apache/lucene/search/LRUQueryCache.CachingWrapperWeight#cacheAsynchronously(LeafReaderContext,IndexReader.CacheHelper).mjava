@@ -1,0 +1,34 @@
+    // Perform a cache load asynchronously
+    // @return true if synchronous caching is needed, false otherwise
+    private boolean cacheAsynchronously(LeafReaderContext context, IndexReader.CacheHelper cacheHelper) {
+      /*
+       * If the current query is already being asynchronously cached,
+       * do not trigger another cache operation
+       */
+      if (inFlightAsyncLoadQueries.add(in.getQuery()) == false) {
+        return false;
+      }
+
+      FutureTask<Void> task = new FutureTask<>(() -> {
+        DocIdSet localDocIdSet = cache(context);
+        putIfAbsent(in.getQuery(), localDocIdSet, cacheHelper);
+
+        // Remove the key from inflight -- the key is loaded now
+        Object retValue = inFlightAsyncLoadQueries.remove(in.getQuery());
+
+        // The query should have been present in the inflight queries set before
+        // we actually loaded it -- hence the removal of the key should be successful
+        assert retValue != null;
+
+        return null;
+      });
+      try {
+        executor.execute(task);
+      } catch (RejectedExecutionException e) {
+        // Trigger synchronous caching
+        return true;
+      }
+
+      return false;
+    }
+

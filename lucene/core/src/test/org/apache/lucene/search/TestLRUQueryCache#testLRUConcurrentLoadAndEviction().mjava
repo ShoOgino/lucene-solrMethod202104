@@ -1,4 +1,4 @@
-  public void testLRUEviction() throws Exception {
+  public void testLRUConcurrentLoadAndEviction() throws Exception {
     Directory dir = newDirectory();
     final RandomIndexWriter w = new RandomIndexWriter(random(), dir);
 
@@ -11,8 +11,11 @@
     f.setStringValue("green");
     w.addDocument(doc);
     final DirectoryReader reader = w.getReader();
+    ExecutorService service = new ThreadPoolExecutor(4, 4, 0L, TimeUnit.MILLISECONDS,
+        new LinkedBlockingQueue<Runnable>(),
+        new NamedThreadFactory("TestLRUQueryCache"));
 
-    IndexSearcher searcher = newSearcher(reader);
+    IndexSearcher searcher = new IndexSearcher(reader, service);
 
     final LRUQueryCache queryCache = new LRUQueryCache(2, 100000, context -> true);
 
@@ -29,18 +32,22 @@
     assertEquals(Collections.emptyList(), queryCache.cachedQueries());
 
     searcher.setQueryCachingPolicy(ALWAYS_CACHE);
+    // First read should miss
     searcher.search(new ConstantScoreQuery(red), 1);
 
     if (!(queryCache.cachedQueries().equals(Collections.emptyList()))) {
-      assertEquals(Arrays.asList(red), queryCache.cachedQueries());
+      searcher.search(new ConstantScoreQuery(red), 1);
     } else {
       // Let the cache load be completed
       Thread.sleep(200);
-      assertEquals(Arrays.asList(red), queryCache.cachedQueries());
+      searcher.search(new ConstantScoreQuery(red), 1);
     }
 
-    searcher.search(new ConstantScoreQuery(green), 1);
+    // Second read should hit
+    searcher.search(new ConstantScoreQuery(red), 1);
+    assertEquals(Collections.singletonList(red), queryCache.cachedQueries());
 
+    searcher.search(new ConstantScoreQuery(green), 1);
     if (!(queryCache.cachedQueries().equals(Arrays.asList(red)))) {
       assertEquals(Arrays.asList(red, green), queryCache.cachedQueries());
     } else {
@@ -53,7 +60,6 @@
     assertEquals(Arrays.asList(green, red), queryCache.cachedQueries());
 
     searcher.search(new ConstantScoreQuery(blue), 1);
-
     if (!(queryCache.cachedQueries().equals(Arrays.asList(green, red)))) {
       assertEquals(Arrays.asList(red, blue), queryCache.cachedQueries());
     } else {
@@ -66,7 +72,6 @@
     assertEquals(Arrays.asList(red, blue), queryCache.cachedQueries());
 
     searcher.search(new ConstantScoreQuery(green), 1);
-
     if (!(queryCache.cachedQueries().equals(Arrays.asList(red, blue)))) {
       assertEquals(Arrays.asList(blue, green), queryCache.cachedQueries());
     } else {
@@ -82,5 +87,6 @@
     reader.close();
     w.close();
     dir.close();
+    service.shutdown();
   }
 

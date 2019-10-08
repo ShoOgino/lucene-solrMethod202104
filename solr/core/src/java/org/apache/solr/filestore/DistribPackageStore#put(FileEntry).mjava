@@ -1,0 +1,65 @@
+  @Override
+  public void put(FileEntry entry) throws IOException {
+    FileInfo info = new FileInfo(entry.path);
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    Utils.writeJson(entry.getMetaData(), baos, true);
+    byte[] bytes = baos.toByteArray();
+    info.persistToFile(entry.buf, ByteBuffer.wrap(bytes, 0, bytes.length));
+    tmpFiles.put(entry.getPath(), info);
+    List<String> nodes = shuffledNodes();
+    int i = 0;
+    int FETCHFROM_SRC = 50;
+    String myNodeName = myNode();
+    try {
+      for (String node : nodes) {
+        String baseUrl = coreContainer.getZkController().getZkStateReader().getBaseUrlForNodeName(node);
+        String url = baseUrl.replace("/solr", "/api") + "/node/files" + entry.getPath() + "?getFrom=";
+        if (i < FETCHFROM_SRC) {
+          // this is to protect very large clusters from overwhelming a single node
+          // the first FETCHFROM_SRC nodes will be asked to fetch from this node.
+          // it's there in  the memory now. So , it must be served fast
+          url += myNodeName;
+        } else {
+          if (i == FETCHFROM_SRC) {
+            // This is just an optimization
+            // at this point a bunch of nodes are already downloading from me
+            // I'll wait for them to finish before asking other nodes to download from each other
+            try {
+              Thread.sleep(2 * 1000);
+            } catch (Exception e) {
+            }
+          }
+          // trying to avoid the thundering herd problem when there are a very large no:of nodes
+          // others should try to fetch it from any node where it is available. By now,
+          // almost FETCHFROM_SRC other nodes may have it
+          url += "*";
+        }
+        try {
+          //fire and forget
+          Utils.executeGET(coreContainer.getUpdateShardHandler().getDefaultHttpClient(), url, null);
+        } catch (Exception e) {
+          log.info("Node: " + node +
+              " failed to respond for blob notification", e);
+          //ignore the exception
+          // some nodes may be down or not responding
+        }
+        i++;
+      }
+    } finally {
+      new Thread(() -> {
+        try {
+          // keep the jar in memory for 10 secs , so that
+          //every node can download it from memory without the file system
+          Thread.sleep(10 * 1000);
+        } catch (Exception e) {
+          //don't care
+        } finally {
+          tmpFiles.remove(entry.getPath());
+        }
+      }).start();
+
+
+    }
+
+  }
+

@@ -1,0 +1,52 @@
+  @Test
+  public void testDateMathInStart() throws Exception {
+    ClusterStateProvider clusterStateProvider = solrClient.getClusterStateProvider();
+    Class<? extends ClusterStateProvider> aClass = clusterStateProvider.getClass();
+    System.out.println("CSPROVIDER:" + aClass);
+
+    // This test prevents recurrence of SOLR-13760
+
+    String configName = getSaferTestName();
+    createConfigSet(configName);
+    CountDownLatch aliasUpdate = new CountDownLatch(1);
+    monitorAlias(aliasUpdate);
+
+    // each collection has 4 shards with 3 replicas for 12 possible destinations
+    // 4 of which are leaders, and 8 of which should fail this test.
+    final int numShards = 1 + random().nextInt(4);
+    final int numReplicas = 1 + random().nextInt(3);
+    CollectionAdminRequest.createTimeRoutedAlias(alias, "2019-09-14T03:00:00Z/DAY", "+1DAY", getTimeField(),
+        CollectionAdminRequest.createCollection("_unused_", configName, numShards, numReplicas)
+            .setMaxShardsPerNode(numReplicas))
+        .process(solrClient);
+
+    aliasUpdate.await();
+    if (BaseHttpClusterStateProvider.class.isAssignableFrom(aClass)) {
+      ((BaseHttpClusterStateProvider)clusterStateProvider).resolveAlias(getAlias(), true);
+    }
+    aliasUpdate = new CountDownLatch(1);
+    monitorAlias(aliasUpdate);
+
+    ModifiableSolrParams params = params();
+    String nowDay = DateTimeFormatter.ISO_INSTANT.format(DateMathParser.parseMath(new Date(), "2019-09-14T01:00:00Z").toInstant());
+    assertUpdateResponse(add(alias, Arrays.asList(
+        sdoc("id", "1", "timestamp_dt", nowDay)), // should not cause preemptive creation of 10-28 now
+        params));
+
+    // this process should have lead to the modification of the start time for the alias, converting it into
+    // a parsable date, removing the DateMath
+
+    // what we test next happens in a separate thread, so we have to give it some time to happen
+    aliasUpdate.await();
+    if (BaseHttpClusterStateProvider.class.isAssignableFrom(aClass)) {
+      ((BaseHttpClusterStateProvider)clusterStateProvider).resolveAlias(getAlias(), true);
+    }
+
+    String hopeFullyModified = clusterStateProvider.getAliasProperties(getAlias()).get(ROUTER_START);
+    try {
+      Instant.parse(hopeFullyModified);
+    } catch (DateTimeParseException e) {
+      fail(ROUTER_START + " should not have any date math by this point and parse as an instant. Using "+ aClass +" Found:" + hopeFullyModified);
+    }
+  }
+

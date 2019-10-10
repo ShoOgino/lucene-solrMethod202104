@@ -1,0 +1,59 @@
+  @Test
+  public void testTaskTimeout() throws Exception  {
+    int DELAY = 2000;
+    boolean taskTimeoutFail = random().nextBoolean();
+    TestInjection.delayInExecutePlanAction = DELAY;
+    CloudSolrClient solrClient = cluster.getSolrClient();
+    String triggerName = "node_lost_trigger2";
+
+    String setTriggerCommand = "{" +
+        "'set-trigger' : {" +
+        "'name' : '" + triggerName + "'," +
+        "'event' : 'nodeLost'," +
+        "'waitFor' : '1s'," +
+        "'enabled' : true," +
+        "'actions' : [{'name':'compute_plan', 'class' : 'solr.ComputePlanAction'}," +
+        "{'name':'execute_plan','class':'solr.ExecutePlanAction', 'taskTimeoutSeconds' : '1','taskTimeoutFail':'" + taskTimeoutFail + "'}," +
+        "{'name':'finish','class':'" + FinishAction.class.getName() + "'}]" +
+        "}}";
+    SolrRequest req = AutoScalingRequest.create(SolrRequest.METHOD.POST, setTriggerCommand);
+    NamedList<Object> response = solrClient.request(req);
+    assertEquals(response.get("result").toString(), "success");
+
+    String collectionName = "testTaskTimeout";
+    CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(collectionName,
+        "conf", 1, 2);
+    create.setMaxShardsPerNode(1);
+    create.process(solrClient);
+
+    cluster.waitForActiveCollection(collectionName, 1, 2);
+
+    waitForState("Timed out waiting for replicas of new collection to be active",
+        collectionName, clusterShape(1, 2));
+
+    JettySolrRunner sourceNode = cluster.getRandomJetty(random());
+
+    for (int i = 0; i < cluster.getJettySolrRunners().size(); i++) {
+      JettySolrRunner runner = cluster.getJettySolrRunner(i);
+      if (runner == sourceNode) {
+        JettySolrRunner j = cluster.stopJettySolrRunner(i);
+        cluster.waitForJettyToStop(j);
+      }
+    }
+
+    boolean await = finishedProcessing.await(DELAY * 5, TimeUnit.MILLISECONDS);
+    if (taskTimeoutFail) {
+      assertFalse("finished processing event but should fail", await);
+    } else {
+      assertTrue("did not finish processing event in time", await);
+    }
+    String path = ZkStateReader.SOLR_AUTOSCALING_TRIGGER_STATE_PATH + "/" + triggerName + "/execute_plan";
+    assertTrue(path + " does not exist", zkClient().exists(path, true));
+    List<String> requests = zkClient().getChildren(path, null, true);
+    assertFalse("some requests should be still present", requests.isEmpty());
+
+    // in either case the task will complete and move the replica as needed
+    waitForState("Timed out waiting for replicas of collection to be 2 again",
+        collectionName, clusterShape(1, 2));
+  }
+

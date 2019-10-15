@@ -1,9 +1,11 @@
-  protected String getRemoteCoreUrl(String collectionName, String origCorename) {
+  protected String getRemoteCoreUrl(String collectionName, String origCorename) throws SolrException {
     ClusterState clusterState = cores.getZkController().getClusterState();
     final DocCollection docCollection = clusterState.getCollectionOrNull(collectionName);
     Slice[] slices = (docCollection != null) ? docCollection.getActiveSlicesArr() : null;
     List<Slice> activeSlices = new ArrayList<>();
     boolean byCoreName = false;
+
+    int totalReplicas = 0;
 
     if (slices == null) {
       byCoreName = true;
@@ -18,6 +20,9 @@
       }
     }
 
+    for (Slice s: activeSlices) {
+      totalReplicas += s.getReplicas().size();
+    }
     if (activeSlices.isEmpty()) {
       return null;
     }
@@ -31,7 +36,13 @@
     String coreUrl = getCoreUrl(collectionName, origCorename, clusterState,
         activeSlices, byCoreName, true);
 
+    // Avoid getting into a recursive loop of requests being forwarded by
+    // stopping forwarding and erroring out after (totalReplicas) forwards
     if (coreUrl == null) {
+      if (queryParams.getInt(INTERNAL_REQUEST_COUNT, 0) > totalReplicas){
+        throw new SolrException(SolrException.ErrorCode.INVALID_STATE,
+            "No active replicas found for collection: " + collectionName);
+      }
       coreUrl = getCoreUrl(collectionName, origCorename, clusterState,
           activeSlices, byCoreName, false);
     }

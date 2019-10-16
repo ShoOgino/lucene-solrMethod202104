@@ -1,0 +1,40 @@
+  /**
+   * Starts the cluster with a security.json built from template, using CallbackAuditLoggerPlugin. The params
+   * to this method will fill the template.
+   * @param async enable async audit logging
+   * @param semaphoreName name of semaphore for controlling how to delay logging
+   * @param enableAuth should authentication be enabled in this cluster?
+   * @param muteRulesJson mute rules to trim down what events we care about in our tests
+   * @throws Exception if anything goes wrong
+   */
+  private void setupCluster(boolean async, String semaphoreName, boolean enableAuth, String... muteRulesJson) throws Exception {
+    String securityJson = FileUtils.readFileToString(TEST_PATH().resolve("security").resolve("auditlog_plugin_security.json").toFile(), StandardCharsets.UTF_8);
+    securityJson = securityJson.replace("_PORT_", Integer.toString(testHarness.get().callbackPort));
+    securityJson = securityJson.replace("_ASYNC_", Boolean.toString(async));
+    securityJson = securityJson.replace("_SEMAPHORE_",
+                                        null == semaphoreName ? "null" : "\""+semaphoreName+"\"");
+    securityJson = securityJson.replace("_AUTH_", enableAuth ? AUTH_SECTION : "");
+
+    // start with any test specific mute rules...
+    final List<String> muteRules = new ArrayList<>(Arrays.asList(muteRulesJson));
+
+    // for test purposes, ignore any intranode /metrics requests...
+    muteRules.add("\"path:/admin/metrics\"");
+
+    // With auth enabled we're also getting /admin/info/key requests
+    // So for test purposes, we're automatically MUTEing those when auth is enabled...
+    if (enableAuth) {
+      muteRules.add("\"path:/admin/info/key\"");
+    }
+
+    securityJson = securityJson.replace("_MUTERULES_", "[" + StringUtils.join(muteRules, ",") + "]");
+
+    MiniSolrCloudCluster myCluster = new Builder(NUM_SERVERS, createTempDir())
+        .withSecurityJson(securityJson)
+        .addConfig("conf1", TEST_PATH().resolve("configsets").resolve("cloud-minimal").resolve("conf"))
+        .build();
+    
+    myCluster.waitForAllNodes(10);
+    testHarness.get().setCluster(myCluster);
+  }
+

@@ -1,11 +1,44 @@
   @Test
   public void testAsyncQueueDrain() throws Exception {
-    setupCluster(true, 150, false, null);
-    runAdminCommands();
-    assertTrue("Expecting <3 callbacks in buffer, was " + testHarness.get().receiver.getBuffer().size(),
-        testHarness.get().receiver.getBuffer().size() < 3); // Events still on queue
-    // We shutdown cluster while events are still in queue
-    testHarness.get().shutdownCluster();
-    assertThreeAdminEvents();
+    final AuditTestHarness harness = testHarness.get();
+    final Semaphore gate = new Semaphore(0);
+    CallbackAuditLoggerPlugin.BLOCKING_SEMAPHORES.put("testAsyncQueueDrain_semaphore", gate);
+    setupCluster(true, "testAsyncQueueDrain_semaphore", false);
+
+    final int preShutdownEventsAllowed = TestUtil.nextInt(random(), 0, 2);
+    final int postShutdownEventsAllowed = 3 - preShutdownEventsAllowed;
+
+    // Starting by only allowing 2/3 of the (expected) events to be logged right away...
+    log.info("Test will allow {} events to happen prior to shutdown", preShutdownEventsAllowed);
+    gate.release(preShutdownEventsAllowed);
+    runThreeTestAdminCommands();
+
+    final List<AuditEvent> events = new ArrayList
+      (harness.receiver.waitForAuditEvents(preShutdownEventsAllowed));
+    assertEquals(preShutdownEventsAllowed, events.size());
+
+    // Now shutdown cluster while 1 event still in process
+    // Do this in a background thread because it blocks...
+    final Thread shutdownThread = new DefaultSolrThreadFactory("shutdown")
+      .newThread(() -> { try {
+            log.info("START Shutting down Cluster.");
+            harness.shutdownCluster();
+            log.info("END   Shutting down Cluster.");
+          } catch (Exception e) {
+            throw new RuntimeException(e);
+          }
+        });
+    try {
+      shutdownThread.start();
+      // release the ticket so the event can be processed
+      log.info("releasing final {} semaphore tickets...", postShutdownEventsAllowed);
+      gate.release(postShutdownEventsAllowed);
+
+      events.addAll(harness.receiver.waitForAuditEvents(postShutdownEventsAllowed));
+
+      assertThreeTestAdminEvents(events);
+    } finally {
+      shutdownThread.join();
+    }
   }
 

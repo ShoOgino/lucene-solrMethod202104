@@ -1,0 +1,43 @@
+  @Test
+  public void authFailures() throws Exception {
+    setupCluster(false, null, true);
+    final CloudSolrClient client = testHarness.get().cluster.getSolrClient();
+    final CallbackReceiver receiver = testHarness.get().receiver;
+
+    { // invalid request: Authenticated user not allowed to CREATE w/o Authorization
+      final SolrException e = expectThrows(SolrException.class, () -> {
+          final Create createRequest = CollectionAdminRequest.createCollection("test_jimbo", 1, 1);
+          createRequest.setBasicAuthCredentials("jimbo", JIMBO_PASS);
+          client.request(createRequest);
+        });
+      assertEquals(403, e.code());
+
+      final List<AuditEvent> events = receiver.waitForAuditEvents(1);
+      assertAuditEvent(events.get(0), UNAUTHORIZED, "/admin/collections", ADMIN, "jimbo", 403, "name", "test_jimbo");
+    }
+
+    { // invalid request: Anon user not allowed to CREATE w/o authentication + authorization
+      final SolrException e = expectThrows(SolrException.class, () -> {
+          Create createRequest = CollectionAdminRequest.createCollection("test_anon", 1, 1);
+          client.request(createRequest);
+        });
+      assertEquals(401, e.code());
+
+      final List<AuditEvent> events = receiver.waitForAuditEvents(1);
+      assertAuditEvent(events.get(0), REJECTED,     "/admin/collections", ADMIN, null, 401, "name", "test_anon");
+    }
+
+    { // invalid request: Admin user not Authenticated due to incorrect password
+      final SolrException e = expectThrows(SolrException.class, () -> {
+          Create createRequest = CollectionAdminRequest.createCollection("test_wrongpass", 1, 1);
+          createRequest.setBasicAuthCredentials("solr", "wrong_" + SOLR_PASS);
+          client.request(createRequest);
+        });
+      assertEquals(401, e.code());
+
+      final List<AuditEvent> events = receiver.waitForAuditEvents(1);
+      // Event generated from HttpServletRequest. Has no user since auth failed
+      assertAuditEvent(events.get(0), REJECTED, "/admin/collections", RequestType.ADMIN, null, 401);
+    }
+  }
+

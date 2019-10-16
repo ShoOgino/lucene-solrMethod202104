@@ -1,4 +1,4 @@
-  @AwaitsFix(bugUrl="https://issues.apache.org/jira/browse/SOLR-13376")
+  //@AwaitsFix(bugUrl="https://issues.apache.org/jira/browse/SOLR-13376")
   @Test
   public void testNodeMarkersRegistration() throws Exception {
     triggerFiredLatch = new CountDownLatch(1);
@@ -52,10 +52,16 @@
     String pathLost = ZkStateReader.SOLR_AUTOSCALING_NODE_LOST_PATH + "/" + overseerLeader;
     
     TimeOut timeout = new TimeOut(30, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+    AtomicBoolean markerInactive = new AtomicBoolean();
     try {
-      timeout.waitFor("zk path to go away", () -> {
+      timeout.waitFor("nodeLost marker to get inactive", () -> {
         try {
-          return !zkClient().exists(pathLost, true);
+          if (!zkClient().exists(pathLost, true)) {
+            throw new RuntimeException("marker " + pathLost + " should exist!");
+          }
+          Map<String, Object> markerData = Utils.getJson(zkClient(), pathLost, true);
+          markerInactive.set(markerData.getOrDefault(MARKER_STATE, MARKER_ACTIVE).equals(MARKER_INACTIVE));
+          return markerInactive.get();
         } catch (KeeperException e) {
           throw new RuntimeException(e);
         } catch (InterruptedException e) {
@@ -66,8 +72,8 @@
       // okay
     }
 
-    // verify that a znode does NOT exist - the new overseer cleaned up existing nodeLost markers
-    assertFalse("Path " + pathLost + " exists", zkClient().exists(pathLost, true));
+    // verify that the marker is inactive - the new overseer should deactivate markers once they are processed
+    assertTrue("Marker " + pathLost + " still active!", markerInactive.get());
 
     listener.reset();
 

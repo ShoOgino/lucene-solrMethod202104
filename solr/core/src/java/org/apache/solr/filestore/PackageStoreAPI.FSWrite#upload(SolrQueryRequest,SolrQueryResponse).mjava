@@ -1,0 +1,43 @@
+    @Command
+    public void upload(SolrQueryRequest req, SolrQueryResponse rsp) {
+      try {
+        coreContainer.getZkController().getZkClient().create(TMP_ZK_NODE, "true".getBytes(UTF_8),
+            CreateMode.EPHEMERAL, true);
+
+        Iterable<ContentStream> streams = req.getContentStreams();
+        if (streams == null) throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "no payload");
+        String path = req.getPathTemplateValues().get("*");
+        if (path == null) {
+          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "No path");
+        }
+        validateName(path);
+        ContentStream stream = streams.iterator().next();
+        try {
+          ByteBuffer buf = SimplePostTool.inputStreamToByteArray(stream.getStream());
+          String sha512 = DigestUtils.sha512Hex(new ByteBufferInputStream(buf));
+          List<String> signatures = readSignatures(req, buf);
+          Map<String, Object> vals = new HashMap<>();
+          vals.put(MetaData.SHA512, sha512);
+          if (signatures != null) {
+            vals.put("sig", signatures);
+          }
+          packageStore.put(new PackageStore.FileEntry(buf, new MetaData(vals), path));
+          rsp.add(CommonParams.FILE, path);
+        } catch (IOException e) {
+          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e);
+        }
+      } catch (InterruptedException e) {
+        log.error("Unexpected error", e);
+      } catch (KeeperException.NodeExistsException e) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "A write is already in process , try later");
+      } catch (KeeperException e) {
+        log.error("Unexpected error", e);
+      } finally {
+        try {
+          coreContainer.getZkController().getZkClient().delete(TMP_ZK_NODE, -1, true);
+        } catch (Exception e) {
+          log.error("Unexpected error  ", e);
+        }
+      }
+    }
+

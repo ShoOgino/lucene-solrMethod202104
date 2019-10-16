@@ -8,11 +8,11 @@
       return;
     }
     try {
+      int counter = 0;
       for (SolrRequest operation : operations) {
         log.debug("Executing operation: {}", operation.getParams());
         try {
           SolrResponse response = null;
-          int counter = 0;
           if (operation instanceof CollectionAdminRequest.AsyncCollectionAdminRequest) {
             CollectionAdminRequest.AsyncCollectionAdminRequest req = (CollectionAdminRequest.AsyncCollectionAdminRequest) operation;
             // waitForFinalState so that the end effects of operations are visible
@@ -22,16 +22,34 @@
             log.trace("Saved requestId: {} in znode: {}", asyncId, znode);
             // TODO: find a better way of using async calls using dataProvider API !!!
             req.setAsyncId(asyncId);
-            SolrResponse asyncResponse = cloudManager.request(req);
-            if (asyncResponse.getResponse().get("error") != null) {
-              throw new IOException("" + asyncResponse.getResponse().get("error"));
+            if (TestInjection.delayInExecutePlanAction != null) {
+              cloudManager.getTimeSource().sleep(TestInjection.delayInExecutePlanAction);
             }
-            asyncId = (String)asyncResponse.getResponse().get("requestid");
-            CollectionAdminRequest.RequestStatusResponse statusResponse = waitForTaskToFinish(cloudManager, asyncId,
-                DEFAULT_TASK_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            CollectionAdminRequest.RequestStatusResponse statusResponse = null;
+            RequestStatusState state = RequestStatusState.FAILED;
+            if (!TestInjection.failInExecutePlanAction) {
+              SolrResponse asyncResponse = cloudManager.request(req);
+              if (asyncResponse.getResponse().get("error") != null) {
+                throw new IOException("" + asyncResponse.getResponse().get("error"));
+              }
+              asyncId = (String)asyncResponse.getResponse().get("requestid");
+              statusResponse = waitForTaskToFinish(cloudManager, asyncId,
+                  taskTimeoutSeconds, TimeUnit.SECONDS);
+            }
             if (statusResponse != null) {
-              RequestStatusState state = statusResponse.getRequestStatus();
+              state = statusResponse.getRequestStatus();
+              // overwrite to test a long-running task
+              if (TestInjection.delayInExecutePlanAction != null &&
+                  TestInjection.delayInExecutePlanAction > TimeUnit.MILLISECONDS.convert(taskTimeoutSeconds, TimeUnit.SECONDS)) {
+                state = RequestStatusState.RUNNING;
+              }
+              if (TestInjection.failInExecutePlanAction) {
+                state = RequestStatusState.FAILED;
+              }
+              // should we accept partial success here? i.e. some operations won't be completed
+              // successfully but the event processing will still be declared a success
               if (state == RequestStatusState.COMPLETED || state == RequestStatusState.FAILED || state == RequestStatusState.NOT_FOUND) {
+                // remove pending task marker for this request
                 try {
                   cloudManager.getDistribStateManager().removeData(znode, -1);
                 } catch (Exception e) {
@@ -40,7 +58,26 @@
               }
               response = statusResponse;
             }
+            if (state == RequestStatusState.RUNNING || state == RequestStatusState.SUBMITTED) {
+              String msg = String.format(Locale.ROOT, "Task %s is still running after " + taskTimeoutSeconds + " seconds. Consider increasing " +
+                      TASK_TIMEOUT_SECONDS + " action property or `waitFor` of the trigger %s. Operation: %s",
+                  asyncId, event.source, req);
+              if (taskTimeoutFail) {
+                throw new IOException(msg);
+              } else {
+                log.warn(msg);
+              }
+            } else if (state == RequestStatusState.FAILED) {
+              // remove it as a pending task
+              try {
+                cloudManager.getDistribStateManager().removeData(znode, -1);
+              } catch (Exception e) {
+                log.warn("Unexpected exception while trying to delete znode: " + znode, e);
+              }
+              throw new IOException("Task " + asyncId + " failed: " + (statusResponse != null ? statusResponse : " timed out. Operation: " + req));
+            }
           } else {
+            // generic response - can't easily determine success or failure
             response = cloudManager.request(operation);
           }
           NamedList<Object> result = response.getResponse();
@@ -50,6 +87,7 @@
             responses.add(result);
             return responses;
           });
+          counter++;
         } catch (IOException e) {
           throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
               "Unexpected exception executing operation: " + operation.getParams(), e);

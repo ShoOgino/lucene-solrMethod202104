@@ -1,0 +1,109 @@
+  @Test
+  public void testSetLimits() throws Exception {
+    AtomicReference<CountDownLatch> removed = new AtomicReference<>(new CountDownLatch(2));
+    List<RemovalCause> removalCauses = new ArrayList<>();
+    List<String> removedKeys = new ArrayList<>();
+    Set<String> allKeys = new HashSet<>();
+    CaffeineCache<String, Accountable> cache = new CaffeineCache<>() {
+      @Override
+      public Accountable put(String key, Accountable val) {
+        allKeys.add(key);
+        return super.put(key, val);
+      }
+
+      @Override
+      public void onRemoval(String key, Accountable value, RemovalCause cause) {
+        super.onRemoval(key, value, cause);
+        removalCauses.add(cause);
+        removedKeys.add(key);
+        removed.get().countDown();
+      }
+    };
+    Map<String, String> params = new HashMap<>();
+    params.put("size", "5");
+    cache.init(params, null, new NoOpRegenerator());
+
+    for (int i = 0; i < 5; i++) {
+      cache.put("foo-" + i, new Accountable() {
+        @Override
+        public long ramBytesUsed() {
+          return 1024 * 1024;
+        }
+      });
+    }
+    assertEquals(5, cache.size());
+    // no evictions yet
+    assertEquals(2, removed.get().getCount());
+
+    cache.put("abc1", new Accountable() {
+      @Override
+      public long ramBytesUsed() {
+        return 1;
+      }
+    });
+    cache.put("abc2", new Accountable() {
+      @Override
+      public long ramBytesUsed() {
+        return 2;
+      }
+    });
+    boolean await = removed.get().await(30, TimeUnit.SECONDS);
+    assertTrue("did not evict entries in in time", await);
+    assertEquals(5, cache.size());
+    assertEquals(2, cache.get("abc2").ramBytesUsed());
+    for (String key : removedKeys) {
+      assertNull("key " + key + " still present!", cache.get(key));
+      allKeys.remove(key);
+    }
+    for (RemovalCause cause : removalCauses) {
+      assertEquals(RemovalCause.SIZE, cause);
+    }
+
+    removed.set(new CountDownLatch(2));
+    removalCauses.clear();
+    removedKeys.clear();
+    // trim down by item count
+    cache.setMaxSize(3);
+    cache.put("abc3",  new Accountable() {
+      @Override
+      public long ramBytesUsed() {
+        return 3;
+      }
+    });
+    await = removed.get().await(30, TimeUnit.SECONDS);
+    assertTrue("did not evict entries in in time", await);
+    assertEquals(3, cache.size());
+    for (String key : removedKeys) {
+      assertNull("key " + key + " still present!", cache.get(key));
+      allKeys.remove(key);
+    }
+    for (RemovalCause cause : removalCauses) {
+      assertEquals(RemovalCause.SIZE, cause);
+    }
+
+    // at least one item has to go
+    removed.set(new CountDownLatch(1));
+    removalCauses.clear();
+    removedKeys.clear();
+    // trim down by ram size
+    cache.setMaxRamMB(1);
+    await = removed.get().await(30, TimeUnit.SECONDS);
+    assertTrue("did not evict entries in in time", await);
+    for (String key : removedKeys) {
+      assertNull("key " + key + " still present!", cache.get(key));
+      allKeys.remove(key);
+    }
+    for (RemovalCause cause : removalCauses) {
+      assertEquals(RemovalCause.SIZE, cause);
+    }
+    // check total size of remaining items
+    long total = 0;
+    for (String key : allKeys) {
+      Accountable a = cache.get(key);
+      assertNotNull("missing value for key " + key, a);
+      total += a.ramBytesUsed();
+    }
+    assertTrue("total ram bytes should be greater than 0", total > 0);
+    assertTrue("total ram bytes exceeded limit", total < 1024 * 1024);
+  }
+

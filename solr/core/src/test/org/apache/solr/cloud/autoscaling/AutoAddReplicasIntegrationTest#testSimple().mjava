@@ -1,96 +1,46 @@
+  /**
+   * Test that basic autoAddReplicaLogic kicks in when a node is lost 
+   */
   @Test
   public void testSimple() throws Exception {
-    JettySolrRunner jetty1 = cluster.getJettySolrRunner(0);
-    JettySolrRunner jetty2 = cluster.getJettySolrRunner(1);
-    JettySolrRunner jetty3 = cluster.getJettySolrRunner(2);
-    CollectionAdminRequest.createCollection(COLLECTION1, "conf", 2, 2)
-        .setCreateNodeSet(jetty1.getNodeName()+","+jetty2.getNodeName())
-        .setAutoAddReplicas(true)
-        .setMaxShardsPerNode(2)
-        .process(cluster.getSolrClient());
+    final String COLLECTION = "test_simple";
+    final ZkStateReader zkStateReader = cluster.getSolrClient().getZkStateReader();
+    final JettySolrRunner jetty1 = cluster.getJettySolrRunner(1);
+    final JettySolrRunner jetty2 = cluster.getJettySolrRunner(2);
+    log.info("Creating {} using jetty1:{}/{} and jetty2:{}/{}", COLLECTION,
+             jetty1.getNodeName(), jetty1.getLocalPort(),
+             jetty2.getNodeName(), jetty2.getLocalPort());
+             
+    CollectionAdminRequest.createCollection(COLLECTION, "conf", 2, 2)
+      .setCreateNodeSet(jetty1.getNodeName()+","+jetty2.getNodeName())
+      .setAutoAddReplicas(true)
+      .setMaxShardsPerNode(2)
+      .process(cluster.getSolrClient());
     
-    cluster.waitForActiveCollection(COLLECTION1, 2, 4);
+    cluster.waitForActiveCollection(COLLECTION, 2, 4);
     
-    CollectionAdminRequest.createCollection(COLLECTION2, "conf", 2, 2)
-        .setCreateNodeSet(jetty2.getNodeName()+","+jetty3.getNodeName())
-        .setAutoAddReplicas(false)
-        .setMaxShardsPerNode(2)
-        .process(cluster.getSolrClient());
-    
-    cluster.waitForActiveCollection(COLLECTION2, 2, 4);
-    
-    // the number of cores in jetty1 (5) will be larger than jetty3 (1)
-    CollectionAdminRequest.createCollection("testSimple3", "conf", 3, 1)
-        .setCreateNodeSet(jetty1.getNodeName())
-        .setAutoAddReplicas(false)
-        .setMaxShardsPerNode(3)
-        .process(cluster.getSolrClient());
-
-    cluster.waitForActiveCollection("testSimple3", 3, 3);
-    
-    ZkStateReader zkStateReader = cluster.getSolrClient().getZkStateReader();
-
     // start the tests
-    JettySolrRunner lostJetty = random().nextBoolean() ? cluster.getJettySolrRunner(0) : cluster.getJettySolrRunner(1);
+    JettySolrRunner lostJetty = random().nextBoolean() ? jetty1 : jetty2;
     String lostNodeName = lostJetty.getNodeName();
-    List<Replica> replacedHdfsReplicas = getReplacedSharedFsReplicas(COLLECTION1, zkStateReader, lostNodeName);
+    List<Replica> replacedHdfsReplicas = getReplacedSharedFsReplicas(COLLECTION, zkStateReader, lostNodeName);
+    log.info("Stopping random node: {} / {}", lostNodeName, lostJetty.getLocalPort());
     lostJetty.stop();
     
     cluster.waitForJettyToStop(lostJetty);
-    
     waitForNodeLeave(lostNodeName);
     
-    // ensure that 2 shards have 2 active replicas and only 4 replicas in total
-    // i.e. old replicas have been deleted.
-    // todo remove the condition for total replicas == 4 after SOLR-11591 is fixed
-    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, (liveNodes, collectionState) -> clusterShape(2, 4).matches(liveNodes, collectionState)
-        && collectionState.getReplicas().size() == 4, 90, TimeUnit.SECONDS);
-    checkSharedFsReplicasMovedCorrectly(replacedHdfsReplicas, zkStateReader, COLLECTION1);
+    waitForState(COLLECTION + "=(2,4) w/o down replicas",
+                 COLLECTION, clusterShapeNoDownReplicas(2,4), 90, TimeUnit.SECONDS);
+                 
+    checkSharedFsReplicasMovedCorrectly(replacedHdfsReplicas, zkStateReader, COLLECTION);
+    
+    log.info("Re-starting (same) random node: {} / {}", lostNodeName, lostJetty.getLocalPort());
     lostJetty.start();
     
-    cluster.waitForAllNodes(30);
+    waitForNodeLive(lostJetty);
     
-    assertTrue("Timeout waiting for all live and active", ClusterStateUtil.waitForAllActiveAndLiveReplicas(cluster.getSolrClient().getZkStateReader(), 90000));
+    assertTrue("Timeout waiting for all live and active",
+               ClusterStateUtil.waitForAllActiveAndLiveReplicas(zkStateReader, 90000));
 
-    // check cluster property is considered
-    disableAutoAddReplicasInCluster();
-    lostNodeName = jetty3.getNodeName();
-    jetty3.stop();
-    
-    cluster.waitForJettyToStop(jetty3);
-    
-    waitForNodeLeave(lostNodeName);
-    
-    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, clusterShape(2, 2));
-    jetty3.start();
-    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, clusterShape(2, 4));
-    waitForState("Waiting for collection " + COLLECTION2, COLLECTION2, clusterShape(2, 4));
-    enableAutoAddReplicasInCluster();
-
-
-    // test for multiple collections
-    new CollectionAdminRequest.AsyncCollectionAdminRequest(CollectionParams.CollectionAction.MODIFYCOLLECTION) {
-      @Override
-      public SolrParams getParams() {
-        ModifiableSolrParams params = (ModifiableSolrParams) super.getParams();
-        params.set("collection", COLLECTION2);
-        params.set("autoAddReplicas", true);
-        return params;
-      }
-    }.process(cluster.getSolrClient());
-
-    lostNodeName = jetty2.getNodeName();
-    replacedHdfsReplicas = getReplacedSharedFsReplicas(COLLECTION2, zkStateReader, lostNodeName);
-    
-    jetty2.stop();
-    
-    cluster.waitForJettyToStop(jetty2);
-    
-    waitForNodeLeave(lostNodeName);
-    waitForState("Waiting for collection " + COLLECTION1, COLLECTION1, clusterShape(2, 4), 45, TimeUnit.SECONDS);
-    waitForState("Waiting for collection " + COLLECTION2, COLLECTION2, clusterShape(2, 4), 45, TimeUnit.SECONDS);
-    checkSharedFsReplicasMovedCorrectly(replacedHdfsReplicas, zkStateReader, COLLECTION2);
-
-    // overseer failover test..
   }
 

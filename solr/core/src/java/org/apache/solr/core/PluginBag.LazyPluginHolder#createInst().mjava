@@ -5,7 +5,34 @@
         MemClassLoader loader = (MemClassLoader) resourceLoader;
         loader.loadJars();
       }
-      lazyInst = createInitInstance(pluginInfo,pluginMeta,core,resourceLoader, isRuntimeLib);
+      Class<T> clazz = (Class<T>) pluginMeta.clazz;
+      T localInst = null;
+      try {
+        localInst = core.createInstance(pluginInfo.className, clazz, pluginMeta.getCleanTag(), null, resourceLoader);
+      } catch (SolrException e) {
+        if (isRuntimeLib && !(resourceLoader instanceof MemClassLoader)) {
+          throw new SolrException(SolrException.ErrorCode.getErrorCode(e.code()),
+              e.getMessage() + ". runtime library loading is not enabled, start Solr with -Denable.runtime.lib=true",
+              e.getCause());
+        }
+        throw e;
+
+
+      }
+      initInstance(localInst, pluginInfo);
+      if (localInst instanceof SolrCoreAware) {
+        SolrResourceLoader.assertAwareCompatibility(SolrCoreAware.class, localInst);
+        ((SolrCoreAware) localInst).inform(core);
+      }
+      if (localInst instanceof ResourceLoaderAware) {
+        SolrResourceLoader.assertAwareCompatibility(ResourceLoaderAware.class, localInst);
+        try {
+          ((ResourceLoaderAware) localInst).inform(core.getResourceLoader());
+        } catch (IOException e) {
+          throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "error initializing component", e);
+        }
+      }
+      lazyInst = localInst;  // only assign the volatile until after the plugin is completely ready to use
       return true;
     }
 

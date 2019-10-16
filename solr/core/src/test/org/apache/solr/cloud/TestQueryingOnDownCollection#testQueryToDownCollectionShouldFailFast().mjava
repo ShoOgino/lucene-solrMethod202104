@@ -1,0 +1,62 @@
+  @Test
+  /**
+   * Assert that requests to "down collection", i.e. a collection which has all replicas in down state
+   * (but are hosted on nodes that are live), fail fast and throw meaningful exceptions
+   */
+  public void testQueryToDownCollectionShouldFailFast() throws Exception {
+
+    CollectionAdminRequest.createCollection(COLLECTION_NAME, "conf", 2, 1)
+        .setBasicAuthCredentials(USERNAME, PASSWORD)
+        .process(cluster.getSolrClient());
+
+    // Add some dummy documents
+    UpdateRequest update = (UpdateRequest) new UpdateRequest().setBasicAuthCredentials(USERNAME, PASSWORD);
+    for (int i = 0; i < 100; i++) {
+      update.add("id", Integer.toString(i));
+    }
+    update.commit(cluster.getSolrClient(), COLLECTION_NAME);
+
+    // Bring down replicas but keep nodes up. This could've been done by some combinations of collections API operations;
+    // however, to make it faster, altering cluster state directly! ;-)
+    downAllReplicas();
+
+    // assert all replicas are in down state
+    List<Replica> replicas = getCollectionState(COLLECTION_NAME).getReplicas();
+    for (Replica replica: replicas){
+      assertEquals(replica.getState(), Replica.State.DOWN);
+    }
+
+    // assert all nodes as active
+    assertEquals(3, cluster.getSolrClient().getClusterStateProvider().getLiveNodes().size());
+
+    SolrClient client = cluster.getJettySolrRunner(0).newClient();
+
+    SolrRequest req = new QueryRequest(new SolrQuery("*:*").setRows(0)).setBasicAuthCredentials(USERNAME, PASSWORD);
+
+    // Without the SOLR-13793 fix, this causes requests to "down collection" to pile up (until the nodes run out 
+    // of serviceable threads and they crash, even for other collections hosted on the nodes).
+    SolrException error = expectThrows(SolrException.class,
+        "Request should fail after trying all replica nodes once",
+        () -> client.request(req, COLLECTION_NAME)
+    );
+
+    client.close();
+
+    assertEquals(error.code(), SolrException.ErrorCode.INVALID_STATE.code);
+    assertTrue(error.getMessage().contains("No active replicas found for collection: " + COLLECTION_NAME));
+
+    // run same set of tests on v2 client which uses V2HttpCall
+    Http2SolrClient v2Client = new Http2SolrClient.Builder(cluster.getJettySolrRunner(0).getBaseUrl().toString())
+        .build();
+
+    error = expectThrows(SolrException.class,
+        "Request should fail after trying all replica nodes once",
+        () -> v2Client.request(req, COLLECTION_NAME)
+    );
+
+    v2Client.close();
+
+    assertEquals(error.code(), SolrException.ErrorCode.INVALID_STATE.code);
+    assertTrue(error.getMessage().contains("No active replicas found for collection: " + COLLECTION_NAME));
+  }
+

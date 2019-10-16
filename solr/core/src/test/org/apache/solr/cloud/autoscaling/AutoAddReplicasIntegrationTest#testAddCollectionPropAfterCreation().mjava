@@ -1,0 +1,57 @@
+  /**
+   * Test that we can modify a collection after creation to add autoAddReplicas.
+   */
+  @Test
+  public void testAddCollectionPropAfterCreation() throws Exception {
+    final String COLLECTION = "test_addprop";
+    final ZkStateReader zkStateReader = cluster.getSolrClient().getZkStateReader();
+    final JettySolrRunner jetty1 = cluster.getJettySolrRunner(1);
+    final JettySolrRunner jetty2 = cluster.getJettySolrRunner(2);
+
+    log.info("Creating {} using jetty1:{}/{} and jetty2:{}/{}", COLLECTION,
+             jetty1.getNodeName(), jetty1.getLocalPort(),
+             jetty2.getNodeName(), jetty2.getLocalPort());
+             
+    CollectionAdminRequest.createCollection(COLLECTION, "conf", 2, 2)
+      .setCreateNodeSet(jetty1.getNodeName()+","+jetty2.getNodeName())
+      .setAutoAddReplicas(false) // NOTE: false
+      .setMaxShardsPerNode(2)
+      .process(cluster.getSolrClient());
+    
+    cluster.waitForActiveCollection(COLLECTION, 2, 4);
+    
+    log.info("Modifying {} to use autoAddReplicas", COLLECTION);
+    new CollectionAdminRequest.AsyncCollectionAdminRequest(CollectionParams.CollectionAction.MODIFYCOLLECTION) {
+      @Override
+      public SolrParams getParams() {
+        ModifiableSolrParams params = (ModifiableSolrParams) super.getParams();
+        params.set("collection", COLLECTION);
+        params.set("autoAddReplicas", true);
+        return params;
+      }
+    }.process(cluster.getSolrClient());
+
+    JettySolrRunner lostJetty = random().nextBoolean() ? jetty1 : jetty2;
+    String lostNodeName = lostJetty.getNodeName();
+    List<Replica> replacedHdfsReplicas = getReplacedSharedFsReplicas(COLLECTION, zkStateReader, lostNodeName);
+
+    log.info("Stopping random node: {} / {}", lostNodeName, lostJetty.getLocalPort());
+    lostJetty.stop();
+    
+    cluster.waitForJettyToStop(lostJetty);
+    
+    waitForNodeLeave(lostNodeName);
+
+    waitForState(COLLECTION + "=(2,4) w/o down replicas",
+                 COLLECTION, clusterShapeNoDownReplicas(2,4), 90, TimeUnit.SECONDS);
+    checkSharedFsReplicasMovedCorrectly(replacedHdfsReplicas, zkStateReader, COLLECTION);
+    
+    log.info("Re-starting (same) random node: {} / {}", lostNodeName, lostJetty.getLocalPort());
+    lostJetty.start();
+    
+    waitForNodeLive(lostJetty);
+    
+    assertTrue("Timeout waiting for all live and active",
+               ClusterStateUtil.waitForAllActiveAndLiveReplicas(zkStateReader, 90000));
+  }
+

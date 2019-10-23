@@ -1,0 +1,42 @@
+    @Command(name = "delete")
+    public void del(SolrQueryRequest req, SolrQueryResponse rsp, PayloadObj<Package.DelVersion> payload) {
+      if (!checkEnabled(payload)) return;
+      Package.DelVersion delVersion = payload.get();
+      try {
+        coreContainer.getZkController().getZkClient().atomicUpdate(SOLR_PKGS_PATH, (stat, bytes) -> {
+          Packages packages = null;
+          try {
+            packages = mapper.readValue(bytes, Packages.class);
+            packages = packages.copy();
+          } catch (IOException e) {
+            packages = new Packages();
+          }
+
+          List<PkgVersion> versions = packages.packages.get(delVersion.pkg);
+          if (versions == null || versions.isEmpty()) {
+            payload.addError("No such package: " + delVersion.pkg);
+            return null;// no change
+          }
+          int idxToremove = -1;
+          for (int i = 0; i < versions.size(); i++) {
+            if (Objects.equals(versions.get(i).version, delVersion.version)) {
+              idxToremove = i;
+              break;
+            }
+          }
+          if (idxToremove == -1) {
+            payload.addError("No such version: " + delVersion.version);
+            return null;
+          }
+          versions.remove(idxToremove);
+          packages.znodeVersion = stat.getVersion() + 1;
+          return Utils.toJSON(packages);
+        });
+      } catch (KeeperException | InterruptedException e) {
+        handleZkErr(e);
+
+      }
+
+
+    }
+

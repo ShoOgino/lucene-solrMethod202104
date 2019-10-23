@@ -1,0 +1,40 @@
+    @Command(name = "add")
+    public void add(SolrQueryRequest req, SolrQueryResponse rsp, PayloadObj<Package.AddVersion> payload) {
+      if (!checkEnabled(payload)) return;
+      Package.AddVersion add = payload.get();
+      if (add.files.isEmpty()) {
+        payload.addError("No files specified");
+        return;
+      }
+      PackageStoreAPI packageStoreAPI = coreContainer.getPackageStoreAPI();
+      packageStoreAPI.validateFiles(add.files, true, s -> payload.addError(s));
+      if (payload.hasError()) return;
+      Packages[] finalState = new Packages[1];
+      try {
+        coreContainer.getZkController().getZkClient().atomicUpdate(SOLR_PKGS_PATH, (stat, bytes) -> {
+          Packages packages = null;
+          try {
+            packages = bytes == null ? new Packages() : mapper.readValue(bytes, Packages.class);
+            packages = packages.copy();
+          } catch (IOException e) {
+            log.error("Error deserializing packages.json", e);
+            packages = new Packages();
+          }
+          packages.packages.computeIfAbsent(add.pkg, Utils.NEW_ARRAYLIST_FUN).add(new PkgVersion(add));
+          packages.znodeVersion = stat.getVersion() + 1;
+          finalState[0] = packages;
+          return Utils.toJSON(packages);
+        });
+      } catch (KeeperException | InterruptedException e) {
+        finalState[0] = null;
+        handleZkErr(e);
+      }
+      if (finalState[0] != null) {
+//        succeeded in updating
+        pkgs = finalState[0];
+        notifyAllNodesToSync(pkgs.znodeVersion);
+        packageLoader.refreshPackageConf();
+      }
+
+    }
+

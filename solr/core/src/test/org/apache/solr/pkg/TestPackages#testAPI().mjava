@@ -1,0 +1,132 @@
+  @Test
+  public void testAPI() throws Exception {
+    System.setProperty("enable.packages", "true");
+    MiniSolrCloudCluster cluster =
+        configureCluster(4)
+            .withJettyConfig(jetty -> jetty.enableV2(true))
+            .addConfig("conf", configset("cloud-minimal"))
+            .configure();
+    try {
+      String errPath = "/error/details[0]/errorMessages[0]";
+      String FILE1 = "/mypkg/v.0.12/jar_a.jar";
+      String FILE2 = "/mypkg/v.0.12/jar_b.jar";
+      String FILE3 = "/mypkg/v.0.13/jar_a.jar";
+
+      Package.AddVersion add = new Package.AddVersion();
+      add.version = "0.12";
+      add.pkg = "test_pkg";
+      add.files = Arrays.asList(new String[]{FILE1, FILE2});
+      V2Request req = new V2Request.Builder("/cluster/package")
+          .forceV2(true)
+          .withMethod(SolrRequest.METHOD.POST)
+          .withPayload(Collections.singletonMap("add", add))
+          .build();
+
+      //the files is not yet there. The command should fail with error saying "No such file"
+      expectError(req, cluster.getSolrClient(), errPath, "No such file :");
+
+
+      //post the jar file. No signature is sent
+      postFileAndWait(cluster, "runtimecode/runtimelibs.jar.bin", FILE1, null);
+
+
+      add.files = Arrays.asList(new String[]{FILE1});
+      expectError(req, cluster.getSolrClient(), errPath,
+          FILE1 + " has no signature");
+      //now we upload the keys
+      byte[] derFile = readFile("cryptokeys/pub_key512.der");
+      cluster.getZkClient().makePath("/keys/exe", true);
+      cluster.getZkClient().create("/keys/exe/pub_key512.der", derFile, CreateMode.PERSISTENT, true);
+      //and upload the same file with a different name but it has proper signature
+      postFileAndWait(cluster, "runtimecode/runtimelibs.jar.bin", FILE2,
+          "L3q/qIGs4NaF6JiO0ZkMUFa88j0OmYc+I6O7BOdNuMct/xoZ4h73aZHZGc0+nmI1f/U3bOlMPINlSOM6LK3JpQ==");
+      // with correct signature
+      //after uploading the file, let's delete the keys to see if we get proper error message
+      cluster.getZkClient().delete("/keys/exe/pub_key512.der", -1, true);
+      add.files = Arrays.asList(new String[]{FILE2});
+      expectError(req, cluster.getSolrClient(), errPath,
+          "ZooKeeper does not have any public keys");
+
+      //Now lets' put the keys back
+      cluster.getZkClient().create("/keys/exe/pub_key512.der", derFile, CreateMode.PERSISTENT, true);
+
+      //this time we have a file with proper signature, public keys are in ZK
+      // so the add {} command should succeed
+      req.process(cluster.getSolrClient());
+
+      //Now verify the data in ZK
+      TestDistribPackageStore.assertResponseValues(1,
+          () -> new MapWriterMap((Map) Utils.fromJSON(cluster.getZkClient().getData(SOLR_PKGS_PATH,
+              null, new Stat(), true))),
+          Utils.makeMap(
+              ":packages:test_pkg[0]:version", "0.12",
+              ":packages:test_pkg[0]:files[0]", FILE1
+          ));
+
+      //post a new jar with a proper signature
+      postFileAndWait(cluster, "runtimecode/runtimelibs_v2.jar.bin", FILE3,
+          "j+Rflxi64tXdqosIhbusqi6GTwZq8znunC/dzwcWW0/dHlFGKDurOaE1Nz9FSPJuXbHkVLj638yZ0Lp1ssnoYA==");
+
+
+      //this time we are adding the second version of the package (0.13)
+      add.version = "0.13";
+      add.pkg = "test_pkg";
+      add.files = Arrays.asList(new String[]{FILE3});
+
+      //this request should succeed
+      req.process(cluster.getSolrClient());
+      //no verify the data (/packages.json) in ZK
+      TestDistribPackageStore.assertResponseValues(1,
+          () -> new MapWriterMap((Map) Utils.fromJSON(cluster.getZkClient().getData(SOLR_PKGS_PATH,
+              null, new Stat(), true))),
+          Utils.makeMap(
+              ":packages:test_pkg[1]:version", "0.13",
+              ":packages:test_pkg[1]:files[0]", FILE3
+          ));
+
+      //Now we will just delete one version
+      Package.DelVersion delVersion = new Package.DelVersion();
+      delVersion.version = "0.1";//this version does not exist
+      delVersion.pkg = "test_pkg";
+      req = new V2Request.Builder("/cluster/package")
+          .forceV2(true)
+          .withMethod(SolrRequest.METHOD.POST)
+          .withPayload(Collections.singletonMap("delete", delVersion))
+          .build();
+
+      //we are expecting an error
+      expectError(req, cluster.getSolrClient(), errPath, "No such version:");
+
+      delVersion.version = "0.12";//correct version. Should succeed
+      req.process(cluster.getSolrClient());
+      //Verify with ZK that the data is correcy
+      TestDistribPackageStore.assertResponseValues(1,
+          () -> new MapWriterMap((Map) Utils.fromJSON(cluster.getZkClient().getData(SOLR_PKGS_PATH,
+              null, new Stat(), true))),
+          Utils.makeMap(
+              ":packages:test_pkg[0]:version", "0.13",
+              ":packages:test_pkg[0]:files[0]", FILE2
+          ));
+
+
+      //So far we have been verifying the details with  ZK directly
+      //use the package read API to verify with each node that it has the correct data
+      for (JettySolrRunner jetty : cluster.getJettySolrRunners()) {
+        String path = jetty.getBaseUrl().toString().replace("/solr", "/api") + "/cluster/package?wt=javabin";
+        TestDistribPackageStore.assertResponseValues(10, new Callable<NavigableObject>() {
+          @Override
+          public NavigableObject call() throws Exception {
+            try (HttpSolrClient solrClient = (HttpSolrClient) jetty.newClient()) {
+              return (NavigableObject) Utils.executeGET(solrClient.getHttpClient(), path, Utils.JAVABINCONSUMER);
+            }
+          }
+        }, Utils.makeMap(
+            ":result:packages:test_pkg[0]:version", "0.13",
+            ":result:packages:test_pkg[0]:files[0]", FILE3
+        ));
+      }
+    } finally {
+      cluster.shutdown();
+    }
+  }
+

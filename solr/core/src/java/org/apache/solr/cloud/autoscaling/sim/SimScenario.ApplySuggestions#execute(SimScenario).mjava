@@ -1,0 +1,41 @@
+    @Override
+    public void execute(SimScenario scenario) throws Exception {
+      List<Suggester.SuggestionInfo> suggestions = (List<Suggester.SuggestionInfo>) scenario.context.getOrDefault(SUGGESTIONS_CTX_PROP, Collections.emptyList());
+      int unresolvedCount = 0;
+      for (Suggester.SuggestionInfo suggestion : suggestions) {
+        SolrRequest operation = suggestion.getOperation();
+        if (operation == null) {
+          unresolvedCount++;
+          if (suggestion.getViolation() == null) {
+            log.error("       -- ignoring suggestion without violation and without operation: " + suggestion);
+          }
+          continue;
+        }
+        SolrParams params = operation.getParams();
+        if (operation instanceof V2Request) {
+          params = SimUtils.v2AdminRequestToV1Params((V2Request)operation);
+        }
+        Map<String, Object> paramsMap = new LinkedHashMap<>();
+        params.toMap(paramsMap);
+        ReplicaInfo info = scenario.cluster.getSimClusterStateProvider().simGetReplicaInfo(
+            params.get(CollectionAdminParams.COLLECTION), params.get("replica"));
+        if (info == null) {
+          log.error("Could not find ReplicaInfo for params: " + params);
+        } else if (scenario.verbose) {
+          paramsMap.put("replicaInfo", info);
+        } else if (info.getVariable(Variable.Type.CORE_IDX.tagName) != null) {
+          paramsMap.put(Variable.Type.CORE_IDX.tagName, info.getVariable(Variable.Type.CORE_IDX.tagName));
+        }
+        try {
+          scenario.cluster.request(operation);
+        } catch (Exception e) {
+          log.error("Aborting - error executing suggestion " + suggestion, e);
+          break;
+        }
+      }
+      if (suggestions.size() > 0 && unresolvedCount == suggestions.size()) {
+        log.info("        -- aborting simulation, only " + unresolvedCount + " unresolved violations remain");
+        scenario.abortLoop = true;
+      }
+    }
+

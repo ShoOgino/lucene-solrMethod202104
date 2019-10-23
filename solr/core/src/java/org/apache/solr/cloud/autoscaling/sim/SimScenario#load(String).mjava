@@ -1,0 +1,93 @@
+  /**
+   * Parse a DSL string and create a scenario ready to run.
+   * @param data DSL string with commands and parameters
+   * @return configured scenario
+   * @throws Exception on syntax errors
+   */
+  public static SimScenario load(String data) throws Exception {
+    SimScenario scenario = new SimScenario();
+    String[] lines = data.split("\\r?\\n");
+    for (int i = 0; i < lines.length; i++) {
+      String line = lines[i];
+      line = line.trim();
+      if (line.isBlank() || line.startsWith("#") || line.startsWith("//")) {
+        continue;
+      }
+      // remove trailing / / comments
+      String[] comments = line.split("//");
+      String expr = comments[0];
+      // split on blank
+      String[] parts = expr.split("\\s+");
+      if (parts.length > 2) {
+        log.warn("Invalid line - wrong number of parts " + parts.length + ", skipping: " + line);
+        continue;
+      }
+      SimAction action = SimAction.get(parts[0]);
+      if (action == null) {
+        log.warn("Invalid scenario action " + parts[0] + ", skipping...");
+        continue;
+      }
+      if (action == SimAction.LOOP_END) {
+        if (!scenario.context.containsKey("loop")) {
+          throw new IOException("LOOP_END without start!");
+        }
+        scenario.context.remove("loop");
+        continue;
+      }
+      Class<? extends SimOp> opClass = simOps.get(action);
+      SimOp op = opClass.getConstructor().newInstance();
+      ModifiableSolrParams params = new ModifiableSolrParams();
+      if (parts.length > 1) {
+        String paramsString = parts[1];
+        if (parts[1].contains("?")) { // url-like with path?params...
+          String[] urlParts = parts[1].split("\\?");
+          params.set("path", urlParts[0]);
+          paramsString = urlParts.length > 1 ? urlParts[1] : "";
+        }
+        String[] paramsParts = paramsString.split("&");
+        for (String paramPair : paramsParts) {
+          String[] paramKV = paramPair.split("=");
+          String k = URLDecoder.decode(paramKV[0], "UTF-8");
+          String v = paramKV.length > 1 ? URLDecoder.decode(paramKV[1], "UTF-8") : null;
+          params.add(k, v);
+        }
+      }
+      op.init(params);
+      // loop handling
+      if (action == SimAction.LOOP_START) {
+        if (scenario.context.containsKey("loop")) {
+          throw new IOException("only one loop level is allowed");
+        }
+        scenario.context.put("loop", op);
+        scenario.ops.add(op);
+        continue;
+      }
+      LoopOp currentLoop = (LoopOp) scenario.context.get("loop");
+      if (currentLoop != null) {
+        currentLoop.ops.add(op);
+      } else {
+        scenario.ops.add(op);
+      }
+    }
+    if (scenario.context.containsKey("loop")) {
+      throw new IOException("Unterminated loop statement");
+    }
+    // sanity check set_listener / wait_listener
+    int numSets = 0, numWaits = 0;
+    for (SimOp op : scenario.ops) {
+      if (op instanceof SetEventListener) {
+        numSets++;
+      } else if (op instanceof WaitEvent) {
+        numWaits++;
+      }
+      if (numWaits > numSets) {
+        throw new Exception("Unexpected " + SimAction.WAIT_EVENT + " without previous " + SimAction.EVENT_LISTENER);
+      }
+    }
+    if (numSets > numWaits) {
+      throw new Exception(SimAction.EVENT_LISTENER + " count should be equal to " + SimAction.WAIT_EVENT + " count but was " +
+          numSets + " > " + numWaits);
+    }
+    return scenario;
+  }
+

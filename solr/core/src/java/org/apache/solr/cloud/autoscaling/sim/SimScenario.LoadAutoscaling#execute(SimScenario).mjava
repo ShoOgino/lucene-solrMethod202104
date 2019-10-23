@@ -1,0 +1,59 @@
+    @Override
+    public void execute(SimScenario scenario) throws Exception {
+      Map<String, Object> map;
+      boolean addDefaults = Boolean.parseBoolean(params.get("withDefaultTriggers", "true"));
+      int defaultWaitFor = Integer.parseInt(params.get("defaultWaitFor", "120"));
+      String path = params.get("path");
+      if (path == null) {
+        String json = params.get("json");
+        if (json == null) {
+          throw new IOException(SimAction.LOAD_AUTOSCALING + " must specify either 'path' or 'json'");
+        } else {
+          map = (Map<String, Object>) Utils.fromJSONString(json);
+        }
+      } else {
+        File f = new File(path);
+        Reader r;
+        if (f.exists()) {
+          r = new InputStreamReader(new FileInputStream(f), Charset.forName("UTF-8"));
+        } else {
+          InputStream is = getClass().getResourceAsStream(path);
+          if (is == null) {
+            throw new IOException("path " + path + " does not exist and it's not a resource");
+          }
+          r = new InputStreamReader(is, Charset.forName("UTF-8"));
+        }
+        map = (Map<String, Object>) Utils.fromJSON(r);
+      }
+      AutoScalingConfig config = new AutoScalingConfig(map);
+      if (addDefaults) {
+        // add default triggers
+        if (!config.getTriggerConfigs().containsKey(AutoScaling.AUTO_ADD_REPLICAS_TRIGGER_NAME)) {
+          Map<String, Object> props = new HashMap<>(AutoScaling.AUTO_ADD_REPLICAS_TRIGGER_PROPS);
+          props.put("waitFor", defaultWaitFor);
+          AutoScalingConfig.TriggerConfig trigger = new AutoScalingConfig.TriggerConfig(AutoScaling.AUTO_ADD_REPLICAS_TRIGGER_NAME, props);
+          config = config.withTriggerConfig(trigger);
+          config = AutoScalingHandler.withSystemLogListener(config, AutoScaling.AUTO_ADD_REPLICAS_TRIGGER_NAME);
+        }
+        if (!config.getTriggerConfigs().containsKey(AutoScaling.SCHEDULED_MAINTENANCE_TRIGGER_NAME)) {
+          AutoScalingConfig.TriggerConfig trigger = new AutoScalingConfig.TriggerConfig(AutoScaling.SCHEDULED_MAINTENANCE_TRIGGER_NAME, AutoScaling.SCHEDULED_MAINTENANCE_TRIGGER_PROPS);
+          config = config.withTriggerConfig(trigger);
+          config = AutoScalingHandler.withSystemLogListener(config, AutoScaling.SCHEDULED_MAINTENANCE_TRIGGER_NAME);
+        }
+      }
+      scenario.config = config;
+      // set this config on the simulator
+      scenario.cluster.getSimDistribStateManager().simSetAutoScalingConfig(config);
+      // wait until it finished processing the config
+      (new TimeOut(30, TimeUnit.SECONDS, scenario.cluster.getTimeSource()))
+          .waitFor("OverseerTriggerThread never caught up to the latest znodeVersion", () -> {
+            try {
+              AutoScalingConfig autoscalingConfig = scenario.cluster.getDistribStateManager().getAutoScalingConfig();
+              return autoscalingConfig.getZkVersion() == scenario.cluster.getOverseerTriggerThread().getProcessedZnodeVersion();
+            } catch (Exception e) {
+              throw new RuntimeException("FAILED", e);
+            }
+          });
+
+    }
+

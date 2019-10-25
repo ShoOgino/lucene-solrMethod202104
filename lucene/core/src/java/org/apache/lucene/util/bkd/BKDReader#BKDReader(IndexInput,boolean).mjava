@@ -1,0 +1,48 @@
+  /**
+   * Caller must pre-seek the provided {@link IndexInput} to the index location that {@link BKDWriter#finish} returned
+   * and specify {@code true} to store BKD off-heap ({@code false} otherwise)
+   */
+  public BKDReader(IndexInput in, boolean offHeap) throws IOException {
+    version = CodecUtil.checkHeader(in, BKDWriter.CODEC_NAME, BKDWriter.VERSION_START, BKDWriter.VERSION_CURRENT);
+    numDataDims = in.readVInt();
+    if (version >= BKDWriter.VERSION_SELECTIVE_INDEXING) {
+      numIndexDims = in.readVInt();
+    } else {
+      numIndexDims = numDataDims;
+    }
+    maxPointsInLeafNode = in.readVInt();
+    bytesPerDim = in.readVInt();
+    packedBytesLength = numDataDims * bytesPerDim;
+    packedIndexBytesLength = numIndexDims * bytesPerDim;
+
+    // Read index:
+    numLeaves = in.readVInt();
+    assert numLeaves > 0;
+    leafNodeOffset = numLeaves;
+
+    minPackedValue = new byte[packedIndexBytesLength];
+    maxPackedValue = new byte[packedIndexBytesLength];
+
+    in.readBytes(minPackedValue, 0, packedIndexBytesLength);
+    in.readBytes(maxPackedValue, 0, packedIndexBytesLength);
+
+    for(int dim=0;dim<numIndexDims;dim++) {
+      if (Arrays.compareUnsigned(minPackedValue, dim * bytesPerDim, dim * bytesPerDim + bytesPerDim, maxPackedValue, dim * bytesPerDim, dim * bytesPerDim + bytesPerDim) > 0) {
+        throw new CorruptIndexException("minPackedValue " + new BytesRef(minPackedValue) + " is > maxPackedValue " + new BytesRef(maxPackedValue) + " for dim=" + dim, in);
+      }
+    }
+    
+    pointCount = in.readVLong();
+    docCount = in.readVInt();
+
+    int numBytes = in.readVInt();
+    IndexInput slice = in.slice("packedIndex", in.getFilePointer(), numBytes);
+    if (offHeap) {
+      packedIndex = new BKDOffHeapInput(slice);
+    } else {
+      packedIndex = new BKDOnHeapInput(slice, numBytes);
+    }
+
+    this.in = in;
+  }
+

@@ -1,0 +1,65 @@
+  public void testConcurrentCreatePlacement() throws Exception {
+    final int nThreads = 20;
+    final int createsPerThread = 1;
+    final int repFactor = 1;
+
+    final CloudSolrClient client = cluster.getSolrClient();
+
+    final AtomicInteger collectionNum = new AtomicInteger();
+    Thread[] indexThreads = new Thread[nThreads];
+
+
+    for (int i=0; i<nThreads; i++) {
+      indexThreads[i] = new Thread(() -> {
+        try {
+          for (int j=0; j<createsPerThread; j++) {
+            int num = collectionNum.incrementAndGet();
+            String collectionName = "collection" + num;
+            CollectionAdminRequest
+                .createCollection("collection" + num, "conf", 1, repFactor)
+                .setMaxShardsPerNode(1)
+                .process(client);
+            cluster.waitForActiveCollection(collectionName, 1, repFactor);
+            // Thread.sleep(5000);
+          }
+        } catch (Exception e) {
+          fail(e.getMessage());
+        }
+      });
+    }
+
+    for (Thread thread : indexThreads) {
+      thread.start();
+    }
+
+    for (Thread thread : indexThreads) {
+      thread.join();
+    }
+
+    Map<String,List<Replica>> map = new HashMap<>();
+    ClusterState cstate = client.getZkStateReader().getClusterState();
+    for (DocCollection collection : cstate.getCollectionsMap().values()) {
+      for (Replica replica : collection.getReplicas()) {
+        String url = replica.getBaseUrl();
+        List<Replica> replicas = map.get(url);
+        if (replicas == null) {
+          replicas = new ArrayList<>();
+          map.put(url, replicas);
+        }
+        replicas.add(replica);
+      }
+    }
+
+    // check if nodes are balanced
+    List<Replica> prev = null;
+    for (List<Replica> replicas : map.values()) {
+      if (prev != null && prev.size() != replicas.size()) {
+        log.error("UNBALANCED CLUSTER: prev node replica count=" + prev.size() + " current=" + replicas.size() + "\n" + cstate.getCollectionsMap());
+        log.error("Replica lists per node: " + map);
+        assertEquals(prev.size(), replicas.size());
+      }
+      prev = replicas;
+    }
+
+  }
+

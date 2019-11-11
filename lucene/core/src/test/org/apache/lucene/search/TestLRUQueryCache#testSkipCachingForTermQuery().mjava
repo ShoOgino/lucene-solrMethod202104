@@ -1,0 +1,47 @@
+  public void testSkipCachingForTermQuery() throws IOException {
+    Directory dir = newDirectory();
+    final RandomIndexWriter w = new RandomIndexWriter(random(), dir);
+    Document doc1 = new Document();
+    doc1.add(new StringField("name", "tom", Store.YES));
+    doc1.add(new StringField("hobby", "movie", Store.YES));
+    Document doc2 = new Document();
+    doc2.add(new StringField("name", "alice", Store.YES));
+    doc2.add(new StringField("hobby", "book", Store.YES));
+    Document doc3 = new Document();
+    doc3.add(new StringField("name", "alice", Store.YES));
+    doc3.add(new StringField("hobby", "movie", Store.YES));
+    w.addDocuments(Arrays.asList(doc1, doc2, doc3));
+    final IndexReader reader = w.getReader();
+    final IndexSearcher searcher = newSearcher(reader);
+    final UsageTrackingQueryCachingPolicy policy = new UsageTrackingQueryCachingPolicy();
+    searcher.setQueryCachingPolicy(policy);
+    w.close();
+
+    // lead cost is 2, cost of subQuery1 is 3, cost of subQuery2 is 2
+    BooleanQuery.Builder inner = new BooleanQuery.Builder();
+    TermQuery innerSubQuery1 = new TermQuery(new Term("hobby", "book"));
+    TermQuery innerSubQuery2 = new TermQuery(new Term("hobby", "movie"));
+    BooleanQuery subQuery1 = inner.add(innerSubQuery1, Occur.SHOULD).add(innerSubQuery2, Occur.SHOULD).build();
+
+    BooleanQuery.Builder bq = new BooleanQuery.Builder();
+    TermQuery subQuery2 = new TermQuery(new Term("name", "alice"));
+    BooleanQuery query = bq.add(new ConstantScoreQuery(subQuery1), Occur.FILTER).add(subQuery2, Occur.FILTER).build();
+    Set<Query> cacheSet = new HashSet<>();
+
+    // both queries are not cached
+    final LRUQueryCache partCache = new LRUQueryCache(1000000, 10000000, context -> true, 1);
+    searcher.setQueryCache(partCache);
+    searcher.search(query, 1);
+    assertEquals(cacheSet, new HashSet<>(partCache.cachedQueries()));
+
+    // only subQuery1 is cached
+    final LRUQueryCache allCache = new LRUQueryCache(1000000, 10000000, context -> true, Float.POSITIVE_INFINITY);
+    searcher.setQueryCache(allCache);
+    searcher.search(query, 1);
+    cacheSet.add(subQuery1);
+    assertEquals(cacheSet, new HashSet<>(allCache.cachedQueries()));
+
+    reader.close();
+    dir.close();
+  }
+

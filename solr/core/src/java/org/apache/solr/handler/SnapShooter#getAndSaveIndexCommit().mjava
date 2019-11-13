@@ -1,0 +1,47 @@
+  /**
+   * If {@link #commitName} is non-null, then fetches the generation from the 
+   * {@link SolrSnapshotMetaDataManager} and then returns 
+   * {@link IndexDeletionPolicyWrapper#getAndSaveCommitPoint}, otherwise it returns 
+   * {@link IndexDeletionPolicyWrapper#getAndSaveLatestCommit}.
+   * <p>
+   * Either way:
+   * <ul>
+   *  <li>This method does error handling for all cases where the commit can't be found 
+   *       and wraps them in {@link SolrException}
+   *  </li>
+   *  <li>If this method returns, the result will be non null, and the caller <em>MUST</em> 
+   *      call {@link IndexDeletionPolicyWrapper#releaseCommitPoint} when finished
+   *  </li>
+   * </ul>
+   */
+  private IndexCommit getAndSaveIndexCommit() throws IOException {
+    final IndexDeletionPolicyWrapper delPolicy = solrCore.getDeletionPolicy();
+    if (null != commitName) {
+      final SolrSnapshotMetaDataManager snapshotMgr = solrCore.getSnapshotMetaDataManager();
+      // We're going to tell the delPolicy to "save" this commit -- even though it's a named snapshot
+      // that will already be protected -- just in case another thread deletes the name.
+      // Because of this, we want to sync on the delPolicy to ensure there is no window of time after
+      // snapshotMgr confirms commitName exists, but before we have a chance to 'save' it, when
+      // the commitName might be deleted *and* the IndexWriter might call onCommit()
+      synchronized (delPolicy) { 
+        final Optional<IndexCommit> namedCommit = snapshotMgr.getIndexCommitByName(commitName);
+        if (namedCommit.isPresent()) {
+          final IndexCommit commit = namedCommit.get();
+          log.debug("Using named commit: name={}, generation={}", commitName, commit.getGeneration());
+          delPolicy.saveCommitPoint(commit.getGeneration());
+          return commit;
+        }
+      } // else...
+      throw new SolrException(ErrorCode.BAD_REQUEST, "Unable to find an index commit with name " +
+                                commitName + " for core " + solrCore.getName());
+    }
+    // else: not a named commit...
+    final IndexCommit commit = delPolicy.getAndSaveLatestCommit();
+    if (null == commit) {
+      throw new SolrException(ErrorCode.BAD_REQUEST, "Index does not yet have any commits for core " +
+                              solrCore.getName());
+    }
+    log.debug("Using latest commit: generation={}", commit.getGeneration());
+    return commit;
+  }
+

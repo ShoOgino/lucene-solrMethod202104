@@ -1,0 +1,131 @@
+  public void testSnapshotsAndBackupsDuringConcurrentCommitsAndOptimizes(final BackupAPIImpl impl) throws Exception {
+    final int numBackupIters = 20; // don't use 'atLeast', we don't want to blow up on nightly
+    
+    final AtomicReference<Throwable> heavyCommitFailure = new AtomicReference<>();
+    final AtomicBoolean keepGoing = new AtomicBoolean(true);
+
+    // this thread will do nothing but add/commit new 'dummy' docs over and over again as fast as possible
+    // to create a lot of index churn w/ segment merging
+    final Thread heavyCommitting = new Thread() {
+      public void run() {
+        try {
+          int docIdCounter = 0;
+          while (keepGoing.get()) {
+            docIdCounter++;
+
+            final UpdateRequest req = new UpdateRequest().add(makeDoc("dummy_" + docIdCounter, "dummy"));
+            // always commit to force lots of new segments
+            req.setParam(UpdateParams.COMMIT,"true");
+            req.setParam(UpdateParams.OPEN_SEARCHER,"false");           // we don't care about searching
+
+            // frequently forceMerge to ensure segments are frequently deleted
+            if (0 == (docIdCounter % 13)) {                             // arbitrary
+              req.setParam(UpdateParams.OPTIMIZE, "true");
+              req.setParam(UpdateParams.MAX_OPTIMIZE_SEGMENTS, "5");    // arbitrary
+            }
+            
+            log.info("Heavy Committing #{}: {}", docIdCounter, req);
+            final UpdateResponse rsp = req.process(coreClient);
+            assertEquals("Dummy Doc#" + docIdCounter + " add status: " + rsp.toString(), 0, rsp.getStatus());
+                   
+          }
+        } catch (Throwable t) {
+          heavyCommitFailure.set(t);
+        }
+      }
+    };
+    
+    heavyCommitting.start();
+    try {
+      // now have the "main" test thread try to take a serious of backups/snapshots
+      // while adding other "real" docs
+      
+      final Queue<String> namedSnapshots = new LinkedList<>();
+
+      // NOTE #1: start at i=1 for 'id' & doc counting purposes...
+      // NOTE #2: abort quickly if the oher thread reports a heavyCommitFailure...
+      for (int i = 1; (i <= numBackupIters && null == heavyCommitFailure.get()); i++) {
+        
+        // in each iteration '#i', the commit we create should have exactly 'i' documents in
+        // it with the term 'type_s:real' (regardless of what the other thread does with dummy docs)
+        
+        // add & commit a doc #i
+        final UpdateRequest req = new UpdateRequest().add(makeDoc("doc_" + i, "real"));
+        req.setParam(UpdateParams.COMMIT,"true"); // make immediately available for backup
+        req.setParam(UpdateParams.OPEN_SEARCHER,"false"); // we don't care about searching
+        
+        final UpdateResponse rsp = req.process(coreClient);
+        assertEquals("Real Doc#" + i + " add status: " + rsp.toString(), 0, rsp.getStatus());
+
+        // create a backup of the 'current' index
+        impl.makeBackup("backup_currentAt_" + i);
+        
+        // verify backup is valid and has the number of 'real' docs we expect...
+        validateBackup("backup_currentAt_" + i);
+
+        // occasionally make a "snapshot_i", add it to 'namedSnapshots'
+        // NOTE: we don't want to do this too often, or the SnapShotMetadataManager will protect
+        // too many segment files "long term".  It's more important to stress the thread contention
+        // between backups calling save/release vs the DelPolicy trying to delete segments
+        if ( 0 == random().nextInt(7 + namedSnapshots.size()) ) {
+          final String snapshotName = "snapshot_" + i;
+          log.info("Creating snapshot: {}", snapshotName);
+          impl.makeSnapshot(snapshotName);
+          namedSnapshots.add(snapshotName);
+        }
+
+        // occasionally make a backup of a snapshot and remove it
+        // the odds of doing this increase based on how many snapshots currently exist,
+        // and how few iterations we have left
+        if (3 < namedSnapshots.size() &&
+            random().nextInt(3 + numBackupIters - i) < random().nextInt(namedSnapshots.size())) {
+
+          assert 0 < namedSnapshots.size() : "Someone broke the conditionl";
+          final String snapshotName = namedSnapshots.poll();
+          final String backupName = "backup_as_of_" + snapshotName;
+          log.info("Creating {} from {} in iter={}", backupName, snapshotName, i);
+          impl.makeBackup(backupName, snapshotName);
+          log.info("Deleting {} in iter={}", snapshotName, i);
+          impl.deleteSnapshot(snapshotName);
+
+          validateBackup(backupName);
+
+          // NOTE: we can't directly compare our backups, because the stress thread
+          // may have added/committed documents
+          // ie: backup_as_of_snapshot_4 and backup_currentAt_4 should have the same 4 "real"
+          // documents, but they may have other commits that affect the data files
+          // between when the backup was taken and when the snapshot was taken
+
+        }
+      }
+      
+    } finally {
+      keepGoing.set(false);
+      heavyCommitting.join();
+    }
+    assertNull(heavyCommitFailure.get());
+
+    { log.info("Done with (concurrent) updates, Deleting all docs...");
+      final UpdateRequest delAll = new UpdateRequest().deleteByQuery("*:*");
+      delAll.setParam(UpdateParams.COMMIT,"true");
+      delAll.setParam(UpdateParams.OPTIMIZE, "true");
+      delAll.setParam(UpdateParams.MAX_OPTIMIZE_SEGMENTS, "1"); // purge as many files as possible
+      final UpdateResponse delRsp = delAll.process(coreClient);
+      assertEquals("dellAll status: " + delRsp.toString(), 0, delRsp.getStatus());
+    }
+
+    { // Validate some backups at random...
+      final int numBackupsToCheck = atLeast(1);
+      log.info("Validating {} random backups to ensure they are un-affected by deleting all docs...",
+               numBackupsToCheck);
+      final List<File> allBackups = Arrays.asList(backupDir.listFiles());
+      // insure consistent (arbitrary) ordering before shuffling
+      Collections.sort(allBackups); 
+      Collections.shuffle(allBackups, random());
+      for (int i = 0; i < numBackupsToCheck; i++) {
+        final File backup = allBackups.get(i);
+        validateBackup(backup);
+      }
+    }
+  }
+

@@ -1,0 +1,50 @@
+  /**
+   * Updates {@link #latestCommit}.
+   * <p>
+   * This is handled special, and not included in {@link #updateKnownCommitPoints}, because we need to 
+   * ensure this happens <em>before</em> delegating calls to {@link #onInit} or {@link #onCommit} to our 
+   * inner Policy.  Doing this ensures that we can always protect {@link #latestCommit} from being deleted.  
+   * </p>
+   * <p>
+   * If we did not do this, and waited to update <code>latestCommit</code> in 
+   * <code>updateKnownCommitPoints()</code> then we would need to wrap synchronization completley around 
+   * the (delegated) <code>onInit()</code> and <code>onCommit()</code> calls, to ensure there was no 
+   * window of time when {@link #getAndSaveLatestCommit} might return the "old" latest commit, after our 
+   * delegate Policy had already deleted it.
+   * </p>
+   * <p>
+   * (Since Saving/Reserving (other) commits is handled indirectly ("by reference") via the generation
+   * callers can still safely (try) to reserve "old" commits using an explicit generation since 
+   * {@link IndexCommitWrapper#delete} is synchornized on <code>this</code>)
+   *
+   * @see #latestCommit
+   * @see #updateKnownCommitPoints
+   */
+  private synchronized void updateLatestCommit(final List<IndexCommitWrapper> list) {
+    // NOTE: There's a hypothetical, not neccessarily possible/plausible, situation that
+    // could lead to this combination of updateLatestCommit + updateKnownCommitPoints not
+    // being as thread safe as completley synchornizing in onInit/onCommit...
+    //  - knownCommits==(1, 2, 3, 4), latestCommit==4
+    //  - onCommit(1, 2, 3, 4, 5, 6, 7) - we immediately update latestCommit=7
+    //    - before knownCommits is updated, some client calls getAndSaveCommitPoint(6)
+    //      - call fails "too old to be saved" even though it's in flight
+    // (this assumes some future caller/use-case that doesn't currently exist)
+    //
+    // The upside of this current approach, and not completley synchornizing onInit/onCommit
+    // is that we have no control over what delegate is used, or how long those calls might take.
+    //
+    // If the hypotehtical situation above ever becomes problematic, then an alternative approach might be
+    // to *add* to the Set/Map of all known commits *before* delegating, then *remove* everything except
+    // the new (non-deleted) commits *after* delegating.
+
+    assert null != list;
+    if (list.isEmpty()) {
+      return;
+    }
+    final IndexCommitWrapper newLast = list.get(list.size() - 1);
+    assert ! newLast.isDeleted()
+      : "Code flaw: Last commit already deleted, call this method before delegating onCommit/onInit";
+
+    latestCommit = newLast.delegate;
+  }
+

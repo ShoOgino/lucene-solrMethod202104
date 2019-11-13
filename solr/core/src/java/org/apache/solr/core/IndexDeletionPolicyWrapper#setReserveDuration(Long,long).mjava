@@ -1,27 +1,23 @@
   /**
    * Set the duration for which commit point is to be reserved by the deletion policy.
+   * <p>
+   * <b>NOTE:</b> This method does not make any garuntees that the specified index generation exists, 
+   * or that the specified generation has not already ben deleted.  The only garuntee is that 
+   * <em>if</em> the specified generation exists now, or is created at some point in the future, then 
+   * it will be resered for <em>at least</em> the specified <code>reserveTime</code>.
+   * </p>
    *
    * @param indexGen gen of the commit point to be reserved
-   * @param reserveTime  time in milliseconds for which the commit point is to be reserved
+   * @param reserveTime durration in milliseconds (relative to 'now') for which the commit point is to be reserved
    */
   public void setReserveDuration(Long indexGen, long reserveTime) {
-    long timeToSet = System.nanoTime() + TimeUnit.NANOSECONDS.convert(reserveTime, TimeUnit.MILLISECONDS);
-    for(;;) {
-      Long previousTime = reserves.put(indexGen, timeToSet);
-
-      // this is the common success case: the older time didn't exist, or
-      // came before the new time.
-      if (previousTime == null || previousTime <= timeToSet) {
-        log.debug("Commit point reservation for generation {} set to {} (requested reserve time of {})",
-            indexGen, timeToSet, reserveTime);
-        break;
-      }
-
-      // At this point, we overwrote a longer reservation, so we want to restore the older one.
-      // the problem is that an even longer reservation may come in concurrently
-      // and we don't want to overwrite that one too.  We simply keep retrying in a loop
-      // with the maximum time value we have seen.
-      timeToSet = previousTime;      
-    }
+    // since 'reserves' is a concurrent HashMap, we don't need to synchronize this method as long as all
+    // operations on 'reserves' are done atomically.
+    //
+    // Here we'll use Map.merge to ensure that we atomically replace any existing timestamp if
+    // and only if our new reservation timetsamp is larger.
+    final long reserveAsNanoTime
+      = System.nanoTime() + TimeUnit.NANOSECONDS.convert(reserveTime, TimeUnit.MILLISECONDS);
+    reserves.merge(indexGen, reserveAsNanoTime, BinaryOperator.maxBy(Comparator.naturalOrder()));
   }
 

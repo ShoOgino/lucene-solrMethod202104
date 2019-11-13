@@ -7,13 +7,10 @@
     // initialize oldestEntry
     oldestEntry.updateAndGet(x -> x > e.lastAccessed  || x == 0 ? e.lastAccessed : x);
     CacheEntry<K, V> oldCacheEntry = map.put(e.key, e);
-    int currentSize;
     if (oldCacheEntry == null) {
       stats.size.increment();
-      currentSize = stats.size.intValue();
       ramBytes.add(e.ramBytesUsed() + HASHTABLE_RAM_BYTES_PER_ENTRY); // added key + value + entry
     } else {
-      currentSize = stats.size.intValue();
       ramBytes.add(-oldCacheEntry.ramBytesUsed());
       ramBytes.add(e.ramBytesUsed());
     }
@@ -22,28 +19,7 @@
     } else {
       stats.nonLivePutCounter.increment();
     }
-
-    // Check if we need to clear out old entries from the cache.
-    // isCleaning variable is checked instead of markAndSweepLock.isLocked()
-    // for performance because every put invokation will check until
-    // the size is back to an acceptable level.
-    //
-    // There is a race between the check and the call to markAndSweep, but
-    // it's unimportant because markAndSweep actually aquires the lock or returns if it can't.
-    //
-    // Thread safety note: isCleaning read is piggybacked (comes after) other volatile reads
-    // in this method.
-    boolean evictByIdleTime = maxIdleTimeNs != Long.MAX_VALUE;
-    long idleCutoff = evictByIdleTime ? timeSource.getEpochTimeNs() - maxIdleTimeNs : -1L;
-    if ((currentSize > upperWaterMark || (evictByIdleTime && oldestEntry.get() < idleCutoff)) && !isCleaning) {
-      if (newThreadForCleanup) {
-        new Thread(this::markAndSweep).start();
-      } else if (cleanupThread != null) {
-        cleanupThread.wakeThread();
-      } else {
-        markAndSweep();
-      }
-    }
+    maybeMarkAndSweep();
     return oldCacheEntry == null ? null : oldCacheEntry.value;
   }
 

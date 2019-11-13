@@ -13,19 +13,29 @@
       arc.target = FINAL_END_NODE;
       arc.output = follow.nextFinalOutput();
       arc.flags = BIT_LAST_ARC;
+      arc.nodeFlags = arc.flags;
       return arc;
     } else {
       in.setPosition(follow.target());
-      final byte b = in.readByte();
-      if (b == ARCS_AS_ARRAY_PACKED) {
-        // array: jump straight to end
+      byte flags = arc.nodeFlags = in.readByte();
+      if (flags == ARCS_FOR_BINARY_SEARCH || flags == ARCS_FOR_DIRECT_ADDRESSING) {
+        // Special arc which is actually a node header for fixed length arcs.
+        // Jump straight to end to find the last arc.
         arc.numArcs = in.readVInt();
         arc.bytesPerArc = in.readVInt();
         //System.out.println("  array numArcs=" + arc.numArcs + " bpa=" + arc.bytesPerArc);
-        arc.posArcsStart = in.getPosition();
-        arc.arcIdx = arc.numArcs() - 2;
+        if (flags == ARCS_FOR_DIRECT_ADDRESSING) {
+          readPresenceBytes(arc, in);
+          arc.firstLabel = readLabel(in);
+          arc.posArcsStart = in.getPosition();
+          readArcByDirectAddressing(arc, in, arc.numArcs() - 1);
+        } else {
+          arc.arcIdx = arc.numArcs() - 2;
+          arc.posArcsStart = in.getPosition();
+          readNextRealArc(arc, in);
+        }
       } else {
-        arc.flags = b;
+        arc.flags = flags;
         // non-array: linear scan
         arc.bytesPerArc = 0;
         //System.out.println("  scan");
@@ -48,8 +58,8 @@
         // Undo the byte flags we read:
         in.skipBytes(-1);
         arc.nextArc = in.getPosition();
+        readNextRealArc(arc, in);
       }
-      readNextRealArc(arc, in);
       assert arc.isLast();
       return arc;
     }

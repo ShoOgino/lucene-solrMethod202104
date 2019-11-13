@@ -4,45 +4,44 @@
     assert !arc.isLast();
 
     if (arc.label() == END_LABEL) {
-      //System.out.println("    nextArc fake " +
-      //arc.nextArc);
-      
-      long pos = arc.nextArc();
-      in.setPosition(pos);
+      //System.out.println("    nextArc fake " + arc.nextArc);
+      // Next arc is the first arc of a node.
+      // Position to read the first arc label.
 
-      final byte flags = in.readByte();
-      if (flags == ARCS_AS_ARRAY_PACKED) {
-        //System.out.println("    nextArc fixed array");
-        in.readVInt();
-
-        // Skip bytesPerArc:
-        in.readVInt();
-      } else {
-        in.setPosition(pos);
+      in.setPosition(arc.nextArc());
+      byte flags = in.readByte();
+      if (flags == ARCS_FOR_BINARY_SEARCH || flags == ARCS_FOR_DIRECT_ADDRESSING) {
+        //System.out.println("    nextArc fixed length arc");
+        // Special arc which is actually a node header for fixed length arcs.
+        int numArcs = in.readVInt();
+        in.readVInt(); // Skip bytesPerArc.
+        if (flags == ARCS_FOR_BINARY_SEARCH) {
+          in.readByte(); // Skip arc flags.
+        } else {
+          in.skipBytes(getNumPresenceBytes(numArcs));
+        }
       }
-      // skip flags
-      in.readByte();
     } else {
       if (arc.bytesPerArc() != 0) {
         //System.out.println("    nextArc real array");
-        // arcs are in an array
-        if (arc.arcIdx() >= 0) {
-          in.setPosition(arc.posArcsStart());
-          // point at next arc, -1 to skip flags
-          in.skipBytes((1 + arc.arcIdx()) * arc.bytesPerArc() + 1);
+        // Arcs have fixed length.
+        if (arc.nodeFlags() == ARCS_FOR_BINARY_SEARCH) {
+          // Point to next arc, -1 to skip arc flags.
+          in.setPosition(arc.posArcsStart() - (1 + arc.arcIdx()) * arc.bytesPerArc() - 1);
         } else {
-          in.setPosition(arc.nextArc());
-          byte flags = in.readByte();
-          // skip missing arcs
-          while (flag(flags, BIT_MISSING_ARC)) {
-            in.skipBytes(arc.bytesPerArc() - 1);
-            flags = in.readByte();
-          }
+          assert arc.nodeFlags() == ARCS_FOR_DIRECT_ADDRESSING;
+          // Direct addressing node. The label is not stored but rather inferred
+          // based on first label and arc index in the range.
+          assert assertPresenceBytesAreValid(arc);
+          assert arc.bitTable().isBitSet(arc.arcIdx());
+          int nextIndex = arc.bitTable().nextBitSet(arc.arcIdx());
+          assert nextIndex != -1;
+          return arc.firstLabel() + nextIndex;
         }
       } else {
-        // arcs are packed
-        //System.out.println("    nextArc real packed");
-        // -1 to skip flags
+        // Arcs have variable length.
+        //System.out.println("    nextArc real list");
+        // Position to next arc, -1 to skip flags.
         in.setPosition(arc.nextArc() - 1);
       }
     }

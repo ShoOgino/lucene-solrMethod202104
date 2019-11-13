@@ -1,5 +1,14 @@
+  /**
+   * Reads an arc.
+   * <br>Precondition: The arc flags byte has already been read and set;
+   * the given BytesReader is positioned just after the arc flags byte.
+   */
   private Arc<T> readArc(Arc<T> arc, BytesReader in) throws IOException {
-    arc.label = readLabel(in);
+    if (arc.nodeFlags() == ARCS_FOR_DIRECT_ADDRESSING) {
+      arc.label = arc.firstLabel() + arc.arcIdx();
+    } else {
+      arc.label = readLabel(in);
+    }
 
     if (arc.flag(BIT_ARC_HAS_OUTPUT)) {
       arc.output = outputs.read(in);
@@ -19,13 +28,9 @@
       } else {
         arc.target = NON_FINAL_END_NODE;
       }
-      if (arc.bytesPerArc() == 0) {
-        arc.nextArc = in.getPosition();
-      } else {
-        arc.nextArc -= arc.bytesPerArc();
-      }
+      arc.nextArc = in.getPosition(); // Only useful for list.
     } else if (arc.flag(BIT_TARGET_NEXT)) {
-      arc.nextArc = in.getPosition();
+      arc.nextArc = in.getPosition(); // Only useful for list.
       // TODO: would be nice to make this lazy -- maybe
       // caller doesn't need the target and is scanning arcs...
       if (!arc.flag(BIT_LAST_ARC)) {
@@ -33,21 +38,14 @@
           // must scan
           seekToNextNode(in);
         } else {
-          in.setPosition(arc.posArcsStart());
-          in.skipBytes(arc.bytesPerArc() * arc.numArcs());
+          int numArcs = arc.nodeFlags == ARCS_FOR_DIRECT_ADDRESSING ? getNumArcsDirectAddressing(arc) : arc.numArcs();
+          in.setPosition(arc.posArcsStart() - arc.bytesPerArc() * numArcs);
         }
       }
       arc.target = in.getPosition();
     } else {
       arc.target = readUnpackedNodeTarget(in);
-      if (arc.bytesPerArc() > 0 && arc.arcIdx() == Integer.MIN_VALUE) {
-        // nextArc was pointing to *this* arc when we entered; advance to the next
-        // if it is a missing arc, we will skip it later
-        arc.nextArc = arc.nextArc() - arc.bytesPerArc();
-      } else {
-        // in list and fixed table encodings, the next arc always follows this one
-        arc.nextArc = in.getPosition();
-      }
+      arc.nextArc = in.getPosition(); // Only useful for list.
     }
     return arc;
   }

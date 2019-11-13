@@ -14,11 +14,12 @@
     final long startAddress = builder.bytes.getPosition();
     //System.out.println("  startAddr=" + startAddress);
 
-    final boolean doFixedArray = shouldExpand(builder, nodeIn);
-    if (doFixedArray) {
-      //System.out.println("  fixedArray");
-      if (builder.reusedBytesPerArc.length < nodeIn.numArcs) {
-        builder.reusedBytesPerArc = new int[ArrayUtil.oversize(nodeIn.numArcs, 1)];
+    final boolean doFixedLengthArcs = shouldExpandNodeWithFixedLengthArcs(builder, nodeIn);
+    if (doFixedLengthArcs) {
+      //System.out.println("  fixed length arcs");
+      if (builder.numBytesPerArc.length < nodeIn.numArcs) {
+        builder.numBytesPerArc = new int[ArrayUtil.oversize(nodeIn.numArcs, Integer.BYTES)];
+        builder.numLabelBytesPerArc = new int[builder.numBytesPerArc.length];
       }
     }
 
@@ -28,6 +29,7 @@
 
     long lastArcStart = builder.bytes.getPosition();
     int maxBytesPerArc = 0;
+    int maxBytesPerArcWithoutLabel = 0;
     for(int arcIdx=0; arcIdx < nodeIn.numArcs; arcIdx++) {
       final Builder.Arc<T> arc = nodeIn.arcs[arcIdx];
       final Builder.CompiledNode target = (Builder.CompiledNode) arc.target;
@@ -38,7 +40,7 @@
         flags += BIT_LAST_ARC;
       }
 
-      if (builder.lastFrozenNode == target.node && !doFixedArray) {
+      if (builder.lastFrozenNode == target.node && !doFixedLengthArcs) {
         // TODO: for better perf (but more RAM used) we
         // could avoid this except when arc is "near" the
         // last arc:
@@ -65,7 +67,9 @@
       }
 
       builder.bytes.writeByte((byte) flags);
+      long labelStart = builder.bytes.getPosition();
       writeLabel(builder.bytes, arc.label);
+      int numLabelBytes = (int) (builder.bytes.getPosition() - labelStart);
 
       // System.out.println("  write arc: label=" + (char) arc.label + " flags=" + flags + " target=" + target.node + " pos=" + bytes.getPosition() + " output=" + outputs.outputToString(arc.output));
 
@@ -87,15 +91,18 @@
 
       // just write the arcs "like normal" on first pass, but record how many bytes each one took
       // and max byte size:
-      if (doFixedArray) {
-        builder.reusedBytesPerArc[arcIdx] = (int) (builder.bytes.getPosition() - lastArcStart);
+      if (doFixedLengthArcs) {
+        int numArcBytes = (int) (builder.bytes.getPosition() - lastArcStart);
+        builder.numBytesPerArc[arcIdx] = numArcBytes;
+        builder.numLabelBytesPerArc[arcIdx] = numLabelBytes;
         lastArcStart = builder.bytes.getPosition();
-        maxBytesPerArc = Math.max(maxBytesPerArc, builder.reusedBytesPerArc[arcIdx]);
-        //System.out.println("    bytes=" + builder.reusedBytesPerArc[arcIdx]);
+        maxBytesPerArc = Math.max(maxBytesPerArc, numArcBytes);
+        maxBytesPerArcWithoutLabel = Math.max(maxBytesPerArcWithoutLabel, numArcBytes - numLabelBytes);
+        //System.out.println("    arcBytes=" + numArcBytes + " labelBytes=" + numLabelBytes);
       }
     }
 
-    // TODO: try to avoid wasteful cases: disable doFixedArray in that case
+    // TODO: try to avoid wasteful cases: disable doFixedLengthArcs in that case
     /* 
      * 
      * LUCENE-4682: what is a fair heuristic here?
@@ -105,43 +112,33 @@
      * 3. waste: numBytes vs numBytesExpanded
      * 
      * the one below just looks at #3
-    if (doFixedArray) {
+    if (doFixedLengthArcs) {
       // rough heuristic: make this 1.25 "waste factor" a parameter to the phd ctor????
       int numBytes = lastArcStart - startAddress;
       int numBytesExpanded = maxBytesPerArc * nodeIn.numArcs;
       if (numBytesExpanded > numBytes*1.25) {
-        doFixedArray = false;
+        doFixedLengthArcs = false;
       }
     }
     */
 
-    if (doFixedArray) {
-      final int MAX_HEADER_SIZE = 11; // header(byte) + numArcs(vint) + numBytes(vint)
+    if (doFixedLengthArcs) {
       assert maxBytesPerArc > 0;
       // 2nd pass just "expands" all arcs to take up a fixed byte size
 
-      // create the header
-      // TODO: clean this up: or just rewind+reuse and deal with it
-      byte[] header = new byte[MAX_HEADER_SIZE];
-      ByteArrayDataOutput bad = new ByteArrayDataOutput(header);
-      // write a "false" first arc:
-      bad.writeByte(ARCS_AS_ARRAY_PACKED);
-      bad.writeVInt(nodeIn.numArcs);
-      bad.writeVInt(maxBytesPerArc);
-      int headerLen = bad.getPosition();
-      
-      final long fixedArrayStart = startAddress + headerLen;
-
-      writeArrayPacked(builder, nodeIn, fixedArrayStart, maxBytesPerArc);
-      
-      // now write the header
-      builder.bytes.writeBytes(startAddress, header, 0, headerLen);
+      int labelRange = nodeIn.arcs[nodeIn.numArcs - 1].label - nodeIn.arcs[0].label + 1;
+      assert labelRange > 0;
+      if (shouldExpandNodeWithDirectAddressing(builder, nodeIn, maxBytesPerArc, maxBytesPerArcWithoutLabel, labelRange)) {
+        writeNodeForDirectAddressing(builder, nodeIn, startAddress, maxBytesPerArcWithoutLabel, labelRange);
+        builder.directAddressingNodeCount++;
+      } else {
+        writeNodeForBinarySearch(builder, nodeIn, startAddress, maxBytesPerArc);
+        builder.binarySearchNodeCount++;
+      }
     }
 
     final long thisNodeAddress = builder.bytes.getPosition()-1;
-
     builder.bytes.reverse(startAddress, thisNodeAddress);
-
     builder.nodeCount++;
     return thisNodeAddress;
   }

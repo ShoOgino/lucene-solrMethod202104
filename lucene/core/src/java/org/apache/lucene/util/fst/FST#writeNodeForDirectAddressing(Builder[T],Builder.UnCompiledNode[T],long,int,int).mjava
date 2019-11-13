@@ -1,0 +1,65 @@
+  private void writeNodeForDirectAddressing(Builder<T> builder, Builder.UnCompiledNode<T> nodeIn, long startAddress, int maxBytesPerArcWithoutLabel, int labelRange) {
+    // Expand the arcs backwards in a buffer because we remove the labels.
+    // So the obtained arcs might occupy less space. This is the reason why this
+    // whole method is more complex.
+    // Drop the label bytes since we can infer the label based on the arc index,
+    // the presence bits, and the first label. Keep the first label.
+    int headerMaxLen = 11;
+    int numPresenceBytes = getNumPresenceBytes(labelRange);
+    long srcPos = builder.bytes.getPosition();
+    int totalArcBytes = builder.numLabelBytesPerArc[0] + nodeIn.numArcs * maxBytesPerArcWithoutLabel;
+    int bufferOffset = headerMaxLen + numPresenceBytes + totalArcBytes;
+    byte[] buffer = builder.fixedLengthArcsBuffer.ensureCapacity(bufferOffset).getBytes();
+    // Copy the arcs to the buffer, dropping all labels except first one.
+    for (int arcIdx = nodeIn.numArcs - 1; arcIdx >= 0; arcIdx--) {
+      bufferOffset -= maxBytesPerArcWithoutLabel;
+      int srcArcLen = builder.numBytesPerArc[arcIdx];
+      srcPos -= srcArcLen;
+      int labelLen = builder.numLabelBytesPerArc[arcIdx];
+      // Copy the flags.
+      builder.bytes.copyBytes(srcPos, buffer, bufferOffset, 1);
+      // Skip the label, copy the remaining.
+      int remainingArcLen = srcArcLen - 1 - labelLen;
+      if (remainingArcLen != 0) {
+        builder.bytes.copyBytes(srcPos + 1 + labelLen, buffer, bufferOffset + 1, remainingArcLen);
+      }
+      if (arcIdx == 0) {
+        // Copy the label of the first arc only.
+        bufferOffset -= labelLen;
+        builder.bytes.copyBytes(srcPos + 1, buffer, bufferOffset, labelLen);
+      }
+    }
+    assert bufferOffset == headerMaxLen + numPresenceBytes;
+
+    // Build the header in the buffer.
+    // It is a false/special arc which is in fact a node header with node flags followed by node metadata.
+    builder.fixedLengthArcsBuffer
+        .resetPosition()
+        .writeByte(ARCS_FOR_DIRECT_ADDRESSING)
+        .writeVInt(labelRange) // labelRange instead of numArcs.
+        .writeVInt(maxBytesPerArcWithoutLabel); // maxBytesPerArcWithoutLabel instead of maxBytesPerArc.
+    int headerLen = builder.fixedLengthArcsBuffer.getPosition();
+
+    // Prepare the builder byte store. Enlarge or truncate if needed.
+    long nodeEnd = startAddress + headerLen + numPresenceBytes + totalArcBytes;
+    long currentPosition = builder.bytes.getPosition();
+    if (nodeEnd >= currentPosition) {
+      builder.bytes.skipBytes((int) (nodeEnd - currentPosition));
+    } else {
+      builder.bytes.truncate(nodeEnd);
+    }
+    assert builder.bytes.getPosition() == nodeEnd;
+
+    // Write the header.
+    long writeOffset = startAddress;
+    builder.bytes.writeBytes(writeOffset, builder.fixedLengthArcsBuffer.getBytes(), 0, headerLen);
+    writeOffset += headerLen;
+
+    // Write the presence bits
+    writePresenceBits(builder, nodeIn, writeOffset, numPresenceBytes);
+    writeOffset += numPresenceBytes;
+
+    // Write the first label and the arcs.
+    builder.bytes.writeBytes(writeOffset, builder.fixedLengthArcsBuffer.getBytes(), bufferOffset, totalArcBytes);
+  }
+

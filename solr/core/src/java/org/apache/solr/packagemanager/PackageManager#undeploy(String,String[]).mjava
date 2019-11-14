@@ -1,0 +1,43 @@
+  /**
+   * Undeploys a packge from given collections.
+   */
+  public void undeploy(String packageName, String[] collections) throws SolrException {
+    for (String collection: collections) {
+      SolrPackageInstance deployedPackage = getPackagesDeployed(collection).get(packageName);
+      Map<String, String> collectionParameterOverrides = getPackageParams(packageName, collection);
+
+      // Run the uninstall command for all plugins
+      Map<String, String> systemParams = Map.of("collection", collection, "package-name", deployedPackage.name, "package-version", deployedPackage.version);
+
+      for (Plugin plugin: deployedPackage.plugins) {
+        Command cmd = plugin.uninstallCommand;
+        if (cmd != null && !Strings.isNullOrEmpty(cmd.method)) {
+          if ("POST".equalsIgnoreCase(cmd.method)) {
+            try {
+              String payload = PackageUtils.resolve(getMapper().writeValueAsString(cmd.payload), deployedPackage.parameterDefaults, collectionParameterOverrides, systemParams);
+              String path = PackageUtils.resolve(cmd.path, deployedPackage.parameterDefaults, collectionParameterOverrides, systemParams);
+              PackageUtils.printGreen("Executing " + payload + " for path:" + path);
+              SolrCLI.postJsonToSolr(solrClient, path, payload);
+            } catch (Exception ex) {
+              throw new SolrException(ErrorCode.SERVER_ERROR, ex);
+            }
+          } else {
+            throw new SolrException(ErrorCode.BAD_REQUEST, "Non-POST method not supported for uninstall commands");
+          }
+        } else {
+          PackageUtils.printRed("There is no uninstall command to execute for plugin: " + plugin.name);
+        }
+      }
+
+      // Set the package version in the collection's parameters
+      try {
+        SolrCLI.postJsonToSolr(solrClient, "/api/collections/" + collection + "/config/params", "{set: {PKG_VERSIONS: {"+packageName+": null}}}");
+        SolrCLI.postJsonToSolr(solrClient, "/api/cluster/package", "{\"refresh\": \"" + packageName + "\"}");
+      } catch (Exception ex) {
+        throw new SolrException(ErrorCode.SERVER_ERROR, ex);
+      }
+
+      // TODO: Also better to remove the package parameters
+    }
+  }
+

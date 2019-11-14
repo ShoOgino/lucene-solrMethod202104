@@ -1,0 +1,101 @@
+  private boolean deployPackage(SolrPackageInstance packageInstance, boolean pegToLatest, boolean isUpdate, boolean noprompt,
+      List<String> collections, String overrides[]) {
+    for (String collection: collections) {
+
+      SolrPackageInstance deployedPackage = getPackagesDeployed(collection).get(packageInstance.name);
+      if (packageInstance.equals(deployedPackage)) {
+        if (!pegToLatest) {
+          PackageUtils.printRed("Package " + packageInstance + " already deployed on "+collection);
+          continue;
+        }
+      } else {
+        if (deployedPackage != null && !isUpdate) {
+          PackageUtils.printRed("Package " + deployedPackage + " already deployed on "+collection+". To update to "+packageInstance+", pass --update parameter.");
+          continue;
+        }
+      }
+
+      Map<String,String> collectionParameterOverrides = getCollectionParameterOverrides(packageInstance, isUpdate, overrides, collection);
+
+      // Get package params
+      try {
+        boolean packageParamsExist = ((Map)PackageUtils.getJson(solrClient.getHttpClient(), solrBaseUrl + "/api/collections/abc/config/params/packages", Map.class)
+            .getOrDefault("response", Collections.emptyMap())).containsKey("params");
+        SolrCLI.postJsonToSolr(solrClient, "/api/collections/" + collection + "/config/params",
+            getMapper().writeValueAsString(Collections.singletonMap(packageParamsExist? "update": "set",
+                Collections.singletonMap("packages", Collections.singletonMap(packageInstance.name, collectionParameterOverrides)))));
+      } catch (Exception e) {
+        throw new SolrException(ErrorCode.SERVER_ERROR, e);
+      }
+
+      // Set the package version in the collection's parameters
+      try {
+        SolrCLI.postJsonToSolr(solrClient, "/api/collections/" + collection + "/config/params",
+            "{set:{PKG_VERSIONS:{" + packageInstance.name+": '" + (pegToLatest? PackagePluginHolder.LATEST: packageInstance.version)+"'}}}");
+      } catch (Exception ex) {
+        throw new SolrException(ErrorCode.SERVER_ERROR, ex);
+      }
+
+      // If updating, refresh the package version for this to take effect
+      if (isUpdate || pegToLatest) {
+        try {
+          SolrCLI.postJsonToSolr(solrClient, "/api/cluster/package", "{\"refresh\": \"" + packageInstance.name + "\"}");
+        } catch (Exception ex) {
+          throw new SolrException(ErrorCode.SERVER_ERROR, ex);
+        }
+      }
+
+      // If it is a fresh deploy on a collection, run setup commands all the plugins in the package
+      if (!isUpdate) {
+        Map<String, String> systemParams = Map.of("collection", collection, "package-name", packageInstance.name, "package-version", packageInstance.version);
+
+        for (Plugin plugin: packageInstance.plugins) {
+          Command cmd = plugin.setupCommand;
+          if (cmd != null && !Strings.isNullOrEmpty(cmd.method)) {
+            if ("POST".equalsIgnoreCase(cmd.method)) {
+              try {
+                String payload = PackageUtils.resolve(getMapper().writeValueAsString(cmd.payload), packageInstance.parameterDefaults, collectionParameterOverrides, systemParams);
+                String path = PackageUtils.resolve(cmd.path, packageInstance.parameterDefaults, collectionParameterOverrides, systemParams);
+                PackageUtils.printGreen("Executing " + payload + " for path:" + path);
+                boolean shouldExecute = true;
+                if (!noprompt) { // show a prompt asking user to execute the setup command for the plugin
+                  PackageUtils.print(PackageUtils.YELLOW, "Execute this command (y/n): ");
+                  String userInput = new Scanner(System.in, "UTF-8").next();
+                  if (!"yes".equalsIgnoreCase(userInput) && !"y".equalsIgnoreCase(userInput)) {
+                    shouldExecute = false;
+                    PackageUtils.printRed("Skipping setup command for deploying (deployment verification may fail)."
+                        + " Please run this step manually or refer to package documentation.");
+                  }
+                }
+                if (shouldExecute) {
+                  SolrCLI.postJsonToSolr(solrClient, path, payload);
+                }
+              } catch (Exception ex) {
+                throw new SolrException(ErrorCode.SERVER_ERROR, ex);
+              }
+            } else {
+              throw new SolrException(ErrorCode.BAD_REQUEST, "Non-POST method not supported for setup commands");
+            }
+          } else {
+            PackageUtils.printRed("There is no setup command to execute for plugin: " + plugin.name);
+          }
+        }
+      }
+
+      // Set the package version in the collection's parameters
+      try {
+        SolrCLI.postJsonToSolr(solrClient, "/api/collections/" + collection + "/config/params",
+            "{update:{PKG_VERSIONS:{'" + packageInstance.name + "' : '" + (pegToLatest? PackagePluginHolder.LATEST: packageInstance.version) + "'}}}");
+      } catch (Exception ex) {
+        throw new SolrException(ErrorCode.SERVER_ERROR, ex);
+      }
+    }
+
+    // Verify that package was successfully deployed
+    boolean success = verify(packageInstance, collections);
+    if (success) {
+      PackageUtils.printGreen("Deployed and verified package: " + packageInstance.name + ", version: " + packageInstance.version);
+    }
+    return success;
+  }
+

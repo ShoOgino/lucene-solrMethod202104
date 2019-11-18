@@ -1,0 +1,41 @@
+  CompletionFieldsProducer(String codecName, SegmentReadState state, FSTLoadMode fstLoadMode) throws IOException {
+    String indexFile = IndexFileNames.segmentFileName(state.segmentInfo.name, state.segmentSuffix, INDEX_EXTENSION);
+    delegateFieldsProducer = null;
+    boolean success = false;
+
+    try (ChecksumIndexInput index = state.directory.openChecksumInput(indexFile, state.context)) {
+      // open up dict file containing all fsts
+      String dictFile = IndexFileNames.segmentFileName(state.segmentInfo.name, state.segmentSuffix, DICT_EXTENSION);
+      dictIn = state.directory.openInput(dictFile, state.context);
+      CodecUtil.checkIndexHeader(dictIn, codecName, COMPLETION_CODEC_VERSION, COMPLETION_VERSION_CURRENT, state.segmentInfo.getId(), state.segmentSuffix);
+      // just validate the footer for the dictIn
+      CodecUtil.retrieveChecksum(dictIn);
+
+      // open up index file (fieldNumber, offset)
+      CodecUtil.checkIndexHeader(index, codecName, COMPLETION_CODEC_VERSION, COMPLETION_VERSION_CURRENT, state.segmentInfo.getId(), state.segmentSuffix);
+      // load delegate PF
+      PostingsFormat delegatePostingsFormat = PostingsFormat.forName(index.readString());
+      delegateFieldsProducer = delegatePostingsFormat.fieldsProducer(state);
+
+      // read suggest field numbers and their offsets in the terms file from index
+      int numFields = index.readVInt();
+      readers = new HashMap<>(numFields);
+      for (int i = 0; i < numFields; i++) {
+        int fieldNumber = index.readVInt();
+        long offset = index.readVLong();
+        long minWeight = index.readVLong();
+        long maxWeight = index.readVLong();
+        byte type = index.readByte();
+        FieldInfo fieldInfo = state.fieldInfos.fieldInfo(fieldNumber);
+        // we don't load the FST yet
+        readers.put(fieldInfo.name, new CompletionsTermsReader(dictIn, offset, minWeight, maxWeight, type, fstLoadMode));
+      }
+      CodecUtil.checkFooter(index);
+      success = true;
+    } finally {
+      if (success == false) {
+        IOUtils.closeWhileHandlingException(delegateFieldsProducer, dictIn);
+      }
+    }
+  }
+

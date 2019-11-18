@@ -1,0 +1,66 @@
+    @Override
+    public int advance(int target) throws IOException {
+      if (target > nextSkipDoc) {
+        if (skipper == null) {
+          // Lazy init: first time this enum has ever been used for skipping
+          skipper = new Lucene84SkipReader(docIn.clone(),
+                                        MAX_SKIP_LEVELS,
+                                        true,
+                                        indexHasOffsets,
+                                        indexHasPayloads);
+        }
+
+        if (!skipped) {
+          assert skipOffset != -1;
+          // This is the first time this enum has skipped
+          // since reset() was called; load the skip data:
+          skipper.init(docTermStartFP+skipOffset, docTermStartFP, posTermStartFP, payTermStartFP, docFreq);
+          skipped = true;
+        }
+
+        final int newDocUpto = skipper.skipTo(target) + 1;
+
+        if (newDocUpto > docUpto) {
+          // Skipper moved
+          assert newDocUpto % BLOCK_SIZE == 0 : "got " + newDocUpto;
+          docUpto = newDocUpto;
+
+          // Force to read next block
+          docBufferUpto = BLOCK_SIZE;
+          accum = skipper.getDoc();
+          docIn.seek(skipper.getDocPointer());
+          posPendingFP = skipper.getPosPointer();
+          payPendingFP = skipper.getPayPointer();
+          posPendingCount = skipper.getPosBufferUpto();
+          lastStartOffset = 0; // new document
+          payloadByteUpto = skipper.getPayloadByteUpto();
+        }
+        nextSkipDoc = skipper.getNextSkipDoc();
+      }
+      if (docBufferUpto == BLOCK_SIZE) {
+        refillDocs();
+      }
+
+      // Now scan:
+      long doc;
+      while (true) {
+        doc = docBuffer[docBufferUpto];
+        freq = (int) freqBuffer[docBufferUpto];
+        posPendingCount += freq;
+        docBufferUpto++;
+        docUpto++;
+
+        if (doc >= target) {
+          break;
+        }
+
+        if (docBufferUpto == BLOCK_SIZE) {
+          return this.doc = NO_MORE_DOCS;
+        }
+      }
+
+      position = 0;
+      lastStartOffset = 0;
+      return this.doc = (int) doc;
+    }
+

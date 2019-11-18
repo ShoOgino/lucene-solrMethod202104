@@ -1,0 +1,73 @@
+  /**
+   * Encode 128 integers from {@code longs} into {@code out}.
+   */
+  void encode(long[] longs, int bitsPerValue, DataOutput out) throws IOException {
+    final int nextPrimitive;
+    final int numLongs;
+    if (bitsPerValue <= 8) {
+      nextPrimitive = 8;
+      numLongs = BLOCK_SIZE / 8;
+      collapse8(longs);
+    } else if (bitsPerValue <= 16) {
+      nextPrimitive = 16;
+      numLongs = BLOCK_SIZE / 4;
+      collapse16(longs);
+    } else {
+      nextPrimitive = 32;
+      numLongs = BLOCK_SIZE / 2;
+      collapse32(longs);
+    }
+
+    final int numLongsPerShift = bitsPerValue * 2;
+    Arrays.fill(tmp, 0L);
+    int idx = 0;
+    for (int shift = nextPrimitive - bitsPerValue; shift >= 0; shift -= bitsPerValue) {
+      for (int i = 0; i < numLongsPerShift; ++i) {
+        tmp[i] |= longs[idx++] << shift;
+      }
+    }
+
+    final int remainingBitsPerLong = nextPrimitive % bitsPerValue;
+    final long maskRemainingBitsPerLong;
+    if (nextPrimitive == 8) {
+      maskRemainingBitsPerLong = mask8(remainingBitsPerLong);
+    } else if (nextPrimitive == 16) {
+      maskRemainingBitsPerLong = mask16(remainingBitsPerLong);
+    } else {
+      maskRemainingBitsPerLong = mask32(remainingBitsPerLong);
+    }
+    int tmpIdx = 0;
+    int remainingBitsPerValue = bitsPerValue;
+    while (idx < numLongs) {
+      if (remainingBitsPerValue > remainingBitsPerLong) {
+        remainingBitsPerValue -= remainingBitsPerLong;
+        tmp[tmpIdx++] |= (longs[idx] >>> remainingBitsPerValue) & maskRemainingBitsPerLong;
+        if (remainingBitsPerValue == 0) {
+          idx++;
+          remainingBitsPerValue = bitsPerValue;
+        }
+      } else {
+        final long mask1, mask2;
+        if (nextPrimitive == 8) {
+          mask1 = mask8(remainingBitsPerValue);
+          mask2 = mask8(remainingBitsPerLong - remainingBitsPerValue);
+        } else if (nextPrimitive == 16) {
+          mask1 = mask16(remainingBitsPerValue);
+          mask2 = mask16(remainingBitsPerLong - remainingBitsPerValue);
+        } else {
+          mask1 = mask32(remainingBitsPerValue);
+          mask2 = mask32(remainingBitsPerLong - remainingBitsPerValue);
+        }
+        tmp[tmpIdx] |= (longs[idx++] & mask1) << (remainingBitsPerLong - remainingBitsPerValue);
+        remainingBitsPerValue = bitsPerValue - remainingBitsPerLong + remainingBitsPerValue;
+        tmp[tmpIdx++] |= (longs[idx] >>> remainingBitsPerValue) & mask2;
+      }
+    }
+
+    for (int i = 0; i < numLongsPerShift; ++i) {
+      // Java longs are big endian and we want to read little endian longs, so we need to reverse bytes
+      long l = Long.reverseBytes(tmp[i]);
+      out.writeLong(l);
+    }
+  }
+

@@ -1,0 +1,63 @@
+  /**
+   * @param name  The name of the slice
+   * @param replicas The replicas of the slice.  This is used directly and a copy is not made.  If null, replicas will be constructed from props.
+   * @param props  The properties of the slice - a shallow copy will always be made.
+   */
+  public Slice(String name, Map<String,Replica> replicas, Map<String,Object> props, String collection) {
+    super( props==null ? new LinkedHashMap<String,Object>(2) : new LinkedHashMap<>(props));
+    this.name = name;
+    this.collection = collection;
+
+    Object rangeObj = propMap.get(RANGE);
+    if (propMap.get(ZkStateReader.STATE_PROP) != null) {
+      this.state = State.getState((String) propMap.get(ZkStateReader.STATE_PROP));
+    } else {
+      this.state = State.ACTIVE;                         //Default to ACTIVE
+      propMap.put(ZkStateReader.STATE_PROP, state.toString());
+    }
+    DocRouter.Range tmpRange = null;
+    if (rangeObj instanceof DocRouter.Range) {
+      tmpRange = (DocRouter.Range)rangeObj;
+    } else if (rangeObj != null) {
+      // Doesn't support custom implementations of Range, but currently not needed.
+      tmpRange = DocRouter.DEFAULT.fromString(rangeObj.toString());
+    }
+    range = tmpRange;
+
+    /** debugging.  this isn't an error condition for custom sharding.
+    if (range == null) {
+      System.out.println("###### NO RANGE for " + name + " props=" + props);
+    }
+    **/
+
+    if (propMap.containsKey(PARENT) && propMap.get(PARENT) != null)
+      this.parent = (String) propMap.get(PARENT);
+    else
+      this.parent = null;
+
+    replicationFactor = null;  // future
+
+    // add the replicas *after* the other properties (for aesthetics, so it's easy to find slice properties in the JSON output)
+    this.replicas = replicas != null ? replicas : makeReplicas(collection,name, (Map<String,Object>)propMap.get(REPLICAS));
+    propMap.put(REPLICAS, this.replicas);
+
+    Map<String, Object> rules = (Map<String, Object>) propMap.get("routingRules");
+    if (rules != null) {
+      this.routingRules = new HashMap<>();
+      for (Map.Entry<String, Object> entry : rules.entrySet()) {
+        Object o = entry.getValue();
+        if (o instanceof Map) {
+          Map map = (Map) o;
+          RoutingRule rule = new RoutingRule(entry.getKey(), map);
+          routingRules.put(entry.getKey(), rule);
+        } else {
+          routingRules.put(entry.getKey(), (RoutingRule) o);
+        }
+      }
+    } else {
+      this.routingRules = null;
+    }
+
+    leader = findLeader();
+  }
+

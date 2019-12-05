@@ -1,0 +1,49 @@
+  private void doWrite(Writer writer, SolrQueryRequest request, SolrQueryResponse response) throws IOException {
+    VelocityEngine engine = createEngine(request);  // TODO: have HTTP headers available for configuring engine
+
+    Template template = getTemplate(engine, request);
+
+    VelocityContext context = createContext(request, response);
+    context.put("engine", engine);  // for $engine.resourceExists(...)
+
+    String layoutTemplate = request.getParams().get(LAYOUT);
+    boolean layoutEnabled = request.getParams().getBool(LAYOUT_ENABLED, true) && layoutTemplate != null;
+
+    String jsonWrapper = request.getParams().get(JSON);
+    boolean wrapResponse = layoutEnabled || jsonWrapper != null;
+
+    // create output
+    if (!wrapResponse) {
+      // straight-forward template/context merge to output
+      template.merge(context, writer);
+    }
+    else {
+      // merge to a string buffer, then wrap with layout and finally as JSON
+      StringWriter stringWriter = new StringWriter();
+      template.merge(context, stringWriter);
+
+      if (layoutEnabled) {
+        context.put("content", stringWriter.toString());
+        stringWriter = new StringWriter();
+        try {
+          engine.getTemplate(layoutTemplate + TEMPLATE_EXTENSION).merge(context, stringWriter);
+        } catch (Exception e) {
+          throw new IOException(e.getMessage());
+        }
+      }
+
+      if (jsonWrapper != null) {
+        for (int i=0; i<jsonWrapper.length(); i++) {
+          if (!Character.isJavaIdentifierPart(jsonWrapper.charAt(i))) {
+            throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Invalid function name for " + JSON + ": '" + jsonWrapper + "'");
+          }
+        }
+        writer.write(jsonWrapper + "(");
+        writer.write(getJSONWrap(stringWriter.toString()));
+        writer.write(')');
+      } else {  // using a layout, but not JSON wrapping
+        writer.write(stringWriter.toString());
+      }
+    }
+  }
+

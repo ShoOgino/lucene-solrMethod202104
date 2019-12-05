@@ -1,5 +1,29 @@
   @Override
   public SlotAcc createSlotAcc(FacetContext fcontext, int numDocs, int numSlots) throws IOException {
-    return new AvgSlotAcc(getArg(), fcontext, numSlots);
+    ValueSource vs = getArg();
+
+    if (vs instanceof FieldNameValueSource) {
+      String field = ((FieldNameValueSource) vs).getFieldName();
+      SchemaField sf = fcontext.qcontext.searcher().getSchema().getField(field);
+      if (sf.getType().getNumberType() == null) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+            name() + " aggregation not supported for " + sf.getType().getTypeName());
+      }
+      if (sf.multiValued() || sf.getType().multiValuedFieldCache()) {
+        if (sf.hasDocValues()) {
+          if (sf.getType().isPointField()) {
+            return new AvgSortedNumericAcc(fcontext, sf, numSlots);
+          }
+          return new AvgSortedSetAcc(fcontext, sf, numSlots);
+        }
+        if (sf.getType().isPointField()) {
+          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+              name() + " aggregation not supported for PointField w/o docValues");
+        }
+        return new AvgUnInvertedFieldAcc(fcontext, sf, numSlots);
+      }
+      vs = sf.getType().getValueSource(sf, null);
+    }
+    return new AvgSlotAcc(vs, fcontext, numSlots);
   }
 

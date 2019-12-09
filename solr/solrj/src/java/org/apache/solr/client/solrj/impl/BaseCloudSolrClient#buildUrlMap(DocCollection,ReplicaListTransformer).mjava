@@ -1,9 +1,9 @@
-  private Map<String,List<String>> buildUrlMap(DocCollection col) {
+  private Map<String,List<String>> buildUrlMap(DocCollection col, ReplicaListTransformer replicaListTransformer) {
     Map<String, List<String>> urlMap = new HashMap<>();
     Slice[] slices = col.getActiveSlicesArr();
     for (Slice slice : slices) {
       String name = slice.getName();
-      List<String> urls = new ArrayList<>();
+      List<Replica> sortedReplicas = new ArrayList<>();
       Replica leader = slice.getLeader();
       if (directUpdatesToLeadersOnly && leader == null) {
         for (Replica replica : slice.getReplicas(
@@ -20,20 +20,22 @@
         // take unoptimized general path - we cannot find a leader yet
         return null;
       }
-      ZkCoreNodeProps zkProps = new ZkCoreNodeProps(leader);
-      String url = zkProps.getCoreUrl();
-      urls.add(url);
+
       if (!directUpdatesToLeadersOnly) {
         for (Replica replica : slice.getReplicas()) {
-          if (!replica.getNodeName().equals(leader.getNodeName()) &&
-              !replica.getName().equals(leader.getName())) {
-            ZkCoreNodeProps zkProps1 = new ZkCoreNodeProps(replica);
-            String url1 = zkProps1.getCoreUrl();
-            urls.add(url1);
+          if (!replica.equals(leader)) {
+            sortedReplicas.add(replica);
           }
         }
       }
-      urlMap.put(name, urls);
+
+      // Sort the non-leader replicas according to the request parameters
+      replicaListTransformer.transform(sortedReplicas);
+
+      // put the leaderUrl first.
+      sortedReplicas.add(0, leader);
+
+      urlMap.put(name, sortedReplicas.stream().map(Replica::getCoreUrl).collect(Collectors.toList()));
     }
     return urlMap;
   }

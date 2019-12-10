@@ -1,0 +1,145 @@
+  // serializes new node by appending its bytes to the end
+  // of the current byte[]
+  long addNode(FSTCompiler<T> fstCompiler, FSTCompiler.UnCompiledNode<T> nodeIn) throws IOException {
+    T NO_OUTPUT = outputs.getNoOutput();
+
+    //System.out.println("FST.addNode pos=" + bytes.getPosition() + " numArcs=" + nodeIn.numArcs);
+    if (nodeIn.numArcs == 0) {
+      if (nodeIn.isFinal) {
+        return FINAL_END_NODE;
+      } else {
+        return NON_FINAL_END_NODE;
+      }
+    }
+    final long startAddress = fstCompiler.bytes.getPosition();
+    //System.out.println("  startAddr=" + startAddress);
+
+    final boolean doFixedLengthArcs = shouldExpandNodeWithFixedLengthArcs(fstCompiler, nodeIn);
+    if (doFixedLengthArcs) {
+      //System.out.println("  fixed length arcs");
+      if (fstCompiler.numBytesPerArc.length < nodeIn.numArcs) {
+        fstCompiler.numBytesPerArc = new int[ArrayUtil.oversize(nodeIn.numArcs, Integer.BYTES)];
+        fstCompiler.numLabelBytesPerArc = new int[fstCompiler.numBytesPerArc.length];
+      }
+    }
+
+    fstCompiler.arcCount += nodeIn.numArcs;
+    
+    final int lastArc = nodeIn.numArcs-1;
+
+    long lastArcStart = fstCompiler.bytes.getPosition();
+    int maxBytesPerArc = 0;
+    int maxBytesPerArcWithoutLabel = 0;
+    for(int arcIdx=0; arcIdx < nodeIn.numArcs; arcIdx++) {
+      final FSTCompiler.Arc<T> arc = nodeIn.arcs[arcIdx];
+      final FSTCompiler.CompiledNode target = (FSTCompiler.CompiledNode) arc.target;
+      int flags = 0;
+      //System.out.println("  arc " + arcIdx + " label=" + arc.label + " -> target=" + target.node);
+
+      if (arcIdx == lastArc) {
+        flags += BIT_LAST_ARC;
+      }
+
+      if (fstCompiler.lastFrozenNode == target.node && !doFixedLengthArcs) {
+        // TODO: for better perf (but more RAM used) we
+        // could avoid this except when arc is "near" the
+        // last arc:
+        flags += BIT_TARGET_NEXT;
+      }
+
+      if (arc.isFinal) {
+        flags += BIT_FINAL_ARC;
+        if (arc.nextFinalOutput != NO_OUTPUT) {
+          flags += BIT_ARC_HAS_FINAL_OUTPUT;
+        }
+      } else {
+        assert arc.nextFinalOutput == NO_OUTPUT;
+      }
+
+      boolean targetHasArcs = target.node > 0;
+
+      if (!targetHasArcs) {
+        flags += BIT_STOP_NODE;
+      }
+
+      if (arc.output != NO_OUTPUT) {
+        flags += BIT_ARC_HAS_OUTPUT;
+      }
+
+      fstCompiler.bytes.writeByte((byte) flags);
+      long labelStart = fstCompiler.bytes.getPosition();
+      writeLabel(fstCompiler.bytes, arc.label);
+      int numLabelBytes = (int) (fstCompiler.bytes.getPosition() - labelStart);
+
+      // System.out.println("  write arc: label=" + (char) arc.label + " flags=" + flags + " target=" + target.node + " pos=" + bytes.getPosition() + " output=" + outputs.outputToString(arc.output));
+
+      if (arc.output != NO_OUTPUT) {
+        outputs.write(arc.output, fstCompiler.bytes);
+        //System.out.println("    write output");
+      }
+
+      if (arc.nextFinalOutput != NO_OUTPUT) {
+        //System.out.println("    write final output");
+        outputs.writeFinalOutput(arc.nextFinalOutput, fstCompiler.bytes);
+      }
+
+      if (targetHasArcs && (flags & BIT_TARGET_NEXT) == 0) {
+        assert target.node > 0;
+        //System.out.println("    write target");
+        fstCompiler.bytes.writeVLong(target.node);
+      }
+
+      // just write the arcs "like normal" on first pass, but record how many bytes each one took
+      // and max byte size:
+      if (doFixedLengthArcs) {
+        int numArcBytes = (int) (fstCompiler.bytes.getPosition() - lastArcStart);
+        fstCompiler.numBytesPerArc[arcIdx] = numArcBytes;
+        fstCompiler.numLabelBytesPerArc[arcIdx] = numLabelBytes;
+        lastArcStart = fstCompiler.bytes.getPosition();
+        maxBytesPerArc = Math.max(maxBytesPerArc, numArcBytes);
+        maxBytesPerArcWithoutLabel = Math.max(maxBytesPerArcWithoutLabel, numArcBytes - numLabelBytes);
+        //System.out.println("    arcBytes=" + numArcBytes + " labelBytes=" + numLabelBytes);
+      }
+    }
+
+    // TODO: try to avoid wasteful cases: disable doFixedLengthArcs in that case
+    /* 
+     * 
+     * LUCENE-4682: what is a fair heuristic here?
+     * It could involve some of these:
+     * 1. how "busy" the node is: nodeIn.inputCount relative to frontier[0].inputCount?
+     * 2. how much binSearch saves over scan: nodeIn.numArcs
+     * 3. waste: numBytes vs numBytesExpanded
+     * 
+     * the one below just looks at #3
+    if (doFixedLengthArcs) {
+      // rough heuristic: make this 1.25 "waste factor" a parameter to the phd ctor????
+      int numBytes = lastArcStart - startAddress;
+      int numBytesExpanded = maxBytesPerArc * nodeIn.numArcs;
+      if (numBytesExpanded > numBytes*1.25) {
+        doFixedLengthArcs = false;
+      }
+    }
+    */
+
+    if (doFixedLengthArcs) {
+      assert maxBytesPerArc > 0;
+      // 2nd pass just "expands" all arcs to take up a fixed byte size
+
+      int labelRange = nodeIn.arcs[nodeIn.numArcs - 1].label - nodeIn.arcs[0].label + 1;
+      assert labelRange > 0;
+      if (shouldExpandNodeWithDirectAddressing(fstCompiler, nodeIn, maxBytesPerArc, maxBytesPerArcWithoutLabel, labelRange)) {
+        writeNodeForDirectAddressing(fstCompiler, nodeIn, startAddress, maxBytesPerArcWithoutLabel, labelRange);
+        fstCompiler.directAddressingNodeCount++;
+      } else {
+        writeNodeForBinarySearch(fstCompiler, nodeIn, startAddress, maxBytesPerArc);
+        fstCompiler.binarySearchNodeCount++;
+      }
+    }
+
+    final long thisNodeAddress = fstCompiler.bytes.getPosition()-1;
+    fstCompiler.bytes.reverse(startAddress, thisNodeAddress);
+    fstCompiler.nodeCount++;
+    return thisNodeAddress;
+  }
+

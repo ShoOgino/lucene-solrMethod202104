@@ -1,16 +1,19 @@
   private boolean deployPackage(SolrPackageInstance packageInstance, boolean pegToLatest, boolean isUpdate, boolean noprompt,
       List<String> collections, String overrides[]) {
-    for (String collection: collections) {
+    List<String> previouslyDeployed =  new ArrayList<>(); // collections where package is already deployed in
 
+    for (String collection: collections) {
       SolrPackageInstance deployedPackage = getPackagesDeployed(collection).get(packageInstance.name);
       if (packageInstance.equals(deployedPackage)) {
         if (!pegToLatest) {
           PackageUtils.printRed("Package " + packageInstance + " already deployed on "+collection);
+          previouslyDeployed.add(collection);
           continue;
         }
       } else {
         if (deployedPackage != null && !isUpdate) {
           PackageUtils.printRed("Package " + deployedPackage + " already deployed on "+collection+". To update to "+packageInstance+", pass --update parameter.");
+          previouslyDeployed.add(collection);
           continue;
         }
       }
@@ -19,9 +22,9 @@
 
       // Get package params
       try {
-        boolean packageParamsExist = ((Map)PackageUtils.getJson(solrClient.getHttpClient(), solrBaseUrl + "/api/collections/abc/config/params/packages", Map.class)
+        boolean packageParamsExist = ((Map)PackageUtils.getJson(solrClient.getHttpClient(), solrBaseUrl + PackageUtils.getCollectionParamsPath(collection) + "/packages", Map.class)
             .getOrDefault("response", Collections.emptyMap())).containsKey("params");
-        SolrCLI.postJsonToSolr(solrClient, "/api/collections/" + collection + "/config/params",
+        SolrCLI.postJsonToSolr(solrClient, PackageUtils.getCollectionParamsPath(collection),
             getMapper().writeValueAsString(Collections.singletonMap(packageParamsExist? "update": "set",
                 Collections.singletonMap("packages", Collections.singletonMap(packageInstance.name, collectionParameterOverrides)))));
       } catch (Exception e) {
@@ -30,7 +33,7 @@
 
       // Set the package version in the collection's parameters
       try {
-        SolrCLI.postJsonToSolr(solrClient, "/api/collections/" + collection + "/config/params",
+        SolrCLI.postJsonToSolr(solrClient, PackageUtils.getCollectionParamsPath(collection),
             "{set:{PKG_VERSIONS:{" + packageInstance.name+": '" + (pegToLatest? PackagePluginHolder.LATEST: packageInstance.version)+"'}}}");
       } catch (Exception ex) {
         throw new SolrException(ErrorCode.SERVER_ERROR, ex);
@@ -39,7 +42,7 @@
       // If updating, refresh the package version for this to take effect
       if (isUpdate || pegToLatest) {
         try {
-          SolrCLI.postJsonToSolr(solrClient, "/api/cluster/package", "{\"refresh\": \"" + packageInstance.name + "\"}");
+          SolrCLI.postJsonToSolr(solrClient, PackageUtils.PACKAGE_PATH, "{\"refresh\": \"" + packageInstance.name + "\"}");
         } catch (Exception ex) {
           throw new SolrException(ErrorCode.SERVER_ERROR, ex);
         }
@@ -84,18 +87,26 @@
 
       // Set the package version in the collection's parameters
       try {
-        SolrCLI.postJsonToSolr(solrClient, "/api/collections/" + collection + "/config/params",
+        SolrCLI.postJsonToSolr(solrClient, PackageUtils.getCollectionParamsPath(collection),
             "{update:{PKG_VERSIONS:{'" + packageInstance.name + "' : '" + (pegToLatest? PackagePluginHolder.LATEST: packageInstance.version) + "'}}}");
       } catch (Exception ex) {
         throw new SolrException(ErrorCode.SERVER_ERROR, ex);
       }
     }
 
-    // Verify that package was successfully deployed
-    boolean success = verify(packageInstance, collections);
-    if (success) {
-      PackageUtils.printGreen("Deployed and verified package: " + packageInstance.name + ", version: " + packageInstance.version);
+    List<String> deployedCollections = collections.stream().filter(c -> !previouslyDeployed.contains(c)).collect(Collectors.toList());
+
+    boolean success = true;
+    if (deployedCollections.isEmpty() == false) {
+      // Verify that package was successfully deployed
+      success = verify(packageInstance, deployedCollections);
+      if (success) {
+        PackageUtils.printGreen("Deployed on " + deployedCollections + " and verified package: " + packageInstance.name + ", version: " + packageInstance.version);
+      }
     }
-    return success;
+    if (previouslyDeployed.isEmpty() == false) {
+      PackageUtils.printRed("Already Deployed on " + previouslyDeployed + ", package: " + packageInstance.name + ", version: " + packageInstance.version);
+    }
+    return previouslyDeployed.isEmpty() && success;
   }
 

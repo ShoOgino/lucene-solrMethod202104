@@ -1,0 +1,86 @@
+  public void testThatCantForwardToLeaderFails() throws Exception {
+    final CloudSolrClient cloudClient = cluster.getSolrClient();
+    final String collectionName = "test_collection_" + NAME_COUNTER.getAndIncrement();
+    cloudClient.setDefaultCollection(collectionName);
+    
+    // get a random node for use in our collection before creating the one we'll partition..
+    final JettySolrRunner otherLeader = cluster.getRandomJetty(random());
+    // pick a (second) random node (which may be the same) for sending updates to
+    // (if it's the same, we're testing routing from another shard, if diff we're testing routing
+    // from a non-collection node)
+    final String indexingUrl = cluster.getRandomJetty(random()).getProxyBaseUrl() + "/" + collectionName;
+
+    // create a new node for the purpose of killing it...
+    final JettySolrRunner leaderToPartition = cluster.startJettySolrRunner();
+    try {
+      cluster.waitForNode(leaderToPartition, DEFAULT_TIMEOUT);
+
+      // HACK: we have to stop the node in order to enable the proxy, in order to then restart the node
+      // (in order to then "partition it" later via the proxy)
+      final SocketProxy proxy = new SocketProxy();
+      cluster.stopJettySolrRunner(leaderToPartition);
+      cluster.waitForJettyToStop(leaderToPartition);
+      leaderToPartition.setProxyPort(proxy.getListenPort());
+      cluster.startJettySolrRunner(leaderToPartition);
+      proxy.open(leaderToPartition.getBaseUrl().toURI());
+      try {
+        log.info("leaderToPartition's Proxy: {}", proxy);
+        
+        cluster.waitForNode(leaderToPartition, DEFAULT_TIMEOUT);
+        // create a 2x1 collection using a nodeSet that includes our leaderToPartition...
+        assertEquals(RequestStatusState.COMPLETED,
+                     CollectionAdminRequest.createCollection(collectionName, 2, 1)
+                     .setCreateNodeSet(leaderToPartition.getNodeName() + "," + otherLeader.getNodeName())
+                     .processAndWait(cloudClient, DEFAULT_TIMEOUT));
+        
+        cloudClient.waitForState(collectionName, DEFAULT_TIMEOUT, TimeUnit.SECONDS,
+                                 (n, c) -> DocCollection.isFullyActive(n, c, 2, 1));
+        
+        { // HACK: Check the leaderProps for the shard hosted on the node we're going to kill...
+          final Replica leaderProps = cloudClient.getZkStateReader()
+            .getClusterState().getCollection(collectionName)
+            .getLeaderReplicas(leaderToPartition.getNodeName()).get(0);
+          
+          // No point in this test if these aren't true...
+          assertNotNull("Sanity check: leaderProps isn't a leader?: " + leaderProps.toString(),
+                        leaderProps.getStr(Slice.LEADER));
+          assertTrue("Sanity check: leaderProps isn't using the proxy port?: " + leaderProps.toString(),
+                     leaderProps.getCoreUrl().contains(""+proxy.getListenPort()));
+        }
+        
+        // create client to send our updates to...
+        try (HttpSolrClient indexClient = getHttpSolrClient(indexingUrl)) {
+          
+          // Sanity check: we should be able to send a bunch of updates that work right now...
+          for (int i = 0; i < 100; i++) {
+            final UpdateResponse rsp = indexClient.add
+              (sdoc("id", i, "text_t", TestUtil.randomRealisticUnicodeString(random(), 200)));
+            assertEquals(0, rsp.getStatus());
+          }
+
+          log.info("Closing leaderToPartition's proxy: {}", proxy);
+          proxy.close(); // NOTE: can't use halfClose, won't ensure a garunteed failure
+          
+          final SolrException e = expectThrows(SolrException.class, () -> {
+              // start at 50 so that we have some "updates" to previous docs and some "adds"...
+              for (int i = 50; i < 250; i++) {
+                // Pure random odds of all of these docs belonging to the live shard are 1 in 2**200...
+                // Except we know the hashing algorithm isn't purely random,
+                // So the actual odds are "0" unless the hashing algorithm is changed to suck badly...
+                final UpdateResponse rsp = indexClient.add
+                (sdoc("id", i, "text_t", TestUtil.randomRealisticUnicodeString(random(), 200)));
+                // if the update didn't throw an exception, it better be a success..
+                assertEquals(0, rsp.getStatus());
+              }
+            });
+          assertEquals(500, e.code());
+        }
+      } finally {
+        proxy.close(); // don't leak this port
+      }
+    } finally {
+      cluster.stopJettySolrRunner(leaderToPartition); // don't let this jetty bleed into other tests
+      cluster.waitForJettyToStop(leaderToPartition);
+    }
+  }
+

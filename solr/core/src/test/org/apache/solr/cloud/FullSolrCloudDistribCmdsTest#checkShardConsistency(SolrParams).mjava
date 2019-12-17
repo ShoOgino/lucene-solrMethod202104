@@ -1,0 +1,40 @@
+  /**
+   * Inspects the cluster to determine all active shards/replicas for the default collection then,
+   * executes a <code>distrib=false</code> query using the specified params, and compares the resulting 
+   * {@link SolrDocumentList}, failing if any replica does not agree with it's leader.
+   *
+   * @see #cluster
+   * @see CloudInspectUtil#showDiff 
+   */
+  private void checkShardConsistency(final SolrParams params) throws Exception {
+    // TODO: refactor into static in CloudInspectUtil w/ DocCollection param?
+    // TODO: refactor to take in a BiFunction<QueryResponse,QueryResponse,Boolean> ?
+    
+    final SolrParams perReplicaParams = SolrParams.wrapDefaults(params("distrib", "false"),
+                                                                params);
+    final DocCollection collection = cluster.getSolrClient().getZkStateReader()
+      .getClusterState().getCollection(cluster.getSolrClient().getDefaultCollection());
+    log.info("Checking shard consistency via: {}", perReplicaParams);
+    for (Map.Entry<String,Slice> entry : collection.getActiveSlicesMap().entrySet()) {
+      final String shardName = entry.getKey();
+      final Slice slice = entry.getValue();
+      log.info("Checking: {} -> {}", shardName, slice);
+      final Replica leader = entry.getValue().getLeader();
+      try (HttpSolrClient leaderClient = getHttpSolrClient(leader.getCoreUrl())) {
+        final SolrDocumentList leaderResults = leaderClient.query(perReplicaParams).getResults();
+        log.debug("Shard {}: Leader results: {}", shardName, leaderResults);
+        for (Replica replica : slice) {
+          try (HttpSolrClient replicaClient = getHttpSolrClient(replica.getCoreUrl())) {
+            final SolrDocumentList replicaResults = replicaClient.query(perReplicaParams).getResults();
+            log.debug("Shard {}: Replica ({}) results: {}", shardName, replica.getCoreName(), replicaResults);
+            assertEquals("inconsistency w/leader: shard=" + shardName + "core=" + replica.getCoreName(),
+                         Collections.emptySet(),
+                         CloudInspectUtil.showDiff(leaderResults, replicaResults,
+                                                   shardName + " leader: " + leader.getCoreUrl(),
+                                                   shardName + ": " + replica.getCoreUrl()));
+          }
+        }
+      }
+    }
+  }
+

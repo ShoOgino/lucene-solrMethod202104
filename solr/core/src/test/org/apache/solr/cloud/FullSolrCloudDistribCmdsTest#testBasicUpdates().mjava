@@ -1,0 +1,43 @@
+  @Test
+  public void testBasicUpdates() throws Exception {
+    final CloudSolrClient cloudClient = cluster.getSolrClient();
+    final String collectionName = createAndSetNewDefaultCollection();
+    
+    // add a doc, update it, and delete it
+    addUpdateDelete("doc1");
+    assertEquals(0, cloudClient.query(params("q","*:*")).getResults().getNumFound());
+    
+    // add 2 docs in a single request
+    addTwoDocsInOneRequest("doc2", "doc3");
+    assertEquals(2, cloudClient.query(params("q","*:*")).getResults().getNumFound());
+
+    // 2 deletes in a single request...
+    assertEquals(0, (new UpdateRequest().deleteById("doc2").deleteById("doc3"))
+                 .process(cloudClient).getStatus());
+    assertEquals(0, cloudClient.commit().getStatus());
+    
+    assertEquals(0, cloudClient.query(params("q","*:*")).getResults().getNumFound());
+    
+    // add a doc that we will then delete later after adding two other docs (all before next commit).
+    assertEquals(0, cloudClient.add(sdoc("id", "doc4", "content_s", "will_delete_later")).getStatus());
+    assertEquals(0, cloudClient.add(sdocs(sdoc("id", "doc5"),
+                                          sdoc("id", "doc6"))).getStatus());
+    assertEquals(0, cloudClient.deleteById("doc4").getStatus());
+    assertEquals(0, cloudClient.commit().getStatus());
+
+    assertEquals(0, cloudClient.query(params("q", "id:doc4")).getResults().getNumFound());
+    assertEquals(1, cloudClient.query(params("q", "id:doc5")).getResults().getNumFound());
+    assertEquals(1, cloudClient.query(params("q", "id:doc6")).getResults().getNumFound());
+    assertEquals(2, cloudClient.query(params("q","*:*")).getResults().getNumFound());
+    
+    checkShardConsistency(params("q","*:*", "rows", "9999","_trace","post_doc_5_6"));
+
+    // delete everything....
+    assertEquals(0, cloudClient.deleteByQuery("*:*").getStatus());
+    assertEquals(0, cloudClient.commit().getStatus());
+    assertEquals(0, cloudClient.query(params("q","*:*")).getResults().getNumFound());
+
+    checkShardConsistency(params("q","*:*", "rows", "9999","_trace","delAll"));
+    
+  }
+

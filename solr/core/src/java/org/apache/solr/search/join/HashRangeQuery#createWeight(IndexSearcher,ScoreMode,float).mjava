@@ -1,0 +1,65 @@
+  @Override
+  public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
+    return new ConstantScoreWeight(this, boost) {
+
+      @Override
+      public boolean isCacheable(LeafReaderContext context) {
+        return DocValues.isCacheable(context, field);
+      }
+
+      @Override
+      public Scorer scorer(LeafReaderContext context) throws IOException {
+        SortedDocValues docValues = context.reader().getSortedDocValues(field);
+        int[] cache = getCache(context);
+
+        TwoPhaseIterator iterator = new TwoPhaseIterator(docValues) {
+          @Override
+          public boolean matches() throws IOException {
+            int hash = cache != null ? cache[docValues.docID()] : hash(docValues);
+            return hash >= lower && hash <= upper;
+          }
+
+          @Override
+          public float matchCost() {
+            return cache != null ? 2 : 100;
+          }
+        };
+
+        return new ConstantScoreScorer(this, boost, scoreMode, iterator);
+      }
+
+      private int[] getCache(LeafReaderContext context) throws IOException {
+        IndexReader.CacheHelper cacheHelper = context.reader().getReaderCacheHelper();
+        if (cacheHelper == null) {
+          return null;
+        }
+        @SuppressWarnings("unchecked")
+        final SolrCache<IndexReader.CacheKey, int[]> cache =
+                ((SolrIndexSearcher) searcher).getCache(CACHE_KEY_PREFIX + field);
+        if (cache == null) {
+          return null;
+        }
+
+        IndexReader.CacheKey cacheKey = cacheHelper.getKey();
+        synchronized (cacheKey) {
+          int[] hashes = cache.get(cacheKey);
+          if (hashes == null) {
+            hashes = new int[context.reader().maxDoc()];
+            SortedDocValues docValues = context.reader().getSortedDocValues(field);
+            int doc;
+            while ((doc = docValues.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+              hashes[doc] = hash(docValues);
+            }
+            cache.put(cacheKey, hashes);
+          }
+          return hashes;
+        }
+      }
+
+      private int hash(SortedDocValues docValues) throws IOException {
+        BytesRef bytesRef = docValues.binaryValue();
+        return Hash.murmurhash3_x86_32(bytesRef.bytes, bytesRef.offset, bytesRef.length, 0);
+      }
+    };
+  }
+

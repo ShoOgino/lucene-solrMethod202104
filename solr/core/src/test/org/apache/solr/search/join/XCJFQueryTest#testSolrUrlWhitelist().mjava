@@ -1,0 +1,52 @@
+  @Test
+  public void testSolrUrlWhitelist() throws Exception {
+    setupIndexes(false);
+
+    // programmatically add the current jetty solr url to the solrUrl whitelist property in the solrconfig.xml
+    int i = 0;
+    for (JettySolrRunner runner : cluster.getJettySolrRunners()) {
+      i++;
+      System.setProperty("test.xcjf.solr.url." + i, runner.getBaseUrl().toString());
+    }
+    try {
+      // now we need to re-upload our config , now that we know a valid solr url for the cluster.
+      CloudSolrClient client = cluster.getSolrClient();
+      ((ZkClientClusterStateProvider) client.getClusterStateProvider()).uploadConfig(configset("xcjf"), "xcjf");
+      // reload the cores with the updated whitelisted solr url config.
+      CollectionAdminRequest.Reload.reloadCollection("products").process(client);
+      CollectionAdminRequest.Reload.reloadCollection("parts").process(client);
+
+      final ModifiableSolrParams params = new ModifiableSolrParams();
+      //  a bogus solrUrl
+      params.add("q", "");
+      params.add("rows", "0");
+
+      // we expect an exception because bogus url isn't valid.
+      try {
+        // This should throw an exception.
+        // verify the xcfj_whitelist definition has the current valid urls and works.
+        testXcjfQuery(String.format(Locale.ROOT,
+            "{!xcjf_whitelist solrUrl=\"%s\" collection=products from=product_id_i to=product_id_i}size_s:M",
+            "http://bogus.example.com:8983/solr"),
+            true);
+        fail("The query invovling bogus.example.com should not succeed");
+      } catch (Exception e) {
+        // should get here.
+        String message = e.getMessage();
+        assertTrue("message was " + message, message.contains("SyntaxError: Solr Url was not in the whitelist"));
+      }
+
+      // verify the xcfj_whitelist definition has the current valid urls and works.
+      testXcjfQuery(String.format(Locale.ROOT,
+          "{!xcjf_whitelist solrUrl=\"%s\" collection=products from=product_id_i to=product_id_i}size_s:M",
+          getSolrUrl()),
+          true);
+
+    } finally {
+      for (JettySolrRunner runner : cluster.getJettySolrRunners()) {
+        i++;
+        System.getProperties().remove("test.xcjf.solr.url." + i);
+      }
+    }
+  }
+

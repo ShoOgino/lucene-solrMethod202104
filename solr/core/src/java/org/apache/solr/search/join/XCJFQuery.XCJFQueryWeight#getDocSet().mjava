@@ -1,0 +1,45 @@
+    private DocSet getDocSet() throws IOException {
+      SolrClientCache solrClientCache = new SolrClientCache();
+      TupleStream solrStream;
+      if (zkHost != null || solrUrl == null) {
+        solrStream = createCloudSolrStream(solrClientCache);
+      } else {
+        solrStream = createSolrStream();
+      }
+
+      FieldType fieldType = searcher.getSchema().getFieldType(toField);
+      JoinKeyCollector collector;
+      if (fieldType.isPointField()) {
+        collector = new PointJoinKeyCollector(searcher);
+      } else {
+        Terms terms = searcher.getSlowAtomicReader().terms(toField);
+        if (terms == null) {
+          return DocSet.EMPTY;
+        }
+        collector = new TermsJoinKeyCollector(fieldType, terms, searcher);
+      }
+
+      try {
+        solrStream.open();
+        while (true) {
+          Tuple tuple = solrStream.read();
+          if (tuple.EXCEPTION) {
+            throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, tuple.getException());
+          }
+          if (tuple.EOF) {
+            break;
+          }
+
+          Object value = tuple.get(fromField);
+          collector.collect(value);
+        }
+      } catch (IOException e) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, e);
+      } finally {
+        solrStream.close();
+        solrClientCache.close();
+      }
+
+      return collector.getDocSet();
+    }
+

@@ -1,0 +1,53 @@
+    public FieldMetadata read(DataInput input, FieldInfos fieldInfos, int maxNumDocs) throws IOException {
+      int fieldId = input.readVInt();
+      FieldInfo fieldInfo = fieldInfos.fieldInfo(fieldId);
+      if (fieldInfo == null) {
+        throw new CorruptIndexException("Illegal field id= " + fieldId, input);
+      }
+      FieldMetadata fieldMetadata = new FieldMetadata(fieldInfo, 0, false);
+
+      fieldMetadata.numTerms = input.readVInt();
+      if (fieldMetadata.numTerms <= 0) {
+        throw new CorruptIndexException("Illegal number of terms= " + fieldMetadata.numTerms + " for field= " + fieldId, input);
+      }
+
+      fieldMetadata.sumDocFreq = input.readVInt();
+      fieldMetadata.sumTotalTermFreq = fieldMetadata.sumDocFreq;
+      if (fieldMetadata.fieldInfo.getIndexOptions().compareTo(IndexOptions.DOCS_AND_FREQS) >= 0) {
+        fieldMetadata.sumTotalTermFreq += input.readVInt();
+        if (fieldMetadata.sumTotalTermFreq < fieldMetadata.sumDocFreq) {
+          // #positions must be >= #postings.
+          throw new CorruptIndexException("Illegal sumTotalTermFreq= " + fieldMetadata.sumTotalTermFreq
+              + " sumDocFreq= " + fieldMetadata.sumDocFreq + " for field= " + fieldId, input);
+        }
+      }
+
+      fieldMetadata.docCount = input.readVInt();
+      if (fieldMetadata.docCount < 0 || fieldMetadata.docCount > maxNumDocs) {
+        // #docs with field must be <= #docs.
+        throw new CorruptIndexException("Illegal number of docs= " + fieldMetadata.docCount
+            + " maxNumDocs= " + maxNumDocs + " for field=" + fieldId, input);
+      }
+      if (fieldMetadata.sumDocFreq < fieldMetadata.docCount) {
+        // #postings must be >= #docs with field.
+        throw new CorruptIndexException("Illegal sumDocFreq= " + fieldMetadata.sumDocFreq
+            + " docCount= " + fieldMetadata.docCount + " for field= " + fieldId, input);
+      }
+
+      fieldMetadata.dictionaryStartFP = input.readVLong();
+      fieldMetadata.firstBlockStartFP = input.readVLong();
+      fieldMetadata.lastBlockStartFP = input.readVLong();
+
+      int lastTermLength = input.readVInt();
+      BytesRef lastTerm = new BytesRef(lastTermLength);
+      if (lastTermLength > 0) {
+        input.readBytes(lastTerm.bytes, 0, lastTermLength);
+        lastTerm.length = lastTermLength;
+      } else if (lastTermLength < 0) {
+        throw new CorruptIndexException("Illegal last term length= " + lastTermLength + " for field= " + fieldId, input);
+      }
+      fieldMetadata.setLastTerm(lastTerm);
+
+      return fieldMetadata;
+    }
+

@@ -1,0 +1,82 @@
+  public void testManyDocsInTlogReplayWhileReplicaIsTryingToRecover() throws Exception {
+    final int committedDocs = 3;
+    final int uncommittedDocs = 50;
+    
+    log.info("Create Collection...");
+    assertEquals(RequestStatusState.COMPLETED,
+                 CollectionAdminRequest.createCollection(COLLECTION, 1, 2)
+                 .setCreateNodeSet("")
+                 .processAndWait(cluster.getSolrClient(), DEFAULT_TIMEOUT));
+    assertEquals(RequestStatusState.COMPLETED,
+                 CollectionAdminRequest.addReplicaToShard(COLLECTION, "shard1")
+                 .setNode(NODE0.getNodeName())
+                 .processAndWait(cluster.getSolrClient(), DEFAULT_TIMEOUT));
+    
+    waitForState("Timeout waiting for shard leader", COLLECTION, clusterShape(1, 1));
+
+    assertEquals(RequestStatusState.COMPLETED,
+                 CollectionAdminRequest.addReplicaToShard(COLLECTION, "shard1")
+                 .setNode(NODE1.getNodeName())
+                 .processAndWait(cluster.getSolrClient(), DEFAULT_TIMEOUT));
+    
+    cluster.waitForActiveCollection(COLLECTION, 1, 2);
+    
+    waitForState("Timeout waiting for 1x2 collection", COLLECTION, clusterShape(1, 2));
+    
+    final Replica leader = getCollectionState(COLLECTION).getSlice("shard1").getLeader();
+    assertEquals("Sanity check failed", NODE0.getNodeName(), leader.getNodeName());
+
+    log.info("Add and commit a {} docs...", committedDocs);
+    addDocs(true, committedDocs, 1);
+
+    log.info("Partition nodes...");
+    proxies.get(NODE0).close();
+    proxies.get(NODE1).close();
+
+    log.info("Adding {} (uncommitted) docs during network partition....", uncommittedDocs);
+    addDocs(false, uncommittedDocs, committedDocs + 1);
+
+    log.info("Stopping leader node...");
+    assertEquals("Something broke our expected commitOnClose", false, DirectUpdateHandler2.commitOnClose);
+    NODE0.stop();
+    cluster.waitForJettyToStop(NODE0);
+
+    log.info("Un-Partition replica (NODE1)...");
+    proxies.get(NODE1).reopen();
+    
+    waitForState("Timeout waiting for leader goes DOWN", COLLECTION, (liveNodes, collectionState)
+                 -> collectionState.getReplica(leader.getName()).getState() == Replica.State.DOWN);
+
+    TimeOut timeOut = new TimeOut(10, TimeUnit.SECONDS, TimeSource.NANO_TIME);
+    while (!timeOut.hasTimedOut()) {
+      Replica newLeader = getCollectionState(COLLECTION).getLeader("shard1");
+      if (newLeader != null && !newLeader.getName().equals(leader.getName()) && newLeader.getState() == Replica.State.ACTIVE) {
+        fail("Out of sync replica became leader " + newLeader);
+      }
+    }
+
+    log.info("Enabling TestInjection.updateLogReplayRandomPause");
+    TestInjection.updateLogReplayRandomPause = "true:100";
+      
+    log.info("Un-Partition & restart leader (NODE0)...");
+    proxies.get(NODE0).reopen();
+    NODE0.start();
+
+    log.info("Waiting for all nodes and active collection...");
+    
+    cluster.waitForAllNodes(30);;
+    waitForState("Timeout waiting for leader", COLLECTION, (liveNodes, collectionState) -> {
+      Replica newLeader = collectionState.getLeader("shard1");
+      return newLeader != null && newLeader.getName().equals(leader.getName());
+    });
+    waitForState("Timeout waiting for active collection", COLLECTION, clusterShape(1, 2));
+    
+    cluster.waitForActiveCollection(COLLECTION, 1, 2);
+
+    log.info("Check docs on both replicas...");
+    assertDocsExistInBothReplicas(1, uncommittedDocs + uncommittedDocs);
+    
+    log.info("Test ok, delete collection...");
+    CollectionAdminRequest.deleteCollection(COLLECTION).process(cluster.getSolrClient());
+  }
+

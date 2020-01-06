@@ -1,0 +1,68 @@
+  /**
+   * Builds a config:
+   * <p>
+   * Note that the 'name' parameter is used to obtain a valid input stream if no valid one is provided through 'is'.
+   * If no valid stream is provided, a valid SolrResourceLoader instance should be provided through 'loader' so
+   * the resource can be opened (@see SolrResourceLoader#openResource); if no SolrResourceLoader instance is provided, a default one
+   * will be created.
+   * </p>
+   * <p>
+   * Consider passing a non-null 'name' parameter in all use-cases since it is used for logging &amp; exception reporting.
+   * </p>
+   * @param loader the resource loader used to obtain an input stream if 'is' is null
+   * @param name the resource name used if the input stream 'is' is null
+   * @param is the resource as a SAX InputSource
+   * @param prefix an optional prefix that will be prepended to all non-absolute xpath expressions
+   * @param substituteProps optional property substitution
+   */
+  public XmlConfigFile(SolrResourceLoader loader, String name, InputSource is, String prefix, Properties substituteProps) throws ParserConfigurationException, IOException, SAXException
+  {
+    if( loader == null ) {
+      loader = new SolrResourceLoader(SolrPaths.locateSolrHome());
+    }
+    this.loader = loader;
+    this.substituteProperties = substituteProps;
+    this.name = name;
+    this.prefix = (prefix != null && !prefix.endsWith("/"))? prefix + '/' : prefix;
+    try {
+      javax.xml.parsers.DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+
+      if (is == null) {
+        InputStream in = loader.openResource(name);
+        if (in instanceof ZkSolrResourceLoader.ZkByteArrayInputStream) {
+          zkVersion = ((ZkSolrResourceLoader.ZkByteArrayInputStream) in).getStat().getVersion();
+          log.debug("loaded config {} with version {} ",name,zkVersion);
+        }
+        is = new InputSource(in);
+        is.setSystemId(SystemIdResolver.createSystemIdFromResourceName(name));
+      }
+
+      // only enable xinclude, if a SystemId is available
+      if (is.getSystemId() != null) {
+        try {
+          dbf.setXIncludeAware(true);
+          dbf.setNamespaceAware(true);
+        } catch(UnsupportedOperationException e) {
+          log.warn(name + " XML parser doesn't support XInclude option");
+        }
+      }
+      
+      final DocumentBuilder db = dbf.newDocumentBuilder();
+      db.setEntityResolver(new SystemIdResolver(loader));
+      db.setErrorHandler(xmllog);
+      try {
+        doc = db.parse(is);
+        origDoc = copyDoc(doc);
+      } finally {
+        // some XML parsers are broken and don't close the byte stream (but they should according to spec)
+        IOUtils.closeQuietly(is.getByteStream());
+      }
+      if (substituteProps != null) {
+        DOMUtil.substituteProperties(doc, getSubstituteProperties());
+      }
+    } catch (ParserConfigurationException | SAXException | TransformerException e)  {
+      SolrException.log(log, "Exception during parsing file: " + name, e);
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, e);
+    }
+  }
+

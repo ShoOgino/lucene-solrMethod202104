@@ -1,0 +1,162 @@
+  /**
+   * Creates a new core and register it in the list of cores. If a core with the
+   * same name already exists, it will be stopped and replaced by this one.
+   */
+  private SolrCore(CoreContainer coreContainer, String name, ConfigSet configSet, CoreDescriptor coreDescriptor,
+                  String dataDir, UpdateHandler updateHandler,
+                  IndexDeletionPolicyWrapper delPolicy, SolrCore prev, boolean reload) {
+
+    assert ObjectReleaseTracker.track(searcherExecutor); // ensure that in unclean shutdown tests we still close this
+
+    this.coreContainer = coreContainer;
+
+    final CountDownLatch latch = new CountDownLatch(1);
+
+    try {
+      IndexSchema schema = configSet.getIndexSchema();
+
+      CoreDescriptor cd = Objects.requireNonNull(coreDescriptor, "coreDescriptor cannot be null");
+      coreContainer.solrCores.addCoreDescriptor(cd);
+
+      setName(name);
+      MDCLoggingContext.setCore(this);
+
+      this.solrConfig = configSet.getSolrConfig();
+      this.resourceLoader = configSet.getSolrConfig().getResourceLoader();
+      this.configSetProperties = configSet.getProperties();
+      // Initialize the metrics manager
+      this.coreMetricManager = initCoreMetricManager(solrConfig);
+      solrMetricsContext = coreMetricManager.getSolrMetricsContext();
+      this.coreMetricManager.loadReporters();
+
+      if (updateHandler == null) {
+        directoryFactory = initDirectoryFactory();
+        recoveryStrategyBuilder = initRecoveryStrategyBuilder();
+        solrCoreState = new DefaultSolrCoreState(directoryFactory, recoveryStrategyBuilder);
+      } else {
+        solrCoreState = updateHandler.getSolrCoreState();
+        directoryFactory = solrCoreState.getDirectoryFactory();
+        recoveryStrategyBuilder = solrCoreState.getRecoveryStrategyBuilder();
+        isReloaded = true;
+      }
+
+      this.dataDir = initDataDir(dataDir, solrConfig, coreDescriptor);
+      this.ulogDir = initUpdateLogDir(coreDescriptor);
+
+      log.info("[{}] Opening new SolrCore at [{}], dataDir=[{}]", logid, getInstancePath(), this.dataDir);
+
+      checkVersionFieldExistsInSchema(schema, coreDescriptor);
+      setLatestSchema(schema);
+
+      // initialize core metrics
+      initializeMetrics(solrMetricsContext, null);
+
+      SolrFieldCacheBean solrFieldCacheBean = new SolrFieldCacheBean();
+      // this is registered at the CONTAINER level because it's not core-specific - for now we
+      // also register it here for back-compat
+      solrFieldCacheBean.initializeMetrics(solrMetricsContext, "core");
+      infoRegistry.put("fieldCache", solrFieldCacheBean);
+
+      this.maxWarmingSearchers = solrConfig.maxWarmingSearchers;
+      this.slowQueryThresholdMillis = solrConfig.slowQueryThresholdMillis;
+
+      initListeners();
+
+      this.snapshotMgr = initSnapshotMetaDataManager();
+      this.solrDelPolicy = initDeletionPolicy(delPolicy);
+
+      this.codec = initCodec(solrConfig, this.schema);
+
+      memClassLoader = new MemClassLoader(
+          PluginBag.RuntimeLib.getLibObjects(this, solrConfig.getPluginInfos(PluginBag.RuntimeLib.class.getName())),
+          getResourceLoader());
+      initIndex(prev != null, reload);
+
+      initWriters();
+      qParserPlugins.init(QParserPlugin.standardPlugins, this);
+      valueSourceParsers.init(ValueSourceParser.standardValueSourceParsers, this);
+      transformerFactories.init(TransformerFactory.defaultFactories, this);
+      loadSearchComponents();
+      updateProcessors.init(Collections.emptyMap(), this);
+
+      // Processors initialized before the handlers
+      updateProcessorChains = loadUpdateProcessorChains();
+      reqHandlers = new RequestHandlers(this);
+      reqHandlers.initHandlersFromConfig(solrConfig);
+
+      // cause the executor to stall so firstSearcher events won't fire
+      // until after inform() has been called for all components.
+      // searchExecutor must be single-threaded for this to work
+      searcherExecutor.submit(() -> {
+        latch.await();
+        return null;
+      });
+
+      this.updateHandler = initUpdateHandler(updateHandler);
+
+      initSearcher(prev);
+
+      // Initialize the RestManager
+      restManager = initRestManager();
+
+      // at this point we can load jars loaded from remote urls.
+      memClassLoader.loadRemoteJars();
+
+      // Finally tell anyone who wants to know
+      resourceLoader.inform(resourceLoader);
+      resourceLoader.inform(this); // last call before the latch is released.
+      this.updateHandler.informEventListeners(this);
+
+      infoRegistry.put("core", this);
+
+      // register any SolrInfoMBeans SolrResourceLoader initialized
+      //
+      // this must happen after the latch is released, because a JMX server impl may
+      // choose to block on registering until properties can be fetched from an MBean,
+      // and a SolrCoreAware MBean may have properties that depend on getting a Searcher
+      // from the core.
+      resourceLoader.inform(infoRegistry);
+
+      // Allow the directory factory to report metrics
+      if (directoryFactory instanceof SolrMetricProducer) {
+        ((SolrMetricProducer) directoryFactory).initializeMetrics(solrMetricsContext, "directoryFactory");
+      }
+
+      // seed version buckets with max from index during core initialization ... requires a searcher!
+      seedVersionBuckets();
+
+      bufferUpdatesIfConstructing(coreDescriptor);
+
+      this.ruleExpiryLock = new ReentrantLock();
+      this.snapshotDelLock = new ReentrantLock();
+
+      registerConfListener();
+
+    } catch (Throwable e) {
+      // release the latch, otherwise we block trying to do the close. This
+      // should be fine, since counting down on a latch of 0 is still fine
+      latch.countDown();
+      if (e instanceof OutOfMemoryError) {
+        throw (OutOfMemoryError) e;
+      }
+
+      try {
+        // close down the searcher and any other resources, if it exists, as this
+        // is not recoverable
+        close();
+      } catch (Throwable t) {
+        if (t instanceof OutOfMemoryError) {
+          throw (OutOfMemoryError) t;
+        }
+        log.error("Error while closing", t);
+      }
+
+      throw new SolrException(ErrorCode.SERVER_ERROR, e.getMessage(), e);
+    } finally {
+      // allow firstSearcher events to fire and make sure it is released
+      latch.countDown();
+    }
+
+    assert ObjectReleaseTracker.track(this);
+  }
+

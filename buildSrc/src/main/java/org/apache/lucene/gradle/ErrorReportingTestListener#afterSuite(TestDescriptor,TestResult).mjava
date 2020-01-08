@@ -1,20 +1,60 @@
    @Override
    public void afterSuite(final TestDescriptor suite, TestResult result) {
+      if (suite.getParent() == null || suite.getName().startsWith("Gradle")) {
+         return;
+      }
+
       TestKey key = TestKey.of(suite);
       try {
-         // if the test suite failed, report all captured output
-         if (Objects.equals(result.getResultType(), TestResult.ResultType.FAILURE)) {
-            reportFailure(suite, outputHandlers.get(key));
+         OutputHandler outputHandler = outputHandlers.get(key);
+         if (outputHandler != null) {
+            long length = outputHandler.length();
+            if (length > 1024 * 1024 * 10) {
+               LOGGER.warn(String.format(Locale.ROOT, "WARNING: Test %s wrote %,d bytes of output.",
+                   suite.getName(),
+                   length));
+            }
+         }
+
+         boolean echoOutput = Objects.equals(result.getResultType(), TestResult.ResultType.FAILURE);
+         boolean dumpOutput = echoOutput; // Force output dumping.
+
+         // If the test suite failed, report output.
+         if (dumpOutput || echoOutput) {
+            Files.createDirectories(outputsDir);
+            Path outputLog = outputsDir.resolve(getOutputLogName(suite));
+
+            // Save the output of a failing test to disk.
+            try (Writer w = Files.newBufferedWriter(outputLog, StandardCharsets.UTF_8)) {
+               if (outputHandler != null) {
+                  outputHandler.copyTo(w);
+               }
+            }
+
+            if (echoOutput) {
+               synchronized (this) {
+                  System.out.println("");
+                  System.out.println(suite.getClassName() + " > test suite's output saved to " + outputLog + ", copied below:");
+                  try (BufferedReader reader = Files.newBufferedReader(outputLog, StandardCharsets.UTF_8)) {
+                     char[] buf = new char[1024];
+                     int len;
+                     while ((len = reader.read(buf)) >= 0) {
+                        System.out.print(new String(buf, 0, len));
+                     }
+                     System.out.println();
+                  }
+               }
+            }
          }
       } catch (IOException e) {
-         throw new UncheckedIOException("Error reading test suite output", e);
+         throw new UncheckedIOException(e);
       } finally {
-         OutputHandler writer = outputHandlers.remove(key);
-         if (writer != null) {
+         OutputHandler handler = outputHandlers.remove(key);
+         if (handler != null) {
             try {
-               writer.close();
+               handler.close();
             } catch (IOException e) {
-               LOGGER.error("Failed to close test suite's event writer for: " + key, e);
+               LOGGER.error("Failed to close output handler for: " + key, e);
             }
          }
       }

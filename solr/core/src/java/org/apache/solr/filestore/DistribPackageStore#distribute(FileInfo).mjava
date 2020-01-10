@@ -1,0 +1,62 @@
+  private void distribute(FileInfo info) {
+    try {
+      String dirName = info.path.substring(0, info.path.lastIndexOf('/'));
+      coreContainer.getZkController().getZkClient().makePath(ZK_PACKAGESTORE + dirName, false, true);
+      coreContainer.getZkController().getZkClient().create(ZK_PACKAGESTORE + info.path, info.getDetails().getMetaData().sha512.getBytes(UTF_8),
+          CreateMode.PERSISTENT, true);
+    } catch (Exception e) {
+      throw new SolrException(SERVER_ERROR, "Unable to create an entry in ZK", e);
+    }
+    tmpFiles.put(info.path, info);
+
+    List<String> nodes = coreContainer.getPackageStoreAPI().shuffledNodes();
+    int i = 0;
+    int FETCHFROM_SRC = 50;
+    String myNodeName = coreContainer.getZkController().getNodeName();
+    try {
+      for (String node : nodes) {
+        String baseUrl = coreContainer.getZkController().getZkStateReader().getBaseUrlForNodeName(node);
+        String url = baseUrl.replace("/solr", "/api") + "/node/files" + info.path + "?getFrom=";
+        if (i < FETCHFROM_SRC) {
+          // this is to protect very large clusters from overwhelming a single node
+          // the first FETCHFROM_SRC nodes will be asked to fetch from this node.
+          // it's there in  the memory now. So , it must be served fast
+          url += myNodeName;
+        } else {
+          if (i == FETCHFROM_SRC) {
+            // This is just an optimization
+            // at this point a bunch of nodes are already downloading from me
+            // I'll wait for them to finish before asking other nodes to download from each other
+            try {
+              Thread.sleep(2 * 1000);
+            } catch (Exception e) {
+            }
+          }
+          // trying to avoid the thundering herd problem when there are a very large no:of nodes
+          // others should try to fetch it from any node where it is available. By now,
+          // almost FETCHFROM_SRC other nodes may have it
+          url += "*";
+        }
+        try {
+          //fire and forget
+          Utils.executeGET(coreContainer.getUpdateShardHandler().getDefaultHttpClient(), url, null);
+        } catch (Exception e) {
+          log.info("Node: " + node +
+              " failed to respond for file fetch notification", e);
+          //ignore the exception
+          // some nodes may be down or not responding
+        }
+        i++;
+      }
+    } finally {
+      coreContainer.getUpdateShardHandler().getUpdateExecutor().submit(() -> {
+        try {
+          Thread.sleep(10 * 1000);
+        } finally {
+          tmpFiles.remove(info.path);
+        }
+        return null;
+      });
+    }
+  }
+

@@ -1,4 +1,12 @@
   public void testManyDocsInTlogReplayWhileReplicaIsTryingToRecover() throws Exception {
+    // TODO: One the basic problem in SOLR-13486 is fixed, this test can be made more robust by:
+    // 1) randomizing the number of committedDocs (pre net split) & uncommittedDocs (post net split)
+    //    to trigger diff recovery strategies & shutdown behavior
+    // 2) replace "committedDocs + uncommittedDocs" with 4 variables:
+    //    a: docs committed before network split (add + commit)
+    //    b: docs not committed before network split (add w/o commit)
+    //    c: docs committed after network split (add + commit)
+    //    d: docs not committed after network split (add w/o commit)
     final int committedDocs = 3;
     final int uncommittedDocs = 50;
     
@@ -26,8 +34,9 @@
     final Replica leader = getCollectionState(COLLECTION).getSlice("shard1").getLeader();
     assertEquals("Sanity check failed", NODE0.getNodeName(), leader.getNodeName());
 
-    log.info("Add and commit a {} docs...", committedDocs);
+    log.info("Add and commit {} docs...", committedDocs);
     addDocs(true, committedDocs, 1);
+    assertDocsExistInBothReplicas(1, committedDocs);
 
     log.info("Partition nodes...");
     proxies.get(NODE0).close();
@@ -37,7 +46,8 @@
     addDocs(false, uncommittedDocs, committedDocs + 1);
 
     log.info("Stopping leader node...");
-    assertEquals("Something broke our expected commitOnClose", false, DirectUpdateHandler2.commitOnClose);
+    assertEquals("Something broke our expected commitOnClose",
+                 TEST_VALUE_FOR_COMMIT_ON_CLOSE, DirectUpdateHandler2.commitOnClose);
     NODE0.stop();
     cluster.waitForJettyToStop(NODE0);
 
@@ -74,7 +84,7 @@
     cluster.waitForActiveCollection(COLLECTION, 1, 2);
 
     log.info("Check docs on both replicas...");
-    assertDocsExistInBothReplicas(1, uncommittedDocs + uncommittedDocs);
+    assertDocsExistInBothReplicas(1, committedDocs + uncommittedDocs);
     
     log.info("Test ok, delete collection...");
     CollectionAdminRequest.deleteCollection(COLLECTION).process(cluster.getSolrClient());

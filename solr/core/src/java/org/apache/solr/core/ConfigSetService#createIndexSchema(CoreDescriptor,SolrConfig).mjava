@@ -1,10 +1,34 @@
   /**
-   * Create an IndexSchema object for a core
+   * Create an IndexSchema object for a core.  It might be a cached lookup.
    * @param cd the core's CoreDescriptor
    * @param solrConfig the core's SolrConfig
    * @return an IndexSchema
    */
   protected IndexSchema createIndexSchema(CoreDescriptor cd, SolrConfig solrConfig) {
-    return IndexSchemaFactory.buildIndexSchema(cd.getSchemaName(), solrConfig);
+    // This is the schema name from the core descriptor.  Sometimes users specify a custom schema file.
+    //   Important:  indexSchemaFactory.create wants this!
+    String cdSchemaName = cd.getSchemaName();
+    // This is the schema name that we think will actually be used.  In the case of a managed schema,
+    //  we don't know for sure without examining what files exists in the configSet, and we don't
+    //  want to pay the overhead of that at this juncture.  If we guess wrong, no schema sharing.
+    //  The fix is usually to name your schema managed-schema instead of schema.xml.
+    IndexSchemaFactory indexSchemaFactory = IndexSchemaFactory.newIndexSchemaFactory(solrConfig);
+    String guessSchemaName = indexSchemaFactory.getSchemaResourceName(cdSchemaName);
+
+    String configSet = cd.getConfigSet();
+    if (configSet != null && schemaCache != null) {
+      Long modVersion = getCurrentSchemaModificationVersion(configSet, solrConfig, guessSchemaName);
+      if (modVersion != null) {
+        // note: luceneMatchVersion influences the schema
+        String cacheKey = configSet + "/" + guessSchemaName + "/" + modVersion + "/" + solrConfig.luceneMatchVersion;
+        return schemaCache.get(cacheKey,
+            (key) -> indexSchemaFactory.create(cdSchemaName, solrConfig));
+      } else {
+        log.warn("Unable to get schema modification version, configSet={} schema={}", configSet, guessSchemaName);
+        // see explanation above; "guessSchema" is a guess
+      }
+    }
+
+    return indexSchemaFactory.create(cdSchemaName, solrConfig);
   }
 

@@ -1,0 +1,62 @@
+  private void doTest(byte[] data, int offset, int length, LZ4.HashTable hashTable) throws IOException {
+    ByteBuffersDataOutput out = new ByteBuffersDataOutput();
+    LZ4.compress(data, offset, length, out, hashTable);
+    byte[] compressed = out.toArrayCopy();
+
+    int off = 0;
+    int decompressedOff = 0;
+    for (;;) {
+      final int token = compressed[off++] & 0xFF;
+      int literalLen = token >>> 4;
+      if (literalLen == 0x0F) {
+        while (compressed[off] == (byte) 0xFF) {
+          literalLen += 0xFF;
+          ++off;
+        }
+        literalLen += compressed[off++] & 0xFF;
+      }
+      // skip literals
+      off += literalLen;
+      decompressedOff += literalLen;
+
+      // check that the stream ends with literals and that there are at least
+      // 5 of them
+      if (off == compressed.length) {
+        assertEquals(length, decompressedOff);
+        assertTrue("lastLiterals=" + literalLen + ", bytes=" + length,
+            literalLen >= LZ4.LAST_LITERALS || literalLen == length);
+        break;
+      }
+
+      final int matchDec = (compressed[off++] & 0xFF) | ((compressed[off++] & 0xFF) << 8);
+      // check that match dec is not 0
+      assertTrue(matchDec + " " + decompressedOff, matchDec > 0 && matchDec <= decompressedOff);
+
+      int matchLen = token & 0x0F;
+      if (matchLen == 0x0F) {
+        while (compressed[off] == (byte) 0xFF) {
+          matchLen += 0xFF;
+          ++off;
+        }
+        matchLen += compressed[off++] & 0xFF;
+      }
+      matchLen += LZ4.MIN_MATCH;
+
+      // if the match ends prematurely, the next sequence should not have
+      // literals or this means we are wasting space
+      if (decompressedOff + matchLen < length - LZ4.LAST_LITERALS) {
+        final boolean moreCommonBytes = data[offset + decompressedOff + matchLen] == data[offset + decompressedOff - matchDec + matchLen];
+        final boolean nextSequenceHasLiterals = ((compressed[off] & 0xFF) >>> 4) != 0;
+        assertTrue(moreCommonBytes == false || nextSequenceHasLiterals == false);
+      }      
+
+      decompressedOff += matchLen;
+    }
+    assertEquals(length, decompressedOff);
+
+    // Compress once again with the same hash table to test reuse
+    ByteBuffersDataOutput out2 = new ByteBuffersDataOutput();
+    LZ4.compress(data, offset, length, out2, hashTable);
+    assertArrayEquals(compressed, out2.toArrayCopy());
+  }
+

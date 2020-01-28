@@ -1,0 +1,59 @@
+  /**
+   * Process all the JFR files passed in args and print a merged summary.
+   */
+  public static void printReport(List<String> files, int stacksize, int count, boolean lineNumbers) throws IOException {
+    if (stacksize < 1) {
+      throw new IllegalArgumentException("tests.profile.stacksize must be positive");
+    }
+    if (count < 1) {
+      throw new IllegalArgumentException("tests.profile.count must be positive");
+    }
+    Map<String, SimpleEntry<String, Integer>> histogram = new HashMap<>();
+    int total = 0;
+    for (String file : files) {
+      try (RecordingFile recording = new RecordingFile(Paths.get(file))) {
+        while (recording.hasMoreEvents()) {
+          RecordedEvent event = recording.readEvent();
+          RecordedThread thread = event.getThread("sampledThread");
+          // ignore gradle's epoll loop in the worker thread
+          if (thread != null && thread.getJavaName().startsWith("/127.0.0.1")) {
+            continue;
+          }
+          // process java and native method samples
+          if (event.getEventType().getName().equals("jdk.ExecutionSample") ||
+              event.getEventType().getName().equals("jdk.NativeMethodSample")) {
+            RecordedStackTrace trace = event.getStackTrace();
+            if (trace != null) {
+              StringBuilder stack = new StringBuilder();
+              for (int i = 0; i < Math.min(stacksize, trace.getFrames().size()); i++) {
+                if (stack.length() > 0) {
+                  stack.append("\n\t\t\t  at ");
+                }
+                stack.append(frameToString(trace.getFrames().get(i), lineNumbers));
+              }
+              String line = stack.toString();
+              SimpleEntry<String,Integer> entry = histogram.computeIfAbsent(line, u -> new SimpleEntry<String, Integer>(line, 0));
+              entry.setValue(entry.getValue() + 1);
+              total++;
+            }
+          }
+        }
+      }
+    }
+    // print summary from histogram
+    System.out.printf(Locale.ROOT, "PROFILE SUMMARY from %d samples\n", total);
+    System.out.printf(Locale.ROOT, "  tests.profile.count=%d\n", count);
+    System.out.printf(Locale.ROOT, "  tests.profile.stacksize=%d\n",  stacksize);
+    System.out.printf(Locale.ROOT, "  tests.profile.linenumbers=%b\n",  lineNumbers);
+    System.out.printf(Locale.ROOT, "PERCENT\tSAMPLES\tSTACK\n", total);
+    List<SimpleEntry<String, Integer>> entries = new ArrayList<>(histogram.values());
+    entries.sort((u, v) -> v.getValue().compareTo(u.getValue()));
+    int seen = 0;
+    for (SimpleEntry<String, Integer> c : entries) {
+      if (seen++ == count) {
+        break;
+      }
+      System.out.printf(Locale.ROOT, "%2.2f%%\t%d\t%s\n", 100 * (float) c.getValue() / total, c.getValue(), c.getKey());
+    }
+  }
+

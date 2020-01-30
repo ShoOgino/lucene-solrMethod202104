@@ -1,0 +1,51 @@
+  /**
+   * Simple sanity checks that authentication is working the way the test expects 
+   */
+  public void testSanityCheckAuth() throws Exception {
+    
+    assertEquals("sanity check of non authenticated query request",
+                 401,
+                 expectThrows(SolrException.class, () -> {
+                     final long ignored = 
+                       (new QueryRequest(params("q", "*:*",
+                                                "rows", "0",
+                                                "_trace", "no_auth_sanity_check")))
+                       .process(cluster.getSolrClient(), COLLECTION_X).getResults().getNumFound();
+                   }).code());
+    
+    assertEquals("sanity check of update to X from write_X user",
+                 0,
+                 (setBasicAuthCredentials(new UpdateRequest(), WRITE_X_USER)
+                  .add(sdoc("id", "1_from_write_X_user"))
+                  .commit(cluster.getSolrClient(), COLLECTION_X)).getStatus());
+
+    assertEquals("sanity check of update to X from read only user",
+                 500, // should be 403, but CloudSolrClient lies on updates for now: SOLR-14222 
+                 expectThrows(SolrException.class, () -> {
+                     final int ignored = (setBasicAuthCredentials(new UpdateRequest(), READ_ONLY_USER)
+                                          .add(sdoc("id", "2_from_read_only_user"))
+                                          .commit(cluster.getSolrClient(), COLLECTION_X)).getStatus();
+                   }).code());
+    
+    assertEquals("sanity check of update to X from write_Y user",
+                 500, // should be 403, but CloudSolrClient lies on updates for now: SOLR-14222 
+                 expectThrows(SolrException.class, () -> {
+                     final int ignored = (setBasicAuthCredentials(new UpdateRequest(), WRITE_Y_USER)
+                                          .add(sdoc("id", "3_from_write_Y_user"))
+                                          .commit(cluster.getSolrClient(), COLLECTION_X)).getStatus();
+                   }).code());
+    
+    assertEquals("sanity check of update to Y from write_Y user",
+                 0,
+                 (setBasicAuthCredentials(new UpdateRequest(), WRITE_Y_USER)
+                  .add(sdoc("id", "1_from_write_Y_user"))
+                  .commit(cluster.getSolrClient(), COLLECTION_Y)).getStatus());
+    
+    for (String user : Arrays.asList(READ_ONLY_USER, WRITE_Y_USER, WRITE_X_USER)) {
+      for (String collection : Arrays.asList(COLLECTION_X, COLLECTION_Y)) {
+        assertEquals("sanity check: query "+collection+" from user: "+user,
+                     1, countDocsInCollection(collection, user));
+      }
+    }
+  }
+

@@ -1,0 +1,67 @@
+  /*
+   * Exercises behavior shared by all join methods.
+   */
+  @Test
+  public void testJoinAllMethods() throws Exception {
+    indexEmployeeDocs();
+    ModifiableSolrParams p = params("sort","id asc");
+
+    assertJQ(req(p, "q", buildJoinRequest(DEPT_FIELD, DEPT_ID_FIELD, "title:MTS"), "fl","id")
+        ,"/response=={'numFound':3,'start':0,'docs':[{'id':'10'},{'id':'12'},{'id':'13'}]}"
+    );
+
+    // empty from
+    assertJQ(req(p, "q", buildJoinRequest("noexist_ss_dv", DEPT_ID_FIELD, "*:*", "fl","id"))
+        ,"/response=={'numFound':0,'start':0,'docs':[]}"
+    );
+
+    // empty to
+    assertJQ(req(p, "q", buildJoinRequest(DEPT_FIELD, "noexist_ss_dv", "*:*"), "fl","id")
+        ,"/response=={'numFound':0,'start':0,'docs':[]}"
+    );
+
+    // self join... return everyone in same dept(s) as Dave
+    assertJQ(req(p, "q", buildJoinRequest(DEPT_FIELD, DEPT_FIELD, "name:dave"), "fl","id")
+        ,"/response=={'numFound':3,'start':0,'docs':[{'id':'1'},{'id':'4'},{'id':'5'}]}"
+    );
+
+    // from single-value to multi-value
+    assertJQ(req(p, "q", buildJoinRequest(DEPT_ID_FIELD, DEPT_FIELD, "text:develop"), "fl","id")
+        ,"/response=={'numFound':3,'start':0,'docs':[{'id':'1'},{'id':'4'},{'id':'5'}]}"
+    );
+
+    // from multi-value to single-value
+    assertJQ(req(p, "q",buildJoinRequest(DEPT_FIELD, DEPT_ID_FIELD, "title:MTS"), "fl","id", "debugQuery","true")
+        ,"/response=={'numFound':3,'start':0,'docs':[{'id':'10'},{'id':'12'},{'id':'13'}]}"
+    );
+
+    // expected outcome for a sub query matching dave joined against departments
+    final String davesDepartments =
+        "/response=={'numFound':2,'start':0,'docs':[{'id':'10'},{'id':'13'}]}";
+
+    // straight forward query
+    assertJQ(req(p, "q", buildJoinRequest(DEPT_FIELD, DEPT_ID_FIELD, "name:dave"), "fl","id"),
+        davesDepartments);
+
+    // variable deref in 'from' query
+    assertJQ(req(p, "q", buildJoinRequest(DEPT_FIELD, DEPT_ID_FIELD, "$qq"), "qq","{!dismax}dave", "qf","name",
+        "fl","id", "debugQuery","true"),
+        davesDepartments);
+
+    // variable deref in 'from' query (w/ localparams)
+    assertJQ(req(p, "q", buildJoinRequest(DEPT_FIELD, DEPT_ID_FIELD, "$qq"), "qq","{!dismax qf=name}dave",
+        "fl","id", "debugQuery","true"),
+        davesDepartments);
+
+    // defType local param to control sub-query parsing
+    assertJQ(req(p, "q", buildJoinRequest(DEPT_FIELD, DEPT_ID_FIELD, "dave", "defType=dismax"), "qf","name",
+        "fl","id", "debugQuery","true"),
+        davesDepartments);
+
+    // find people that develop stuff - but limit via filter query to a name of "john"
+    // this tests filters being pushed down to queries (SOLR-3062)
+    assertJQ(req(p, "q", buildJoinRequest(DEPT_ID_FIELD, DEPT_FIELD, "text:develop"), "fl","id", "fq", "name:john")
+        ,"/response=={'numFound':1,'start':0,'docs':[{'id':'1'}]}"
+    );
+  }
+

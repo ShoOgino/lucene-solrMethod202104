@@ -1,0 +1,66 @@
+  @Override
+  public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
+    if (! (searcher instanceof SolrIndexSearcher)) {
+      log.debug("Falling back to JoinQueryWeight because searcher [{}] is not the required SolrIndexSearcher", searcher);
+      return super.createWeight(searcher, scoreMode, boost);
+    }
+
+    final SolrIndexSearcher solrSearcher = (SolrIndexSearcher) searcher;
+    final JoinQueryWeight weight = new JoinQueryWeight(solrSearcher, ScoreMode.COMPLETE_NO_SCORES, 1.0f);
+    final SolrIndexSearcher fromSearcher = weight.fromSearcher;
+    final SolrIndexSearcher toSearcher = weight.toSearcher;
+
+    try {
+      final SortedSetDocValues topLevelFromDocValues = validateAndFetchDocValues(fromSearcher, fromField, "from");
+      final SortedSetDocValues topLevelToDocValues = validateAndFetchDocValues(toSearcher, toField, "to");
+      if (topLevelFromDocValues.getValueCount() == 0 || topLevelToDocValues.getValueCount() == 0) {
+        return createNoMatchesWeight(boost);
+      }
+
+      final LongBitSet fromOrdBitSet = findFieldOrdinalsMatchingQuery(q, fromField, fromSearcher, topLevelFromDocValues);
+      final LongBitSet toOrdBitSet = new LongBitSet(topLevelToDocValues.getValueCount());
+      final BitsetBounds toBitsetBounds = convertFromOrdinalsIntoToField(fromOrdBitSet, topLevelFromDocValues, toOrdBitSet, topLevelToDocValues);
+
+      final boolean toMultivalued = toSearcher.getSchema().getFieldOrNull(toField).multiValued();
+      return new ConstantScoreWeight(this, boost) {
+        public Scorer scorer(LeafReaderContext context) throws IOException {
+          if (toBitsetBounds.lower == BitsetBounds.NO_MATCHES) {
+            return null;
+          }
+
+          final DocIdSetIterator toApproximation = (toMultivalued) ? context.reader().getSortedSetDocValues(toField) :
+              context.reader().getSortedDocValues(toField);
+          if (toApproximation == null) {
+            return null;
+          }
+
+          final int docBase = context.docBase;
+          return new ConstantScoreScorer(this, this.score(), scoreMode, new TwoPhaseIterator(toApproximation) {
+            public boolean matches() throws IOException {
+              final boolean hasDoc = topLevelToDocValues.advanceExact(docBase + approximation.docID());
+              if (hasDoc) {
+                for (long ord = topLevelToDocValues.nextOrd(); ord != -1L; ord = topLevelToDocValues.nextOrd()) {
+                  if (toOrdBitSet.get(ord)) {
+                    return true;
+                  }
+                }
+              }
+              return false;
+            }
+
+            public float matchCost() {
+              return 10.0F;
+            }
+          });
+
+        }
+
+        public boolean isCacheable(LeafReaderContext ctx) {
+          return false;
+        }
+      };
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+  }
+

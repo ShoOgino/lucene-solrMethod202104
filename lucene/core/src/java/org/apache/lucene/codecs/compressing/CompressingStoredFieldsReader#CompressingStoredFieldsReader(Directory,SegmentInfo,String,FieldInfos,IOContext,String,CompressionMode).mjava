@@ -6,42 +6,13 @@
     boolean success = false;
     fieldInfos = fn;
     numDocs = si.maxDoc();
-    
-    int version = -1;
-    long maxPointer = -1;
-    CompressingStoredFieldsIndexReader indexReader = null;
-    
-    // Load the index into memory
-    final String indexName = IndexFileNames.segmentFileName(segment, segmentSuffix, FIELDS_INDEX_EXTENSION);    
-    try (ChecksumIndexInput indexStream = d.openChecksumInput(indexName, context)) {
-      Throwable priorE = null;
-      try {
-        final String codecNameIdx = formatName + CODEC_SFX_IDX;
-        version = CodecUtil.checkIndexHeader(indexStream, codecNameIdx, VERSION_START, VERSION_CURRENT, si.getId(), segmentSuffix);
-        assert CodecUtil.indexHeaderLength(codecNameIdx, segmentSuffix) == indexStream.getFilePointer();
-        indexReader = new CompressingStoredFieldsIndexReader(indexStream, si);
-        maxPointer = indexStream.readVLong();
-      } catch (Throwable exception) {
-        priorE = exception;
-      } finally {
-        CodecUtil.checkFooter(indexStream, priorE);
-      }
-    }
-    
-    this.version = version;
-    this.maxPointer = maxPointer;
-    this.indexReader = indexReader;
 
     final String fieldsStreamFN = IndexFileNames.segmentFileName(segment, segmentSuffix, FIELDS_EXTENSION);
     try {
       // Open the data file and read metadata
       fieldsStream = d.openInput(fieldsStreamFN, context);
-      final String codecNameDat = formatName + CODEC_SFX_DAT;
-      final int fieldsVersion = CodecUtil.checkIndexHeader(fieldsStream, codecNameDat, VERSION_START, VERSION_CURRENT, si.getId(), segmentSuffix);
-      if (version != fieldsVersion) {
-        throw new CorruptIndexException("Version mismatch between stored fields index and data: " + version + " != " + fieldsVersion, fieldsStream);
-      }
-      assert CodecUtil.indexHeaderLength(codecNameDat, segmentSuffix) == fieldsStream.getFilePointer();
+      version = CodecUtil.checkIndexHeader(fieldsStream, formatName, VERSION_START, VERSION_CURRENT, si.getId(), segmentSuffix);
+      assert CodecUtil.indexHeaderLength(formatName, segmentSuffix) == fieldsStream.getFilePointer();
 
       chunkSize = fieldsStream.readVInt();
       packedIntsVersion = fieldsStream.readVInt();
@@ -49,18 +20,51 @@
       this.merging = false;
       this.state = new BlockState();
 
+      // NOTE: data file is too costly to verify checksum against all the bytes on open,
+      // but for now we at least verify proper structure of the checksum footer: which looks
+      // for FOOTER_MAGIC + algorithmID. This is cheap and can detect some forms of corruption
+      // such as file truncation.
+      CodecUtil.retrieveChecksum(fieldsStream);
+
+      long maxPointer = -1;
+      FieldsIndex indexReader = null;
+
+      if (version < VERSION_OFFHEAP_INDEX) {
+        // Load the index into memory
+        final String indexName = IndexFileNames.segmentFileName(segment, segmentSuffix, "fdx");
+        try (ChecksumIndexInput indexStream = d.openChecksumInput(indexName, context)) {
+          Throwable priorE = null;
+          try {
+            assert formatName.endsWith("Data");
+            final String codecNameIdx = formatName.substring(0, formatName.length() - "Data".length()) + "Index";
+            final int version2 = CodecUtil.checkIndexHeader(indexStream, codecNameIdx, VERSION_START, VERSION_CURRENT, si.getId(), segmentSuffix);
+            if (version != version2) {
+              throw new CorruptIndexException("Version mismatch between stored fields index and data: " + version2 + " != " + version, indexStream);
+            }
+            assert CodecUtil.indexHeaderLength(codecNameIdx, segmentSuffix) == indexStream.getFilePointer();
+            indexReader = new LegacyFieldsIndexReader(indexStream, si);
+            maxPointer = indexStream.readVLong();
+          } catch (Throwable exception) {
+            priorE = exception;
+          } finally {
+            CodecUtil.checkFooter(indexStream, priorE);
+          }
+        }
+      } else {
+        FieldsIndexReader fieldsIndexReader = new FieldsIndexReader(d, si.name, segmentSuffix, INDEX_EXTENSION_PREFIX, INDEX_CODEC_NAME, si.getId());
+        indexReader = fieldsIndexReader;
+        maxPointer = fieldsIndexReader.getMaxPointer();
+      }
+
+      this.maxPointer = maxPointer;
+      this.indexReader = indexReader;
+
       fieldsStream.seek(maxPointer);
       numChunks = fieldsStream.readVLong();
       numDirtyChunks = fieldsStream.readVLong();
       if (numDirtyChunks > numChunks) {
         throw new CorruptIndexException("invalid chunk counts: dirty=" + numDirtyChunks + ", total=" + numChunks, fieldsStream);
       }
-
-      // NOTE: data file is too costly to verify checksum against all the bytes on open,
-      // but for now we at least verify proper structure of the checksum footer: which looks
-      // for FOOTER_MAGIC + algorithmID. This is cheap and can detect some forms of corruption
-      // such as file truncation.
-      CodecUtil.retrieveChecksum(fieldsStream);
 
       success = true;
     } finally {

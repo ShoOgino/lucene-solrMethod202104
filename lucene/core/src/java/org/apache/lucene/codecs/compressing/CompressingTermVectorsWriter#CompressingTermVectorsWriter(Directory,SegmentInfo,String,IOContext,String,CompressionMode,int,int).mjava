@@ -1,6 +1,6 @@
   /** Sole constructor. */
   public CompressingTermVectorsWriter(Directory directory, SegmentInfo si, String segmentSuffix, IOContext context,
-      String formatName, CompressionMode compressionMode, int chunkSize, int blockSize) throws IOException {
+      String formatName, CompressionMode compressionMode, int chunkSize, int blockShift) throws IOException {
     assert directory != null;
     this.segment = si.name;
     this.compressionMode = compressionMode;
@@ -14,21 +14,13 @@
     lastTerm = new BytesRef(ArrayUtil.oversize(30, 1));
 
     boolean success = false;
-    IndexOutput indexStream = directory.createOutput(IndexFileNames.segmentFileName(segment, segmentSuffix, VECTORS_INDEX_EXTENSION), 
-                                                                     context);
     try {
       vectorsStream = directory.createOutput(IndexFileNames.segmentFileName(segment, segmentSuffix, VECTORS_EXTENSION),
                                                      context);
+      CodecUtil.writeIndexHeader(vectorsStream, formatName, VERSION_CURRENT, si.getId(), segmentSuffix);
+      assert CodecUtil.indexHeaderLength(formatName, segmentSuffix) == vectorsStream.getFilePointer();
 
-      final String codecNameIdx = formatName + CODEC_SFX_IDX;
-      final String codecNameDat = formatName + CODEC_SFX_DAT;
-      CodecUtil.writeIndexHeader(indexStream, codecNameIdx, VERSION_CURRENT, si.getId(), segmentSuffix);
-      CodecUtil.writeIndexHeader(vectorsStream, codecNameDat, VERSION_CURRENT, si.getId(), segmentSuffix);
-      assert CodecUtil.indexHeaderLength(codecNameDat, segmentSuffix) == vectorsStream.getFilePointer();
-      assert CodecUtil.indexHeaderLength(codecNameIdx, segmentSuffix) == indexStream.getFilePointer();
-
-      indexWriter = new CompressingStoredFieldsIndexWriter(indexStream, blockSize);
-      indexStream = null;
+      indexWriter = new FieldsIndexWriter(directory, segment, segmentSuffix, VECTORS_INDEX_EXTENSION_PREFIX, VECTORS_INDEX_CODEC_NAME, si.getId(), blockShift, context);
 
       vectorsStream.writeVInt(PackedInts.VERSION_CURRENT);
       vectorsStream.writeVInt(chunkSize);
@@ -42,7 +34,7 @@
       success = true;
     } finally {
       if (!success) {
-        IOUtils.closeWhileHandlingException(vectorsStream, indexStream, indexWriter);
+        IOUtils.closeWhileHandlingException(vectorsStream, indexWriter, indexWriter);
       }
     }
   }

@@ -1,0 +1,36 @@
+  /** A simple "Delete by Query" example */
+  public void testSimpleDeleteStreamByQuery() throws Exception {
+    { // Put some "real" docs directly to both X...
+      final UpdateRequest update = setBasicAuthCredentials(new UpdateRequest(), WRITE_X_USER);
+      for (int i = 1; i <= 42; i++) {
+        update.add(sdoc("id",i+"x","foo_i",""+i));
+      }
+      assertEquals("initial docs in X",
+                   0, update.commit(cluster.getSolrClient(), COLLECTION_X).getStatus());
+    }
+    
+    assertEquals(42L, commitAndCountDocsInCollection(COLLECTION_X, WRITE_X_USER));
+    
+    { // WRITE_X user should be able to delete X via a query from X
+      final String expr
+        = "delete("+COLLECTION_X+", batchSize=5,                    " // note batch size
+        + "       search("+COLLECTION_X+",                          "
+        + "              q=\"foo_i:[* TO 10]\",                     " // 10 matches = 2 batches
+        + "              rows=100,                                  "
+        + "              fl=\"id,foo_i,_version_\",                 " // foo_i should be ignored...
+        + "              sort=\"foo_i desc\"))                      " // version constraint should be ok
+        ;
+
+      final SolrStream solrStream = new SolrStream(solrUrl + "/" + COLLECTION_X,
+                                                   params("qt", "/stream",
+                                                          "expr", expr));
+      solrStream.setCredentials(WRITE_X_USER, WRITE_X_USER);
+      final List<Tuple> tuples = getTuples(solrStream);
+      assertEquals(2, tuples.size());
+      assertEquals(5L, tuples.get(0).get("totalIndexed"));
+      assertEquals(10L, tuples.get(1).get("totalIndexed"));
+    }
+    
+    assertEquals(42L - 10L, commitAndCountDocsInCollection(COLLECTION_X, WRITE_X_USER));
+  }
+

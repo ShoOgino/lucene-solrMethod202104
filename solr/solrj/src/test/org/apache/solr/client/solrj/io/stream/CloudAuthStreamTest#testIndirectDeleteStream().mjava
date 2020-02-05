@@ -1,0 +1,89 @@
+  public void testIndirectDeleteStream() throws Exception {
+    { // Put some "real" docs directly to both X & Y...
+      final UpdateRequest xxx_Update = setBasicAuthCredentials(new UpdateRequest(), WRITE_X_USER);
+      final UpdateRequest yyy_Update = setBasicAuthCredentials(new UpdateRequest(), WRITE_Y_USER);
+      for (int i = 1; i <= 42; i++) {
+        xxx_Update.add(sdoc("id",i+"z","foo_i",""+i));
+        yyy_Update.add(sdoc("id",i+"z","foo_i",""+i));
+      }
+      assertEquals("initial docs in X",
+                   0, xxx_Update.commit(cluster.getSolrClient(), COLLECTION_X).getStatus());
+      assertEquals("initial docs in Y",
+                   0, yyy_Update.commit(cluster.getSolrClient(), COLLECTION_Y).getStatus());
+    }
+    
+    assertEquals(42L, commitAndCountDocsInCollection(COLLECTION_X, WRITE_X_USER));
+    assertEquals(42L, commitAndCountDocsInCollection(COLLECTION_Y, WRITE_Y_USER));
+    
+    { // WRITE_X user should be able to delete X via a (dummy) stream from Y...
+      final SolrStream solrStream = new SolrStream(solrUrl + "/" + COLLECTION_Y,
+                                                   params("qt", "/stream", "expr",
+                                                          "delete("+COLLECTION_X+",batchSize=1," +
+                                                          "tuple(id=42z))"));
+      solrStream.setCredentials(WRITE_X_USER, WRITE_X_USER);
+      final List<Tuple> tuples = getTuples(solrStream);
+      assertEquals(1, tuples.size());
+      assertEquals(1L, tuples.get(0).get("totalIndexed"));
+    }
+
+    assertEquals(42L - 1L, commitAndCountDocsInCollection(COLLECTION_X, WRITE_X_USER));
+    assertEquals(42L, commitAndCountDocsInCollection(COLLECTION_Y, WRITE_Y_USER));
+    
+    { // WRITE_X user should be able to delete ids from X via a (search) stream from Y (routed via Y)
+      final String expr
+        = "delete("+COLLECTION_X+", batchSize=50,                   " // note batch size
+        + "       pruneVersionField=true,                           " // NOTE: ignoring Y version to del X
+        + "       search("+COLLECTION_Y+",                          "
+        + "              q=\"foo_i:[* TO 10]\",                     " // 10 matches = 1 batch
+        + "              rows=100,                                  "
+        + "              fl=\"id,foo_i,_version_\",                 " // foo_i & version should be ignored
+        + "              sort=\"foo_i desc\"))                      "
+        ;
+      
+      final SolrStream solrStream = new SolrStream(solrUrl + "/" + COLLECTION_Y, // NOTE: Y route
+                                                   params("qt", "/stream",
+                                                          "expr", expr));
+      solrStream.setCredentials(WRITE_X_USER, WRITE_X_USER);
+      final List<Tuple> tuples = getTuples(solrStream);
+      assertEquals(1, tuples.size());
+      assertEquals(10L, tuples.get(0).get("batchIndexed"));
+      assertEquals(10L, tuples.get(0).get("totalIndexed"));
+
+    }
+
+    assertEquals(42L - 1L - 10L, commitAndCountDocsInCollection(COLLECTION_X, WRITE_X_USER));
+    assertEquals(42L, commitAndCountDocsInCollection(COLLECTION_Y, WRITE_Y_USER));
+      
+    { // WRITE_X user should be able to delete ids from X via a (search) stream from Y (routed via X)...
+      final String expr
+        = "delete("+COLLECTION_X+", batchSize=5,                    " // note batch size
+        + "       search("+COLLECTION_Y+",                          "
+        + "              q=\"foo_i:[30 TO *]\",                     " // 13 matches = 3 batches
+        + "              rows=100,                                  "
+        + "              fl=\"id,foo_i\",                           " // foo_i should be ignored
+        + "              sort=\"foo_i desc\"))                      "
+        ;
+      
+      final SolrStream solrStream = new SolrStream(solrUrl + "/" + COLLECTION_X, // NOTE: X route
+                                                   params("qt", "/stream",
+                                                          "expr", expr));
+      solrStream.setCredentials(WRITE_X_USER, WRITE_X_USER);
+      final List<Tuple> tuples = getTuples(solrStream);
+      assertEquals(3, tuples.size());
+      
+      assertEquals( 5L, tuples.get(0).get("batchIndexed"));
+      assertEquals( 5L, tuples.get(0).get("totalIndexed"));
+      
+      assertEquals( 5L, tuples.get(1).get("batchIndexed"));
+      assertEquals(10L, tuples.get(1).get("totalIndexed"));
+      
+      assertEquals( 3L, tuples.get(2).get("batchIndexed"));
+      assertEquals(13L, tuples.get(2).get("totalIndexed"));
+    }
+
+    assertEquals(42L - 1L - 10L - (13L - 1L), // '42' in last 13 deletes was already deleted from X
+                 commitAndCountDocsInCollection(COLLECTION_X, WRITE_X_USER));
+    assertEquals(42L, commitAndCountDocsInCollection(COLLECTION_Y, WRITE_Y_USER));
+    
+  }
+

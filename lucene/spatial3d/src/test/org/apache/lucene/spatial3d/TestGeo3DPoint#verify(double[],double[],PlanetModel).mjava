@@ -1,0 +1,147 @@
+  private static void verify(double[] lats, double[] lons, final PlanetModel planetModel) throws Exception {
+    IndexWriterConfig iwc = newIndexWriterConfig();
+
+    GeoPoint[] points = new GeoPoint[lats.length];
+    GeoPoint[] unquantizedPoints = new GeoPoint[lats.length];
+    
+    // Pre-quantize all lat/lons:
+    for(int i=0;i<lats.length;i++) {
+      if (Double.isNaN(lats[i]) == false) {
+        //System.out.println("lats[" + i + "] = " + lats[i]);
+        unquantizedPoints[i] = new GeoPoint(planetModel, toRadians(lats[i]), toRadians(lons[i]));
+        points[i] = quantize(unquantizedPoints[i], planetModel);
+      }
+    }
+
+    // Else we can get O(N^2) merging:
+    int mbd = iwc.getMaxBufferedDocs();
+    if (mbd != -1 && mbd < points.length/100) {
+      iwc.setMaxBufferedDocs(points.length/100);
+    }
+    iwc.setCodec(getCodec());
+    Directory dir;
+    if (points.length > 100000) {
+      dir = newFSDirectory(createTempDir("TestBKDTree"));
+    } else {
+      dir = getDirectory();
+    }
+    Set<Integer> deleted = new HashSet<>();
+    // RandomIndexWriter is too slow here:
+    IndexWriter w = new IndexWriter(dir, iwc);
+    for(int id=0;id<points.length;id++) {
+      Document doc = new Document();
+      doc.add(newStringField("id", ""+id, Field.Store.NO));
+      doc.add(new NumericDocValuesField("id", id));
+      GeoPoint point = points[id];
+      if (point != null) {
+        doc.add(new Geo3DPoint("point", planetModel, point.x, point.y, point.z));
+      }
+      w.addDocument(doc);
+      if (id > 0 && random().nextInt(100) == 42) {
+        int idToDelete = random().nextInt(id);
+        w.deleteDocuments(new Term("id", ""+idToDelete));
+        deleted.add(idToDelete);
+        if (VERBOSE) {
+          System.err.println("  delete id=" + idToDelete);
+        }
+      }
+    }
+    if (random().nextBoolean()) {
+      w.forceMerge(1);
+    }
+    final IndexReader r = DirectoryReader.open(w);
+    if (VERBOSE) {
+      System.out.println("TEST: using reader " + r);
+    }
+    w.close();
+
+    // We can't wrap with "exotic" readers because the geo3d query must see the Geo3DDVFormat:
+    IndexSearcher s = newSearcher(r, false);
+
+    final int iters = atLeast(100);
+
+    for (int iter=0;iter<iters;iter++) {
+
+      /*
+      GeoShape shape = randomShape();
+
+      if (VERBOSE) {
+        System.err.println("\nTEST: iter=" + iter + " shape="+shape);
+      }
+      */
+      
+      Query query = random3DQuery("point", planetModel); // Geo3DPoint.newShapeQuery("point", shape);
+
+      if (VERBOSE) {
+        System.err.println("  using query: " + query);
+      }
+
+      final FixedBitSet hits = new FixedBitSet(r.maxDoc());
+
+      s.search(query, new SimpleCollector() {
+
+          private int docBase;
+
+          @Override
+          public ScoreMode scoreMode() {
+            return ScoreMode.COMPLETE_NO_SCORES;
+          }
+
+          @Override
+          protected void doSetNextReader(LeafReaderContext context) throws IOException {
+            docBase = context.docBase;
+          }
+
+          @Override
+          public void collect(int doc) {
+            hits.set(docBase+doc);
+          }
+        });
+
+      if (VERBOSE) {
+        System.err.println("  hitCount: " + hits.cardinality());
+      }
+      
+      NumericDocValues docIDToID = MultiDocValues.getNumericValues(r, "id");
+
+      for(int docID=0;docID<r.maxDoc();docID++) {
+        assertEquals(docID, docIDToID.nextDoc());
+        int id = (int) docIDToID.longValue();
+        GeoPoint point = points[id];
+        GeoPoint unquantizedPoint = unquantizedPoints[id];
+        if (point != null && unquantizedPoint != null) {
+          GeoShape shape = ((PointInGeo3DShapeQuery)query).getShape();
+          XYZBounds bounds = new XYZBounds();
+          shape.getBounds(bounds);
+          XYZSolid solid = XYZSolidFactory.makeXYZSolid(planetModel, bounds.getMinimumX(), bounds.getMaximumX(), bounds.getMinimumY(), bounds.getMaximumY(), bounds.getMinimumZ(), bounds.getMaximumZ());
+
+          boolean expected = ((deleted.contains(id) == false) && shape.isWithin(point));
+          if (hits.get(docID) != expected) {
+            StringBuilder b = new StringBuilder();
+            if (expected) {
+              b.append("FAIL: id=" + id + " should have matched but did not\n");
+            } else {
+              b.append("FAIL: id=" + id + " should not have matched but did\n");
+            }
+            b.append("  shape=" + shape + "\n");
+            b.append("  bounds=" + bounds + "\n");
+            b.append("  world bounds=(" +
+              " minX=" + planetModel.getMinimumXValue() + " maxX=" + planetModel.getMaximumXValue() +
+              " minY=" + planetModel.getMinimumYValue() + " maxY=" + planetModel.getMaximumYValue() +
+              " minZ=" + planetModel.getMinimumZValue() + " maxZ=" + planetModel.getMaximumZValue() + "\n");
+            b.append("  quantized point=" + point + " within shape? "+shape.isWithin(point)+" within bounds? "+solid.isWithin(point)+"\n");
+            b.append("  unquantized point=" + unquantizedPoint + " within shape? "+shape.isWithin(unquantizedPoint)+" within bounds? "+solid.isWithin(unquantizedPoint)+"\n");
+            b.append("  docID=" + docID + " deleted?=" + deleted.contains(id) + "\n");
+            b.append("  query=" + query + "\n");
+            b.append("  explanation:\n    " + explain("point", shape, point, unquantizedPoint, r, docID).replace("\n", "\n  "));
+            fail(b.toString());
+          }
+        } else {
+          assertFalse(hits.get(docID));
+        }
+      }
+    }
+
+    IOUtils.close(r, dir);
+  }
+

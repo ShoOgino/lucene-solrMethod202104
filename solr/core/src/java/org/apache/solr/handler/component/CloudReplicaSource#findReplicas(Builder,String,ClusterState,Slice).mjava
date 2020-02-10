@@ -1,0 +1,19 @@
+  private List<String> findReplicas(Builder builder, String shardsParam, ClusterState clusterState, Slice slice) {
+    if (slice == null) {
+      // Treat this the same as "all servers down" for a slice, and let things continue
+      // if partial results are acceptable
+      return Collections.emptyList();
+    } else {
+      final Predicate<Replica> isShardLeader = new IsLeaderPredicate(builder.zkStateReader, clusterState, slice.getCollection(), slice.getName());
+      List<Replica> list = slice.getReplicas()
+          .stream()
+          .filter(replica -> replica.isActive(clusterState.getLiveNodes()))
+          .filter(replica -> !builder.onlyNrt || (replica.getType() == Replica.Type.NRT || (replica.getType() == Replica.Type.TLOG && isShardLeader.test(replica))))
+          .collect(Collectors.toList());
+      builder.replicaListTransformer.transform(list);
+      List<String> collect = list.stream().map(Replica::getCoreUrl).collect(Collectors.toList());
+      builder.hostChecker.checkWhitelist(clusterState, shardsParam, collect);
+      return collect;
+    }
+  }
+

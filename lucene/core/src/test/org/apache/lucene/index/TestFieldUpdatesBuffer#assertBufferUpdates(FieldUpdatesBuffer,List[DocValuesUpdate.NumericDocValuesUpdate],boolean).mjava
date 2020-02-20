@@ -1,0 +1,47 @@
+  void assertBufferUpdates(FieldUpdatesBuffer buffer,
+                           List<DocValuesUpdate.NumericDocValuesUpdate> updates,
+                           boolean termSorted) throws IOException {
+    if (termSorted) {
+      updates.sort(Comparator.comparing(u -> u.term.bytes));
+      SortedMap<BytesRef, DocValuesUpdate.NumericDocValuesUpdate> byTerms = new TreeMap<>();
+      for (DocValuesUpdate.NumericDocValuesUpdate update : updates) {
+        byTerms.compute(update.term.bytes, (k, v) -> v != null && v.docIDUpto >= update.docIDUpto ? v : update);
+      }
+      updates = new ArrayList<>(byTerms.values());
+    }
+    FieldUpdatesBuffer.BufferedUpdateIterator iterator = buffer.iterator();
+    FieldUpdatesBuffer.BufferedUpdate value;
+
+    int count = 0;
+    long min = Long.MAX_VALUE;
+    long max = Long.MIN_VALUE;
+    boolean hasAtLeastOneValue = false;
+    DocValuesUpdate.NumericDocValuesUpdate expectedUpdate;
+    while ((value = iterator.next()) != null) {
+      long v = buffer.getNumericValue(count);
+      expectedUpdate = updates.get(count++);
+      assertEquals(expectedUpdate.term.bytes.utf8ToString(), value.termValue.utf8ToString());
+      assertEquals(expectedUpdate.term.field, value.termField);
+      assertEquals(expectedUpdate.hasValue, value.hasValue);
+      if (expectedUpdate.hasValue) {
+        assertEquals(expectedUpdate.getValue(), value.numericValue);
+        assertEquals(v, value.numericValue);
+        min = Math.min(min, v);
+        max = Math.max(max, v);
+        hasAtLeastOneValue = true;
+      } else {
+        assertEquals(0, value.numericValue);
+        assertEquals(0, v);
+      }
+      assertEquals(expectedUpdate.docIDUpto, value.docUpTo);
+    }
+    if (hasAtLeastOneValue) {
+      assertEquals(max, buffer.getMaxNumeric());
+      assertEquals(min, buffer.getMinNumeric());
+    } else {
+      assertEquals(0, buffer.getMaxNumeric());
+      assertEquals(0, buffer.getMinNumeric());
+    }
+    assertEquals(count, updates.size());
+  }
+

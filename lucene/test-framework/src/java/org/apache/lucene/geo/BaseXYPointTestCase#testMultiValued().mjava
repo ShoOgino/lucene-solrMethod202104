@@ -1,0 +1,107 @@
+  public void testMultiValued() throws Exception {
+    int numPoints = atLeast(1000);
+    // Every doc has 2 points:
+    float[] xs = new float[2*numPoints];
+    float[] ys = new float[2*numPoints];
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = newIndexWriterConfig();
+
+    // We rely on docID order:
+    iwc.setMergePolicy(newLogMergePolicy());
+    // and on seeds being able to reproduce:
+    iwc.setMergeScheduler(new SerialMergeScheduler());
+    RandomIndexWriter w = new RandomIndexWriter(random(), dir, iwc);
+
+    for (int id=0;id<numPoints;id++) {
+      Document doc = new Document();
+      xs[2*id] = nextX();
+      ys[2*id] = nextY();
+      doc.add(newStringField("id", ""+id, Field.Store.YES));
+      addPointToDoc(FIELD_NAME, doc, xs[2*id], ys[2*id]);
+      xs[2*id+1] = nextX();
+      ys[2*id+1] = nextY();
+      addPointToDoc(FIELD_NAME, doc, xs[2*id+1], ys[2*id+1]);
+
+      if (VERBOSE) {
+        System.out.println("id=" + id);
+        System.out.println("  x=" + xs[2*id] + " y=" + ys[2*id]);
+        System.out.println("  x=" + xs[2*id+1] + " y=" + ys[2*id+1]);
+      }
+      w.addDocument(doc);
+    }
+
+    // TODO: share w/ verify; just need parallel array of the expected ids
+    if (random().nextBoolean()) {
+      w.forceMerge(1);
+    }
+    IndexReader r = w.getReader();
+    w.close();
+
+    IndexSearcher s = newSearcher(r);
+
+    int iters = atLeast(25);
+    for (int iter=0;iter<iters;iter++) {
+      XYRectangle rect = nextBox();
+
+      if (VERBOSE) {
+        System.out.println("\nTEST: iter=" + iter + " rect=" + rect);
+      }
+
+      Query query = newRectQuery(FIELD_NAME, rect.minX, rect.maxX, rect.minY, rect.maxY);
+
+      final FixedBitSet hits = new FixedBitSet(r.maxDoc());
+      s.search(query, new SimpleCollector() {
+
+          private int docBase;
+
+          @Override
+          public ScoreMode scoreMode() {
+            return ScoreMode.COMPLETE_NO_SCORES;
+          }
+
+          @Override
+          protected void doSetNextReader(LeafReaderContext context) throws IOException {
+            docBase = context.docBase;
+          }
+
+          @Override
+          public void collect(int doc) {
+            hits.set(docBase+doc);
+          }
+        });
+
+      boolean fail = false;
+
+      for(int docID=0;docID<ys.length/2;docID++) {
+        float yDoc1 = ys[2*docID];
+        float xDoc1 = xs[2*docID];
+        float yDoc2 = ys[2*docID+1];
+        float xDoc2 = xs[2*docID+1];
+        
+        boolean result1 = rectContainsPoint(rect, xDoc1, yDoc1);
+        boolean result2 = rectContainsPoint(rect, xDoc2, yDoc2);
+
+        boolean expected = result1 || result2;
+
+        if (hits.get(docID) != expected) {
+          String id = s.doc(docID).get("id");
+          if (expected) {
+            System.out.println("TEST: id=" + id + " docID=" + docID + " should match but did not");
+          } else {
+            System.out.println("TEST: id=" + id + " docID=" + docID + " should not match but did");
+          }
+          System.out.println("  rect=" + rect);
+          System.out.println("  x=" + xDoc1 + " y=" + yDoc1 + "\n  x=" + xDoc2 + " y" + yDoc2);
+          System.out.println("  result1=" + result1 + " result2=" + result2);
+          fail = true;
+        }
+      }
+
+      if (fail) {
+        fail("some hits were wrong");
+      }
+    }
+    r.close();
+    dir.close();
+  }
+

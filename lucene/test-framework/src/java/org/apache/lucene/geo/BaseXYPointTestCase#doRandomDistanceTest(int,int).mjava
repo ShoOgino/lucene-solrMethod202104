@@ -1,0 +1,77 @@
+  private void doRandomDistanceTest(int numDocs, int numQueries) throws IOException {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = newIndexWriterConfig();
+    // Else seeds may not reproduce:
+    iwc.setMergeScheduler(new SerialMergeScheduler());
+    int pointsInLeaf = 2 + random().nextInt(4);
+    iwc.setCodec(new FilterCodec("Lucene84", TestUtil.getDefaultCodec()) {
+      @Override
+      public PointsFormat pointsFormat() {
+        return new PointsFormat() {
+          @Override
+          public PointsWriter fieldsWriter(SegmentWriteState writeState) throws IOException {
+            return new Lucene60PointsWriter(writeState, pointsInLeaf, BKDWriter.DEFAULT_MAX_MB_SORT_IN_HEAP);
+          }
+
+          @Override
+          public PointsReader fieldsReader(SegmentReadState readState) throws IOException {
+            return new Lucene60PointsReader(readState);
+          }
+        };
+      }
+    });
+    RandomIndexWriter writer = new RandomIndexWriter(random(), dir, iwc);
+
+    for (int i = 0; i < numDocs; i++) {
+      float x = nextX();
+      float y = nextY();
+      // pre-normalize up front, so we can just use quantized value for testing and do simple exact comparisons
+
+      Document doc = new Document();
+      addPointToDoc("field", doc, x, y);
+      doc.add(new StoredField("x", x));
+      doc.add(new StoredField("y", y));
+      writer.addDocument(doc);
+    }
+    IndexReader reader = writer.getReader();
+    IndexSearcher searcher = newSearcher(reader);
+
+    for (int i = 0; i < numQueries; i++) {
+      float x = nextX();
+      float y = nextY();
+      float radius = (Float.MAX_VALUE / 2) * random().nextFloat();
+
+      BitSet expected = new BitSet();
+      for (int doc = 0; doc < reader.maxDoc(); doc++) {
+        float docX = reader.document(doc).getField("x").numericValue().floatValue();
+        float docY = reader.document(doc).getField("y").numericValue().floatValue();
+        double distance = cartesianDistance(x, y, docX, docY);
+        if (distance <= radius) {
+          expected.set(doc);
+        }
+      }
+
+      TopDocs topDocs = searcher.search(newDistanceQuery("field", x, y, radius), reader.maxDoc(), Sort.INDEXORDER);
+      BitSet actual = new BitSet();
+      for (ScoreDoc doc : topDocs.scoreDocs) {
+        actual.set(doc.doc);
+      }
+
+      try {
+        assertEquals(expected, actual);
+      } catch (AssertionError e) {
+        System.out.println("center: (" + x + "," + y + "), radius=" + radius);
+        for (int doc = 0; doc < reader.maxDoc(); doc++) {
+          float docX = reader.document(doc).getField("x").numericValue().floatValue();
+          float docY = reader.document(doc).getField("y").numericValue().floatValue();
+          double distance = cartesianDistance(x, y, docX, docY);
+          System.out.println("" + doc + ": (" + x + "," + y + "), distance=" + distance);
+        }
+        throw e;
+      }
+    }
+    reader.close();
+    writer.close();
+    dir.close();
+  }
+

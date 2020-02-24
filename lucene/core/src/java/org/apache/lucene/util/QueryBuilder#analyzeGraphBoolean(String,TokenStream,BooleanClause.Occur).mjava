@@ -15,33 +15,40 @@
         end = articulationPoints[i];
       }
       lastState = end;
-      final Query queryPos;
+      final Query positionalQuery;
       if (graph.hasSidePath(start)) {
-        final Iterator<TokenStream> it = graph.getFiniteStrings(start, end);
+        final Iterator<TokenStream> sidePathsIterator = graph.getFiniteStrings(start, end);
         Iterator<Query> queries = new Iterator<Query>() {
           @Override
           public boolean hasNext() {
-            return it.hasNext();
+            return sidePathsIterator.hasNext();
           }
 
           @Override
           public Query next() {
-            TokenStream ts = it.next();
-            return createFieldQuery(ts, BooleanClause.Occur.MUST, field, getAutoGenerateMultiTermSynonymsPhraseQuery(), 0);
+            TokenStream sidePath = sidePathsIterator.next();
+            return createFieldQuery(sidePath, BooleanClause.Occur.MUST, field, getAutoGenerateMultiTermSynonymsPhraseQuery(), 0);
           }
         };
-        queryPos = newGraphSynonymQuery(queries);
+        positionalQuery = newGraphSynonymQuery(queries);
       } else {
-        Term[] terms = graph.getTerms(field, start);
+        List<AttributeSource> attributes = graph.getTerms(start);
+        TermAndBoost[] terms = attributes.stream()
+                .map(s -> {
+                  TermToBytesRefAttribute t = s.addAttribute(TermToBytesRefAttribute.class);
+                  BoostAttribute b = s.addAttribute(BoostAttribute.class);
+                  return new TermAndBoost(new Term(field, t.getBytesRef()), b.getBoost());
+                })
+                .toArray(TermAndBoost[]::new);
         assert terms.length > 0;
         if (terms.length == 1) {
-          queryPos = newTermQuery(terms[0]);
+          positionalQuery = newTermQuery(terms[0].term, terms[0].boost);
         } else {
-          queryPos = newSynonymQuery(terms);
+          positionalQuery = newSynonymQuery(terms);
         }
       }
-      if (queryPos != null) {
-        builder.add(queryPos, operator);
+      if (positionalQuery != null) {
+        builder.add(positionalQuery, operator);
       }
     }
     return builder.build();

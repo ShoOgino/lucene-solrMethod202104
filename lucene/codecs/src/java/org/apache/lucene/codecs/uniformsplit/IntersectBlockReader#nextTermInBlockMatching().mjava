@@ -1,39 +1,88 @@
   /**
-   * Find the next block line that matches, or null when at end of block.
+   * Finds the next block line that matches (accepted by the automaton), or null when at end of block.
+   *
+   * @return The next term in the current block that is accepted by the automaton; or null if none.
    */
   protected BytesRef nextTermInBlockMatching() throws IOException {
-    do {
-      // if seekTerm is set, then we seek into this block instead of starting with the first blindly.
-      if (seekTerm != null) {
-        assert blockLine == null;
-        boolean moveBeyondIfFound = seekTerm == startTerm; // for startTerm, we want to get the following term
-        SeekStatus seekStatus = seekInBlock(seekTerm);
-        seekTerm = null;// reset.
-        if (seekStatus == SeekStatus.END) {
-          return null;
-        } else if (seekStatus == SeekStatus.FOUND && moveBeyondIfFound) {
-          if (readLineInBlock() == null) {
-            return null;
-          }
-        }
-        assert blockLine != null;
-      } else {
-        if (readLineInBlock() == null) {
-          return null;
-        }
+    if (seekTerm == null) {
+      if (readLineInBlock() == null) {
+        return null;
       }
-
+    } else {
+      SeekStatus seekStatus = seekInBlock(seekTerm);
+      seekTerm = null;
+      if (seekStatus == SeekStatus.END) {
+        return null;
+      }
+      assert numMatchedBytes == 0;
+      assert numConsecutivelyRejectedTerms == 0;
+    }
+    while (true) {
       TermBytes lineTermBytes = blockLine.getTermBytes();
       BytesRef lineTerm = lineTermBytes.getTerm();
-
-      if (commonSuffixRef == null || StringHelper.endsWith(lineTerm, commonSuffixRef)) {
-        if (runAutomatonFromPrefix(lineTerm)) {
-          return lineTerm;
-        } else if (beyondCommonPrefix) {
-          return null;
+      assert lineTerm.offset == 0;
+      if (states.length <= lineTerm.length) {
+        states = ArrayUtil.growExact(states, ArrayUtil.oversize(lineTerm.length + 1, Byte.BYTES));
+      }
+      // Since terms are delta encoded, we may start the automaton steps from the last state reached by the previous term.
+      int index = Math.min(lineTermBytes.getSuffixOffset(), numMatchedBytes);
+      // Skip this term early if it is shorter than the min term length, or if it does not end with the common suffix
+      // accepted by the automaton.
+      if (lineTerm.length >= minTermLength && (commonSuffix == null || endsWithCommonSuffix(lineTerm.bytes, lineTerm.length))) {
+        int state = states[index];
+        while (true) {
+          if (index == lineTerm.length) {
+            if (runAutomaton.isAccept(state)) {
+              // The automaton accepts the current term. Record the number of matched bytes and return the term.
+              assert runAutomaton.run(lineTerm.bytes, 0, lineTerm.length);
+              numMatchedBytes = index;
+              if (numConsecutivelyRejectedTerms > 0) {
+                numConsecutivelyRejectedTerms = 0;
+              }
+              assert blockIteration == BlockIteration.NEXT;
+              return lineTerm;
+            }
+            break;
+          }
+          state = runAutomaton.step(state, lineTerm.bytes[index] & 0xff);
+          if (state == -1) {
+            // The automaton rejects the current term.
+            break;
+          }
+          // Record the reached automaton state.
+          states[++index] = state;
         }
       }
-
-    } while (true);
+      // The current term is not accepted by the automaton.
+      // Still record the reached automaton state to start the next term steps from there.
+      assert !runAutomaton.run(lineTerm.bytes, 0, lineTerm.length);
+      numMatchedBytes = index;
+      // If the number of consecutively rejected terms reaches the threshold,
+      // then determine whether it is worthwhile to jump to a block away.
+      if (++numConsecutivelyRejectedTerms >= NUM_CONSECUTIVELY_REJECTED_TERMS_THRESHOLD
+          && lineIndexInBlock < blockHeader.getLinesCount() - 1
+          && !nextStringCalculator.isLinearState(lineTerm)) {
+        // Compute the next term accepted by the automaton after the current term.
+        if ((seekTerm = nextStringCalculator.nextSeekTerm(lineTerm)) == null) {
+          blockIteration = BlockIteration.END;
+          return null;
+        }
+        // It is worthwhile to jump to a block away if the next term accepted is after the next term in the block.
+        // Actually the block away may be the current block, but this is a good heuristic.
+        readLineInBlock();
+        if (seekTerm.compareTo(blockLine.getTermBytes().getTerm()) > 0) {
+          // Stop scanning this block terms and set the iteration order to jump to a block away by seeking seekTerm.
+          blockIteration = BlockIteration.SEEK;
+          return null;
+        }
+        seekTerm = null;
+        // If it is not worthwhile to jump to a block away, do not attempt anymore for the current block.
+        numConsecutivelyRejectedTerms = Integer.MIN_VALUE;
+      } else if (readLineInBlock() == null) {
+        // No more terms in the block. The iteration order is to open the very next block.
+        assert blockIteration == BlockIteration.NEXT;
+        return null;
+      }
+    }
   }
 

@@ -1,4 +1,4 @@
-  private long finishDocument(DocumentsWriterDeleteQueue.Node<?> deleteNode) {
+  private long finishDocuments(DocumentsWriterDeleteQueue.Node<?> deleteNode, int docCount) {
     /*
      * here we actually finish the document in two steps 1. push the delete into
      * the queue and update our slice. 2. increment the DWPT private document
@@ -7,27 +7,24 @@
      * the updated slice we get from 1. holds all the deletes that have occurred
      * since we updated the slice the last time.
      */
-    boolean applySlice = numDocsInRAM != 0;
+    // Apply delTerm only after all indexing has
+    // succeeded, but apply it only to docs prior to when
+    // this batch started:
     long seqNo;
     if (deleteNode != null) {
       seqNo = deleteQueue.add(deleteNode, deleteSlice);
-      assert deleteSlice.isTail(deleteNode) : "expected the delete node as the tail";
-    } else  {
+      assert deleteSlice.isTail(deleteNode) : "expected the delete term as the tail item";
+      deleteSlice.apply(pendingUpdates, numDocsInRAM - docCount);
+      return seqNo;
+    } else {
       seqNo = deleteQueue.updateSlice(deleteSlice);
-      
       if (seqNo < 0) {
         seqNo = -seqNo;
+        deleteSlice.apply(pendingUpdates, numDocsInRAM - docCount);
       } else {
-        applySlice = false;
+        deleteSlice.reset();
       }
     }
-    
-    if (applySlice) {
-      deleteSlice.apply(pendingUpdates, numDocsInRAM);
-    } else { // if we don't need to apply we must reset!
-      deleteSlice.reset();
-    }
-    ++numDocsInRAM;
 
     return seqNo;
   }

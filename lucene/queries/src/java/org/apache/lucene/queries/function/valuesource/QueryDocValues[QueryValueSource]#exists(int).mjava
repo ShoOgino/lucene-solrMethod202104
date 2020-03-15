@@ -1,30 +1,32 @@
   @Override
   public boolean exists(int doc) {
+    if (doc < lastDocRequested) {
+      throw new IllegalArgumentException("docs were sent out-of-order: lastDocID=" + lastDocRequested + " vs docID=" + doc);
+    }
+    lastDocRequested = doc;
+
     try {
-      if (doc < lastDocRequested) {
-        if (noMatches) return false;
+      if (disi == null) {
         scorer = weight.scorer(readerContext);
-        scorerDoc = -1;
-        if (scorer==null) {
-          noMatches = true;
-          return false;
+        if (scorer == null) {
+          disi = DocIdSetIterator.empty();
+        } else {
+          tpi = scorer.twoPhaseIterator();
+          disi = tpi == null ? scorer.iterator() : tpi.approximation();
         }
-        it = scorer.iterator();
-      }
-      lastDocRequested = doc;
-
-      if (scorerDoc < doc) {
-        scorerDoc = it.advance(doc);
+        thisDocMatches = null;
       }
 
-      if (scorerDoc > doc) {
-        // query doesn't match this document... either because we hit the
-        // end, or because the next doc is after this doc.
-        return false;
+      if (disi.docID() < doc) {
+        disi.advance(doc);
+        thisDocMatches = null;
       }
-
-      // a match!
-      return true;
+      if (disi.docID() == doc) {
+        if (thisDocMatches == null) {
+          thisDocMatches = tpi == null || tpi.matches();
+        }
+        return thisDocMatches;
+      } else return false;
     } catch (IOException e) {
       throw new RuntimeException("caught exception in QueryDocVals("+q+") doc="+doc, e);
     }

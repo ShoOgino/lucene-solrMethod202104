@@ -2,15 +2,13 @@
     try {
       testPoint("DocumentsWriterPerThread addDocuments start");
       assert hasHitAbortingException() == false: "DWPT has hit aborting exception but is still indexing";
-      assert deleteQueue != null;
       docState.analyzer = analyzer;
       if (INFO_VERBOSE && infoStream.isEnabled("DWPT")) {
         infoStream.message("DWPT", Thread.currentThread().getName() + " update delTerm=" + deleteNode + " docID=" + docState.docID + " seg=" + segmentInfo.name);
       }
-      int docCount = 0;
+      final int docsInRamBefore = numDocsInRAM;
       boolean allDocsIndexed = false;
       try {
-
         for (Iterable<? extends IndexableField> doc : docs) {
           // Even on exception, the document is still added (but marked
           // deleted), so we don't need to un-reserve at that point.
@@ -21,34 +19,19 @@
           reserveOneDoc();
           docState.doc = doc;
           docState.docID = numDocsInRAM;
-          docCount++;
-
-          boolean success = false;
           try {
             consumer.processDocument();
-            success = true;
           } finally {
-            if (!success) {
-              // Incr here because finishDocument will not
-              // be called (because an exc is being thrown):
-              numDocsInRAM++;
-            }
+            numDocsInRAM++; // we count the doc anyway even in the case of an exception
           }
-
-          numDocsInRAM++;
         }
         allDocsIndexed = true;
-        return finishDocuments(deleteNode, docCount);
+        return finishDocuments(deleteNode, docsInRamBefore);
       } finally {
         if (!allDocsIndexed && !aborted) {
           // the iterator threw an exception that is not aborting
           // go and mark all docs from this block as deleted
-          int docID = numDocsInRAM - 1;
-          final int endDocID = docID - docCount;
-          while (docID > endDocID) {
-            deleteDocID(docID);
-            docID--;
-          }
+          deleteLastDocs(numDocsInRAM - docsInRamBefore);
         }
         docState.clear();
       }

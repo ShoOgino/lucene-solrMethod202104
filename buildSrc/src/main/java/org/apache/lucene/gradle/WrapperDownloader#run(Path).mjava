@@ -1,0 +1,60 @@
+  public void run(Path destination) throws IOException, NoSuchAlgorithmException {
+    Path checksumPath = destination.resolveSibling(destination.getFileName().toString() + ".sha256");
+    if (!Files.exists(checksumPath)) {
+      throw new IOException("Checksum file not found: " + checksumPath);
+    }
+    String expectedChecksum = Files.readString(checksumPath, StandardCharsets.UTF_8).trim();
+
+    Path versionPath = destination.resolveSibling(destination.getFileName().toString() + ".version");
+    if (!Files.exists(versionPath)) {
+      throw new IOException("Wrapper version file not found: " + versionPath);
+    }
+    String wrapperVersion = Files.readString(versionPath, StandardCharsets.UTF_8).trim();
+
+    MessageDigest digest = MessageDigest.getInstance("SHA-256");
+
+    if (Files.exists(destination)) {
+      if (checksum(digest, destination).equalsIgnoreCase(expectedChecksum)) {
+        // File exists, checksum matches, good to go!
+        return;
+      } else {
+        System.err.println("Checksum mismatch, will attempt to re-download gradle-wrapper.jar");
+        System.out.println(destination);
+        Files.delete(destination);
+      }
+    }
+
+    URL url = new URL("https://github.com/gradle/gradle/raw/v" + wrapperVersion + "/gradle/wrapper/gradle-wrapper.jar");
+    System.err.println("Downloading gradle-wrapper.jar from " + url);
+
+    // As of v6.0.1 the wrapper is approximately 60K
+    // Can increase this if gradle wrapper ever goes beyond 500K, but keep a safety check
+    final int maxSize = 512 * 1024;
+
+    // Zero-copy save the jar to a temp file
+    Path temp = Files.createTempFile(destination.getParent(), ".gradle-wrapper", ".tmp");
+    try {
+      try (ReadableByteChannel in = Channels.newChannel(url.openStream());
+           FileChannel out = FileChannel.open(temp, EnumSet.of(APPEND))) {
+        out.transferFrom(in, 0, maxSize);
+      } catch (IOException e) {
+        throw new IOException("Could not download gradle-wrapper.jar (" + e.getMessage() + ").");
+      }
+
+      String checksum = checksum(digest, temp);
+      if (!checksum.equalsIgnoreCase(expectedChecksum)) {
+        throw new IOException(String.format(Locale.ROOT,
+                "Checksum mismatch on downloaded gradle-wrapper.jar (was: %s, expected: %s).",
+                checksum,
+                expectedChecksum));
+      }
+
+      Files.move(temp, destination, REPLACE_EXISTING);
+      temp = null;
+    } finally {
+      if (temp != null) {
+        Files.deleteIfExists(temp);
+      }
+    }
+  }
+

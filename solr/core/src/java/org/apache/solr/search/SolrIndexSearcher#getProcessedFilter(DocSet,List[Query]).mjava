@@ -1,10 +1,20 @@
+  /**
+   * INTERNAL: Processes conjunction (AND) of both args into a {@link ProcessedFilter} result.
+   * Either arg may be null/empty thus doesn't restrict the matching docs.
+   * Queries typically are resolved against the filter cache, and populate it.
+   */
   public ProcessedFilter getProcessedFilter(DocSet setFilter, List<Query> queries) throws IOException {
     ProcessedFilter pf = new ProcessedFilter();
     if (queries == null || queries.size() == 0) {
-      if (setFilter != null) pf.filter = setFilter.getTopFilter();
+      if (setFilter != null) {
+        pf.answer = setFilter;
+        pf.filter = setFilter.getTopFilter();
+      }
       return pf;
     }
 
+    // We combine all the filter queries that come from the filter cache & setFilter into "answer".
+    // This might become pf.filterAsDocSet but not if there are any non-cached filters
     DocSet answer = null;
 
     boolean[] neg = new boolean[queries.size() + 1];
@@ -18,7 +28,7 @@
     if (setFilter != null) {
       answer = sets[end++] = setFilter;
       smallestIndex = end;
-    }
+    } // we are done with setFilter at this point
 
     int smallestCount = Integer.MAX_VALUE;
     for (Query q : queries) {
@@ -80,7 +90,30 @@
       if (!neg[i] && i != smallestIndex) answer = answer.intersection(sets[i]);
     }
 
-    if (notCached != null) {
+    // ignore "answer" if it simply matches all docs
+    if (answer != null && answer.size() == numDocs()) {
+      answer = null;
+    }
+
+    // answer is done.
+
+    // If no notCached nor postFilters, we can return now.
+    if (notCached == null && postFilters == null) {
+      // "answer" is the only part of the filter, so set it.
+      if (answer != null) {
+        pf.answer = answer;
+        pf.filter = answer.getTopFilter();
+      }
+      return pf;
+    }
+    // pf.answer will remain null ...  (our local "answer" var is not the complete answer)
+
+    // Set pf.filter based on combining "answer" and "notCached"
+    if (notCached == null) {
+      if (answer != null) {
+        pf.filter = answer.getTopFilter();
+      }
+    } else {
       Collections.sort(notCached, sortByCost);
       List<Weight> weights = new ArrayList<>(notCached.size());
       for (Query q : notCached) {
@@ -89,20 +122,9 @@
       }
       pf.filter = new FilterImpl(answer, weights);
       pf.hasDeletedDocs = (answer == null);  // if all clauses were uncached, the resulting filter may match deleted docs
-    } else {
-      if (postFilters == null) {
-        if (answer == null) {
-          answer = getLiveDocSet();
-        }
-        // "answer" is the only part of the filter, so set it.
-        pf.answer = answer;
-      }
-
-      if (answer != null) {
-        pf.filter = answer.getTopFilter();
-      }
     }
 
+    // Set pf.postFilter
     if (postFilters != null) {
       Collections.sort(postFilters, sortByCost);
       for (int i = postFilters.size() - 1; i >= 0; i--) {

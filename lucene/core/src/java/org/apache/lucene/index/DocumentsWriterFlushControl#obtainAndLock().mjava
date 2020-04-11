@@ -1,20 +1,25 @@
-  ThreadState obtainAndLock() {
-    final ThreadState perThread = perThreadPool.getAndLock();
-    boolean success = false;
-    try {
-      if (perThread.isInitialized() && perThread.dwpt.deleteQueue != documentsWriter.deleteQueue) {
-        // There is a flush-all in process and this DWPT is
-        // now stale -- enroll it for flush and try for
-        // another DWPT:
-        addFlushableState(perThread);
-      }
-      success = true;
-      // simply return the ThreadState even in a flush all case sine we already hold the lock
-      return perThread;
-    } finally {
-      if (!success) { // make sure we unlock if this fails
-        perThreadPool.release(perThread);
+  DocumentsWriterPerThread obtainAndLock() throws IOException {
+    while (closed == false) {
+      final DocumentsWriterPerThread perThread = perThreadPool.getAndLock();
+      if (perThread.deleteQueue == documentsWriter.deleteQueue) {
+        // simply return the DWPT even in a flush all case since we already hold the lock and the DWPT is not stale
+        // since it has the current delete queue associated with it. This means we have established a happens-before
+        // relationship and all docs indexed into this DWPT are guaranteed to not be flushed with the currently
+        // progress full flush.
+        return perThread;
+      } else {
+        try {
+          // we must first assert otherwise the full flush might make progress once we unlock the dwpt
+          assert fullFlush && fullFlushMarkDone == false :
+              "found a stale DWPT but full flush mark phase is already done fullFlush: "
+                  + fullFlush  + " markDone: " + fullFlushMarkDone;
+        } finally {
+          perThread.unlock();
+          // There is a flush-all in process and this DWPT is
+          // now stale - try another one
+        }
       }
     }
+    throw new AlreadyClosedException("flush control is closed");
   }
 

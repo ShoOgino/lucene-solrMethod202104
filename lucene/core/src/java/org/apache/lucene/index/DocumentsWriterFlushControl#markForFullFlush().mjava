@@ -2,50 +2,57 @@
     final DocumentsWriterDeleteQueue flushingQueue;
     long seqNo;
     synchronized (this) {
-      assert !fullFlush : "called DWFC#markForFullFlush() while full flush is still running";
-      assert fullFlushBuffer.isEmpty() : "full flush buffer should be empty: "+ fullFlushBuffer;
+      assert fullFlush == false: "called DWFC#markForFullFlush() while full flush is still running";
+      assert fullFlushMarkDone == false : "full flush collection marker is still set to true";
       fullFlush = true;
       flushingQueue = documentsWriter.deleteQueue;
       // Set a new delete queue - all subsequent DWPT will use this queue until
       // we do another full flush
-
-      perThreadPool.lockNewThreadStates(); // no new thread-states while we do a flush otherwise the seqNo accounting might be off
+      perThreadPool.lockNewWriters(); // no new thread-states while we do a flush otherwise the seqNo accounting might be off
       try {
         // Insert a gap in seqNo of current active thread count, in the worst case each of those threads now have one operation in flight.  It's fine
         // if we have some sequence numbers that were never assigned:
-        seqNo = documentsWriter.deleteQueue.getLastSequenceNumber() + perThreadPool.getActiveThreadStateCount() + 2;
+        seqNo = documentsWriter.deleteQueue.getLastSequenceNumber() + perThreadPool.size() + 2;
         flushingQueue.maxSeqNo = seqNo + 1;
         DocumentsWriterDeleteQueue newQueue = new DocumentsWriterDeleteQueue(infoStream, flushingQueue.generation + 1, seqNo + 1);
         documentsWriter.deleteQueue = newQueue;
-
       } finally {
-        perThreadPool.unlockNewThreadStates();
+        perThreadPool.unlockNewWriters();
       }
     }
-    final int limit = perThreadPool.getActiveThreadStateCount();
-    for (int i = 0; i < limit; i++) {
-      final ThreadState next = perThreadPool.getThreadState(i);
-      next.lock();
-      try {
-        if (!next.isInitialized()) {
-          continue; 
+    final List<DocumentsWriterPerThread> fullFlushBuffer = new ArrayList<>();
+    for (final DocumentsWriterPerThread next : perThreadPool.filterAndLock(dwpt -> dwpt.deleteQueue == flushingQueue)) {
+        try {
+          assert next.deleteQueue == flushingQueue
+              || next.deleteQueue == documentsWriter.deleteQueue : " flushingQueue: "
+              + flushingQueue
+              + " currentqueue: "
+              + documentsWriter.deleteQueue
+              + " perThread queue: "
+              + next.deleteQueue
+              + " numDocsInRam: " + next.getNumDocsInRAM();
+
+          if (next.getNumDocsInRAM() > 0) {
+            final DocumentsWriterPerThread flushingDWPT;
+            synchronized(this) {
+              if (next.isFlushPending() == false) {
+                setFlushPending(next);
+              }
+              flushingDWPT = checkOutForFlush(next);
+            }
+            assert flushingDWPT != null : "DWPT must never be null here since we hold the lock and it holds documents";
+            assert next == flushingDWPT : "flushControl returned different DWPT";
+            fullFlushBuffer.add(flushingDWPT);
+          } else {
+            // it's possible that we get a DWPT with 0 docs if we flush concurrently to
+            // threads getting DWPTs from the pool. In this case we simply remove it from
+            // the pool and drop it on the floor.
+            boolean checkout = perThreadPool.checkout(next);
+            assert checkout;
+          }
+        } finally {
+          next.unlock();
         }
-        assert next.dwpt.deleteQueue == flushingQueue
-            || next.dwpt.deleteQueue == documentsWriter.deleteQueue : " flushingQueue: "
-            + flushingQueue
-            + " currentqueue: "
-            + documentsWriter.deleteQueue
-            + " perThread queue: "
-            + next.dwpt.deleteQueue
-            + " numDocsInRam: " + next.dwpt.getNumDocsInRAM();
-        if (next.dwpt.deleteQueue != flushingQueue) {
-          // this one is already a new DWPT
-          continue;
-        }
-        addFlushableState(next);
-      } finally {
-        next.unlock();
-      }
     }
     synchronized (this) {
       /* make sure we move all DWPT that are where concurrently marked as
@@ -55,8 +62,8 @@
       pruneBlockedQueue(flushingQueue);   
       assert assertBlockedFlushes(documentsWriter.deleteQueue);
       flushQueue.addAll(fullFlushBuffer);
-      fullFlushBuffer.clear();
       updateStallState();
+      fullFlushMarkDone = true; // at this point we must have collected all DWPTs that belong to the old delete queue
     }
     assert assertActiveDeleteQueue(documentsWriter.deleteQueue);
     return seqNo;

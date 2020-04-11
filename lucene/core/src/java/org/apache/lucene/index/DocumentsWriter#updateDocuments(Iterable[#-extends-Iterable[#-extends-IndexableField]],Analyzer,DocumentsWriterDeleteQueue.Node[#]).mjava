@@ -2,23 +2,20 @@
                        final DocumentsWriterDeleteQueue.Node<?> delNode) throws IOException {
     boolean hasEvents = preUpdate();
 
-    final ThreadState perThread = flushControl.obtainAndLock();
+    final DocumentsWriterPerThread dwpt = flushControl.obtainAndLock();
     final DocumentsWriterPerThread flushingDWPT;
     long seqNo;
 
     try {
-      // This must happen after we've pulled the ThreadState because IW.close
-      // waits for all ThreadStates to be released:
+      // This must happen after we've pulled the DWPT because IW.close
+      // waits for all DWPT to be released:
       ensureOpen();
-      ensureInitialized(perThread);
-      assert perThread.isInitialized();
-      final DocumentsWriterPerThread dwpt = perThread.dwpt;
       final int dwptNumDocs = dwpt.getNumDocsInRAM();
       try {
         seqNo = dwpt.updateDocuments(docs, analyzer, delNode, flushNotifications);
       } finally {
         if (dwpt.isAborted()) {
-          flushControl.doOnAbort(perThread);
+          flushControl.doOnAbort(dwpt);
         }
         // We don't know how many documents were actually
         // counted as indexed, so we must subtract here to
@@ -26,13 +23,14 @@
         numDocsInRAM.addAndGet(dwpt.getNumDocsInRAM() - dwptNumDocs);
       }
       final boolean isUpdate = delNode != null && delNode.isDelete();
-      flushingDWPT = flushControl.doAfterDocument(perThread, isUpdate);
-
-      assert seqNo > perThread.lastSeqNo: "seqNo=" + seqNo + " lastSeqNo=" + perThread.lastSeqNo;
-      perThread.lastSeqNo = seqNo;
-
+      flushingDWPT = flushControl.doAfterDocument(dwpt, isUpdate);
     } finally {
-      perThreadPool.release(perThread);
+      if (dwpt.isFlushPending() || dwpt.isAborted()) {
+        dwpt.unlock();
+      } else {
+        perThreadPool.marksAsFreeAndUnlock(dwpt);
+      }
+      assert dwpt.isHeldByCurrentThread() == false : "we didn't release the dwpt even on abort";
     }
 
     if (postUpdate(flushingDWPT, hasEvents)) {

@@ -1,0 +1,41 @@
+    @Override
+    public void onInsert(DocumentsWriterFlushControl control, DocumentsWriterPerThread dwpt) {
+      final ArrayList<DocumentsWriterPerThread> pending = new ArrayList<>();
+      final ArrayList<DocumentsWriterPerThread> notPending = new ArrayList<>();
+      findPending(control, pending, notPending);
+      final boolean flushCurrent = dwpt.isFlushPending();
+      long activeBytes = control.activeBytes();
+      final DocumentsWriterPerThread toFlush;
+      if (dwpt.isFlushPending()) {
+        toFlush = dwpt;
+      } else if (flushOnDocCount()
+          && dwpt.getNumDocsInRAM() >= indexWriterConfig
+              .getMaxBufferedDocs()) {
+        toFlush = dwpt;
+      } else if (flushOnRAM()
+          && activeBytes >= (long) (indexWriterConfig.getRAMBufferSizeMB() * 1024. * 1024.)) {
+        toFlush = findLargestNonPendingWriter(control, dwpt);
+        assertFalse(toFlush.isFlushPending());
+      } else {
+        toFlush = null;
+      }
+      super.onInsert(control, dwpt);
+      if (toFlush != null) {
+        if (flushCurrent) {
+          assertTrue(pending.remove(toFlush));
+        } else {
+          assertTrue(notPending.remove(toFlush));
+        }
+        assertTrue(toFlush.isFlushPending());
+        hasMarkedPending = true;
+      } else {
+        peakBytesWithoutFlush = Math.max(activeBytes, peakBytesWithoutFlush);
+        peakDocCountWithoutFlush = Math.max(dwpt.getNumDocsInRAM(),
+            peakDocCountWithoutFlush);
+      }
+
+      for (DocumentsWriterPerThread perThread : notPending) {
+        assertFalse(perThread.isFlushPending());
+      }
+    }
+

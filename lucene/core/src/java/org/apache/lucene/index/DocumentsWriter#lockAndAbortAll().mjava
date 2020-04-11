@@ -11,33 +11,34 @@
         pendingNumDocs.addAndGet(-ticket.getFlushedSegment().segmentInfo.info.maxDoc());
       }
     });
-    List<ThreadState> threadStates = new ArrayList<>();
+    List<DocumentsWriterPerThread> writers = new ArrayList<>();
     AtomicBoolean released = new AtomicBoolean(false);
     final Closeable release = () -> {
+      // we return this closure to unlock all writers once done
+      // or if hit an exception below in the try block.
+      // we can't assign this later otherwise the ref can't be final
       if (released.compareAndSet(false, true)) { // only once
         if (infoStream.isEnabled("DW")) {
           infoStream.message("DW", "unlockAllAbortedThread");
         }
-        perThreadPool.unlockNewThreadStates();
-        for (ThreadState state : threadStates) {
-          state.unlock();
+        perThreadPool.unlockNewWriters();
+        for (DocumentsWriterPerThread writer : writers) {
+          writer.unlock();
         }
       }
     };
     try {
       deleteQueue.clear();
-      perThreadPool.lockNewThreadStates();
-      final int limit = perThreadPool.getMaxThreadStates();
-      for (int i = 0; i < limit; i++) {
-        final ThreadState perThread = perThreadPool.getThreadState(i);
-        perThread.lock();
-        threadStates.add(perThread);
-        abortThreadState(perThread);
+      perThreadPool.lockNewWriters();
+      writers.addAll(perThreadPool.filterAndLock(x -> true));
+      for (final DocumentsWriterPerThread perThread : writers) {
+        assert perThread.isHeldByCurrentThread();
+        abortDocumentsWriterPerThread(perThread);
       }
       deleteQueue.clear();
 
       // jump over any possible in flight ops:
-      deleteQueue.skipSequenceNumbers(perThreadPool.getActiveThreadStateCount() + 1);
+      deleteQueue.skipSequenceNumbers(perThreadPool.size() + 1);
 
       flushControl.abortPendingFlushes();
       flushControl.waitForFlush();

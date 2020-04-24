@@ -1,9 +1,5 @@
   @Override
-  public synchronized void merge(IndexWriter writer, MergeTrigger trigger) throws IOException {
-
-    assert !Thread.holdsLock(writer);
-
-    initDynamicDefaults(writer);
+  public synchronized void merge(MergeSource mergeSource, MergeTrigger trigger) throws IOException {
 
     if (trigger == MergeTrigger.CLOSING) {
       // Disable throttling on close:
@@ -20,18 +16,18 @@
 
     if (verbose()) {
       message("now merge");
-      message("  index: " + writer.segString());
+      message("  index(source): " + mergeSource.toString());
     }
     
     // Iterate, pulling from the IndexWriter's queue of
     // pending merges, until it's empty:
     while (true) {
 
-      if (maybeStall(writer) == false) {
+      if (maybeStall(mergeSource) == false) {
         break;
       }
 
-      OneMerge merge = writer.getNextMerge();
+      OneMerge merge = mergeSource.getNextMerge();
       if (merge == null) {
         if (verbose()) {
           message("  no more merges pending; now return");
@@ -41,13 +37,9 @@
 
       boolean success = false;
       try {
-        if (verbose()) {
-          message("  consider merge " + writer.segString(merge.segments));
-        }
-
         // OK to spawn a new merge thread to handle this
         // merge:
-        final MergeThread newMergeThread = getMergeThread(writer, merge);
+        final MergeThread newMergeThread = getMergeThread(mergeSource, merge);
         mergeThreads.add(newMergeThread);
 
         updateIOThrottle(newMergeThread.merge, newMergeThread.rateLimiter);
@@ -62,7 +54,7 @@
         success = true;
       } finally {
         if (!success) {
-          writer.mergeFinish(merge);
+          mergeSource.onMergeFinished(merge);
         }
       }
     }

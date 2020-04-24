@@ -1,17 +1,18 @@
-  /** Translates a frozen packet of delete term/query, or doc values
-   *  updates, into their actual docIDs in the index, and applies the change.  This is a heavy
-   *  operation and is done concurrently by incoming indexing threads.
-   *  */
-  void forceApply(IndexWriter writer) throws IOException {
-    applyLock.lock();
+  /**
+   * Translates a frozen packet of delete term/query, or doc values
+   * updates, into their actual docIDs in the index, and applies the change.  This is a heavy
+   * operation and is done concurrently by incoming indexing threads.
+   */
+  void forceApply(FrozenBufferedUpdates updates) throws IOException {
+    updates.lock();
     try {
-      if (applied.getCount() == 0) {
+      if (updates.isApplied()) {
         // already done
         return;
       }
       long startNS = System.nanoTime();
 
-      assert any();
+      assert updates.any();
 
       Set<SegmentCommitInfo> seenSegments = new HashSet<>();
 
@@ -34,13 +35,13 @@
 
         long iterStartNS = System.nanoTime();
 
-        long mergeGenStart = writer.mergeFinishedGen.get();
+        long mergeGenStart = mergeFinishedGen.get();
 
         Set<String> delFiles = new HashSet<>();
         BufferedUpdatesStream.SegmentState[] segStates;
 
-        synchronized (writer) {
-          List<SegmentCommitInfo> infos = getInfosToApply(writer);
+        synchronized (this) {
+          List<SegmentCommitInfo> infos = getInfosToApply(updates);
           if (infos == null) {
             break;
           }
@@ -51,7 +52,7 @@
 
           // Must open while holding IW lock so that e.g. segments are not merged
           // away, dropped from 100% deletions, etc., before we can open the readers
-          segStates = openSegmentStates(writer, infos, seenSegments, delGen());
+          segStates = openSegmentStates(infos, seenSegments, updates.delGen());
 
           if (segStates.length == 0) {
 
@@ -71,20 +72,20 @@
 
           // Important, else IFD may try to delete our files while we are still using them,
           // if e.g. a merge finishes on some of the segments we are resolving on:
-          writer.deleter.incRef(delFiles);
+          deleter.incRef(delFiles);
         }
 
         AtomicBoolean success = new AtomicBoolean();
         long delCount;
-        try (Closeable finalizer = () -> finishApply(writer, segStates, success.get(), delFiles)) {
+        try (Closeable finalizer = () -> finishApply(segStates, success.get(), delFiles)) {
           assert finalizer != null; // access the finalizer to prevent a warning
           // don't hold IW monitor lock here so threads are free concurrently resolve deletes/updates:
-          delCount = apply(segStates);
+          delCount = updates.apply(segStates);
           success.set(true);
         }
 
         // Since we just resolved some more deletes/updates, now is a good time to write them:
-        writer.writeSomeDocValuesUpdates();
+        writeSomeDocValuesUpdates();
 
         // It's OK to add this here, even if the while loop retries, because delCount only includes newly
         // deleted documents, on the segments we didn't already do in previous iterations:
@@ -95,7 +96,7 @@
               messagePrefix + "done inner apply del packet (%s) to %d segments; %d new deletes/updates; took %.3f sec",
               this, segStates.length, delCount, (System.nanoTime() - iterStartNS) / 1000000000.));
         }
-        if (privateSegment != null) {
+        if (updates.privateSegment != null) {
           // No need to retry for a segment-private packet: the merge that folds in our private segment already waits for all deletes to
           // be applied before it kicks off, so this private segment must already not be in the set of merging segments
 
@@ -104,15 +105,15 @@
 
         // Must sync on writer here so that IW.mergeCommit is not running concurrently, so that if we exit, we know mergeCommit will succeed
         // in pulling all our delGens into a merge:
-        synchronized (writer) {
-          long mergeGenCur = writer.mergeFinishedGen.get();
+        synchronized (this) {
+          long mergeGenCur = mergeFinishedGen.get();
 
           if (mergeGenCur == mergeGenStart) {
 
             // Must do this while still holding IW lock else a merge could finish and skip carrying over our updates:
 
             // Record that this packet is finished:
-            writer.finished(this);
+            bufferedUpdatesStream.finished(updates);
 
             finished = true;
 
@@ -133,7 +134,7 @@
 
       if (finished == false) {
         // Record that this packet is finished:
-        writer.finished(this);
+        bufferedUpdatesStream.finished(updates);
       }
 
       if (infoStream.isEnabled("BD")) {
@@ -143,11 +144,11 @@
         if (iter > 0) {
           message += "; " + (iter + 1) + " iters due to concurrent merges";
         }
-        message += "; " + writer.getPendingUpdatesCount() + " packets remain";
+        message += "; " + bufferedUpdatesStream.getPendingUpdatesCount() + " packets remain";
         infoStream.message("BD", message);
       }
     } finally {
-      applyLock.unlock();
+      updates.unlock();
     }
   }
 

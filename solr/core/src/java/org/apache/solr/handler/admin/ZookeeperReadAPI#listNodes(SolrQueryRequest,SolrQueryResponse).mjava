@@ -1,0 +1,32 @@
+  @EndPoint(path = "/cluster/zk/ls/*",
+      method = SolrRequest.METHOD.GET,
+      permission = ZK_READ_PERM)
+  public void listNodes(SolrQueryRequest req, SolrQueryResponse rsp) {
+    String path = req.getPathTemplateValues().get("*");
+    if (path == null || path.isEmpty()) path = "/";
+    try {
+      List<String> l = coreContainer.getZkController().getZkClient().getChildren(path, null, false);
+      String prefix = path.endsWith("/") ? path : path + "/";
+
+      Map<String , Stat> stats = new LinkedHashMap<>();
+      for (String s : l) {
+        try {
+          stats.put(s, coreContainer.getZkController().getZkClient().exists(prefix + s, null, false));
+        } catch (Exception e) {
+          throw new RuntimeException(e);
+        }
+      }
+      rsp.add(path, (MapWriter) ew -> {
+        for (Map.Entry<String, Stat> e : stats.entrySet()) {
+          printStat(ew, e.getKey(), e.getValue());
+        }
+      });
+    } catch (KeeperException.NoNodeException e) {
+      throw new SolrException(SolrException.ErrorCode.NOT_FOUND, "No such node :"+ path);
+    } catch (Exception e) {
+      rsp.add(CONTENT, new ContentStreamBase.StringStream(Utils.toJSONString(Collections.singletonMap("error", e.getMessage()))));
+    } finally {
+      RequestHandlerUtils.addExperimentalFormatWarning(rsp);
+    }
+  }
+

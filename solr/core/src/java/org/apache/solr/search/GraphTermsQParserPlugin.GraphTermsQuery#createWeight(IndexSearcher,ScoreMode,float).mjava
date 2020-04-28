@@ -1,26 +1,29 @@
     @Override
     public Weight createWeight(IndexSearcher searcher, ScoreMode scoreMode, float boost) throws IOException {
 
-      List<TermStates> finalContexts = new ArrayList();
-      List<Term> finalTerms = new ArrayList();
-      List<LeafReaderContext> contexts = searcher.getTopReaderContext().leaves();
-      TermStates[] termStates = new TermStates[this.queryTerms.length];
-      collectTermStates(searcher.getIndexReader(), contexts, termStates, this.queryTerms);
-      for(int i=0; i<termStates.length; i++) {
-        TermStates ts = termStates[i];
-        if(ts != null && ts.docFreq() <= this.maxDocFreq) {
-          finalContexts.add(ts);
-          finalTerms.add(queryTerms[i]);
+      List<TermStates> finalContexts = new ArrayList<>();
+      List<Term> finalTerms = new ArrayList<>();
+      {
+        List<LeafReaderContext> contexts = searcher.getTopReaderContext().leaves();
+        TermStates[] termStates = new TermStates[this.queryTerms.length];
+        collectTermStates(searcher.getIndexReader(), contexts, termStates, this.queryTerms);
+        for(int i=0; i<termStates.length; i++) {
+          TermStates ts = termStates[i];
+          if(ts != null && ts.docFreq() <= this.maxDocFreq) {
+            finalContexts.add(ts);
+            finalTerms.add(queryTerms[i]);
+          }
         }
       }
 
       return new ConstantScoreWeight(this, boost) {
 
-        private WeightOrDocIdSet rewrite(LeafReaderContext context) throws IOException {
+        @Override
+        public Scorer scorer(LeafReaderContext context) throws IOException {
           final LeafReader reader = context.reader();
           Terms terms = reader.terms(field);
-          if(terms == null) {
-            return new WeightOrDocIdSet(new BitDocIdSet(new FixedBitSet(reader.maxDoc()), 0));
+          if (terms == null) {
+            return null;
           }
           TermsEnum  termsEnum = terms.iterator();
           PostingsEnum docs = null;
@@ -35,42 +38,9 @@
               builder.add(docs);
             }
           }
-          return new WeightOrDocIdSet(builder.build());
-        }
-
-        private Scorer scorer(DocIdSet set) throws IOException {
-          if (set == null) {
-            return null;
-          }
-          final DocIdSetIterator disi = set.iterator();
-          if (disi == null) {
-            return null;
-          }
-          return new ConstantScoreScorer(this, score(), scoreMode, disi);
-        }
-
-        @Override
-        public BulkScorer bulkScorer(LeafReaderContext context) throws IOException {
-          final WeightOrDocIdSet weightOrBitSet = rewrite(context);
-          if (weightOrBitSet.weight != null) {
-            return weightOrBitSet.weight.bulkScorer(context);
-          } else {
-            final Scorer scorer = scorer(weightOrBitSet.set);
-            if (scorer == null) {
-              return null;
-            }
-            return new DefaultBulkScorer(scorer);
-          }
-        }
-
-        @Override
-        public Scorer scorer(LeafReaderContext context) throws IOException {
-          final WeightOrDocIdSet weightOrBitSet = rewrite(context);
-          if (weightOrBitSet.weight != null) {
-            return weightOrBitSet.weight.scorer(context);
-          } else {
-            return scorer(weightOrBitSet.set);
-          }
+          DocIdSet docIdSet = builder.build();
+          DocIdSetIterator disi = docIdSet.iterator();
+          return disi == null ? null : new ConstantScoreScorer(this, score(), scoreMode, disi);
         }
 
         @Override

@@ -1,6 +1,6 @@
   /** The point writer contains the data that is going to be splitted using radix selection.
   /*  This method is used when we are merging previously written segments, in the numDims > 1 case. */
-  private void build(int nodeID, int leafNodeOffset,
+  private void build(int nodeID, int leavesOffset, int numLeaves,
                      BKDRadixSelector.PathSlice points,
                      IndexOutput out,
                      BKDRadixSelector radixSelector,
@@ -10,7 +10,7 @@
                      long[] leafBlockFPs,
                      int[] spareDocIds) throws IOException {
 
-    if (nodeID >= leafNodeOffset) {
+    if (numLeaves == 1) {
 
       // Leaf node: write block
       // We can write the block in any order so by default we write it sorted by the dimension that has the
@@ -61,13 +61,13 @@
       int leafCardinality = heapSource.computeCardinality(from ,to, numDataDims, bytesPerDim, commonPrefixLengths);
 
       // Save the block file pointer:
-      leafBlockFPs[nodeID - leafNodeOffset] = out.getFilePointer();
+      leafBlockFPs[leavesOffset] = out.getFilePointer();
       //System.out.println("  write leaf block @ fp=" + out.getFilePointer());
 
       // Write docIDs first, as their own chunk, so that at intersect time we can add all docIDs w/o
       // loading the values:
       int count = to - from;
-      assert count > 0: "nodeID=" + nodeID + " leafNodeOffset=" + leafNodeOffset;
+      assert count > 0: "nodeID=" + nodeID + " leavesOffset=" + leavesOffset;
       assert count <= spareDocIds.length : "count=" + count + " > length=" + spareDocIds.length;
       // Write doc IDs
       int[] docIDs = spareDocIds;
@@ -118,9 +118,10 @@
 
       assert nodeID < splitPackedValues.length : "nodeID=" + nodeID + " splitValues.length=" + splitPackedValues.length;
 
+      // How many leaves will be in the left tree:
+      int numLeftLeafNodes = getNumLeftLeafNodes(numLeaves);
       // How many points will be in the left tree:
-      long rightCount = points.count / 2;
-      long leftCount = points.count - rightCount;
+      final long leftCount = numLeftLeafNodes * maxPointsInLeafNode;
 
       BKDRadixSelector.PathSlice[] slices = new BKDRadixSelector.PathSlice[2];
 
@@ -148,12 +149,12 @@
 
       parentSplits[splitDim]++;
       // Recurse on left tree:
-      build(2 * nodeID, leafNodeOffset, slices[0],
+      build(2 * nodeID, leavesOffset, numLeftLeafNodes, slices[0],
           out, radixSelector, minPackedValue, maxSplitPackedValue,
           parentSplits, splitPackedValues, leafBlockFPs, spareDocIds);
 
       // Recurse on right tree:
-      build(2 * nodeID + 1, leafNodeOffset, slices[1],
+      build(2 * nodeID + 1, leavesOffset + numLeftLeafNodes, numLeaves - numLeftLeafNodes, slices[1],
           out, radixSelector, minSplitPackedValue, maxPackedValue
           , parentSplits, splitPackedValues, leafBlockFPs, spareDocIds);
 

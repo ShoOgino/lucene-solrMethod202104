@@ -1,0 +1,53 @@
+  public void testGroupHeads() throws IOException {
+
+    Shard shard = new Shard();
+    indexRandomDocs(shard.writer);
+    IndexSearcher searcher = shard.getIndexSearcher();
+
+    String[] query = new String[]{ "foo", "bar", "baz" };
+    Query topLevel = new TermQuery(new Term("text", query[random().nextInt(query.length)]));
+
+    GroupSelector<T> groupSelector = getGroupSelector();
+    GroupingSearch grouping = new GroupingSearch(groupSelector);
+    grouping.setAllGroups(true);
+    grouping.setAllGroupHeads(true);
+
+    grouping.search(searcher, topLevel, 0, 1);
+    Collection<T> matchingGroups = grouping.getAllMatchingGroups();
+
+    // The number of hits from the top-level query should equal the sum of
+    // the number of hits from the query filtered by each group value in turn
+    int totalHits = searcher.count(topLevel);
+    int groupHits = 0;
+    for (T groupValue : matchingGroups) {
+      Query filtered = new BooleanQuery.Builder()
+          .add(topLevel, BooleanClause.Occur.MUST)
+          .add(filterQuery(groupValue), BooleanClause.Occur.FILTER)
+          .build();
+      groupHits += searcher.count(filtered);
+    }
+    assertEquals(totalHits, groupHits);
+
+    Bits groupHeads = grouping.getAllGroupHeads();
+    int cardinality = 0;
+    for (int i = 0; i < groupHeads.length(); i++) {
+      if (groupHeads.get(i)) {
+        cardinality++;
+      }
+    }
+    assertEquals(matchingGroups.size(), cardinality);   // We should have one set bit per matching group
+
+    // Each group head should correspond to the topdoc of a search filtered by
+    // that group
+    for (T groupValue : matchingGroups) {
+      Query filtered = new BooleanQuery.Builder()
+          .add(topLevel, BooleanClause.Occur.MUST)
+          .add(filterQuery(groupValue), BooleanClause.Occur.FILTER)
+          .build();
+      TopDocs td = searcher.search(filtered, 1);
+      assertTrue(groupHeads.get(td.scoreDocs[0].doc));
+    }
+
+    shard.close();
+  }
+

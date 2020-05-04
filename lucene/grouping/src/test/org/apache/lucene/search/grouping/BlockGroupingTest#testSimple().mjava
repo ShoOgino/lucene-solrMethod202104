@@ -1,0 +1,35 @@
+  public void testSimple() throws IOException {
+
+    Shard shard = new Shard();
+    indexRandomDocs(shard.writer);
+    IndexSearcher searcher = shard.getIndexSearcher();
+
+    Query blockEndQuery = new TermQuery(new Term("blockEnd", "true"));
+    GroupingSearch grouper = new GroupingSearch(blockEndQuery);
+    grouper.setGroupDocsLimit(10);
+
+    Query topLevel = new TermQuery(new Term("text", "grandmother"));
+    TopGroups<?> tg = grouper.search(searcher, topLevel, 0, 5);
+
+    // We're sorting by score, so the score of the top group should be the same as the
+    // score of the top document from the same query with no grouping
+    TopDocs topDoc = searcher.search(topLevel, 1);
+    assertEquals(topDoc.scoreDocs[0].score, tg.groups[0].scoreDocs[0].score, 0);
+    assertEquals(topDoc.scoreDocs[0].doc, tg.groups[0].scoreDocs[0].doc);
+
+    for (int i = 0; i < tg.groups.length; i++) {
+      String bookName = searcher.doc(tg.groups[i].scoreDocs[0].doc).get("book");
+      // The contents of each group should be equal to the results of a search for
+      // that group alone
+      Query filtered = new BooleanQuery.Builder()
+          .add(topLevel, BooleanClause.Occur.MUST)
+          .add(new TermQuery(new Term("book", bookName)), BooleanClause.Occur.FILTER)
+          .build();
+      TopDocs td = searcher.search(filtered, 10);
+      assertScoreDocsEquals(td.scoreDocs, tg.groups[i].scoreDocs);
+    }
+
+    shard.close();
+
+  }
+

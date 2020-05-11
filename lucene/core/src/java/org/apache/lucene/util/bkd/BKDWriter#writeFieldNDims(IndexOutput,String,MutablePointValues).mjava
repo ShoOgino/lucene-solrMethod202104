@@ -16,10 +16,12 @@
     pointCount = values.size();
 
     final int numLeaves = Math.toIntExact((pointCount + maxPointsInLeafNode - 1) / maxPointsInLeafNode);
+    final int numSplits = numLeaves - 1;
 
     checkMaxLeafNodeCount(numLeaves);
 
-    final byte[] splitPackedValues = new byte[numLeaves * (bytesPerDim + 1)];
+    final byte[] splitPackedValues = new byte[numSplits * bytesPerDim];
+    final byte[] splitDimensionValues = new byte[numSplits];
     final long[] leafBlockFPs = new long[numLeaves];
 
     // compute the min/max for this slice
@@ -29,14 +31,40 @@
     }
 
     final int[] parentSplits = new int[numIndexDims];
-    build(1, 0, numLeaves, values, 0, Math.toIntExact(pointCount), out,
+    build(0, numLeaves, values, 0, Math.toIntExact(pointCount), out,
           minPackedValue.clone(), maxPackedValue.clone(), parentSplits,
-          splitPackedValues, leafBlockFPs,
+          splitPackedValues, splitDimensionValues, leafBlockFPs,
           new int[maxPointsInLeafNode]);
     assert Arrays.equals(parentSplits, new int[numIndexDims]);
 
+    scratchBytesRef1.length = bytesPerDim;
+    scratchBytesRef1.bytes = splitPackedValues;
+
+    BKDTreeLeafNodes leafNodes  = new BKDTreeLeafNodes() {
+      @Override
+      public long getLeafLP(int index) {
+        return leafBlockFPs[index];
+      }
+
+      @Override
+      public BytesRef getSplitValue(int index) {
+        scratchBytesRef1.offset = index * bytesPerDim;
+        return scratchBytesRef1;
+      }
+
+      @Override
+      public int getSplitDimension(int index) {
+        return splitDimensionValues[index] & 0xff;
+      }
+
+      @Override
+      public int numLeaves() {
+        return leafBlockFPs.length;
+      }
+    };
+
     long indexFP = out.getFilePointer();
-    writeIndex(out, maxPointsInLeafNode, leafBlockFPs, splitPackedValues);
+    writeIndex(out, maxPointsInLeafNode, leafNodes);
     return indexFP;
   }
 

@@ -1,11 +1,12 @@
   /* Recursively reorders the provided reader and writes the bkd-tree on the fly; this method is used
    * when we are writing a new segment directly from IndexWriter's indexing buffer (MutablePointsReader). */
-  private void build(int nodeID, int leavesOffset, int numLeaves,
+  private void build(int leavesOffset, int numLeaves,
                      MutablePointValues reader, int from, int to,
                      IndexOutput out,
                      byte[] minPackedValue, byte[] maxPackedValue,
                      int[] parentSplits,
                      byte[] splitPackedValues,
+                     byte[] splitDimensionValues,
                      long[] leafBlockFPs,
                      int[] spareDocIds) throws IOException {
 
@@ -124,7 +125,7 @@
         // for dimensions > 2 we recompute the bounds for the current inner node to help the algorithm choose best
         // split dimensions. Because it is an expensive operation, the frequency we recompute the bounds is given
         // by SPLITS_BEFORE_EXACT_BOUNDS.
-        if (nodeID > 1 && numIndexDims > 2 && Arrays.stream(parentSplits).sum() % SPLITS_BEFORE_EXACT_BOUNDS == 0) {
+        if (numLeaves != leafBlockFPs.length && numIndexDims > 2 && Arrays.stream(parentSplits).sum() % SPLITS_BEFORE_EXACT_BOUNDS == 0) {
           computePackedValueBounds(reader, from, to, minPackedValue, maxPackedValue, scratchBytesRef1);
         }
         splitDim = split(minPackedValue, maxPackedValue, parentSplits);
@@ -145,11 +146,13 @@
       MutablePointsReaderUtils.partition(numDataDims, numIndexDims, maxDoc, splitDim, bytesPerDim, commonPrefixLen,
           reader, from, to, mid, scratchBytesRef1, scratchBytesRef2);
 
+      final int rightOffset = leavesOffset + numLeftLeafNodes;
+      final int splitOffset = rightOffset - 1;
       // set the split value
-      final int address = nodeID * (1+bytesPerDim);
-      splitPackedValues[address] = (byte) splitDim;
+      final int address = splitOffset * bytesPerDim;
+      splitDimensionValues[splitOffset] = (byte) splitDim;
       reader.getValue(mid, scratchBytesRef1);
-      System.arraycopy(scratchBytesRef1.bytes, scratchBytesRef1.offset + splitDim * bytesPerDim, splitPackedValues, address + 1, bytesPerDim);
+      System.arraycopy(scratchBytesRef1.bytes, scratchBytesRef1.offset + splitDim * bytesPerDim, splitPackedValues, address, bytesPerDim);
 
       byte[] minSplitPackedValue = ArrayUtil.copyOfSubArray(minPackedValue, 0, packedIndexBytesLength);
       byte[] maxSplitPackedValue = ArrayUtil.copyOfSubArray(maxPackedValue, 0, packedIndexBytesLength);
@@ -160,12 +163,12 @@
 
       // recurse
       parentSplits[splitDim]++;
-      build(nodeID * 2, leavesOffset, numLeftLeafNodes, reader, from, mid, out,
+      build(leavesOffset, numLeftLeafNodes, reader, from, mid, out,
           minPackedValue, maxSplitPackedValue, parentSplits,
-          splitPackedValues, leafBlockFPs, spareDocIds);
-      build(nodeID * 2 + 1, leavesOffset + numLeftLeafNodes, numLeaves - numLeftLeafNodes, reader, mid, to, out,
+          splitPackedValues, splitDimensionValues, leafBlockFPs, spareDocIds);
+      build(rightOffset, numLeaves - numLeftLeafNodes, reader, mid, to, out,
           minSplitPackedValue, maxPackedValue, parentSplits,
-          splitPackedValues, leafBlockFPs, spareDocIds);
+          splitPackedValues, splitDimensionValues, leafBlockFPs, spareDocIds);
       parentSplits[splitDim]--;
     }
   }

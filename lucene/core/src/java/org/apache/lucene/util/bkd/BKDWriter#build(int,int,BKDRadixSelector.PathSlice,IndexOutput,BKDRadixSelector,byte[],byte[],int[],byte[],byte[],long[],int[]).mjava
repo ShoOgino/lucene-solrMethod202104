@@ -1,12 +1,13 @@
   /** The point writer contains the data that is going to be splitted using radix selection.
   /*  This method is used when we are merging previously written segments, in the numDims > 1 case. */
-  private void build(int nodeID, int leavesOffset, int numLeaves,
+  private void build(int leavesOffset, int numLeaves,
                      BKDRadixSelector.PathSlice points,
                      IndexOutput out,
                      BKDRadixSelector radixSelector,
                      byte[] minPackedValue, byte[] maxPackedValue,
                      int[] parentSplits,
                      byte[] splitPackedValues,
+                     byte[] splitDimensionValues,
                      long[] leafBlockFPs,
                      int[] spareDocIds) throws IOException {
 
@@ -67,7 +68,7 @@
       // Write docIDs first, as their own chunk, so that at intersect time we can add all docIDs w/o
       // loading the values:
       int count = to - from;
-      assert count > 0: "nodeID=" + nodeID + " leavesOffset=" + leavesOffset;
+      assert count > 0: "numLeaves=" + numLeaves + " leavesOffset=" + leavesOffset;
       assert count <= spareDocIds.length : "count=" + count + " > length=" + spareDocIds.length;
       // Write doc IDs
       int[] docIDs = spareDocIds;
@@ -110,16 +111,16 @@
         // for dimensions > 2 we recompute the bounds for the current inner node to help the algorithm choose best
         // split dimensions. Because it is an expensive operation, the frequency we recompute the bounds is given
         // by SPLITS_BEFORE_EXACT_BOUNDS.
-        if (nodeID > 1 && numIndexDims > 2 && Arrays.stream(parentSplits).sum() % SPLITS_BEFORE_EXACT_BOUNDS == 0) {
+        if (numLeaves != leafBlockFPs.length && numIndexDims > 2 && Arrays.stream(parentSplits).sum() % SPLITS_BEFORE_EXACT_BOUNDS == 0) {
           computePackedValueBounds(points, minPackedValue, maxPackedValue);
         }
         splitDim = split(minPackedValue, maxPackedValue, parentSplits);
       }
 
-      assert nodeID < splitPackedValues.length : "nodeID=" + nodeID + " splitValues.length=" + splitPackedValues.length;
+      assert numLeaves <= leafBlockFPs.length : "numLeaves=" + numLeaves + " leafBlockFPs.length=" + leafBlockFPs.length;
 
       // How many leaves will be in the left tree:
-      int numLeftLeafNodes = getNumLeftLeafNodes(numLeaves);
+      final int numLeftLeafNodes = getNumLeftLeafNodes(numLeaves);
       // How many points will be in the left tree:
       final long leftCount = numLeftLeafNodes * maxPointsInLeafNode;
 
@@ -134,9 +135,12 @@
 
       byte[] splitValue = radixSelector.select(points, slices, points.start, points.start + points.count,  points.start + leftCount, splitDim, commonPrefixLen);
 
-      int address = nodeID * (1 + bytesPerDim);
-      splitPackedValues[address] = (byte) splitDim;
-      System.arraycopy(splitValue, 0, splitPackedValues, address + 1, bytesPerDim);
+      final int rightOffset = leavesOffset + numLeftLeafNodes;
+      final int splitValueOffset = rightOffset - 1;
+
+      splitDimensionValues[splitValueOffset] = (byte) splitDim;
+      int address = splitValueOffset * bytesPerDim;
+      System.arraycopy(splitValue, 0, splitPackedValues, address, bytesPerDim);
 
       byte[] minSplitPackedValue = new byte[packedIndexBytesLength];
       System.arraycopy(minPackedValue, 0, minSplitPackedValue, 0, packedIndexBytesLength);
@@ -149,14 +153,14 @@
 
       parentSplits[splitDim]++;
       // Recurse on left tree:
-      build(2 * nodeID, leavesOffset, numLeftLeafNodes, slices[0],
+      build(leavesOffset, numLeftLeafNodes, slices[0],
           out, radixSelector, minPackedValue, maxSplitPackedValue,
-          parentSplits, splitPackedValues, leafBlockFPs, spareDocIds);
+          parentSplits, splitPackedValues, splitDimensionValues, leafBlockFPs, spareDocIds);
 
       // Recurse on right tree:
-      build(2 * nodeID + 1, leavesOffset + numLeftLeafNodes, numLeaves - numLeftLeafNodes, slices[1],
-          out, radixSelector, minSplitPackedValue, maxPackedValue
-          , parentSplits, splitPackedValues, leafBlockFPs, spareDocIds);
+      build(rightOffset, numLeaves - numLeftLeafNodes, slices[1],
+          out, radixSelector, minSplitPackedValue, maxPackedValue,
+          parentSplits, splitPackedValues, splitDimensionValues, leafBlockFPs, spareDocIds);
 
       parentSplits[splitDim]--;
     }

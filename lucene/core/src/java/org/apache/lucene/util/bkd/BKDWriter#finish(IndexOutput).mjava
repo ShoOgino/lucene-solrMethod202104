@@ -23,6 +23,7 @@
     pointWriter = null;
 
     final int numLeaves = Math.toIntExact((pointCount + maxPointsInLeafNode - 1) / maxPointsInLeafNode);
+    final int numSplits = numLeaves - 1;
 
     checkMaxLeafNodeCount(numLeaves);
 
@@ -30,7 +31,8 @@
     // step of the recursion to recompute the split dim:
 
     // Indexed by nodeID, but first (root) nodeID is 1.  We do 1+ because the lead byte at each recursion says which dim we split on.
-    byte[] splitPackedValues = new byte[Math.toIntExact(numLeaves*(1+bytesPerDim))];
+    byte[] splitPackedValues = new byte[Math.toIntExact(numSplits*bytesPerDim)];
+    byte[] splitDimensionValues = new byte[numSplits];
 
     // +1 because leaf count is power of 2 (e.g. 8), and innerNodeCount is power of 2 minus 1 (e.g. 7)
     long[] leafBlockFPs = new long[numLeaves];
@@ -45,11 +47,12 @@
     try {
 
       final int[] parentSplits = new int[numIndexDims];
-      build(1, 0, numLeaves, points,
+      build(0, numLeaves, points,
              out, radixSelector,
             minPackedValue.clone(), maxPackedValue.clone(),
             parentSplits,
             splitPackedValues,
+            splitDimensionValues,
             leafBlockFPs,
             new int[maxPointsInLeafNode]);
       assert Arrays.equals(parentSplits, new int[numIndexDims]);
@@ -66,11 +69,34 @@
       }
     }
 
-    //System.out.println("Total nodes: " + innerNodeCount);
+    scratchBytesRef1.bytes = splitPackedValues;
+    scratchBytesRef1.length = bytesPerDim;
+    BKDTreeLeafNodes leafNodes  = new BKDTreeLeafNodes() {
+      @Override
+      public long getLeafLP(int index) {
+        return leafBlockFPs[index];
+      }
+
+      @Override
+      public BytesRef getSplitValue(int index) {
+        scratchBytesRef1.offset = index * bytesPerDim;
+        return scratchBytesRef1;
+      }
+
+      @Override
+      public int getSplitDimension(int index) {
+        return splitDimensionValues[index] & 0xff;
+      }
+
+      @Override
+      public int numLeaves() {
+        return leafBlockFPs.length;
+      }
+    };
 
     // Write index:
     long indexFP = out.getFilePointer();
-    writeIndex(out, maxPointsInLeafNode, leafBlockFPs, splitPackedValues);
+    writeIndex(out, maxPointsInLeafNode, leafNodes);
     return indexFP;
   }
 

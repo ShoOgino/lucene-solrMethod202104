@@ -33,12 +33,18 @@
       // Read the contents
       entity = response.getEntity();
       respBody = entity.getContent();
-      Header ctHeader = response.getLastHeader("content-type");
-      String contentType;
-      if (ctHeader != null) {
-        contentType = ctHeader.getValue();
-      } else {
-        contentType = "";
+      String mimeType = null;
+      Charset charset = null;
+      String charsetName = null;
+
+      ContentType contentType = ContentType.get(entity);
+      if (contentType != null) {
+        mimeType = contentType.getMimeType().trim().toLowerCase(Locale.ROOT);
+        charset = contentType.getCharset();
+
+        if (charset != null) {
+          charsetName = charset.name();
+        }
       }
 
       // handle some http level checks before trying to parse the response
@@ -55,7 +61,7 @@
           }
           break;
         default:
-          if (processor == null || "".equals(contentType)) {
+          if (processor == null || contentType == null) {
             throw new RemoteSolrException(baseUrl, httpStatus, "non ok status: " + httpStatus
                 + ", message:" + response.getStatusLine().getReasonPhrase(),
                 null);
@@ -71,34 +77,26 @@
         shouldClose = false;
         return rsp;
       }
-      
+
       String procCt = processor.getContentType();
       if (procCt != null) {
         String procMimeType = ContentType.parse(procCt).getMimeType().trim().toLowerCase(Locale.ROOT);
-        String mimeType = ContentType.parse(contentType).getMimeType().trim().toLowerCase(Locale.ROOT);
         if (!procMimeType.equals(mimeType)) {
           // unexpected mime type
           String msg = "Expected mime type " + procMimeType + " but got " + mimeType + ".";
-          Header encodingHeader = response.getEntity().getContentEncoding();
-          String encoding;
-          if (encodingHeader != null) {
-            encoding = encodingHeader.getValue();
-          } else {
-            encoding = "UTF-8"; // try UTF-8
-          }
+          Charset exceptionCharset = charset != null? charset : FALLBACK_CHARSET;
           try {
-            msg = msg + " " + IOUtils.toString(respBody, encoding);
+            msg = msg + " " + IOUtils.toString(respBody, exceptionCharset);
           } catch (IOException e) {
-            throw new RemoteSolrException(baseUrl, httpStatus, "Could not parse response with encoding " + encoding, e);
+            throw new RemoteSolrException(baseUrl, httpStatus, "Could not parse response with encoding " + exceptionCharset, e);
           }
           throw new RemoteSolrException(baseUrl, httpStatus, msg, null);
         }
       }
       
       NamedList<Object> rsp = null;
-      String charset = EntityUtils.getContentCharSet(response.getEntity());
       try {
-        rsp = processor.processResponse(respBody, charset);
+        rsp = processor.processResponse(respBody, charsetName);
       } catch (Exception e) {
         throw new RemoteSolrException(baseUrl, httpStatus, e.getMessage(), e);
       }
@@ -125,7 +123,7 @@
             .append("\n\n")
             .append("request: ")
             .append(method.getURI());
-          reason = java.net.URLDecoder.decode(msg.toString(), UTF_8);
+          reason = java.net.URLDecoder.decode(msg.toString(), FALLBACK_CHARSET);
         }
         RemoteSolrException rss = new RemoteSolrException(baseUrl, httpStatus, reason, null);
         if (metadata != null) rss.setMetadata(metadata);

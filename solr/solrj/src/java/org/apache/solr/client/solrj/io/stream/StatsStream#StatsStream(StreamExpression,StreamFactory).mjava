@@ -1,20 +1,38 @@
   public StatsStream(StreamExpression expression, StreamFactory factory) throws IOException{
     // grab all parameters out
     String collectionName = factory.getValueOperand(expression, 0);
-    List<StreamExpressionNamedParameter> namedParams = factory.getNamedOperands(expression);
-    List<StreamExpression> metricExpressions = factory.getExpressionOperandsRepresentingTypes(expression, Metric.class);
-    StreamExpressionNamedParameter zkHostExpression = factory.getNamedOperand(expression, "zkHost");
 
+    if(collectionName.indexOf('"') > -1) {
+      collectionName = collectionName.replaceAll("\"", "").replaceAll(" ", "");
+    }
+
+    List<StreamExpressionNamedParameter> namedParams = factory.getNamedOperands(expression);
+
+    StreamExpressionNamedParameter zkHostExpression = factory.getNamedOperand(expression, "zkHost");
+    List<StreamExpression> metricExpressions = factory.getExpressionOperandsRepresentingTypes(expression, Expressible.class, Metric.class);
 
     // Collection Name
     if(null == collectionName){
       throw new IOException(String.format(Locale.ROOT,"invalid expression %s - collectionName expected as first operand",expression));
     }
 
+    // Construct the metrics
+    Metric[] metrics = null;
+    if(metricExpressions.size() > 0) {
+      metrics = new Metric[metricExpressions.size()];
+      for(int idx = 0; idx < metricExpressions.size(); ++idx){
+        metrics[idx] = factory.constructMetric(metricExpressions.get(idx));
+      }
+    } else {
+      metrics = new Metric[1];
+      metrics[0] = new CountMetric();
+    }
+
+    // pull out known named params
     ModifiableSolrParams params = new ModifiableSolrParams();
     for(StreamExpressionNamedParameter namedParam : namedParams){
       if(!namedParam.getName().equals("zkHost")){
-        params.set(namedParam.getName(), namedParam.getParameter().toString().trim());
+        params.add(namedParam.getName(), namedParam.getParameter().toString().trim());
       }
     }
 
@@ -29,24 +47,11 @@
       if(zkHost == null) {
         zkHost = factory.getDefaultZkHost();
       }
-    }
-    else if(zkHostExpression.getParameter() instanceof StreamExpressionValue){
+    } else if(zkHostExpression.getParameter() instanceof StreamExpressionValue){
       zkHost = ((StreamExpressionValue)zkHostExpression.getParameter()).getValue();
     }
 
-    /*
-    if(null == zkHost){
-      throw new IOException(String.format(Locale.ROOT,"invalid expression %s - zkHost not found for collection '%s'",expression,collectionName));
-    }
-    */
-
-    // metrics, optional - if not provided then why are you using this?
-    Metric[] metrics = new Metric[metricExpressions.size()];
-    for(int idx = 0; idx < metricExpressions.size(); ++idx){
-      metrics[idx] = factory.constructMetric(metricExpressions.get(idx));
-    }
-
     // We've got all the required items
-    init(zkHost, collectionName, params, metrics);
+    init(collectionName, params, metrics, zkHost);
   }
 

@@ -3,7 +3,26 @@
     liveNodes = Set.copyOf((Collection<String>)snapshot.getOrDefault("liveNodes", Collections.emptySet()));
     clusterProperties = (Map<String, Object>)snapshot.getOrDefault("clusterProperties", Collections.emptyMap());
     Map<String, Object> stateMap = new HashMap<>((Map<String, Object>)snapshot.getOrDefault("clusterState", Collections.emptyMap()));
-    Number version = (Number)stateMap.remove("version");
-    clusterState = ClusterState.load(version != null ? version.intValue() : null, stateMap, liveNodes, ZkStateReader.CLUSTER_STATE);
+    Map<String, DocCollection> collectionStates = new HashMap<>();
+    // back-compat with format = 1
+    Integer stateVersion = Integer.valueOf(String.valueOf(stateMap.getOrDefault("version", 0)));
+    stateMap.remove("version");
+    stateMap.forEach((name, state) -> {
+      Map<String, Object> mutableState = (Map<String, Object>)state;
+      Map<String, Object> collMap = (Map<String, Object>) mutableState.get(name);
+      if (collMap == null) {
+        // snapshot in format 1
+        collMap = mutableState;
+        mutableState = Collections.singletonMap(name, state);
+      }
+      Integer version = Integer.parseInt(String.valueOf(collMap.getOrDefault("zNodeVersion", stateVersion)));
+      String path = String.valueOf(collMap.getOrDefault("zNode", ZkStateReader.getCollectionPath(name)));
+      collMap.remove("zNodeVersion");
+      collMap.remove("zNode");
+      byte[] data = Utils.toJSON(mutableState);
+      ClusterState collState = ClusterState.load(version, data, Collections.emptySet(), path);
+      collectionStates.put(name, collState.getCollection(name));
+    });
+    clusterState = new ClusterState(stateVersion, liveNodes, collectionStates);
   }
 

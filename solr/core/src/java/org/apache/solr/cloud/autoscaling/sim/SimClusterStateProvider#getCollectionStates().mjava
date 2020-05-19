@@ -1,62 +1,15 @@
-  // this method uses a simple cache in collectionsStatesRef. Operations that modify
-  // cluster state should always reset this cache so that the changes become visible
   private Map<String, DocCollection> getCollectionStates() throws IOException, InterruptedException {
     lock.lockInterruptibly();
     try {
-      Map<String, DocCollection> collectionStates = collectionsStatesRef.get();
-      if (collectionStates != null) {
-        return collectionStates;
-      }
-      collectionsStatesRef.set(null);
-      log.debug("** creating new collection states, currentVersion={}", clusterStateVersion);
-      Map<String, Map<String, Map<String, Replica>>> collMap = new HashMap<>();
-      nodeReplicaMap.forEach((n, replicas) -> {
-          synchronized (replicas) {
-            replicas.forEach(ri -> {
-                Map<String, Object> props;
-                synchronized (ri) {
-                  props = new HashMap<>(ri.getVariables());
-                }
-                props.put(ZkStateReader.NODE_NAME_PROP, n);
-                props.put(ZkStateReader.CORE_NAME_PROP, ri.getCore());
-                props.put(ZkStateReader.REPLICA_TYPE, ri.getType().toString());
-                props.put(ZkStateReader.STATE_PROP, ri.getState().toString());
-                Replica r = new Replica(ri.getName(), props, ri.getCollection(), ri.getShard());
-                collMap.computeIfAbsent(ri.getCollection(), c -> new HashMap<>())
-                  .computeIfAbsent(ri.getShard(), s -> new HashMap<>())
-                  .put(ri.getName(), r);
-              });
-          }
-        });
-
-      // add empty slices
-      sliceProperties.forEach((c, perSliceProps) -> {
-        perSliceProps.forEach((slice, props) -> {
-          collMap.computeIfAbsent(c, co -> new ConcurrentHashMap<>()).computeIfAbsent(slice, s -> new ConcurrentHashMap<>());
-        });
+      Map<String, DocCollection> collectionStates = new HashMap<>();
+      collectionsStatesRef.forEach((name, cached) -> {
+        try {
+          collectionStates.put(name, cached.getColl());
+        } catch (Exception e) {
+          throw new RuntimeException("error building collection " + name + " state", e);
+        }
       });
-      // add empty collections
-      collProperties.keySet().forEach(c -> {
-        collMap.computeIfAbsent(c, co -> new ConcurrentHashMap<>());
-      });
-
-      Map<String, DocCollection> res = new HashMap<>();
-      collMap.forEach((coll, shards) -> {
-        Map<String, Slice> slices = new HashMap<>();
-        shards.forEach((s, replicas) -> {
-          Map<String, Object> sliceProps = sliceProperties.computeIfAbsent(coll, c -> new ConcurrentHashMap<>()).computeIfAbsent(s, sl -> new ConcurrentHashMap<>());
-          Slice slice = new Slice(s, replicas, sliceProps, coll);
-          slices.put(s, slice);
-        });
-        Map<String, Object> collProps = collProperties.computeIfAbsent(coll, c -> new ConcurrentHashMap<>());
-        Map<String, Object> routerProp = (Map<String, Object>) collProps.getOrDefault(DocCollection.DOC_ROUTER, Collections.singletonMap("name", DocRouter.DEFAULT_NAME));
-        DocRouter router = DocRouter.getDocRouter((String)routerProp.getOrDefault("name", DocRouter.DEFAULT_NAME));
-        DocCollection dc = new DocCollection(coll, slices, collProps, router, clusterStateVersion, ZkStateReader.CLUSTER_STATE);
-        res.put(coll, dc);
-      });
-      saveClusterState(new ClusterState(clusterStateVersion, liveNodes.get(), res));
-      collectionsStatesRef.set(res);
-      return res;
+      return collectionStates;
     } finally {
       lock.unlock();
     }

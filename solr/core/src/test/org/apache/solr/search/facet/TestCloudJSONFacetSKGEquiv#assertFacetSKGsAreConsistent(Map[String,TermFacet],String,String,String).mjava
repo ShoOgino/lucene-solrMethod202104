@@ -1,0 +1,47 @@
+  /**
+   * Given a set of term facets, and top level query strings, asserts that 
+   * the results of these queries are identical even when varying the <code>method_val</code> param
+   */
+  private void assertFacetSKGsAreConsistent(final Map<String,TermFacet> facets,
+                                            final String query,
+                                            final String foreQ,
+                                            final String backQ) throws SolrServerException, IOException {
+    final SolrParams basicParams = params("rows","0",
+                                          "q", query, "fore", foreQ, "back", backQ,
+                                          "json.facet", Facet.toJSONFacetParamValue(facets));
+    
+    log.info("Doing full run: {}", basicParams);
+    try {
+
+      // start by recording the results of the purely "default" behavior...
+      final NamedList expected = getFacetResponse(basicParams);
+
+      // now loop over all processors and compare them to the "default"...
+      for (FacetMethod method : EnumSet.allOf(FacetMethod.class)) {
+        ModifiableSolrParams options = params("method_val", method.toString().toLowerCase(Locale.ROOT));
+          
+        final NamedList actual = getFacetResponse(SolrParams.wrapAppended(options, basicParams));
+
+        // we can't rely on a trivial assertEquals() comparison...
+        // 
+        // the order of the sub-facet keys can change between
+        // processors.  (notably: method:enum vs method:smart when sort:"index asc")
+        // 
+        // NOTE: this doesn't ignore the order of the buckets,
+        // it ignores the order of the keys in each bucket...
+        final String pathToMismatch = BaseDistributedSearchTestCase.compare
+          (expected, actual, 0,
+           Collections.singletonMap("buckets", BaseDistributedSearchTestCase.UNORDERED));
+        if (null != pathToMismatch) {
+          log.error("{}: expected = {}", options, expected);
+          log.error("{}: actual = {}", options, actual);
+          fail("Mismatch: " + pathToMismatch + " using " + options);
+        }
+      }
+    } catch (AssertionError e) {
+      throw new AssertionError(basicParams + " ===> " + e.getMessage(), e);
+    } finally {
+      log.info("Ending full run"); 
+    }
+  }
+

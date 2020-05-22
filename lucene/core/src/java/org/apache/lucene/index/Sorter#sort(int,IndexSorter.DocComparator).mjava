@@ -1,0 +1,64 @@
+  /** Computes the old-to-new permutation over the given comparator. */
+  private static Sorter.DocMap sort(final int maxDoc, IndexSorter.DocComparator comparator) {
+    // check if the index is sorted
+    boolean sorted = true;
+    for (int i = 1; i < maxDoc; ++i) {
+      if (comparator.compare(i-1, i) > 0) {
+        sorted = false;
+        break;
+      }
+    }
+    if (sorted) {
+      return null;
+    }
+
+    // sort doc IDs
+    final int[] docs = new int[maxDoc];
+    for (int i = 0; i < maxDoc; i++) {
+      docs[i] = i;
+    }
+    
+    DocValueSorter sorter = new DocValueSorter(docs, comparator);
+    // It can be common to sort a reader, add docs, sort it again, ... and in
+    // that case timSort can save a lot of time
+    sorter.sort(0, docs.length); // docs is now the newToOld mapping
+
+    // The reason why we use MonotonicAppendingLongBuffer here is that it
+    // wastes very little memory if the index is in random order but can save
+    // a lot of memory if the index is already "almost" sorted
+    final PackedLongValues.Builder newToOldBuilder = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
+    for (int i = 0; i < maxDoc; ++i) {
+      newToOldBuilder.add(docs[i]);
+    }
+    final PackedLongValues newToOld = newToOldBuilder.build();
+
+    // invert the docs mapping:
+    for (int i = 0; i < maxDoc; ++i) {
+      docs[(int) newToOld.get(i)] = i;
+    } // docs is now the oldToNew mapping
+
+    final PackedLongValues.Builder oldToNewBuilder = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
+    for (int i = 0; i < maxDoc; ++i) {
+      oldToNewBuilder.add(docs[i]);
+    }
+    final PackedLongValues oldToNew = oldToNewBuilder.build();
+    
+    return new Sorter.DocMap() {
+
+      @Override
+      public int oldToNew(int docID) {
+        return (int) oldToNew.get(docID);
+      }
+
+      @Override
+      public int newToOld(int docID) {
+        return (int) newToOld.get(docID);
+      }
+
+      @Override
+      public int size() {
+        return maxDoc;
+      }
+    };
+  }
+

@@ -1,28 +1,25 @@
     @Override
     public SolrParams parseParamsAndFillStreams(
         final HttpServletRequest req, ArrayList<ContentStream> streams) throws Exception {
-      if( !ServletFileUpload.isMultipartContent(req) ) {
+      if (!isMultipart(req)) {
         throw new SolrException( ErrorCode.BAD_REQUEST, "Not multipart content! "+req.getContentType() );
       }
-      
+      // Magic way to tell Jetty dynamically we want multi-part processing.  "Request" here is a Jetty class
+      req.setAttribute(Request.MULTIPART_CONFIG_ELEMENT, multipartConfigElement);
+
       MultiMapSolrParams params = parseQueryString( req.getQueryString() );
 
-      // Create a new file upload handler
-      ServletFileUpload upload = new ServletFileUpload(factory);
-      upload.setSizeMax( ((long) uploadLimitKB) * 1024L );
+      // IMPORTANT: the Parts will all have the delete() method called by cleanupMultipartFiles()
 
-      // Parse the request
-      List<FileItem> items = upload.parseRequest(req);
-      for (FileItem item : items) {
-        // If it's a form field, put it in our parameter map
-        if (item.isFormField()) {
+      for (Part part : req.getParts()) {
+        if (part.getSubmittedFileName() == null) { // thus a form field and not file upload
+          // If it's a form field, put it in our parameter map
+          String partAsString = org.apache.commons.io.IOUtils.toString(new PartContentStream(part).getReader());
           MultiMapSolrParams.addParam(
-            item.getFieldName().trim(),
-            item.getString(), params.getMap() );
-        }
-        // Add the stream
-        else {
-          streams.add( new FileItemContentStream( item ) );
+              part.getName().trim(),
+              partAsString, params.getMap() );
+        } else { // file upload
+          streams.add(new PartContentStream(part));
         }
       }
       return params;

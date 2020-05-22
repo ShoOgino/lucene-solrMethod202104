@@ -1,9 +1,37 @@
   @Override
   public void configure(SolrResourceLoader loader, SolrCloudManager cloudManager, Map<String, Object> properties) throws TriggerValidationException {
     super.configure(loader, cloudManager, properties);
-    String colString = (String) properties.get("collections");
-    if (colString != null && !colString.isEmpty()) {
-      collections.addAll(StrUtils.splitSmart(colString, ','));
+
+    Object value = properties.get("collections");
+    if (value instanceof String) {
+      String colString = (String) value;
+      if (!colString.isEmpty()) {
+        List<String> whiteListedCollections = StrUtils.splitSmart(colString, ',');
+        collectionsPredicate = whiteListedCollections::contains;
+      }
+    } else if (value instanceof Map) {
+      Map<String, String> matchConditions = (Map<String, String>) value;
+      collectionsPredicate = collectionName -> {
+        try {
+          DocCollection collection = cloudManager.getClusterStateProvider().getCollection(collectionName);
+          if (collection == null) {
+            log.debug("Collection: {} was not found while evaluating conditions", collectionName);
+            return false;
+          }
+          for (Map.Entry<String, String> entry : matchConditions.entrySet()) {
+            if (!entry.getValue().equals(collection.get(entry.getKey()))) {
+              if (log.isDebugEnabled()) {
+                log.debug("Collection: {} does not match condition: {}:{}", collectionName, entry.getKey(), entry.getValue());
+              }
+              return false;
+            }
+          }
+          return true;
+        } catch (IOException e) {
+          log.error("Exception fetching collection information for: {}", collectionName, e);
+          return false;
+        }
+      };
     }
   }
 

@@ -1,12 +1,10 @@
     @Override
     public List<ReplicaPosition> assign(SolrCloudManager solrCloudManager, AssignRequest assignRequest) throws Assign.AssignmentException, IOException, InterruptedException {
       ClusterState clusterState = solrCloudManager.getClusterStateProvider().getClusterState();
-      List<String> nodeList = assignRequest.nodes; // can this be empty list?
+      List<String> nodeList = assignRequest.nodes;
 
+      HashMap<String, Assign.ReplicaCount> nodeNameVsShardCount = Assign.getNodeNameVsShardCount(assignRequest.collectionName, clusterState, assignRequest.nodes);
       if (nodeList == null || nodeList.isEmpty()) {
-        HashMap<String, Assign.ReplicaCount> nodeNameVsShardCount =
-            Assign.getNodeNameVsShardCount(assignRequest.collectionName, clusterState, nodeList);
-        // if nodelist was empty, this map will be empty too. (passing null above however gets a full map)
         ArrayList<Assign.ReplicaCount> sortedNodeList = new ArrayList<>(nodeNameVsShardCount.values());
         sortedNodeList.sort(Comparator.comparingInt(Assign.ReplicaCount::weight));
         nodeList = sortedNodeList.stream().map(replicaCount -> replicaCount.nodeName).collect(Collectors.toList());
@@ -14,17 +12,16 @@
 
       int i = 0;
       List<ReplicaPosition> result = new ArrayList<>();
-      for (String aShard : assignRequest.shardNames) {
-        for (Map.Entry<Replica.Type, Integer> e : countsPerReplicaType(assignRequest).entrySet()) {
+      for (String aShard : assignRequest.shardNames)
+        for (Map.Entry<Replica.Type, Integer> e : ImmutableMap.of(Replica.Type.NRT, assignRequest.numNrtReplicas,
+            Replica.Type.TLOG, assignRequest.numTlogReplicas,
+            Replica.Type.PULL, assignRequest.numPullReplicas
+        ).entrySet()) {
           for (int j = 0; j < e.getValue(); j++) {
-            // TODO: not sure if we can receive an non-null, empty assingRequest.nodes,
-            //  but if we do this appears to result in a div/0. Also not sure if empty should be
-            //  same as null or an error  (with better message) here.
             result.add(new ReplicaPosition(aShard, j, e.getKey(), nodeList.get(i % nodeList.size())));
             i++;
           }
         }
-      }
       return result;
     }
 

@@ -1,18 +1,37 @@
   protected void writeDocs(SolrQueryRequest req, IteratorWriter.ItemWriter writer, Sort sort) throws IOException {
     List<LeafReaderContext> leaves = req.getSearcher().getTopReaderContext().leaves();
     SortDoc sortDoc = getSortDoc(req.getSearcher(), sort.getSort());
-    int count = 0;
     final int queueSize = Math.min(DOCUMENT_BATCH_SIZE, totalHits);
 
     SortQueue queue = new SortQueue(queueSize, sortDoc);
     SortDoc[] outDocs = new SortDoc[queueSize];
 
-    while (count < totalHits) {
-      identifyLowestSortingUnexportedDocs(leaves, sortDoc, queue);
-      int outDocsIndex = transferBatchToArrayForOutput(queue, outDocs);
-
-      count += (outDocsIndex + 1);
-      addDocsToItemWriter(leaves, writer, outDocs, outDocsIndex);
+    if (streamExpression != null) {
+      streamContext.put(SORT_DOCS_KEY, outDocs);
+      streamContext.put(SORT_QUEUE_KEY, queue);
+      streamContext.put(SORT_DOC_KEY, sortDoc);
+      streamContext.put(TOTAL_HITS_KEY, totalHits);
+      streamContext.put(EXPORT_WRITER_KEY, this);
+      streamContext.put(LEAF_READERS_KEY, leaves);
+      TupleStream tupleStream = createTupleStream();
+      tupleStream.open();
+      for (;;) {
+        final Tuple t = tupleStream.read();
+        if (t == null) {
+          break;
+        }
+        if (t.EOF) {
+          break;
+        }
+        writer.add((MapWriter) ew -> t.writeMap(ew));
+      }
+      tupleStream.close();
+    } else {
+      for (int count = 0; count < totalHits; ) {
+        int outDocsIndex = fillOutDocs(leaves, sortDoc, queue, outDocs);
+        count += (outDocsIndex + 1);
+        addDocsToItemWriter(leaves, writer, outDocs, outDocsIndex);
+      }
     }
   }
 

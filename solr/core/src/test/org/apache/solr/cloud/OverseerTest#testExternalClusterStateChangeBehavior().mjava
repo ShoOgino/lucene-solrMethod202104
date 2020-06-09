@@ -8,8 +8,6 @@
 
       ZkController.createClusterZkNodes(zkClient);
 
-      zkClient.create("/collections/test", null, CreateMode.PERSISTENT, true);
-
       reader = new ZkStateReader(zkClient);
       reader.createClusterStateWatchersAndUpdate();
 
@@ -17,15 +15,9 @@
 
       ZkDistributedQueue q = overseers.get(0).getStateUpdateQueue();
 
+      createCollection("c1", 1);
 
-      ZkNodeProps m = new ZkNodeProps(Overseer.QUEUE_OPERATION, CollectionParams.CollectionAction.CREATE.toLower(),
-          "name", "c1",
-          ZkStateReader.REPLICATION_FACTOR, "1",
-          ZkStateReader.NUM_SHARDS_PROP, "1",
-          "createNodeSet", "");
-      q.offer(Utils.toJSON(m));
-
-      m = new ZkNodeProps(Overseer.QUEUE_OPERATION, OverseerAction.STATE.toLower(),
+      ZkNodeProps m = new ZkNodeProps(Overseer.QUEUE_OPERATION, OverseerAction.STATE.toLower(),
           ZkStateReader.BASE_URL_PROP, "http://127.0.0.1/solr",
           ZkStateReader.SHARD_ID_PROP, "shard1",
           ZkStateReader.NODE_NAME_PROP, "node1",
@@ -63,28 +55,32 @@
 
       q.offer(Utils.toJSON(m));
 
-      Stat stat = new Stat();
-      byte[] data = zkClient.getData("/clusterstate.json", null, stat, true);
-      // Simulate an external modification
-      zkClient.setData("/clusterstate.json", data, true);
-
+      final String testCollectionName = "test";
+      zkClient.makePath(ZkStateReader.COLLECTIONS_ZKNODE + "/" + testCollectionName, true);
       m = new ZkNodeProps(Overseer.QUEUE_OPERATION, CollectionParams.CollectionAction.CREATE.toLower(),
-          "name", "test",
+          "name", testCollectionName,
           ZkStateReader.NUM_SHARDS_PROP, "1",
-          ZkStateReader.REPLICATION_FACTOR, "1",
-          DocCollection.STATE_FORMAT, "2"
+          ZkStateReader.REPLICATION_FACTOR, "1"
       );
       q.offer(Utils.toJSON(m));
 
+      // Wait for the overseer to create state.json for the collection
+      waitForCollections(reader, testCollectionName);
+
+      final String path = ZkStateReader.COLLECTIONS_ZKNODE + "/" + testCollectionName + "/state.json";
+      byte[] data = zkClient.getData(path, null, null, true);
+      // Simulate an external modification of state.json
+      zkClient.setData(path, data, true);
+
       m = new ZkNodeProps(Overseer.QUEUE_OPERATION, CollectionParams.CollectionAction.CREATESHARD.toLower(),
-          "collection", "test",
+          "collection", testCollectionName,
           ZkStateReader.SHARD_ID_PROP, "x",
           ZkStateReader.REPLICATION_FACTOR, "1"
       );
       q.offer(Utils.toJSON(m));
 
       m = new ZkNodeProps(Overseer.QUEUE_OPERATION, CollectionParams.CollectionAction.ADDREPLICA.toLower(),
-          "collection", "test",
+          "collection", testCollectionName,
           ZkStateReader.SHARD_ID_PROP, "x",
           ZkStateReader.BASE_URL_PROP, "http://127.0.0.1/solr",
           ZkStateReader.CORE_NODE_NAME_PROP, "core_node1",
@@ -94,8 +90,9 @@
       );
       q.offer(Utils.toJSON(m));
 
-      waitForCollections(reader, "test");
-      verifyReplicaStatus(reader, "test", "x", "core_node1", Replica.State.DOWN);
+      // Verify replica creation worked ok in spite of external update of state.json (although in theory such updates
+      // do not happen unless an old overseer is still updating ZK after a new Overseer got elected...).
+      verifyReplicaStatus(reader, testCollectionName, "x", "core_node1", Replica.State.DOWN);
 
       waitForCollections(reader, "c1");
       verifyReplicaStatus(reader, "c1", "shard1", "core_node1", Replica.State.ACTIVE);

@@ -23,6 +23,9 @@
 
      electNewOverseer(server.getZkAddress());
 
+      // Create collection znode before repeatedly trying to enqueue the Cluster state change message
+      zkClient.makePath(ZkStateReader.COLLECTIONS_ZKNODE + "/" + COLLECTION, true);
+
       for (int i = 0; i < atLeast(4); i++) {
         killCounter.incrementAndGet(); // for each round allow 1 kill
 
@@ -31,7 +34,14 @@
         TimeOut timeout = new TimeOut(10, TimeUnit.SECONDS, TimeSource.NANO_TIME);
         while (!timeout.hasTimedOut()) {
           try {
-            mockController.createCollection(COLLECTION, 1);
+            // We must only retry the enqueue to Overseer, not the collection znode creation (that doesn't depend on Overseer)
+            ZkNodeProps m = new ZkNodeProps(Overseer.QUEUE_OPERATION, CollectionParams.CollectionAction.CREATE.toLower(),
+                "name", COLLECTION,
+                ZkStateReader.REPLICATION_FACTOR, "1",
+                ZkStateReader.NUM_SHARDS_PROP, "1",
+                "createNodeSet", "");
+            ZkDistributedQueue q = MiniSolrCloudCluster.getOpenOverseer(overseers).getStateUpdateQueue();
+            q.offer(Utils.toJSON(m));
             break;
           } catch (SolrException | KeeperException | AlreadyClosedException e) {
             e.printStackTrace();

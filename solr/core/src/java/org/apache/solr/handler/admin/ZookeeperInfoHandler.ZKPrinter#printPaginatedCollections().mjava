@@ -1,0 +1,84 @@
+    // main entry point for printing collections
+    @SuppressWarnings("unchecked")
+    void printPaginatedCollections() throws IOException {
+      SortedMap<String, Object> collectionStates;
+      try {
+        // support paging of the collections graph view (in case there are many collections)
+        // fetch the requested page of collections and then retrieve the state for each
+        pagingSupport.fetchPage(page, zkClient);
+        // keep track of how many collections match the filter
+        boolean applyStatusFilter = (page.filterType == FilterType.status && page.filter != null);
+        List<String> matchesStatusFilter = applyStatusFilter ? new ArrayList<String>() : null;
+        Set<String> liveNodes = applyStatusFilter ?
+            zkController.getZkStateReader().getClusterState().getLiveNodes() : null;
+
+        collectionStates = new TreeMap<>(pagingSupport);
+        for (String collection : page.selected) {
+          // Get collection state from ZK
+          String collStatePath = String.format(Locale.ROOT, "/collections/%s/state.json", collection);
+          String childDataStr = null;
+          try {
+            byte[] childData = zkClient.getData(collStatePath, null, null, true);
+            if (childData != null)
+              childDataStr = (new BytesRef(childData)).utf8ToString();
+          } catch (KeeperException.NoNodeException nne) {
+            log.warn("State for collection {} not found.", collection);
+          } catch (Exception childErr) {
+            log.error("Failed to get {} due to", collStatePath, childErr);
+          }
+
+          if (childDataStr != null) {
+            Map<String, Object> extColl = (Map<String, Object>) Utils.fromJSONString(childDataStr);
+            Object collectionState = extColl.get(collection);
+
+            if (applyStatusFilter) {
+              // verify this collection matches the filtered state
+              if (page.matchesStatusFilter((Map<String, Object>) collectionState, liveNodes)) {
+                matchesStatusFilter.add(collection);
+                collectionStates.put(collection, collectionState);
+              }
+            } else {
+              collectionStates.put(collection, collectionState);
+            }
+          }
+        }
+
+        if (applyStatusFilter) {
+          // update the paged navigation info after applying the status filter
+          page.selectPage(matchesStatusFilter);
+
+          // rebuild the Map of state data
+          SortedMap<String, Object> map = new TreeMap<String, Object>(pagingSupport);
+          for (String next : page.selected)
+            map.put(next, collectionStates.get(next));
+          collectionStates = map;
+        }
+      } catch (KeeperException | InterruptedException e) {
+        writeError(500, e.toString());
+        return;
+      }
+
+      CharArr chars = new CharArr();
+      JSONWriter json = new JSONWriter(chars, 2);
+      json.startObject();
+
+      json.writeString("znode");
+      json.writeNameSeparator();
+      json.startObject();
+
+      // For some reason, without this the Json is badly formed
+      writeKeyValue(json, PATH, "Undefined", true);
+
+      if (collectionStates != null) {
+        CharArr collectionOut = new CharArr();
+        new JSONWriter(collectionOut, 2).write(collectionStates);
+        writeKeyValue(json, "data", collectionOut.toString(), false);
+      }
+
+      writeKeyValue(json, "paging", page.getPagingHeader(), false);
+
+      json.endObject();
+      json.endObject();
+      out.write(chars.toString());
+    }
+

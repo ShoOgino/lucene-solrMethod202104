@@ -1,5 +1,6 @@
-  /** Writes the BKD tree to the provided {@link IndexOutput} and returns the file offset where index was written. */
-  public long finish(IndexOutput out) throws IOException {
+  /** Writes the BKD tree to the provided {@link IndexOutput}s and returns a {@link Runnable} that
+   *  writes the index of the tree if at least one point has been added, or {@code null} otherwise. */
+  public Runnable finish(IndexOutput metaOut, IndexOutput indexOut, IndexOutput dataOut) throws IOException {
     // System.out.println("\nBKDTreeWriter.finish pointCount=" + pointCount + " out=" + out + " heapWriter=" + heapPointWriter);
 
     // TODO: specialize the 1D case?  it's much faster at indexing time (no partitioning on recurse...)
@@ -10,7 +11,7 @@
     }
 
     if (pointCount == 0) {
-      throw new IllegalStateException("must index at least one point");
+      return null;
     }
 
     //mark as finished
@@ -43,12 +44,13 @@
     //We re-use the selector so we do not need to create an object every time.
     BKDRadixSelector radixSelector = new BKDRadixSelector(numDataDims, numIndexDims, bytesPerDim, maxPointsSortInHeap, tempDir, tempFileNamePrefix);
 
+    final long dataStartFP = dataOut.getFilePointer();
     boolean success = false;
     try {
 
       final int[] parentSplits = new int[numIndexDims];
       build(0, numLeaves, points,
-             out, radixSelector,
+             dataOut, radixSelector,
             minPackedValue.clone(), maxPackedValue.clone(),
             parentSplits,
             splitPackedValues,
@@ -94,9 +96,13 @@
       }
     };
 
-    // Write index:
-    long indexFP = out.getFilePointer();
-    writeIndex(out, maxPointsInLeafNode, leafNodes);
-    return indexFP;
+    return () -> {
+      // Write index:
+      try {
+        writeIndex(metaOut, indexOut, maxPointsInLeafNode, leafNodes, dataStartFP);
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
+      }
+    };
   }
 

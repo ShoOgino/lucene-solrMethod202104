@@ -1,0 +1,49 @@
+  @Override
+  public void writeField(FieldInfo fieldInfo, PointsReader reader) throws IOException {
+
+    PointValues values = reader.getValues(fieldInfo.name);
+
+    try (BKDWriter writer = new BKDWriter(writeState.segmentInfo.maxDoc(),
+                                          writeState.directory,
+                                          writeState.segmentInfo.name,
+                                          fieldInfo.getPointDimensionCount(),
+                                          fieldInfo.getPointIndexDimensionCount(),
+                                          fieldInfo.getPointNumBytes(),
+                                          maxPointsInLeafNode,
+                                          maxMBSortInHeap,
+                                          values.size())) {
+
+      if (values instanceof MutablePointValues) {
+        Runnable finalizer = writer.writeField(dataOut, dataOut, dataOut, fieldInfo.name, (MutablePointValues) values);
+        if (finalizer != null) {
+          indexFPs.put(fieldInfo.name, dataOut.getFilePointer());
+          finalizer.run();
+        }
+        return;
+      }
+
+      values.intersect(new IntersectVisitor() {
+          @Override
+          public void visit(int docID) {
+            throw new IllegalStateException();
+          }
+
+          public void visit(int docID, byte[] packedValue) throws IOException {
+            writer.add(packedValue, docID);
+          }
+
+          @Override
+          public Relation compare(byte[] minPackedValue, byte[] maxPackedValue) {
+            return Relation.CELL_CROSSES_QUERY;
+          }
+        });
+
+      // We could have 0 points on merge since all docs with dimensional fields may be deleted:
+      Runnable finalizer = writer.finish(dataOut, dataOut, dataOut);
+      if (finalizer != null) {
+        indexFPs.put(fieldInfo.name, dataOut.getFilePointer());
+        finalizer.run();
+      }
+    }
+  }
+

@@ -1,5 +1,49 @@
-  /** Caller must pre-seek the provided {@link IndexInput} to the index location that {@link BKDWriter#finish} returned */
+  /** Caller must pre-seek the provided {@link IndexInput} to the index location that {@link BKDWriter#finish} returned.
+   * BKD tree is always stored off-heap. */
   public BKDReader(IndexInput metaIn, IndexInput indexIn, IndexInput dataIn) throws IOException {
-    this(metaIn, indexIn, dataIn, indexIn instanceof ByteBufferIndexInput);
+    version = CodecUtil.checkHeader(metaIn, BKDWriter.CODEC_NAME, BKDWriter.VERSION_START, BKDWriter.VERSION_CURRENT);
+    numDataDims = metaIn.readVInt();
+    if (version >= BKDWriter.VERSION_SELECTIVE_INDEXING) {
+      numIndexDims = metaIn.readVInt();
+    } else {
+      numIndexDims = numDataDims;
+    }
+    maxPointsInLeafNode = metaIn.readVInt();
+    bytesPerDim = metaIn.readVInt();
+    packedBytesLength = numDataDims * bytesPerDim;
+    packedIndexBytesLength = numIndexDims * bytesPerDim;
+
+    // Read index:
+    numLeaves = metaIn.readVInt();
+    assert numLeaves > 0;
+    leafNodeOffset = numLeaves;
+
+    minPackedValue = new byte[packedIndexBytesLength];
+    maxPackedValue = new byte[packedIndexBytesLength];
+
+    metaIn.readBytes(minPackedValue, 0, packedIndexBytesLength);
+    metaIn.readBytes(maxPackedValue, 0, packedIndexBytesLength);
+
+    for(int dim=0;dim<numIndexDims;dim++) {
+      if (Arrays.compareUnsigned(minPackedValue, dim * bytesPerDim, dim * bytesPerDim + bytesPerDim, maxPackedValue, dim * bytesPerDim, dim * bytesPerDim + bytesPerDim) > 0) {
+        throw new CorruptIndexException("minPackedValue " + new BytesRef(minPackedValue) + " is > maxPackedValue " + new BytesRef(maxPackedValue) + " for dim=" + dim, metaIn);
+      }
+    }
+    
+    pointCount = metaIn.readVLong();
+    docCount = metaIn.readVInt();
+
+    int numIndexBytes = metaIn.readVInt();
+    long indexStartPointer;
+    if (version >= BKDWriter.VERSION_META_FILE) {
+      minLeafBlockFP = metaIn.readLong();
+      indexStartPointer = metaIn.readLong();
+    } else {
+      indexStartPointer = indexIn.getFilePointer();
+      minLeafBlockFP = indexIn.readVLong();
+      indexIn.seek(indexStartPointer);
+    }
+    this.packedIndex = indexIn.slice("packedIndex", indexStartPointer, numIndexBytes);
+    this.in = dataIn;
   }
 

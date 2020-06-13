@@ -1,27 +1,30 @@
     @Override
     public List<ReplicaPosition> assign(SolrCloudManager solrCloudManager, AssignRequest assignRequest) throws Assign.AssignmentException, IOException, InterruptedException {
       ClusterState clusterState = solrCloudManager.getClusterStateProvider().getClusterState();
-      List<String> nodeList = assignRequest.nodes;
+      List<String> nodeList = assignRequest.nodes; // can this be empty list?
 
-      HashMap<String, Assign.ReplicaCount> nodeNameVsShardCount = Assign.getNodeNameVsShardCount(assignRequest.collectionName, clusterState, assignRequest.nodes);
       if (nodeList == null || nodeList.isEmpty()) {
+        HashMap<String, Assign.ReplicaCount> nodeNameVsShardCount =
+            Assign.getNodeNameVsShardCount(assignRequest.collectionName, clusterState, nodeList);
+        // if nodelist was empty, this map will be empty too. (passing null above however gets a full map)
         ArrayList<Assign.ReplicaCount> sortedNodeList = new ArrayList<>(nodeNameVsShardCount.values());
         sortedNodeList.sort(Comparator.comparingInt(Assign.ReplicaCount::weight));
         nodeList = sortedNodeList.stream().map(replicaCount -> replicaCount.nodeName).collect(Collectors.toList());
       }
 
+      // otherwise we get a div/0 below
+      assert !nodeList.isEmpty();
+
       int i = 0;
       List<ReplicaPosition> result = new ArrayList<>();
-      for (String aShard : assignRequest.shardNames)
-        for (Map.Entry<Replica.Type, Integer> e : ImmutableMap.of(Replica.Type.NRT, assignRequest.numNrtReplicas,
-            Replica.Type.TLOG, assignRequest.numTlogReplicas,
-            Replica.Type.PULL, assignRequest.numPullReplicas
-        ).entrySet()) {
+      for (String aShard : assignRequest.shardNames) {
+        for (Map.Entry<Replica.Type, Integer> e : countsPerReplicaType(assignRequest).entrySet()) {
           for (int j = 0; j < e.getValue(); j++) {
             result.add(new ReplicaPosition(aShard, j, e.getKey(), nodeList.get(i % nodeList.size())));
             i++;
           }
         }
+      }
       return result;
     }
 

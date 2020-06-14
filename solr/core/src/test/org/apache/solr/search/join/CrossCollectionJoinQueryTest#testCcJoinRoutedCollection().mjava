@@ -1,0 +1,59 @@
+  @Test
+  public void testCcJoinRoutedCollection() throws Exception {
+    setupIndexes(true);
+    testCcJoinQuery("{!join method=crossCollection fromIndex=products from=product_id_i to=product_id_i}size_s:M", true);
+    int i = 0;
+    for (JettySolrRunner runner : cluster.getJettySolrRunners()) {
+      i++;
+      String url = runner.getBaseUrl().toString();
+      System.setProperty("test.ccjoin.solr.url." + i, url);
+    }
+    try {
+      // now we need to re-upload our config , now that we know a valid solr url for the cluster.
+      CloudSolrClient client = cluster.getSolrClient();
+      ((ZkClientClusterStateProvider) client.getClusterStateProvider()).uploadConfig(configset("ccjoin"), "ccjoin");
+      // reload the cores with the updated allowSolrUrls config.
+      CollectionAdminRequest.Reload.reloadCollection("products").process(client);
+      CollectionAdminRequest.Reload.reloadCollection("parts").process(client);
+      Thread.sleep(10000);
+
+      testCcJoinQuery("{!join method=crossCollection fromIndex=products from=product_id_i to=product_id_i}size_s:M", true);
+
+      testCcJoinQuery(String.format(Locale.ROOT,
+          "{!join method=crossCollection solrUrl=\"%s\" fromIndex=products from=product_id_i to=product_id_i}size_s:M", getSolrUrl()),
+          true);
+
+      testCcJoinQuery("{!join method=crossCollection fromIndex=products from=product_id_l to=product_id_l}size_s:M",
+          true);
+      testCcJoinQuery(String.format(Locale.ROOT,
+          "{!join method=crossCollection solrUrl=\"%s\" fromIndex=products from=product_id_l to=product_id_l}size_s:M",
+          getSolrUrl()),
+          true);
+
+      testCcJoinQuery("{!join method=crossCollection fromIndex=products from=product_id_s to=product_id_s}size_s:M",
+          true);
+      testCcJoinQuery(String.format(Locale.ROOT,
+          "{!join method=crossCollection solrUrl=\"%s\" fromIndex=products from=product_id_s to=product_id_s}size_s:M",
+          getSolrUrl()),
+          true);
+      testCcJoinQuery(String.format(Locale.ROOT,
+          "{!join method=crossCollection zkHost=\"%s\" fromIndex=products from=product_id_s to=product_id_s}size_s:M",
+          cluster.getSolrClient().getZkHost()),
+          true);
+
+      // Test the ability to set other parameters on crossCollection join and have them passed through
+      assertResultCount("parts",
+          "{!join method=crossCollection fromIndex=products from=product_id_s to=product_id_s fq=product_id_s:1}size_s:M",
+          2, true);
+      assertResultCount("parts",
+          String.format(Locale.ROOT,
+              "{!join method=crossCollection solrUrl=\"%s\" fromIndex=products from=product_id_s to=product_id_s fq=product_id_s:1}size_s:M",
+              getSolrUrl()), 2, true);
+    } finally {
+      for (JettySolrRunner runner : cluster.getJettySolrRunners()) {
+        i++;
+        System.getProperties().remove("test.ccjoin.solr.url." + i);
+      }
+    }
+  }
+

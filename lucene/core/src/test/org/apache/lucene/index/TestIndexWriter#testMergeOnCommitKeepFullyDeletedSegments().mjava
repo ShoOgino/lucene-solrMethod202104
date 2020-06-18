@@ -1,0 +1,38 @@
+  public void testMergeOnCommitKeepFullyDeletedSegments() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = newIndexWriterConfig();
+    iwc.setMaxCommitMergeWaitSeconds(30);
+    iwc.mergePolicy = new FilterMergePolicy(newMergePolicy()) {
+      @Override
+      public boolean keepFullyDeletedSegment(IOSupplier<CodecReader> readerIOSupplier) {
+        return true;
+      }
+
+      @Override
+      public MergeSpecification findFullFlushMerges(MergeTrigger mergeTrigger,
+                                                    SegmentInfos segmentInfos,
+                                                    MergeContext mergeContext) {
+        List<SegmentCommitInfo> fullyDeletedSegments = segmentInfos.asList().stream()
+            .filter(s -> s.info.maxDoc() - s.getDelCount() == 0)
+            .collect(Collectors.toList());
+        if (fullyDeletedSegments.isEmpty()) {
+          return null;
+        }
+        MergeSpecification spec = new MergeSpecification();
+        spec.add(new OneMerge(fullyDeletedSegments));
+        return spec;
+      }
+    };
+    IndexWriter w = new IndexWriter(dir, iwc);
+    Document d = new Document();
+    d.add(new StringField("id", "1", Field.Store.YES));
+    w.addDocument(d);
+    w.commit();
+    w.updateDocument(new Term("id", "1"), d);
+    w.commit();
+    try (DirectoryReader reader = w.getReader()) {
+      assertEquals(1, reader.numDocs());
+    }
+    IOUtils.close(w, dir);
+  }
+

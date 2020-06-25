@@ -1,0 +1,82 @@
+  public synchronized void refresh() {
+    Map<String, Object> pluginInfos = null;
+    try {
+      pluginInfos = ContainerPluginsApi.plugins(coreContainer.zkClientSupplier);
+    } catch (IOException e) {
+      log.error("Could not read plugins data", e);
+      return;
+    }
+    Map<String,PluginMeta> newState = new HashMap<>(pluginInfos.size());
+    for (Map.Entry<String, Object> e : pluginInfos.entrySet()) {
+      try {
+        newState.put(e.getKey(),
+            mapper.readValue(Utils.toJSON(e.getValue()), PluginMeta.class));
+      } catch (Exception exp) {
+        log.error("Invalid apiInfo configuration :", exp);
+      }
+    }
+
+    Map<String, PluginMeta> currentState = new HashMap<>();
+    for (Map.Entry<String, ApiInfo> e : currentPlugins.entrySet()) {
+      currentState.put(e.getKey(), e.getValue().info);
+    }
+    Map<String, Diff> diff = compareMaps(currentState, newState);
+    if (diff == null) return;//nothing has changed
+    for (Map.Entry<String, Diff> e : diff.entrySet()) {
+      if (e.getValue() == Diff.UNCHANGED) continue;
+      if (e.getValue() == Diff.REMOVED) {
+        ApiInfo apiInfo = currentPlugins.remove(e.getKey());
+        if (apiInfo == null) continue;
+        for (ApiHolder holder : apiInfo.holders) {
+          Api old = containerApiBag.unregister(holder.api.getEndPoint().method()[0], holder.api.getEndPoint().path()[0]);
+          if (old instanceof Closeable) {
+            closeWhileHandlingException((Closeable) old);
+          }
+        }
+      } else {
+        //ADDED or UPDATED
+        PluginMeta info = newState.get(e.getKey());
+        ApiInfo apiInfo = null;
+        List<String> errs = new ArrayList<>();
+        apiInfo = new ApiInfo(info, errs);
+        if (!errs.isEmpty()) {
+          log.error(StrUtils.join(errs, ','));
+          continue;
+        }
+        try {
+          apiInfo.init();
+        } catch (Exception exp) {
+          log.error("Cannot install apiInfo ", exp);
+          continue;
+        }
+        if (e.getValue() == Diff.ADDED) {
+          for (ApiHolder holder : apiInfo.holders) {
+            containerApiBag.register(holder, Collections.singletonMap("plugin-name", e.getKey()));
+          }
+          currentPlugins.put(e.getKey(), apiInfo);
+        } else {
+          ApiInfo old = currentPlugins.put(e.getKey(), apiInfo);
+          List<ApiHolder> replaced = new ArrayList<>();
+          for (ApiHolder holder : apiInfo.holders) {
+            Api oldApi = containerApiBag.lookup(holder.getPath(),
+                holder.getMethod().toString(), null);
+            if (oldApi instanceof ApiHolder) {
+              replaced.add((ApiHolder) oldApi);
+            }
+            containerApiBag.register(holder, Collections.singletonMap("plugin-name", e.getKey()));
+          }
+          if (old != null) {
+            for (ApiHolder holder : old.holders) {
+              if (replaced.contains(holder)) continue;// this path is present in the new one as well. so it already got replaced
+              containerApiBag.unregister(holder.getMethod(), holder.getPath());
+            }
+            if (old instanceof Closeable) {
+              closeWhileHandlingException((Closeable) old);
+            }
+          }
+        }
+      }
+
+    }
+  }
+

@@ -1,0 +1,83 @@
+  @Test
+  public void testApi() throws Exception {
+    MiniSolrCloudCluster cluster =
+        configureCluster(4)
+            .withJettyConfig(jetty -> jetty.enableV2(true))
+            .configure();
+    String errPath = "/error/details[0]/errorMessages[0]";
+    try {
+      PluginMeta plugin = new PluginMeta();
+      plugin.name = "testplugin";
+      plugin.klass = C2.class.getName();
+      //test with an invalid class
+      V2Request req = new V2Request.Builder("/cluster/plugin")
+          .forceV2(true)
+          .withMethod(POST)
+          .withPayload(singletonMap("add", plugin))
+          .build();
+      expectError(req, cluster.getSolrClient(), errPath, "No method with @Command in class");
+
+      //test with an invalid class
+      plugin.klass = C1.class.getName();
+      expectError(req, cluster.getSolrClient(), errPath, "No @EndPoints");
+
+      //test with a valid class. This should succeed now
+      plugin.klass = C3.class.getName();
+      req.process(cluster.getSolrClient());
+
+      //just check if the plugin is indeed registered
+      V2Request readPluginState = new V2Request.Builder("/cluster/plugin")
+          .forceV2(true)
+          .withMethod(GET)
+          .build();
+      V2Response rsp = readPluginState.process(cluster.getSolrClient());
+      assertEquals(C3.class.getName(), rsp._getStr("/plugin/testplugin/class", null));
+
+      //let's test the plugin
+      TestDistribPackageStore.assertResponseValues(10,
+          () -> new V2Request.Builder("/plugin/my/plugin")
+              .forceV2(true)
+              .withMethod(GET)
+              .build().process(cluster.getSolrClient()),
+          ImmutableMap.of("/testkey", "testval"));
+
+      //now remove the plugin
+      new V2Request.Builder("/cluster/plugin")
+          .withMethod(POST)
+          .forceV2(true)
+          .withPayload("{remove : testplugin}")
+          .build()
+          .process(cluster.getSolrClient());
+
+      //verify it is removed
+      rsp = readPluginState.process(cluster.getSolrClient());
+      assertEquals(null, rsp._get("/plugin/testplugin/class", null));
+
+      //test with a class  @EndPoint methods. This also uses a template in the path name
+      plugin.klass = C4.class.getName();
+      plugin.name = "collections";
+      expectError(req, cluster.getSolrClient(), errPath, "path must not have a prefix: collections");
+
+      plugin.name = "my-random-name";
+      req.process(cluster.getSolrClient());
+
+      //let's test the plugin
+      TestDistribPackageStore.assertResponseValues(10,
+          () -> new V2Request.Builder("/my-random-name/my/plugin")
+              .forceV2(true)
+              .withMethod(GET)
+              .build().process(cluster.getSolrClient()),
+          ImmutableMap.of("/method.name", "m1"));
+
+  TestDistribPackageStore.assertResponseValues(10,
+          () -> new V2Request.Builder("/my-random-name/their/plugin")
+              .forceV2(true)
+              .withMethod(GET)
+              .build().process(cluster.getSolrClient()),
+          ImmutableMap.of("/method.name", "m2"));
+
+    } finally {
+      cluster.shutdown();
+    }
+  }
+

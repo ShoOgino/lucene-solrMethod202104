@@ -1,0 +1,71 @@
+    @SuppressWarnings({"unchecked","rawtypes"})
+    public ApiInfo(PluginMeta info, List<String> errs) {
+      this.info = info;
+      Pair<String, String> klassInfo = org.apache.solr.core.PluginInfo.parseClassName(info.klass);
+      pkg = klassInfo.first();
+      if (pkg != null) {
+        PackageLoader.Package p = coreContainer.getPackageLoader().getPackage(pkg);
+        if (p == null) {
+          errs.add("Invalid package " + klassInfo.first());
+          return;
+        }
+        this.pkgVersion = p.getVersion(info.version);
+        if (pkgVersion == null) {
+          errs.add("No such package version:" + pkg + ":" + info.version + " . available versions :" + p.allVersions());
+          return;
+        }
+        try {
+          klas = pkgVersion.getLoader().findClass(klassInfo.second(), Object.class);
+        } catch (Exception e) {
+          log.error("Error loading class", e);
+          errs.add("Error loading class " + e.toString());
+          return;
+        }
+      } else {
+        try {
+          klas = Class.forName(klassInfo.second());
+        } catch (ClassNotFoundException e) {
+          errs.add("Error loading class " + e.toString());
+          return;
+        }
+        pkgVersion = null;
+      }
+      if (!Modifier.isPublic(klas.getModifiers())) {
+        errs.add("Class must be public and static : " + klas.getName());
+        return;
+      }
+
+      try {
+        List<Api> apis = AnnotatedApi.getApis(klas, null);
+        for (Object api : apis) {
+          EndPoint endPoint = ((AnnotatedApi) api).getEndPoint();
+          if (endPoint.path().length > 1 || endPoint.method().length > 1) {
+            errs.add("Only one HTTP method and url supported for each API");
+          }
+          if (endPoint.method().length != 1 || endPoint.path().length != 1) {
+            errs.add("The @EndPint must have exactly one method and path attributes");
+          }
+          List<String> pathSegments = StrUtils.splitSmart(endPoint.path()[0], '/', true);
+          PathTrie.replaceTemplates(pathSegments, Collections.singletonMap("plugin-name", info.name));
+          if (V2HttpCall.knownPrefixes.contains(pathSegments.get(0))) {
+            errs.add("path must not have a prefix: "+pathSegments.get(0));
+          }
+
+        }
+      } catch (Exception e) {
+        errs.add(e.toString());
+      }
+      if (!errs.isEmpty()) return;
+
+      Constructor constructor = klas.getConstructors()[0];
+      if (constructor.getParameterTypes().length > 1 ||
+          (constructor.getParameterTypes().length == 1 && constructor.getParameterTypes()[0] != CoreContainer.class)) {
+        errs.add("Must have a no-arg constructor or CoreContainer constructor and it must not be a non static inner class");
+        return;
+      }
+      if (!Modifier.isPublic(constructor.getModifiers())) {
+        errs.add("Must have a public constructor ");
+        return;
+      }
+    }
+

@@ -20,7 +20,9 @@
       SegmentInfos toCommit = null;
       boolean anyChanges = false;
       long seqNo;
-
+      MergePolicy.MergeSpecification onCommitMerges = null;
+      AtomicBoolean includeInCommit = new AtomicBoolean(true);
+      final long maxCommitMergeWaitMillis = config.getMaxCommitMergeWaitMillis();
       // This is copied from doFlush, except it's modified to
       // clone & incRef the flushed SegmentInfos inside the
       // sync block:
@@ -73,16 +75,18 @@
               // corresponding add from an updateDocument) can
               // sneak into the commit point:
               toCommit = segmentInfos.clone();
-
               pendingCommitChangeCount = changeCount.get();
-
               // This protects the segmentInfos we are now going
               // to commit.  This is important in case, eg, while
               // we are trying to sync all referenced files, a
               // merge completes which would otherwise have
-              // removed the files we are now syncing.    
-              filesToCommit = toCommit.files(false); 
-              deleter.incRef(filesToCommit);
+              // removed the files we are now syncing.
+              deleter.incRef(toCommit.files(false));
+              if (anyChanges && maxCommitMergeWaitMillis > 0) {
+                // we can safely call prepareOnCommitMerge since writeReaderPool(true) above wrote all
+                // necessary files to disk and checkpointed them.
+                onCommitMerges = prepareOnCommitMerge(toCommit, includeInCommit);
+              }
             }
             success = true;
           } finally {
@@ -103,7 +107,24 @@
       } finally {
         maybeCloseOnTragicEvent();
       }
-     
+
+      if (onCommitMerges != null) {
+        if (infoStream.isEnabled("IW")) {
+          infoStream.message("IW", "now run merges during commit: " + onCommitMerges.segString(directory));
+        }
+        mergeScheduler.merge(mergeSource, MergeTrigger.COMMIT);
+        onCommitMerges.await(maxCommitMergeWaitMillis, TimeUnit.MILLISECONDS);
+        if (infoStream.isEnabled("IW")) {
+          infoStream.message("IW", "done waiting for merges during commit");
+        }
+        synchronized (this) {
+          // we need to call this under lock since mergeFinished above is also called under the IW lock
+          includeInCommit.set(false);
+        }
+      }
+      // do this after handling any onCommitMerges since the files will have changed if any merges
+      // did complete
+      filesToCommit = toCommit.files(false);
       try {
         if (anyChanges) {
           maybeMerge.set(true);

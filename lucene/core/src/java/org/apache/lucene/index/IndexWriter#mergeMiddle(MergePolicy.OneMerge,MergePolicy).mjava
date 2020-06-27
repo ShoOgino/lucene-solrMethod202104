@@ -6,8 +6,6 @@
     merge.checkAborted();
 
     Directory mergeDirectory = mergeScheduler.wrapForMerge(merge, directory);
-    List<SegmentCommitInfo> sourceSegments = merge.segments;
-    
     IOContext context = new IOContext(merge.getStoreMergeInfo());
 
     final TrackingDirectoryWrapper dirWrapper = new TrackingDirectoryWrapper(mergeDirectory);
@@ -16,45 +14,25 @@
       infoStream.message("IW", "merging " + segString(merge.segments));
     }
 
-    merge.readers = new ArrayList<>(sourceSegments.size());
-    merge.hardLiveDocs = new ArrayList<>(sourceSegments.size());
-
     // This is try/finally to make sure merger's readers are
     // closed:
     boolean success = false;
     try {
-      int segUpto = 0;
-      while(segUpto < sourceSegments.size()) {
-
-        final SegmentCommitInfo info = sourceSegments.get(segUpto);
-
-        // Hold onto the "live" reader; we will use this to
-        // commit merged deletes
-        final ReadersAndUpdates rld = getPooledInstance(info, true);
+      merge.initMergeReaders(sci -> {
+        final ReadersAndUpdates rld = getPooledInstance(sci, true);
         rld.setIsMerging();
-
-        ReadersAndUpdates.MergeReader mr = rld.getReaderForMerge(context);
-        SegmentReader reader = mr.reader;
-
-        if (infoStream.isEnabled("IW")) {
-          infoStream.message("IW", "seg=" + segString(info) + " reader=" + reader);
-        }
-
-        merge.hardLiveDocs.add(mr.hardLiveDocs);
-        merge.readers.add(reader);
-        segUpto++;
-      }
-
+        return rld.getReaderForMerge(context);
+      });
       // Let the merge wrap readers
       List<CodecReader> mergeReaders = new ArrayList<>();
       Counter softDeleteCount = Counter.newCounter(false);
-      for (int r = 0; r < merge.readers.size(); r++) {
-        SegmentReader reader = merge.readers.get(r);
+      for (MergePolicy.MergeReader mergeReader : merge.getMergeReader()) {
+        SegmentReader reader = mergeReader.reader;
         CodecReader wrappedReader = merge.wrapForMerge(reader);
         validateMergeReader(wrappedReader);
         if (softDeletesEnabled) {
           if (reader != wrappedReader) { // if we don't have a wrapped reader we won't preserve any soft-deletes
-            Bits hardLiveDocs = merge.hardLiveDocs.get(r);
+            Bits hardLiveDocs = mergeReader.hardLiveDocs;
             if (hardLiveDocs != null) { // we only need to do this accounting if we have mixed deletes
               Bits wrappedLiveDocs = wrappedReader.getLiveDocs();
               Counter hardDeleteCounter = Counter.newCounter(false);
@@ -87,7 +65,7 @@
       }
       final SegmentMerger merger = new SegmentMerger(mergeReaders,
                                                      merge.info.info, infoStream, dirWrapper,
-                                                     globalFieldNumberMap, 
+                                                     globalFieldNumberMap,
                                                      context);
       merge.info.setSoftDelCount(Math.toIntExact(softDeleteCount.get()));
       merge.checkAborted();
@@ -108,8 +86,8 @@
           String pauseInfo = merge.getMergeProgress().getPauseTimes().entrySet()
             .stream()
             .filter((e) -> e.getValue() > 0)
-            .map((e) -> String.format(Locale.ROOT, "%.1f sec %s", 
-                e.getValue() / 1000000000., 
+            .map((e) -> String.format(Locale.ROOT, "%.1f sec %s",
+                e.getValue() / 1000000000.,
                 e.getKey().name().toLowerCase(Locale.ROOT)))
             .collect(Collectors.joining(", "));
           if (!pauseInfo.isEmpty()) {
@@ -121,9 +99,9 @@
           double segmentMB = (merge.info.sizeInBytes()/1024./1024.);
           infoStream.message("IW", "merge codec=" + codec + " maxDoc=" + merge.info.info.maxDoc() + "; merged segment has " +
                              (mergeState.mergeFieldInfos.hasVectors() ? "vectors" : "no vectors") + "; " +
-                             (mergeState.mergeFieldInfos.hasNorms() ? "norms" : "no norms") + "; " + 
-                             (mergeState.mergeFieldInfos.hasDocValues() ? "docValues" : "no docValues") + "; " + 
-                             (mergeState.mergeFieldInfos.hasProx() ? "prox" : "no prox") + "; " + 
+                             (mergeState.mergeFieldInfos.hasNorms() ? "norms" : "no norms") + "; " +
+                             (mergeState.mergeFieldInfos.hasDocValues() ? "docValues" : "no docValues") + "; " +
+                             (mergeState.mergeFieldInfos.hasProx() ? "prox" : "no prox") + "; " +
                              (mergeState.mergeFieldInfos.hasProx() ? "freqs" : "no freqs") + "; " +
                              (mergeState.mergeFieldInfos.hasPointValues() ? "points" : "no points") + "; " +
                              String.format(Locale.ROOT,
@@ -233,7 +211,7 @@
 
       // TODO: ideally we would freeze merge.info here!!
       // because any changes after writing the .si will be
-      // lost... 
+      // lost...
 
       if (infoStream.isEnabled("IW")) {
         infoStream.message("IW", String.format(Locale.ROOT, "merged segment size=%.3f MB vs estimate=%.3f MB", merge.info.sizeInBytes()/1024./1024., merge.estimatedMergeBytes/1024/1024.));
@@ -265,7 +243,7 @@
       // Readers are already closed in commitMerge if we didn't hit
       // an exc:
       if (success == false) {
-        closeMergeReaders(merge, true);
+        closeMergeReaders(merge, true, false);
       }
     }
 

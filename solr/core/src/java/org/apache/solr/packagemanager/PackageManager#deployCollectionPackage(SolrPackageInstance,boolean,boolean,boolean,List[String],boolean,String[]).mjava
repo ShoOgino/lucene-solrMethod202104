@@ -1,8 +1,9 @@
-  @SuppressWarnings({"unchecked"})
-  private boolean deployPackage(SolrPackageInstance packageInstance, boolean pegToLatest, boolean isUpdate, boolean noprompt,
-      List<String> collections, String[] overrides) {
+  /**
+   * @return list of collections on which packages deployed on
+   */
+  private Pair<List<String>, List<String>> deployCollectionPackage(SolrPackageInstance packageInstance, boolean pegToLatest, boolean isUpdate,
+      boolean noprompt, List<String> collections, boolean shouldDeployClusterPlugins, String[] overrides) {
     List<String> previouslyDeployed =  new ArrayList<>(); // collections where package is already deployed in
-
     for (String collection: collections) {
       SolrPackageInstance deployedPackage = getPackagesDeployed(collection).get(packageInstance.name);
       if (packageInstance.equals(deployedPackage)) {
@@ -23,7 +24,8 @@
 
       // Get package params
       try {
-        boolean packageParamsExist = ((Map)PackageUtils.getJson(solrClient.getHttpClient(), solrBaseUrl + PackageUtils.getCollectionParamsPath(collection) + "/packages", Map.class)
+        @SuppressWarnings("unchecked")
+        boolean packageParamsExist = ((Map<Object, Object>)PackageUtils.getJson(solrClient.getHttpClient(), solrBaseUrl + PackageUtils.getCollectionParamsPath(collection) + "/packages", Map.class)
             .getOrDefault("response", Collections.emptyMap())).containsKey("params");
         SolrCLI.postJsonToSolr(solrClient, PackageUtils.getCollectionParamsPath(collection),
             getMapper().writeValueAsString(Collections.singletonMap(packageParamsExist? "update": "set",
@@ -51,9 +53,10 @@
 
       // If it is a fresh deploy on a collection, run setup commands all the plugins in the package
       if (!isUpdate) {
-        Map<String, String> systemParams = Map.of("collection", collection, "package-name", packageInstance.name, "package-version", packageInstance.version);
-
         for (Plugin plugin: packageInstance.plugins) {
+          if ("collection".equalsIgnoreCase(plugin.type) == false || collections.isEmpty()) continue;
+          Map<String, String> systemParams = Map.of("collection", collection, "package-name", packageInstance.name, "package-version", packageInstance.version, "plugin-name", plugin.name);
+
           Command cmd = plugin.setupCommand;
           if (cmd != null && !Strings.isNullOrEmpty(cmd.method)) {
             if ("POST".equalsIgnoreCase(cmd.method)) {
@@ -64,11 +67,13 @@
                 boolean shouldExecute = true;
                 if (!noprompt) { // show a prompt asking user to execute the setup command for the plugin
                   PackageUtils.print(PackageUtils.YELLOW, "Execute this command (y/n): ");
-                  String userInput = new Scanner(System.in, "UTF-8").next();
-                  if (!"yes".equalsIgnoreCase(userInput) && !"y".equalsIgnoreCase(userInput)) {
-                    shouldExecute = false;
-                    PackageUtils.printRed("Skipping setup command for deploying (deployment verification may fail)."
-                        + " Please run this step manually or refer to package documentation.");
+                  try (Scanner scanner = new Scanner(System.in, "UTF-8")) {
+                    String userInput = scanner.next();
+                    if (!"yes".equalsIgnoreCase(userInput) && !"y".equalsIgnoreCase(userInput)) {
+                      shouldExecute = false;
+                      PackageUtils.printRed("Skipping setup command for deploying (deployment verification may fail)."
+                          + " Please run this step manually or refer to package documentation.");
+                    }
                   }
                 }
                 if (shouldExecute) {
@@ -95,19 +100,11 @@
       }
     }
 
-    List<String> deployedCollections = collections.stream().filter(c -> !previouslyDeployed.contains(c)).collect(Collectors.toList());
-
-    boolean success = true;
-    if (deployedCollections.isEmpty() == false) {
-      // Verify that package was successfully deployed
-      success = verify(packageInstance, deployedCollections);
-      if (success) {
-        PackageUtils.printGreen("Deployed on " + deployedCollections + " and verified package: " + packageInstance.name + ", version: " + packageInstance.version);
-      }
-    }
     if (previouslyDeployed.isEmpty() == false) {
       PackageUtils.printRed("Already Deployed on " + previouslyDeployed + ", package: " + packageInstance.name + ", version: " + packageInstance.version);
     }
-    return previouslyDeployed.isEmpty() && success;
+
+    List<String> deployedCollections = collections.stream().filter(c -> !previouslyDeployed.contains(c)).collect(Collectors.toList());
+    return new Pair<List<String>, List<String>>(deployedCollections, previouslyDeployed);
   }
 

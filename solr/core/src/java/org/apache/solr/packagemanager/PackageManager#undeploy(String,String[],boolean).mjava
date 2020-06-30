@@ -1,9 +1,41 @@
   /**
    * Undeploys a package from given collections.
    */
-  public void undeploy(String packageName, String[] collections) throws SolrException {
+  public void undeploy(String packageName, String[] collections, boolean shouldUndeployClusterPlugins) throws SolrException {
     ensureCollectionsExist(Arrays.asList(collections));
     
+    // Undeploy cluster level plugins
+    if (shouldUndeployClusterPlugins) {
+      SolrPackageInstance deployedPackage = getPackagesDeployedAsClusterLevelPlugins().get(packageName);
+      if (deployedPackage == null) {
+        PackageUtils.printRed("Cluster level plugins from package "+packageName+" not deployed.");
+      } else {
+        for (Plugin plugin: deployedPackage.plugins) {
+          if (!shouldUndeployClusterPlugins || "cluster".equalsIgnoreCase(plugin.type) == false) continue;
+            
+          Map<String, String> systemParams = Map.of("package-name", deployedPackage.name, "package-version", deployedPackage.version, "plugin-name", plugin.name);
+          Command cmd = plugin.uninstallCommand;
+          if (cmd != null && !Strings.isNullOrEmpty(cmd.method)) {
+            if ("POST".equalsIgnoreCase(cmd.method)) {
+              try {
+                String payload = PackageUtils.resolve(getMapper().writeValueAsString(cmd.payload), deployedPackage.parameterDefaults, Collections.emptyMap(), systemParams);
+                String path = PackageUtils.resolve(cmd.path, deployedPackage.parameterDefaults, Collections.emptyMap(), systemParams);
+                PackageUtils.printGreen("Executing " + payload + " for path:" + path);
+                SolrCLI.postJsonToSolr(solrClient, path, payload);
+              } catch (Exception ex) {
+                throw new SolrException(ErrorCode.SERVER_ERROR, ex);
+              }
+            } else {
+              throw new SolrException(ErrorCode.BAD_REQUEST, "Non-POST method not supported for uninstall commands");
+            }
+          } else {
+            PackageUtils.printRed("There is no uninstall command to execute for plugin: " + plugin.name);
+          }
+
+        }
+      }
+    }
+    // Undeploy collection level plugins
     for (String collection: collections) {
       SolrPackageInstance deployedPackage = getPackagesDeployed(collection).get(packageName);
       if (deployedPackage == null) {
@@ -13,9 +45,10 @@
       Map<String, String> collectionParameterOverrides = getPackageParams(packageName, collection);
 
       // Run the uninstall command for all plugins
-      Map<String, String> systemParams = Map.of("collection", collection, "package-name", deployedPackage.name, "package-version", deployedPackage.version);
-
       for (Plugin plugin: deployedPackage.plugins) {
+        if ("collection".equalsIgnoreCase(plugin.type) == false) continue;
+
+        Map<String, String> systemParams = Map.of("collection", collection, "package-name", deployedPackage.name, "package-version", deployedPackage.version, "plugin-name", plugin.name);
         Command cmd = plugin.uninstallCommand;
         if (cmd != null && !Strings.isNullOrEmpty(cmd.method)) {
           if ("POST".equalsIgnoreCase(cmd.method)) {

@@ -1,0 +1,73 @@
+  ExportBuffers(ExportWriter exportWriter, List<LeafReaderContext> leaves, SolrIndexSearcher searcher,
+                OutputStream os, IteratorWriter.ItemWriter rawWriter, Sort sort, int queueSize, int totalHits,
+                Timer writeOutputBufferTimer, Timer fillerWaitTimer, Timer writerWaitTimer) throws IOException {
+    this.exportWriter = exportWriter;
+    this.leaves = leaves;
+    this.os = os;
+    this.rawWriter = rawWriter;
+    this.writer = new IteratorWriter.ItemWriter() {
+      @Override
+      public IteratorWriter.ItemWriter add(Object o) throws IOException {
+        rawWriter.add(o);
+        outputCounter.increment();
+        return this;
+      }
+    };
+    this.writeOutputBufferTimer = writeOutputBufferTimer;
+    this.fillerWaitTimer = fillerWaitTimer;
+    this.writerWaitTimer = writerWaitTimer;
+    this.bufferOne = new Buffer(queueSize);
+    this.bufferTwo = new Buffer(queueSize);
+    this.totalHits = totalHits;
+    fillBuffer = bufferOne;
+    outputBuffer = bufferTwo;
+    SortDoc writerSortDoc = exportWriter.getSortDoc(searcher, sort.getSort());
+    bufferOne.initialize(writerSortDoc);
+    bufferTwo.initialize(writerSortDoc);
+    barrier = new CyclicBarrier(2, () -> swapBuffers());
+    filler = () -> {
+      try {
+        log.debug("--- filler start {}", Thread.currentThread());
+        SortDoc sortDoc = exportWriter.getSortDoc(searcher, sort.getSort());
+        Buffer buffer = getFillBuffer();
+        SortQueue queue = new SortQueue(queueSize, sortDoc);
+        long lastOutputCounter = 0;
+        for (int count = 0; count < totalHits; ) {
+          log.debug("--- filler fillOutDocs in {}", fillBuffer);
+          exportWriter.fillOutDocs(leaves, sortDoc, queue, buffer);
+          count += (buffer.outDocsIndex + 1);
+          log.debug("--- filler count={}, exchange buffer from {}", count, buffer);
+          Timer.Context timerContext = getFillerWaitTimer().time();
+          try {
+            exchangeBuffers();
+          } finally {
+            timerContext.stop();
+          }
+          buffer = getFillBuffer();
+          if (outputCounter.longValue() > lastOutputCounter) {
+            lastOutputCounter = outputCounter.longValue();
+            flushOutput();
+          }
+          log.debug("--- filler got empty buffer {}", buffer);
+        }
+        buffer.outDocsIndex = Buffer.NO_MORE_DOCS;
+        log.debug("--- filler final exchange buffer from {}", buffer);
+        Timer.Context timerContext = getFillerWaitTimer().time();
+        try {
+          exchangeBuffers();
+        } finally {
+          timerContext.stop();
+        }
+        buffer = getFillBuffer();
+        log.debug("--- filler final got buffer {}", buffer);
+      } catch (Throwable e) {
+        log.error("filler", e);
+        error(e);
+        if (e instanceof InterruptedException) {
+          Thread.currentThread().interrupt();
+        }
+        shutdownNow();
+      }
+    };
+  }
+

@@ -1,15 +1,15 @@
   @SuppressWarnings("unchecked")
-  private boolean deployClusterPackage(SolrPackageInstance packageInstance, boolean isUpdate, boolean noprompt,
-      boolean shouldDeployClusterPlugins, String[] overrides) {
-    boolean cluasterPluginFailed = false;
+  private boolean deployClusterPackage(SolrPackageInstance packageInstance, boolean isUpdate, boolean noprompt, String[] overrides) {
+    boolean clusterPluginFailed = false;
+    int numberOfClusterPluginsDeployed = 0;
 
     if (isUpdate) {
       for (Plugin plugin: packageInstance.plugins) {
-        if (!shouldDeployClusterPlugins || "cluster".equalsIgnoreCase(plugin.type) == false) continue;
+        if ("cluster".equalsIgnoreCase(plugin.type) == false) continue;
         SolrPackageInstance deployedPackage = getPackagesDeployedAsClusterLevelPlugins().get(packageInstance.name);
         if (deployedPackage == null) {
           PackageUtils.printRed("Cluster level plugin " + plugin.name + " from package " + packageInstance.name + " not deployed. To deploy, remove the --update parameter.");
-          cluasterPluginFailed = true;
+          clusterPluginFailed = true;
           continue;
         }
         for (PluginMeta pluginMeta: (List<PluginMeta>)deployedPackage.getCustomData()) {
@@ -23,10 +23,17 @@
             throw new SolrException(ErrorCode.SERVER_ERROR, e);
           }
         }
+        numberOfClusterPluginsDeployed++;
+      }
+      if (numberOfClusterPluginsDeployed > 0) {
+        PackageUtils.printGreen(numberOfClusterPluginsDeployed + " cluster level plugins updated.");
+      } else {
+        PackageUtils.printRed("No cluster level plugin updated.");
+        clusterPluginFailed = true;
       }
     } else {
       for (Plugin plugin: packageInstance.plugins) {
-        if (!shouldDeployClusterPlugins || "cluster".equalsIgnoreCase(plugin.type) == false) continue;
+        if ("cluster".equalsIgnoreCase(plugin.type) == false) continue;
         // Check if this cluster level plugin is already deployed
         {
           Map<String, Object> clusterprops = null;
@@ -41,13 +48,13 @@
             Object pkg = ((Map<String, Object>)clusterprops.getOrDefault("plugin", Collections.emptyMap())).get(packageInstance.name+":"+plugin.name);
             if (pkg != null) {
               PackageUtils.printRed("Cluster level plugin " + plugin.name + " from package " + packageInstance.name + " already deployed. To update to " + packageInstance + ", pass --update parameter.");
-              cluasterPluginFailed = true;
+              clusterPluginFailed = true;
               continue;
             }
           }
         }
 
-        // Lets install this plugin now
+        // Lets setup this plugin now
         Map<String, String> systemParams = Map.of("package-name", packageInstance.name, "package-version", packageInstance.version, "plugin-name", plugin.name);
         Command cmd = plugin.setupCommand;
         if (cmd != null && !Strings.isNullOrEmpty(cmd.method)) {
@@ -57,20 +64,10 @@
               String payload = PackageUtils.resolve(getMapper().writeValueAsString(cmd.payload), packageInstance.parameterDefaults, overridesMap, systemParams);
               String path = PackageUtils.resolve(cmd.path, packageInstance.parameterDefaults, overridesMap, systemParams);
               PackageUtils.printGreen("Executing " + payload + " for path:" + path);
-              boolean shouldExecute = true;
-              if (!noprompt) { // show a prompt asking user to execute the setup command for the plugin
-                PackageUtils.print(PackageUtils.YELLOW, "Execute this command (y/n): ");
-                try (Scanner scanner = new Scanner(System.in, "UTF-8")) {
-                  String userInput = scanner.next();
-                  if (!"yes".equalsIgnoreCase(userInput) && !"y".equalsIgnoreCase(userInput)) {
-                    shouldExecute = false;
-                    PackageUtils.printRed("Skipping setup command for deploying (deployment verification may fail)."
-                        + " Please run this step manually or refer to package documentation.");
-                  }
-                }
-              }
+              boolean shouldExecute = prompt(noprompt);
               if (shouldExecute) {
                 SolrCLI.postJsonToSolr(solrClient, path, payload);
+                numberOfClusterPluginsDeployed++;
               }
             } catch (Exception ex) {
               throw new SolrException(ErrorCode.SERVER_ERROR, ex);
@@ -82,7 +79,13 @@
           PackageUtils.printRed("There is no setup command to execute for plugin: " + plugin.name);
         }
       }
+      if (numberOfClusterPluginsDeployed > 0) {
+        PackageUtils.printGreen(numberOfClusterPluginsDeployed + " cluster level plugins setup.");
+      } else {
+        PackageUtils.printRed("No cluster level plugin setup.");
+        clusterPluginFailed = true;
+      }
     }
-    return !cluasterPluginFailed;
+    return !clusterPluginFailed;
   }
 

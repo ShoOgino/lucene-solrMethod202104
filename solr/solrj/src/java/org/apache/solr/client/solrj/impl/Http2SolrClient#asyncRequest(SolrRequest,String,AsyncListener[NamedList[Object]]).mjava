@@ -1,0 +1,44 @@
+  public Cancellable asyncRequest(@SuppressWarnings({"rawtypes"}) SolrRequest solrRequest, String collection, AsyncListener<NamedList<Object>> asyncListener) {
+    Request req;
+    try {
+      req = makeRequest(solrRequest, collection);
+    } catch (SolrServerException | IOException e) {
+      asyncListener.onFailure(e);
+      return FAILED_MAKING_REQUEST_CANCELLABLE;
+    }
+    final ResponseParser parser = solrRequest.getResponseParser() == null
+        ? this.parser: solrRequest.getResponseParser();
+    req.onRequestQueued(asyncTracker.queuedListener)
+        .onComplete(asyncTracker.completeListener)
+        .send(new InputStreamResponseListener() {
+          @Override
+          public void onHeaders(Response response) {
+            super.onHeaders(response);
+            InputStreamResponseListener listener = this;
+            executor.execute(() -> {
+              InputStream is = listener.getInputStream();
+              assert ObjectReleaseTracker.track(is);
+              try {
+                NamedList<Object> body = processErrorsAndResponse(solrRequest, parser, response, is);
+                asyncListener.onSuccess(body);
+              } catch (RemoteSolrException e) {
+                if (SolrException.getRootCause(e) != CANCELLED_EXCEPTION) {
+                  asyncListener.onFailure(e);
+                }
+              } catch (SolrServerException e) {
+                asyncListener.onFailure(e);
+              }
+            });
+          }
+
+          @Override
+          public void onFailure(Response response, Throwable failure) {
+            super.onFailure(response, failure);
+            if (failure != CANCELLED_EXCEPTION) {
+              asyncListener.onFailure(new SolrServerException(failure.getMessage(), failure));
+            }
+          }
+        });
+    return () -> req.abort(CANCELLED_EXCEPTION);
+  }
+

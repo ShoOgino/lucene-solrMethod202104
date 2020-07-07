@@ -1,11 +1,67 @@
   @Override
   public void submit(final ShardRequest sreq, final String shard, final ModifiableSolrParams params) {
-    ShardRequestor shardRequestor = new ShardRequestor(sreq, shard, params, this);
-    try {
-      shardRequestor.init();
-      pending.add(completionService.submit(shardRequestor));
-    } finally {
-      shardRequestor.end();
+    // do this outside of the callable for thread safety reasons
+    final List<String> urls = getURLs(shard);
+    final Tracer tracer = GlobalTracer.getTracer();
+    final Span span = tracer != null ? tracer.activeSpan() : null;
+
+    params.remove(CommonParams.WT); // use default (currently javabin)
+    params.remove(CommonParams.VERSION);
+    QueryRequest req = makeQueryRequest(sreq, params, shard);
+    req.setMethod(SolrRequest.METHOD.POST);
+
+    LBSolrClient.Req lbReq = httpShardHandlerFactory.newLBHttpSolrClientReq(req, urls);
+
+    ShardResponse srsp = new ShardResponse();
+    if (sreq.nodeName != null) {
+      srsp.setNodeName(sreq.nodeName);
     }
+    srsp.setShardRequest(sreq);
+    srsp.setShard(shard);
+    SimpleSolrResponse ssr = new SimpleSolrResponse();
+    srsp.setSolrResponse(ssr);
+
+    pending.incrementAndGet();
+    // if there are no shards available for a slice, urls.size()==0
+    if (urls.size() == 0) {
+      // TODO: what's the right error code here? We should use the same thing when
+      // all of the servers for a shard are down.
+      SolrException exception = new SolrException(SolrException.ErrorCode.SERVICE_UNAVAILABLE, "no servers hosting shard: " + shard);
+      srsp.setException(exception);
+      srsp.setResponseCode(exception.code());
+      responses.add(srsp);
+      return;
+    }
+
+    // all variables that set inside this listener must be at least volatile
+    responseCancellableMap.put(srsp, this.lbClient.asyncReq(lbReq, new AsyncListener<>() {
+      volatile long startTime = System.nanoTime();
+
+      @Override
+      public void onStart() {
+        if (tracer != null && span != null) {
+          tracer.inject(span.context(), Format.Builtin.HTTP_HEADERS, new SolrRequestCarrier(req));
+        }
+        SolrRequestInfo requestInfo = SolrRequestInfo.getRequestInfo();
+        if (requestInfo != null) req.setUserPrincipal(requestInfo.getReq().getUserPrincipal());
+      }
+
+      @Override
+      public void onSuccess(LBSolrClient.Rsp rsp) {
+        ssr.nl = rsp.getResponse();
+        srsp.setShardAddress(rsp.getServer());
+        ssr.elapsedTime = TimeUnit.MILLISECONDS.convert(System.nanoTime() - startTime, TimeUnit.NANOSECONDS);
+        responses.add(srsp);
+      }
+
+      public void onFailure(Throwable throwable) {
+        ssr.elapsedTime = TimeUnit.MILLISECONDS.convert(System.nanoTime() - startTime, TimeUnit.NANOSECONDS);
+        srsp.setException(throwable);
+        if (throwable instanceof SolrException) {
+          srsp.setResponseCode(((SolrException) throwable).code());
+        }
+        responses.add(srsp);
+      }
+    }));
   }
 

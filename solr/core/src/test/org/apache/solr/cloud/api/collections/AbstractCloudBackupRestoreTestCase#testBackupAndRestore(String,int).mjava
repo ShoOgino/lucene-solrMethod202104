@@ -39,8 +39,6 @@
 
     int restoreReplFactor = restoreReplcationFactor + restoreTlogReplicas + restorePullReplicas;
 
-    boolean isMaxShardsPerNodeExternal = false;
-    boolean isMaxShardsUnlimited = false;
     CollectionAdminRequest.Restore restore = CollectionAdminRequest.restoreCollection(restoreCollectionName, backupName)
         .setLocation(backupLocation).setRepositoryName(getBackupRepoName());
 
@@ -52,28 +50,9 @@
     }
     int computeRestoreMaxShardsPerNode = (int) Math.ceil((restoreReplFactor * numShards/(double) cluster.getJettySolrRunners().size()));
 
-    if (restoreReplFactor > backupReplFactor) { //else the backup maxShardsPerNode should be enough
-      if (log.isInfoEnabled()) {
-        log.info("numShards={} restoreReplFactor={} maxShardsPerNode={} totalNodes={}",
-            numShards, restoreReplFactor, computeRestoreMaxShardsPerNode, cluster.getJettySolrRunners().size());
-      }
-
-      if (random().nextBoolean()) { //set it to -1
-        isMaxShardsUnlimited = true;
-        restore.setMaxShardsPerNode(-1);
-      } else {
-        isMaxShardsPerNodeExternal = true;
-        restore.setMaxShardsPerNode(computeRestoreMaxShardsPerNode);
-      }
-    }
-
     if (rarely()) { // Try with createNodeSet configuration
       //Always 1 as cluster.getJettySolrRunners().size()=NUM_SHARDS=2
       restore.setCreateNodeSet(cluster.getJettySolrRunners().get(0).getNodeName());
-      // we need to double maxShardsPerNode value since we reduced number of available nodes by half.
-      isMaxShardsPerNodeExternal = true;
-      computeRestoreMaxShardsPerNode = origShardToDocCount.size() * restoreReplFactor;
-      restore.setMaxShardsPerNode(computeRestoreMaxShardsPerNode);
     }
 
     final int restoreMaxShardsPerNode = computeRestoreMaxShardsPerNode;
@@ -120,13 +99,6 @@
     assertEquals(restoreCollection.toString(), restoreReplcationFactor, restoreCollection.getNumNrtReplicas().intValue());
     assertEquals(restoreCollection.toString(), restorePullReplicas, restoreCollection.getNumPullReplicas().intValue());
     assertEquals(restoreCollection.toString(), restoreTlogReplicas, restoreCollection.getNumTlogReplicas().intValue());
-    if (isMaxShardsPerNodeExternal) {
-      assertEquals(restoreCollectionName, restoreMaxShardsPerNode, restoreCollection.getMaxShardsPerNode());
-    } else if (isMaxShardsUnlimited){
-      assertEquals(restoreCollectionName, -1, restoreCollection.getMaxShardsPerNode());
-    } else {
-      assertEquals(restoreCollectionName, backupCollection.getMaxShardsPerNode(), restoreCollection.getMaxShardsPerNode());
-    }
 
     //SOLR-12605: Add more docs after restore is complete to see if they are getting added fine
     //explicitly querying the leaders. If we use CloudSolrClient there is no guarantee that we'll hit a nrtReplica

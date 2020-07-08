@@ -1,7 +1,7 @@
   // Only called from addReplica (and by extension createShard) (so far).
   //
-  // Gets a list of candidate nodes to put the required replica(s) on. Throws errors if not enough replicas
-  // could be created on live nodes given maxShardsPerNode, Replication factor (if from createShard) etc.
+  // Gets a list of candidate nodes to put the required replica(s) on. Throws errors if the AssignStrategy
+  // can't allocate valid positions.
   @SuppressWarnings({"unchecked"})
   public static List<ReplicaPosition> getNodesForNewReplicas(ClusterState clusterState, String collectionName,
                                                           String shard, int nrtReplicas, int tlogReplicas, int pullReplicas,
@@ -9,8 +9,7 @@
     log.debug("getNodesForNewReplicas() shard: {} , nrtReplicas : {} , tlogReplicas: {} , pullReplicas: {} , createNodeSet {}"
         , shard, nrtReplicas, tlogReplicas, pullReplicas, createNodeSet);
     DocCollection coll = clusterState.getCollection(collectionName);
-    int maxShardsPerNode = coll.getMaxShardsPerNode() == -1 ? Integer.MAX_VALUE : coll.getMaxShardsPerNode();
-    List<String> createNodeList;
+    List<String> createNodeList = null;
 
     if (createNodeSet instanceof List) {
       createNodeList = (List<String>) createNodeSet;
@@ -23,22 +22,6 @@
     // gets a log message of detail about the nodes that are up, and a message that policies could not
     // be satisfied which then requires study to diagnose the issue.
     checkLiveNodes(createNodeList,clusterState);
-
-    if (createNodeList == null) { // We only care if we haven't been told to put new replicas on specific nodes.
-      HashMap<String, ReplicaCount> nodeNameVsShardCount = getNodeNameVsShardCount(collectionName, clusterState, null);
-      long availableSlots = 0;
-      for (Map.Entry<String, ReplicaCount> ent : nodeNameVsShardCount.entrySet()) {
-        //ADDREPLICA can put more than maxShardsPerNode on an instance, so this test is necessary.
-        if (maxShardsPerNode > ent.getValue().thisCollectionNodes) {
-          availableSlots += (maxShardsPerNode - ent.getValue().thisCollectionNodes);
-        }
-      }
-      if (availableSlots < nrtReplicas + tlogReplicas + pullReplicas) {
-        throw new AssignmentException(
-            String.format(Locale.ROOT, "Cannot create %d new replicas for collection %s given the current number of eligible live nodes %d and a maxShardsPerNode of %d",
-                nrtReplicas, collectionName, nodeNameVsShardCount.size(), maxShardsPerNode));
-      }
-    }
 
     AssignRequest assignRequest = new AssignRequestBuilder()
         .forCollection(collectionName)

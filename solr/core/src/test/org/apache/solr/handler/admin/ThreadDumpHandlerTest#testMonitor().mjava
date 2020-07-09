@@ -1,0 +1,51 @@
+  public void testMonitor() throws Exception {
+    assumeTrue("monitor checking not supported on this JVM",
+               ManagementFactory.getThreadMXBean().isObjectMonitorUsageSupported());
+    
+    /** unique class name to show up as a lock class name in output */
+    final class TestMonitorStruct { /* empty */ }
+    
+    final List<String> failures = new ArrayList<>();
+    final CountDownLatch latch = new CountDownLatch(1);
+    final Object monitor = new TestMonitorStruct();
+    final Thread owner = new Thread(() -> {
+        synchronized (monitor) {
+          log.info("monitor owner waiting for latch to release me...");
+          try {
+            if ( ! latch.await(5, TimeUnit.SECONDS ) ){
+              failures.add("owner: never saw latch release");
+            }
+          } catch (InterruptedException ie) {
+            failures.add("owner: " + ie.toString());
+          }
+        }
+      }, "test-thread-monitor-owner");
+    final Thread blocked = new Thread(() -> {
+        log.info("blocked waiting for monitor...");
+        synchronized (monitor) {
+          log.info("monitor now unblocked");
+        }
+      }, "test-thread-monitor-blocked");
+    try {
+      owner.start();
+      blocked.start();
+      
+      assertQ(req("qt", "/admin/threads", "indent", "true")
+              // monitor owner thread (which is also currently waiting on CountDownLatch)
+              , "//lst[@name='thread'][str[@name='name'][.='test-thread-monitor-owner']]"
+              + "                     [lst[@name='lock-waiting'][null[@name='owner']]]" // latch
+              + "                     [arr[@name='monitors-locked']/str[contains(.,'TestMonitorStruct')]]"
+              // blocked thread, waiting on the monitor
+              , "//lst[@name='thread'][str[@name='name'][.='test-thread-monitor-blocked']]"
+              + "                     [lst[@name='lock-waiting'][lst[@name='owner']/str[.='test-thread-monitor-owner']]]"
+              );
+      
+    } finally {
+      latch.countDown();
+      owner.join(1000);
+      assertFalse("owner is still alive", owner.isAlive());
+      blocked.join(1000);
+      assertFalse("blocked is still alive", blocked.isAlive());
+    }
+  }
+

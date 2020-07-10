@@ -9,15 +9,22 @@
     DocSet docs = processor.fcontext.base;
 
     int uniqueTerms = 0;
-    final SlotAcc.CountSlotAcc countAcc = processor.countAcc;
+    final CountSlotAcc countAcc = processor.countAcc;
+    final SweepCountAccStruct baseCountAccStruct = SweepingCountSlotAcc.baseStructOf(processor);
+    final List<SweepCountAccStruct> others = SweepingCountSlotAcc.otherStructsOf(processor);
 
     for (TopTerm tt : bigTerms.values()) {
       if (tt.termNum >= startTermIndex && tt.termNum < endTermIndex) {
         // handle the biggest terms
-        DocSet intersection = searcher.getDocSet(tt.termQuery, docs);
+        DocSet termSet = searcher.getDocSet(tt.termQuery);
+        DocSet intersection = termSet.intersection(docs);
         int collected = processor.collectFirstPhase(intersection, tt.termNum - startTermIndex,
                                                     slotNum -> { return new SlotContext(tt.termQuery); });
-        countAcc.incrementCount(tt.termNum - startTermIndex, collected);
+        final int termOrd = tt.termNum - startTermIndex;
+        countAcc.incrementCount(termOrd, collected);
+        for (SweepCountAccStruct entry : others) {
+          entry.countAcc.incrementCount(termOrd, termSet.intersectionSize(entry.docSet));
+        }
         if (collected > 0) {
           uniqueTerms++;
         }
@@ -37,9 +44,14 @@
 
       // TODO: handle facet.prefix here!!!
 
-      DocIterator iter = docs.iterator();
+      SweepIteratorAndCounts sweepIterAndCounts = SweepDocIterator.newInstance(baseCountAccStruct, others);
+      final SweepDocIterator iter = sweepIterAndCounts.iter;
+      final CountSlotAcc[] countAccs = sweepIterAndCounts.countAccs;
+      final SegCountGlobal counts = new SegCountGlobal(countAccs);
       while (iter.hasNext()) {
         int doc = iter.nextDoc();
+        int maxIdx = iter.registerCounts(counts);
+        boolean collectBase = iter.collectBase();
 
         if (doc >= adjustedMax) {
           do {
@@ -77,8 +89,10 @@
             int arrIdx = tnum - startTermIndex;
             if (arrIdx < 0) continue;
             if (arrIdx >= nTerms) break;
-            countAcc.incrementCount(arrIdx, 1);
-            processor.collectFirstPhase(segDoc, arrIdx, processor.slotContext);
+            counts.incrementCount(arrIdx, 1, maxIdx);
+            if (collectBase) {
+              processor.collectFirstPhase(segDoc, arrIdx, processor.slotContext);
+            }
           }
         } else {
           int tnum = 0;
@@ -91,8 +105,10 @@
               int arrIdx = tnum - startTermIndex;
               if (arrIdx >= 0) {
                 if (arrIdx >= nTerms) break;
-                countAcc.incrementCount(arrIdx, 1);
-                processor.collectFirstPhase(segDoc, arrIdx, processor.slotContext);
+                counts.incrementCount(arrIdx, 1, maxIdx);
+                if (collectBase) {
+                  processor.collectFirstPhase(segDoc, arrIdx, processor.slotContext);
+                }
               }
               delta = 0;
             }

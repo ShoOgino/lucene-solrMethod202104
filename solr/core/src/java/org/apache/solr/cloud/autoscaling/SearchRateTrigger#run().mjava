@@ -6,7 +6,7 @@
     }
 
     // collection, shard, list(replica + rate)
-    Map<String, Map<String, List<ReplicaInfo>>> collectionRates = new HashMap<>();
+    Map<String, Map<String, List<Replica>>> collectionRates = new HashMap<>();
     // node, rate
     Map<String, AtomicDouble> nodeRates = new HashMap<>();
     // this replication factor only considers replica types that are searchable
@@ -21,9 +21,9 @@
       return;
     }
     for (String node : cloudManager.getClusterStateProvider().getLiveNodes()) {
-      Map<String, ReplicaInfo> metricTags = new HashMap<>();
+      Map<String, Replica> metricTags = new HashMap<>();
       // coll, shard, replica
-      Map<String, Map<String, List<ReplicaInfo>>> infos = cloudManager.getNodeStateProvider().getReplicaInfo(node, Collections.emptyList());
+      Map<String, Map<String, List<Replica>>> infos = cloudManager.getNodeStateProvider().getReplicaInfo(node, Collections.emptyList());
       infos.forEach((coll, shards) -> {
         Map<String, AtomicInteger> replPerShard = searchableReplicationFactors.computeIfAbsent(coll, c -> new HashMap<>());
         shards.forEach((sh, replicas) -> {
@@ -35,7 +35,7 @@
             }
             repl.incrementAndGet();
             // we have to translate to the metrics registry name, which uses "_replica_nN" as suffix
-            String replicaName = Utils.parseMetricsReplicaName(coll, replica.getCore());
+            String replicaName = Utils.parseMetricsReplicaName(coll, replica.getCoreName());
             if (replicaName == null) { // should never happen???
               replicaName = replica.getName(); // which is actually coreNode name...
             }
@@ -54,14 +54,14 @@
         rates.forEach((tag, rate) -> log.debug("###  " + tag + "\t" + rate)); // logOk
       }
       rates.forEach((tag, rate) -> {
-        ReplicaInfo info = metricTags.get(tag);
+        Replica info = metricTags.get(tag);
         if (info == null) {
           log.warn("Missing replica info for response tag {}", tag);
         } else {
-          Map<String, List<ReplicaInfo>> perCollection = collectionRates.computeIfAbsent(info.getCollection(), s -> new HashMap<>());
-          List<ReplicaInfo> perShard = perCollection.computeIfAbsent(info.getShard(), s -> new ArrayList<>());
-          info = (ReplicaInfo)info.clone();
-          info.getVariables().put(AutoScalingParams.RATE, ((Number)rate).doubleValue());
+          Map<String, List<Replica>> perCollection = collectionRates.computeIfAbsent(info.getCollection(), s -> new HashMap<>());
+          List<Replica> perShard = perCollection.computeIfAbsent(info.getShard(), s -> new ArrayList<>());
+          info = (Replica)info.clone();
+          info.getProperties().put(AutoScalingParams.RATE, ((Number)rate).doubleValue());
           perShard.add(info);
           AtomicDouble perNode = nodeRates.computeIfAbsent(node, s -> new AtomicDouble());
           perNode.addAndGet(((Number)rate).doubleValue());
@@ -74,7 +74,7 @@
         log.debug("## Collection: {}", coll);
         collRates.forEach((s, replicas) -> {
           log.debug("##  - {}", s);
-          replicas.forEach(ri -> log.debug("##     {}  {}", ri.getCore(), ri.getVariable(AutoScalingParams.RATE))); //logOk
+          replicas.forEach(ri -> log.debug("##     {}  {}", ri.getCoreName(), ri.get(AutoScalingParams.RATE))); //logOk
         });
       });
     }
@@ -103,18 +103,18 @@
 
     Map<String, Map<String, Double>> hotShards = new HashMap<>();
     Map<String, Map<String, Double>> coldShards = new HashMap<>();
-    List<ReplicaInfo> hotReplicas = new ArrayList<>();
-    List<ReplicaInfo> coldReplicas = new ArrayList<>();
+    List<Replica> hotReplicas = new ArrayList<>();
+    List<Replica> coldReplicas = new ArrayList<>();
     collectionRates.forEach((coll, shardRates) -> {
       shardRates.forEach((sh, replicaRates) -> {
         double totalShardRate = replicaRates.stream()
             .map(r -> {
-              String elapsedKey = r.getCollection() + "." + r.getCore();
-              if ((Double)r.getVariable(AutoScalingParams.RATE) > aboveRate) {
+              String elapsedKey = r.getCollection() + "." + r.getCoreName();
+              if ((Double)r.get(AutoScalingParams.RATE) > aboveRate) {
                 if (waitForElapsed(elapsedKey, now, lastReplicaEvent)) {
                   hotReplicas.add(r);
                 }
-              } else if ((Double)r.getVariable(AutoScalingParams.RATE) < belowRate) {
+              } else if ((Double)r.get(AutoScalingParams.RATE) < belowRate) {
                 if (waitForElapsed(elapsedKey, now, lastReplicaEvent)) {
                   coldReplicas.add(r);
                 }
@@ -124,7 +124,7 @@
               }
               return r;
             })
-            .mapToDouble(r -> (Double)r.getVariable(AutoScalingParams.RATE)).sum();
+            .mapToDouble(r -> (Double)r.get(AutoScalingParams.RATE)).sum();
         // calculate average shard rate over all searchable replicas (see SOLR-12470)
         double shardRate = totalShardRate / searchableReplicationFactors.get(coll).get(sh).doubleValue();
         String elapsedKey = coll + "." + sh;
@@ -161,7 +161,7 @@
     collectionRates.forEach((coll, shardRates) -> {
       double total = shardRates.entrySet().stream()
           .mapToDouble(e -> e.getValue().stream()
-              .mapToDouble(r -> (Double)r.getVariable(AutoScalingParams.RATE)).sum()).sum();
+              .mapToDouble(r -> (Double)r.get(AutoScalingParams.RATE)).sum()).sum();
       if (collections.isEmpty() || collections.contains(coll)) {
         if (total > aboveRate) {
           if (waitForElapsed(coll, now, lastCollectionEvent)) {
@@ -222,13 +222,13 @@
       });
     });
     hotReplicas.forEach(r -> {
-      long time = lastReplicaEvent.get(r.getCollection() + "." + r.getCore());
+      long time = lastReplicaEvent.get(r.getCollection() + "." + r.getCoreName());
       if (eventTime.get() > time) {
         eventTime.set(time);
       }
     });
     coldReplicas.forEach(r -> {
-      long time = lastReplicaEvent.get(r.getCollection() + "." + r.getCore());
+      long time = lastReplicaEvent.get(r.getCollection() + "." + r.getCoreName());
       if (eventTime.get() > time) {
         eventTime.set(time);
       }
@@ -268,8 +268,8 @@
           .forEach((sh, rate) -> lastShardEvent.put(e.getKey() + "." + sh, now)));
       coldShards.entrySet().forEach(e -> e.getValue()
           .forEach((sh, rate) -> lastShardEvent.put(e.getKey() + "." + sh, now)));
-      hotReplicas.forEach(r -> lastReplicaEvent.put(r.getCollection() + "." + r.getCore(), now));
-      coldReplicas.forEach(r -> lastReplicaEvent.put(r.getCollection() + "." + r.getCore(), now));
+      hotReplicas.forEach(r -> lastReplicaEvent.put(r.getCollection() + "." + r.getCoreName(), now));
+      coldReplicas.forEach(r -> lastReplicaEvent.put(r.getCollection() + "." + r.getCoreName(), now));
     }
   }
 

@@ -1,0 +1,54 @@
+  private void calculateHotOps(List<TriggerEvent.Op> ops,
+                               Set<String> violations,
+                               Map<String, Map<String, AtomicInteger>> searchableReplicationFactors,
+                               Map<String, Double> hotNodes,
+                               Map<String, Double> hotCollections,
+                               Map<String, Map<String, Double>> hotShards,
+                               List<Replica> hotReplicas) {
+    // calculate the number of replicas to add to each hot shard, based on how much the rate was
+    // exceeded - but within limits.
+
+    // first resolve a situation when only a node is hot but no collection / shard is hot
+    // TODO: eventually we may want to commission a new node
+    if (!hotNodes.isEmpty()) {
+      if (hotShards.isEmpty() && hotCollections.isEmpty()) {
+        // move replicas around
+        if (aboveNodeOp != null) {
+          hotNodes.forEach((n, r) -> {
+            ops.add(new TriggerEvent.Op(aboveNodeOp, Suggester.Hint.SRC_NODE, n));
+            violations.add(HOT_NODES);
+          });
+        }
+      } else {
+        // ignore - hot shards will result in changes that will change hot node status anyway
+      }
+    }
+    // add replicas
+    Map<String, Map<String, List<Pair<String, String>>>> hints = new HashMap<>();
+
+    // HOT COLLECTIONS
+    // currently we don't do anything for hot collections. Theoretically we could add
+    // 1 replica more to each shard, based on how close to the threshold each shard is
+    // but it's probably better to wait for a shard to become hot and be more precise.
+
+    // HOT SHARDS
+
+    hotShards.forEach((coll, shards) -> shards.forEach((s, r) -> {
+      List<Pair<String, String>> perShard = hints
+          .computeIfAbsent(coll, c -> new HashMap<>())
+          .computeIfAbsent(s, sh -> new ArrayList<>());
+      addReplicaHints(coll, s, r, searchableReplicationFactors.get(coll).get(s).get(), perShard);
+      violations.add(HOT_SHARDS);
+    }));
+
+    // HOT REPLICAS
+    // Hot replicas (while their shards are not hot) may be caused by
+    // dumb clients that use direct replica URLs - this is beyond our control
+    // so ignore them.
+
+    hints.values().forEach(m -> m.values().forEach(lst -> lst.forEach(p -> {
+      ops.add(new TriggerEvent.Op(aboveOp, Suggester.Hint.COLL_SHARD, p));
+    })));
+
+  }
+

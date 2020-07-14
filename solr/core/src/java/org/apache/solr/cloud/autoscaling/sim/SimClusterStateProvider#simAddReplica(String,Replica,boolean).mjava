@@ -1,0 +1,96 @@
+  /**
+   * Add a replica. Note that all details of the replica must be present here, including
+   * node, coreNodeName and SolrCore name.
+   * @param nodeId node id where the replica will be added
+   * @param replicaInfo replica info
+   * @param runLeaderElection if true then run a leader election after adding the replica.
+   */
+  @SuppressWarnings({"unchecked"})
+  public void simAddReplica(String nodeId, Replica replicaInfo, boolean runLeaderElection) throws Exception {
+    ensureNotClosed();
+    lock.lockInterruptibly();
+    try {
+
+      // make sure SolrCore name is unique across cluster and coreNodeName within collection
+      for (Map.Entry<String, List<Replica>> e : nodeReplicaMap.entrySet()) {
+        final List<Replica> replicas = e.getValue();
+        synchronized (replicas) {
+          for (Replica ri : replicas) {
+            if (ri.getCoreName().equals(replicaInfo.getCoreName())) {
+              throw new Exception("Duplicate SolrCore name for existing=" + ri + " on node " + e.getKey() + " and new=" + replicaInfo);
+            }
+            if (ri.getName().equals(replicaInfo.getName()) && ri.getCollection().equals(replicaInfo.getCollection())) {
+              throw new Exception("Duplicate coreNode name for existing=" + ri + " on node " + e.getKey() + " and new=" + replicaInfo);
+            }
+          }
+        }
+      }
+      if (!liveNodes.contains(nodeId)) {
+        throw new Exception("Target node " + nodeId + " is not live: " + liveNodes);
+      }
+      // verify info
+      if (replicaInfo.getCoreName() == null) {
+        throw new Exception("Missing core: " + replicaInfo);
+      }
+      // XXX replica info is not supposed to have this as a variable
+      replicaInfo.getProperties().remove(ZkStateReader.SHARD_ID_PROP);
+      if (replicaInfo.getName() == null) {
+        throw new Exception("Missing name: " + replicaInfo);
+      }
+      if (replicaInfo.getNodeName() == null) {
+        throw new Exception("Missing node: " + replicaInfo);
+      }
+      if (!replicaInfo.getNodeName().equals(nodeId)) {
+        throw new Exception("Wrong node (not " + nodeId + "): " + replicaInfo);
+      }
+      
+      opDelay(replicaInfo.getCollection(), CollectionParams.CollectionAction.ADDREPLICA.name());
+
+      // mark replica as active
+      replicaInfo.setState(Replica.State.ACTIVE);
+      // add a property expected in Policy calculations, if missing
+      if (replicaInfo.get(Type.CORE_IDX.metricsAttribute) == null) {
+        replicaInfo.getProperties().put(Type.CORE_IDX.metricsAttribute, new AtomicLong(SimCloudManager.DEFAULT_IDX_SIZE_BYTES));
+        replicaInfo.getProperties().put(Variable.coreidxsize,
+            new AtomicDouble((Double)Type.CORE_IDX.convertVal(SimCloudManager.DEFAULT_IDX_SIZE_BYTES)));
+      }
+      nodeReplicaMap.computeIfAbsent(nodeId, Utils.NEW_SYNCHRONIZED_ARRAYLIST_FUN).add(replicaInfo);
+      colShardReplicaMap.computeIfAbsent(replicaInfo.getCollection(), c -> new ConcurrentHashMap<>())
+          .computeIfAbsent(replicaInfo.getShard(), s -> new ArrayList<>())
+          .add(replicaInfo);
+
+      Map<String, Object> values = cloudManager.getSimNodeStateProvider().simGetAllNodeValues()
+          .computeIfAbsent(nodeId, id -> new ConcurrentHashMap<>(SimCloudManager.createNodeValues(id)));
+      // update the number of cores and freedisk in node values
+      Number cores = (Number)values.get(ImplicitSnitch.CORES);
+      if (cores == null) {
+        cores = 0;
+      }
+      cloudManager.getSimNodeStateProvider().simSetNodeValue(nodeId, ImplicitSnitch.CORES, cores.intValue() + 1);
+      Number disk = (Number)values.get(ImplicitSnitch.DISK);
+      if (disk == null) {
+        throw new Exception("Missing '" + ImplicitSnitch.DISK + "' in node metrics for node " + nodeId);
+        //disk = SimCloudManager.DEFAULT_FREE_DISK;
+      }
+      long replicaSize = ((Number)replicaInfo.get(Type.CORE_IDX.metricsAttribute)).longValue();
+      Number replicaSizeGB = (Number)Type.CORE_IDX.convertVal(replicaSize);
+      cloudManager.getSimNodeStateProvider().simSetNodeValue(nodeId, ImplicitSnitch.DISK, disk.doubleValue() - replicaSizeGB.doubleValue());
+      // fake metrics
+      String registry = SolrMetricManager.getRegistryName(SolrInfoBean.Group.core, replicaInfo.getCollection(),
+          replicaInfo.getShard(),
+          Utils.parseMetricsReplicaName(replicaInfo.getCollection(), replicaInfo.getCoreName()));
+      cloudManager.getMetricManager().registry(registry).counter("UPDATE./update.requests");
+      cloudManager.getMetricManager().registry(registry).counter("QUERY./select.requests");
+      cloudManager.getMetricManager().registerGauge(null, registry,
+          () -> replicaSize, "", true, Type.CORE_IDX.metricsAttribute);
+      // at this point nuke our cached DocCollection state
+      collectionsStatesRef.get(replicaInfo.getCollection()).invalidate();
+      log.trace("-- simAddReplica {}", replicaInfo);
+      if (runLeaderElection) {
+        simRunLeaderElection(replicaInfo.getCollection(), replicaInfo.getShard(), true);
+      }
+    } finally {
+      lock.unlock();
+    }
+  }
+

@@ -1,10 +1,10 @@
   /**
-   * This command downloads all the necessary files from master to install a index commit point. Only changed files are
+   * This command downloads all the necessary files from leader to install a index commit point. Only changed files are
    * downloaded. It also downloads the conf files (if they are modified).
    *
    * @param forceReplication force a replication in all cases
    * @param forceCoreReload force a core reload in all cases
-   * @return true on success, false if slave is already in sync
+   * @return true on success, false if follower is already in sync
    * @throws IOException if an exception occurs
    */
   IndexFetchResult fetchLatestIndex(boolean forceReplication, boolean forceCoreReload) throws IOException, InterruptedException {
@@ -48,15 +48,15 @@
           }
           return IndexFetchResult.LEADER_IS_NOT_ACTIVE;
         }
-        if (!replica.getCoreUrl().equals(masterUrl)) {
-          masterUrl = replica.getCoreUrl();
-          log.info("Updated masterUrl to {}", masterUrl);
+        if (!replica.getCoreUrl().equals(leaderUrl)) {
+          leaderUrl = replica.getCoreUrl();
+          log.info("Updated leaderUrl to {}", leaderUrl);
           // TODO: Do we need to set forceReplication = true?
         } else {
-          log.debug("masterUrl didn't change");
+          log.debug("leaderUrl didn't change");
         }
       }
-      //get the current 'replicateable' index version in the master
+      //get the current 'replicateable' index version in the leader
       @SuppressWarnings({"rawtypes"})
       NamedList response;
       try {
@@ -64,10 +64,10 @@
       } catch (Exception e) {
         final String errorMsg = e.toString();
         if (!Strings.isNullOrEmpty(errorMsg) && errorMsg.contains(INTERRUPT_RESPONSE_MESSAGE)) {
-            log.warn("Master at: {} is not available. Index fetch failed by interrupt. Exception: {}", masterUrl, errorMsg);
+            log.warn("Leader at: {} is not available. Index fetch failed by interrupt. Exception: {}", leaderUrl, errorMsg);
             return new IndexFetchResult(IndexFetchResult.FAILED_BY_INTERRUPT_MESSAGE, false, e);
         } else {
-            log.warn("Master at: {} is not available. Index fetch failed by exception: {}", masterUrl, errorMsg);
+            log.warn("Leader at: {} is not available. Index fetch failed by exception: {}", leaderUrl, errorMsg);
             return new IndexFetchResult(IndexFetchResult.FAILED_BY_EXCEPTION_MESSAGE, false, e);
         }
     }
@@ -75,8 +75,8 @@
       long latestVersion = (Long) response.get(CMD_INDEX_VERSION);
       long latestGeneration = (Long) response.get(GENERATION);
 
-      log.info("Master's generation: {}", latestGeneration);
-      log.info("Master's version: {}", latestVersion);
+      log.info("Leader's generation: {}", latestGeneration);
+      log.info("Leader's version: {}", latestVersion);
 
       // TODO: make sure that getLatestCommit only returns commit points for the main index (i.e. no side-car indexes)
       IndexCommit commit = solrCore.getDeletionPolicy().getLatestCommit();
@@ -97,23 +97,23 @@
       }
 
       if (log.isInfoEnabled()) {
-        log.info("Slave's generation: {}", commit.getGeneration());
-        log.info("Slave's version: {}", IndexDeletionPolicyWrapper.getCommitTimestamp(commit)); // logOK
+        log.info("Follower's generation: {}", commit.getGeneration());
+        log.info("Follower's version: {}", IndexDeletionPolicyWrapper.getCommitTimestamp(commit)); // logOK
       }
 
       if (latestVersion == 0L) {
         if (commit.getGeneration() != 0) {
           // since we won't get the files for an empty index,
           // we just clear ours and commit
-          log.info("New index in Master. Deleting mine...");
+          log.info("New index in Leader. Deleting mine...");
           RefCounted<IndexWriter> iw = solrCore.getUpdateHandler().getSolrCoreState().getIndexWriter(solrCore);
           try {
             iw.get().deleteAll();
           } finally {
             iw.decref();
           }
-          assert TestInjection.injectDelayBeforeSlaveCommitRefresh();
-          if (skipCommitOnMasterVersionZero) {
+          assert TestInjection.injectDelayBeforeFollowerCommitRefresh();
+          if (skipCommitOnLeaderVersionZero) {
             openNewSearcherAndUpdateCommitPoint();
           } else {
             SolrQueryRequest req = new LocalSolrQueryRequest(solrCore, new ModifiableSolrParams());
@@ -123,14 +123,14 @@
 
         //there is nothing to be replicated
         successfulInstall = true;
-        log.debug("Nothing to replicate, master's version is 0");
-        return IndexFetchResult.MASTER_VERSION_ZERO;
+        log.debug("Nothing to replicate, leader's version is 0");
+        return IndexFetchResult.LEADER_VERSION_ZERO;
       }
 
       // TODO: Should we be comparing timestamps (across machines) here?
       if (!forceReplication && IndexDeletionPolicyWrapper.getCommitTimestamp(commit) == latestVersion) {
-        //master and slave are already in sync just return
-        log.info("Slave in sync with master.");
+        //leader and follower are already in sync just return
+        log.info("Follower in sync with leader.");
         successfulInstall = true;
         return IndexFetchResult.ALREADY_IN_SYNC;
       }
@@ -142,11 +142,11 @@
         return IndexFetchResult.PEER_INDEX_COMMIT_DELETED;
       }
       if (log.isInfoEnabled()) {
-        log.info("Number of files in latest index in master: {}", filesToDownload.size());
+        log.info("Number of files in latest index in leader: {}", filesToDownload.size());
       }
       if (tlogFilesToDownload != null) {
         if (log.isInfoEnabled()) {
-          log.info("Number of tlog files in master: {}", tlogFilesToDownload.size());
+          log.info("Number of tlog files in leader: {}", tlogFilesToDownload.size());
         }
       }
 
@@ -154,7 +154,7 @@
       fsyncService = ExecutorUtil.newMDCAwareSingleThreadExecutor(new SolrNamedThreadFactory("fsyncService"));
       // use a synchronized list because the list is read by other threads (to show details)
       filesDownloaded = Collections.synchronizedList(new ArrayList<Map<String, Object>>());
-      // if the generation of master is older than that of the slave , it means they are not compatible to be copied
+      // if the generation of leader is older than that of the follower , it means they are not compatible to be copied
       // then a new index directory to be created and all the files need to be copied
       boolean isFullCopyNeeded = IndexDeletionPolicyWrapper
           .getCommitTimestamp(commit) >= latestVersion
@@ -177,7 +177,7 @@
 
       try {
 
-        // We will compare all the index files from the master vs the index files on disk to see if there is a mismatch
+        // We will compare all the index files from the leader vs the index files on disk to see if there is a mismatch
         // in the metadata. If there is a mismatch for the same index file then we download the entire index
         // (except when differential copy is applicable) again.
         if (!isFullCopyNeeded && isIndexStale(indexDir)) {

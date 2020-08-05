@@ -1,79 +1,79 @@
   @Test
   public void doTestIndexAndConfigReplication() throws Exception {
 
-    TestInjection.delayBeforeSlaveCommitRefresh = random().nextInt(10);
+    TestInjection.delayBeforeFollowerCommitRefresh = random().nextInt(10);
 
     clearIndexWithReplication();
 
     nDocs--;
     for (int i = 0; i < nDocs; i++)
-      index(masterClient, "id", i, "name", "name = " + i);
+      index(leaderClient, "id", i, "name", "name = " + i);
 
-    masterClient.commit();
+    leaderClient.commit();
 
     @SuppressWarnings({"rawtypes"})
-    NamedList masterQueryRsp = rQuery(nDocs, "*:*", masterClient);
-    SolrDocumentList masterQueryResult = (SolrDocumentList) masterQueryRsp.get("response");
-    assertEquals(nDocs, numFound(masterQueryRsp));
+    NamedList leaderQueryRsp = rQuery(nDocs, "*:*", leaderClient);
+    SolrDocumentList leaderQueryResult = (SolrDocumentList) leaderQueryRsp.get("response");
+    assertEquals(nDocs, numFound(leaderQueryRsp));
 
-    //get docs from slave and check if number is equal to master
+    //get docs from follower and check if number is equal to leader
     @SuppressWarnings({"rawtypes"})
-    NamedList slaveQueryRsp = rQuery(nDocs, "*:*", slaveClient);
-    SolrDocumentList slaveQueryResult = (SolrDocumentList) slaveQueryRsp.get("response");
-    assertEquals(nDocs, numFound(slaveQueryRsp));
+    NamedList followerQueryRsp = rQuery(nDocs, "*:*", followerClient);
+    SolrDocumentList followerQueryResult = (SolrDocumentList) followerQueryRsp.get("response");
+    assertEquals(nDocs, numFound(followerQueryRsp));
 
     //compare results
-    String cmp = BaseDistributedSearchTestCase.compare(masterQueryResult, slaveQueryResult, 0, null);
+    String cmp = BaseDistributedSearchTestCase.compare(leaderQueryResult, followerQueryResult, 0, null);
     assertEquals(null, cmp);
     
-    assertVersions(masterClient, slaveClient);
+    assertVersions(leaderClient, followerClient);
 
     //start config files replication test
-    masterClient.deleteByQuery("*:*");
-    masterClient.commit();
+    leaderClient.deleteByQuery("*:*");
+    leaderClient.commit();
 
-    //change the schema on master
-    master.copyConfigFile(CONF_DIR + "schema-replication2.xml", "schema.xml");
+    //change the schema on leader
+    leader.copyConfigFile(CONF_DIR + "schema-replication2.xml", "schema.xml");
 
-    masterJetty.stop();
+    leaderJetty.stop();
 
-    masterJetty = createAndStartJetty(master);
-    masterClient.close();
-    masterClient = createNewSolrClient(masterJetty.getLocalPort());
+    leaderJetty = createAndStartJetty(leader);
+    leaderClient.close();
+    leaderClient = createNewSolrClient(leaderJetty.getLocalPort());
 
-    slave.setTestPort(masterJetty.getLocalPort());
-    slave.copyConfigFile(slave.getSolrConfigFile(), "solrconfig.xml");
+    follower.setTestPort(leaderJetty.getLocalPort());
+    follower.copyConfigFile(follower.getSolrConfigFile(), "solrconfig.xml");
 
-    slaveJetty.stop();
+    followerJetty.stop();
 
     // setup an xslt dir to force subdir file replication
-    File masterXsltDir = new File(master.getConfDir() + File.separator + "xslt");
-    File masterXsl = new File(masterXsltDir, "dummy.xsl");
-    assertTrue("could not make dir " + masterXsltDir, masterXsltDir.mkdirs());
-    assertTrue(masterXsl.createNewFile());
+    File leaderXsltDir = new File(leader.getConfDir() + File.separator + "xslt");
+    File leaderXsl = new File(leaderXsltDir, "dummy.xsl");
+    assertTrue("could not make dir " + leaderXsltDir, leaderXsltDir.mkdirs());
+    assertTrue(leaderXsl.createNewFile());
 
-    File slaveXsltDir = new File(slave.getConfDir() + File.separator + "xslt");
-    File slaveXsl = new File(slaveXsltDir, "dummy.xsl");
-    assertFalse(slaveXsltDir.exists());
+    File followerXsltDir = new File(follower.getConfDir() + File.separator + "xslt");
+    File followerXsl = new File(followerXsltDir, "dummy.xsl");
+    assertFalse(followerXsltDir.exists());
 
-    slaveJetty = createAndStartJetty(slave);
-    slaveClient.close();
-    slaveClient = createNewSolrClient(slaveJetty.getLocalPort());
-    //add a doc with new field and commit on master to trigger index fetch from slave.
-    index(masterClient, "id", "2000", "name", "name = " + 2000, "newname", "newname = " + 2000);
-    masterClient.commit();
+    followerJetty = createAndStartJetty(follower);
+    followerClient.close();
+    followerClient = createNewSolrClient(followerJetty.getLocalPort());
+    //add a doc with new field and commit on leader to trigger index fetch from follower.
+    index(leaderClient, "id", "2000", "name", "name = " + 2000, "newname", "newname = " + 2000);
+    leaderClient.commit();
 
-    assertEquals(1, numFound( rQuery(1, "*:*", masterClient)));
+    assertEquals(1, numFound( rQuery(1, "*:*", leaderClient)));
     
-    slaveQueryRsp = rQuery(1, "*:*", slaveClient);
-    assertVersions(masterClient, slaveClient);
-    SolrDocument d = ((SolrDocumentList) slaveQueryRsp.get("response")).get(0);
+    followerQueryRsp = rQuery(1, "*:*", followerClient);
+    assertVersions(leaderClient, followerClient);
+    SolrDocument d = ((SolrDocumentList) followerQueryRsp.get("response")).get(0);
     assertEquals("newname = 2000", (String) d.getFieldValue("newname"));
 
-    assertTrue(slaveXsltDir.isDirectory());
-    assertTrue(slaveXsl.exists());
+    assertTrue(followerXsltDir.isDirectory());
+    assertTrue(followerXsl.exists());
     
-    checkForSingleIndex(masterJetty);
-    checkForSingleIndex(slaveJetty, true);
+    checkForSingleIndex(leaderJetty);
+    checkForSingleIndex(followerJetty, true);
   }
 

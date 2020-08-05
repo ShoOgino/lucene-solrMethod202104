@@ -1,66 +1,66 @@
   @Test
   public void doTestDetails() throws Exception {
-    slaveJetty.stop();
+    followerJetty.stop();
     
-    slave.setTestPort(masterJetty.getLocalPort());
-    slave.copyConfigFile(CONF_DIR + "solrconfig-slave.xml", "solrconfig.xml");
-    slaveJetty = createAndStartJetty(slave);
+    follower.setTestPort(leaderJetty.getLocalPort());
+    follower.copyConfigFile(CONF_DIR + "solrconfig-follower.xml", "solrconfig.xml");
+    followerJetty = createAndStartJetty(follower);
     
-    slaveClient.close();
-    masterClient.close();
-    masterClient = createNewSolrClient(masterJetty.getLocalPort());
-    slaveClient = createNewSolrClient(slaveJetty.getLocalPort());
+    followerClient.close();
+    leaderClient.close();
+    leaderClient = createNewSolrClient(leaderJetty.getLocalPort());
+    followerClient = createNewSolrClient(followerJetty.getLocalPort());
     
     clearIndexWithReplication();
     { 
-      NamedList<Object> details = getDetails(masterClient);
+      NamedList<Object> details = getDetails(leaderClient);
       
-      assertEquals("master isMaster?", 
-                   "true", details.get("isMaster"));
-      assertEquals("master isSlave?", 
-                   "false", details.get("isSlave"));
-      assertNotNull("master has master section", 
-                    details.get("master"));
+      assertEquals("leader isLeader?",
+                   "true", details.get("isLeader"));
+      assertEquals("leader isFollower?",
+                   "false", details.get("isFollower"));
+      assertNotNull("leader has leader section",
+                    details.get("leader"));
     }
 
-    // check details on the slave a couple of times before & after fetching
+    // check details on the follower a couple of times before & after fetching
     for (int i = 0; i < 3; i++) {
-      NamedList<Object> details = getDetails(slaveClient);
+      NamedList<Object> details = getDetails(followerClient);
       assertNotNull(i + ": " + details);
-      assertNotNull(i + ": " + details.toString(), details.get("slave"));
+      assertNotNull(i + ": " + details.toString(), details.get("follower"));
 
       if (i > 0) {
-        rQuery(i, "*:*", slaveClient);
+        rQuery(i, "*:*", followerClient);
         @SuppressWarnings({"rawtypes"})
-        List replicatedAtCount = (List) ((NamedList) details.get("slave")).get("indexReplicatedAtList");
+        List replicatedAtCount = (List) ((NamedList) details.get("follower")).get("indexReplicatedAtList");
         int tries = 0;
         while ((replicatedAtCount == null || replicatedAtCount.size() < i) && tries++ < 5) {
           Thread.sleep(1000);
-          details = getDetails(slaveClient);
-          replicatedAtCount = (List) ((NamedList) details.get("slave")).get("indexReplicatedAtList");
+          details = getDetails(followerClient);
+          replicatedAtCount = (List) ((NamedList) details.get("follower")).get("indexReplicatedAtList");
         }
         
-        assertNotNull("Expected to see that the slave has replicated" + i + ": " + details.toString(), replicatedAtCount);
+        assertNotNull("Expected to see that the follower has replicated" + i + ": " + details.toString(), replicatedAtCount);
         
         // we can have more replications than we added docs because a replication can legally fail and try 
         // again (sometimes we cannot merge into a live index and have to try again)
         assertTrue("i:" + i + " replicationCount:" + replicatedAtCount.size(), replicatedAtCount.size() >= i); 
       }
 
-      assertEquals(i + ": " + "slave isMaster?", "false", details.get("isMaster"));
-      assertEquals(i + ": " + "slave isSlave?", "true", details.get("isSlave"));
-      assertNotNull(i + ": " + "slave has slave section", details.get("slave"));
+      assertEquals(i + ": " + "follower isLeader?", "false", details.get("isLeader"));
+      assertEquals(i + ": " + "follower isFollower?", "true", details.get("isFollower"));
+      assertNotNull(i + ": " + "follower has follower section", details.get("follower"));
       // SOLR-2677: assert not false negatives
-      Object timesFailed = ((NamedList)details.get("slave")).get(IndexFetcher.TIMES_FAILED);
+      Object timesFailed = ((NamedList)details.get("follower")).get(IndexFetcher.TIMES_FAILED);
       // SOLR-7134: we can have a fail because some mock index files have no checksum, will
       // always be downloaded, and may not be able to be moved into the existing index
-      assertTrue(i + ": " + "slave has fetch error count: " + (String)timesFailed, timesFailed == null || ((String) timesFailed).equals("1"));
+      assertTrue(i + ": " + "follower has fetch error count: " + (String)timesFailed, timesFailed == null || ((String) timesFailed).equals("1"));
 
       if (3 != i) {
         // index & fetch
-        index(masterClient, "id", i, "name", "name = " + i);
-        masterClient.commit();
-        pullFromTo(masterJetty, slaveJetty);
+        index(leaderClient, "id", i, "name", "name = " + i);
+        leaderClient.commit();
+        pullFromTo(leaderJetty, followerJetty);
       }
     }
 
@@ -68,7 +68,7 @@
     JettySolrRunner repeaterJetty = null;
     SolrClient repeaterClient = null;
     try {
-      repeater = new SolrInstance(createTempDir("solr-instance").toFile(), "repeater", masterJetty.getLocalPort());
+      repeater = new SolrInstance(createTempDir("solr-instance").toFile(), "repeater", leaderJetty.getLocalPort());
       repeater.setUp();
       repeaterJetty = createAndStartJetty(repeater);
       repeaterClient = createNewSolrClient(repeaterJetty.getLocalPort());
@@ -76,14 +76,14 @@
       
       NamedList<Object> details = getDetails(repeaterClient);
       
-      assertEquals("repeater isMaster?", 
-                   "true", details.get("isMaster"));
-      assertEquals("repeater isSlave?", 
-                   "true", details.get("isSlave"));
-      assertNotNull("repeater has master section", 
-                    details.get("master"));
-      assertNotNull("repeater has slave section", 
-                    details.get("slave"));
+      assertEquals("repeater isLeader?",
+                   "true", details.get("isLeader"));
+      assertEquals("repeater isFollower?",
+                   "true", details.get("isFollower"));
+      assertNotNull("repeater has leader section",
+                    details.get("leader"));
+      assertNotNull("repeater has follower section",
+                    details.get("follower"));
 
     } finally {
       try { 

@@ -2,32 +2,32 @@
   public void testRateLimitedReplication() throws Exception {
 
     //clean index
-    masterClient.deleteByQuery("*:*");
-    slaveClient.deleteByQuery("*:*");
-    masterClient.commit();
-    slaveClient.commit();
+    leaderClient.deleteByQuery("*:*");
+    followerClient.deleteByQuery("*:*");
+    leaderClient.commit();
+    followerClient.commit();
 
-    masterJetty.stop();
-    slaveJetty.stop();
+    leaderJetty.stop();
+    followerJetty.stop();
 
-    //Start master with the new solrconfig
-    master.copyConfigFile(CONF_DIR + "solrconfig-master-throttled.xml", "solrconfig.xml");
+    //Start leader with the new solrconfig
+    leader.copyConfigFile(CONF_DIR + "solrconfig-leader-throttled.xml", "solrconfig.xml");
     useFactory(null);
-    masterJetty = createAndStartJetty(master);
-    masterClient.close();
-    masterClient = createNewSolrClient(masterJetty.getLocalPort());
+    leaderJetty = createAndStartJetty(leader);
+    leaderClient.close();
+    leaderClient = createNewSolrClient(leaderJetty.getLocalPort());
 
     //index docs
     final int totalDocs = TestUtil.nextInt(random(), 17, 53);
     for (int i = 0; i < totalDocs; i++)
-      index(masterClient, "id", i, "name", TestUtil.randomSimpleString(random(), 1000 , 5000));
+      index(leaderClient, "id", i, "name", TestUtil.randomSimpleString(random(), 1000 , 5000));
 
-    masterClient.commit();
+    leaderClient.commit();
 
     //Check Index Size
-    String dataDir = master.getDataDir();
-    masterClient.close();
-    masterJetty.stop();
+    String dataDir = leader.getDataDir();
+    leaderClient.close();
+    leaderJetty.stop();
 
     Directory dir = FSDirectory.open(Paths.get(dataDir).resolve("index"));
     String[] files = dir.listAll();
@@ -40,29 +40,29 @@
 
     //Start again and replicate the data
     useFactory(null);
-    masterJetty = createAndStartJetty(master);
-    masterClient = createNewSolrClient(masterJetty.getLocalPort());
+    leaderJetty = createAndStartJetty(leader);
+    leaderClient = createNewSolrClient(leaderJetty.getLocalPort());
 
-    //start slave
-    slave.setTestPort(masterJetty.getLocalPort());
-    slave.copyConfigFile(CONF_DIR + "solrconfig-slave1.xml", "solrconfig.xml");
-    slaveJetty = createAndStartJetty(slave);
-    slaveClient.close();
-    slaveClient = createNewSolrClient(slaveJetty.getLocalPort());
+    //start follower
+    follower.setTestPort(leaderJetty.getLocalPort());
+    follower.copyConfigFile(CONF_DIR + "solrconfig-follower1.xml", "solrconfig.xml");
+    followerJetty = createAndStartJetty(follower);
+    followerClient.close();
+    followerClient = createNewSolrClient(followerJetty.getLocalPort());
 
     long startTime = System.nanoTime();
 
-    pullFromMasterToSlave();
+    pullFromLeaderToFollower();
 
-    //Add a few more docs in the master. Just to make sure that we are replicating the correct index point
+    //Add a few more docs in the leader. Just to make sure that we are replicating the correct index point
     //These extra docs should not get replicated
-    new Thread(new AddExtraDocs(masterClient, totalDocs)).start();
+    new Thread(new AddExtraDocs(leaderClient, totalDocs)).start();
 
     //Wait and make sure that it actually replicated correctly.
     @SuppressWarnings({"rawtypes"})
-    NamedList slaveQueryRsp = rQuery(totalDocs, "*:*", slaveClient);
-    SolrDocumentList slaveQueryResult = (SolrDocumentList) slaveQueryRsp.get("response");
-    assertEquals(totalDocs, slaveQueryResult.getNumFound());
+    NamedList followerQueryRsp = rQuery(totalDocs, "*:*", followerClient);
+    SolrDocumentList followerQueryResult = (SolrDocumentList) followerQueryRsp.get("response");
+    assertEquals(totalDocs, followerQueryResult.getNumFound());
 
     long timeTaken = System.nanoTime() - startTime;
 

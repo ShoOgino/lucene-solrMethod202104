@@ -1,7 +1,7 @@
   @Test
   //commented 20-Sep-2018  @BadApple(bugUrl="https://issues.apache.org/jira/browse/SOLR-12028") // added 17-Aug-2018
   public void doTestStressReplication() throws Exception {
-    // change solrconfig on slave
+    // change solrconfig on follower
     // this has no entry for pollinginterval
     
     // get us a straight standard fs dir rather than mock*dir
@@ -10,30 +10,30 @@
     if (useStraightStandardDirectory) {
       useFactory(null);
     }
-    final String SLAVE_SCHEMA_1 = "schema-replication1.xml";
-    final String SLAVE_SCHEMA_2 = "schema-replication2.xml";
-    String slaveSchema = SLAVE_SCHEMA_1;
+    final String FOLLOWER_SCHEMA_1 = "schema-replication1.xml";
+    final String FOLLOWER_SCHEMA_2 = "schema-replication2.xml";
+    String followerSchema = FOLLOWER_SCHEMA_1;
 
     try {
 
-      slave.setTestPort(masterJetty.getLocalPort());
-      slave.copyConfigFile(CONF_DIR +"solrconfig-slave1.xml", "solrconfig.xml");
-      slave.copyConfigFile(CONF_DIR +slaveSchema, "schema.xml");
-      slaveJetty.stop();
-      slaveJetty = createAndStartJetty(slave);
-      slaveClient.close();
-      slaveClient = createNewSolrClient(slaveJetty.getLocalPort());
+      follower.setTestPort(leaderJetty.getLocalPort());
+      follower.copyConfigFile(CONF_DIR +"solrconfig-follower1.xml", "solrconfig.xml");
+      follower.copyConfigFile(CONF_DIR +followerSchema, "schema.xml");
+      followerJetty.stop();
+      followerJetty = createAndStartJetty(follower);
+      followerClient.close();
+      followerClient = createNewSolrClient(followerJetty.getLocalPort());
 
-      master.copyConfigFile(CONF_DIR + "solrconfig-master3.xml",
+      leader.copyConfigFile(CONF_DIR + "solrconfig-leader3.xml",
           "solrconfig.xml");
-      masterJetty.stop();
-      masterJetty = createAndStartJetty(master);
-      masterClient.close();
-      masterClient = createNewSolrClient(masterJetty.getLocalPort());
+      leaderJetty.stop();
+      leaderJetty = createAndStartJetty(leader);
+      leaderClient.close();
+      leaderClient = createNewSolrClient(leaderJetty.getLocalPort());
       
-      masterClient.deleteByQuery("*:*");
-      slaveClient.deleteByQuery("*:*");
-      slaveClient.commit();
+      leaderClient.deleteByQuery("*:*");
+      followerClient.deleteByQuery("*:*");
+      followerClient.commit();
       
       int maxDocs = TEST_NIGHTLY ? 1000 : 75;
       int rounds = TEST_NIGHTLY ? 45 : 3;
@@ -45,57 +45,57 @@
         if (confCoreReload) {
           // toggle the schema file used
 
-          slaveSchema = slaveSchema.equals(SLAVE_SCHEMA_1) ? 
-            SLAVE_SCHEMA_2 : SLAVE_SCHEMA_1;
-          master.copyConfigFile(CONF_DIR + slaveSchema, "schema.xml");
+          followerSchema = followerSchema.equals(FOLLOWER_SCHEMA_1) ?
+            FOLLOWER_SCHEMA_2 : FOLLOWER_SCHEMA_1;
+          leader.copyConfigFile(CONF_DIR + followerSchema, "schema.xml");
         }
         
         int docs = random().nextInt(maxDocs) + 1;
         for (int i = 0; i < docs; i++) {
-          index(masterClient, "id", id++, "name", "name = " + i);
+          index(leaderClient, "id", id++, "name", "name = " + i);
         }
         
         totalDocs += docs;
-        masterClient.commit();
+        leaderClient.commit();
         
         @SuppressWarnings({"rawtypes"})
-        NamedList masterQueryRsp = rQuery(totalDocs, "*:*", masterClient);
-        SolrDocumentList masterQueryResult = (SolrDocumentList) masterQueryRsp
+        NamedList leaderQueryRsp = rQuery(totalDocs, "*:*", leaderClient);
+        SolrDocumentList leaderQueryResult = (SolrDocumentList) leaderQueryRsp
             .get("response");
-        assertEquals(totalDocs, masterQueryResult.getNumFound());
+        assertEquals(totalDocs, leaderQueryResult.getNumFound());
         
         // index fetch
-        Date slaveCoreStart = watchCoreStartAt(slaveClient, 30*1000, null);
-        pullFromMasterToSlave();
+        Date followerCoreStart = watchCoreStartAt(followerClient, 30*1000, null);
+        pullFromLeaderToFollower();
         if (confCoreReload) {
-          watchCoreStartAt(slaveClient, 30*1000, slaveCoreStart);
+          watchCoreStartAt(followerClient, 30*1000, followerCoreStart);
         }
 
-        // get docs from slave and check if number is equal to master
+        // get docs from follower and check if number is equal to leader
         @SuppressWarnings({"rawtypes"})
-        NamedList slaveQueryRsp = rQuery(totalDocs, "*:*", slaveClient);
-        SolrDocumentList slaveQueryResult = (SolrDocumentList) slaveQueryRsp
+        NamedList followerQueryRsp = rQuery(totalDocs, "*:*", followerClient);
+        SolrDocumentList followerQueryResult = (SolrDocumentList) followerQueryRsp
             .get("response");
-        assertEquals(totalDocs, slaveQueryResult.getNumFound());
+        assertEquals(totalDocs, followerQueryResult.getNumFound());
         // compare results
-        String cmp = BaseDistributedSearchTestCase.compare(masterQueryResult,
-            slaveQueryResult, 0, null);
+        String cmp = BaseDistributedSearchTestCase.compare(leaderQueryResult,
+            followerQueryResult, 0, null);
         assertEquals(null, cmp);
         
-        assertVersions(masterClient, slaveClient);
+        assertVersions(leaderClient, followerClient);
         
-        checkForSingleIndex(masterJetty);
+        checkForSingleIndex(leaderJetty);
         
         if (!Constants.WINDOWS) {
-          checkForSingleIndex(slaveJetty);
+          checkForSingleIndex(followerJetty);
         }
         
         if (random().nextBoolean()) {
-          // move the slave ahead
+          // move the follower ahead
           for (int i = 0; i < 3; i++) {
-            index(slaveClient, "id", id++, "name", "name = " + i);
+            index(followerClient, "id", id++, "name", "name = " + i);
           }
-          slaveClient.commit();
+          followerClient.commit();
         }
         
       }

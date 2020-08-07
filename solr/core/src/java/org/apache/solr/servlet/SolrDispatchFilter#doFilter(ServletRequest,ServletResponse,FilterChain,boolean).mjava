@@ -4,6 +4,7 @@
     HttpServletResponse response = closeShield((HttpServletResponse)_response, retry);
     Scope scope = null;
     Span span = null;
+    boolean accepted = false;
     try {
 
       if (cores == null || cores.isShutDown()) {
@@ -30,6 +31,20 @@
         }
       }
 
+      try {
+        accepted = rateLimitManager.handleRequest(request);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new SolrException(ErrorCode.SERVER_ERROR, e.getMessage());
+      }
+
+      if (!accepted) {
+        String errorMessage = "Too many requests for this request type." +
+            "Please try after some time or increase the quota for this request type";
+
+        response.sendError(429, errorMessage);
+      }
+
       SpanContext parentSpan = GlobalTracer.get().extract(request);
       Tracer tracer = GlobalTracer.getTracer();
 
@@ -52,6 +67,7 @@
       if (!authenticateRequest(request, response, wrappedRequest)) { // the response and status code have already been sent
         return;
       }
+
       if (wrappedRequest.get() != null) {
         request = wrappedRequest.get();
       }
@@ -94,6 +110,10 @@
       consumeInputFully(request, response);
       SolrRequestInfo.reset();
       SolrRequestParsers.cleanupMultipartFiles(request);
+
+      if (accepted) {
+        rateLimitManager.decrementActiveRequests(request);
+      }
     }
   }
 

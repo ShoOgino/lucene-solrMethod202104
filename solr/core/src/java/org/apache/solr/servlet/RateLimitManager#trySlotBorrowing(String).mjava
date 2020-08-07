@@ -1,0 +1,44 @@
+  /* For a rejected request type, do the following:
+   * For each request rate limiter whose type that is not of the type of the request which got rejected,
+   * check if slot borrowing is enabled. If enabled, try to acquire a slot.
+   * If allotted, return else try next request type.
+   *
+   * @lucene.experimental -- Can cause slots to be blocked if a request borrows a slot and is itself long lived.
+   */
+  private RequestRateLimiter.SlotMetadata trySlotBorrowing(String requestType) {
+    for (Map.Entry<String, RequestRateLimiter> currentEntry : requestRateLimiterMap.entrySet()) {
+      RequestRateLimiter.SlotMetadata result = null;
+      RequestRateLimiter requestRateLimiter = currentEntry.getValue();
+
+      // Cant borrow from ourselves
+      if (requestRateLimiter.getRateLimiterConfig().requestType.toString().equals(requestType)) {
+        continue;
+      }
+
+      if (requestRateLimiter.getRateLimiterConfig().isSlotBorrowingEnabled) {
+        if (log.isWarnEnabled()) {
+          String msg = "WARN: Experimental feature slots borrowing is enabled for request rate limiter type " +
+              requestRateLimiter.getRateLimiterConfig().requestType.toString();
+
+          log.warn(msg);
+        }
+
+        try {
+          result = requestRateLimiter.allowSlotBorrowing();
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        }
+
+        if (result == null) {
+          throw new IllegalStateException("Returned metadata object is null");
+        }
+
+        if (result.isReleasable()) {
+          return result;
+        }
+      }
+    }
+
+    return null;
+  }
+

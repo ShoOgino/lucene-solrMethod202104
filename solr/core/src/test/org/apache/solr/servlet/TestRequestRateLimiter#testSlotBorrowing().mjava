@@ -1,0 +1,28 @@
+  @Test
+  public void testSlotBorrowing() throws Exception {
+    CloudSolrClient client = cluster.getSolrClient();
+    client.setDefaultCollection(SECOND_COLLECTION);
+
+    CollectionAdminRequest.createCollection(SECOND_COLLECTION, 1, 1).process(client);
+    cluster.waitForActiveCollection(SECOND_COLLECTION, 1, 1);
+
+    SolrDispatchFilter solrDispatchFilter = cluster.getJettySolrRunner(0).getSolrDispatchFilter();
+
+    RequestRateLimiter.RateLimiterConfig queryRateLimiterConfig = new RequestRateLimiter.RateLimiterConfig(SolrRequest.SolrRequestType.QUERY,
+        true, 1, DEFAULT_SLOT_ACQUISITION_TIMEOUT_MS, 5 /* allowedRequests */, true /* isSlotBorrowing */);
+    RequestRateLimiter.RateLimiterConfig indexRateLimiterConfig = new RequestRateLimiter.RateLimiterConfig(SolrRequest.SolrRequestType.UPDATE,
+        true, 1, DEFAULT_SLOT_ACQUISITION_TIMEOUT_MS, 5 /* allowedRequests */, true /* isSlotBorrowing */);
+    // We are fine with a null FilterConfig here since we ensure that MockBuilder never invokes its parent
+    RateLimitManager.Builder builder = new MockBuilder(null /*dummy FilterConfig */, new MockRequestRateLimiter(queryRateLimiterConfig, 5), new MockRequestRateLimiter(indexRateLimiterConfig, 5));
+    RateLimitManager rateLimitManager = builder.build();
+
+    solrDispatchFilter.replaceRateLimitManager(rateLimitManager);
+
+    processTest(client);
+
+    MockRequestRateLimiter mockIndexRateLimiter = (MockRequestRateLimiter) rateLimitManager.getRequestRateLimiter(SolrRequest.SolrRequestType.UPDATE);
+
+    assertTrue("Incoming slots borrowed count did not match. Expected > 0  incoming " + mockIndexRateLimiter.borrowedSlotCount.get(),
+        mockIndexRateLimiter.borrowedSlotCount.get() > 0);
+  }
+

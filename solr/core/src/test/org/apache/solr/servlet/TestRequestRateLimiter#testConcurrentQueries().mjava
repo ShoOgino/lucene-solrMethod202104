@@ -1,0 +1,31 @@
+  @Test
+  public void testConcurrentQueries() throws Exception {
+    CloudSolrClient client = cluster.getSolrClient();
+    client.setDefaultCollection(FIRST_COLLECTION);
+
+    CollectionAdminRequest.createCollection(FIRST_COLLECTION, 1, 1).process(client);
+    cluster.waitForActiveCollection(FIRST_COLLECTION, 1, 1);
+
+    SolrDispatchFilter solrDispatchFilter = cluster.getJettySolrRunner(0).getSolrDispatchFilter();
+
+    RequestRateLimiter.RateLimiterConfig rateLimiterConfig = new RequestRateLimiter.RateLimiterConfig(SolrRequest.SolrRequestType.QUERY,
+        true, 1, DEFAULT_SLOT_ACQUISITION_TIMEOUT_MS, 5 /* allowedRequests */, true /* isSlotBorrowing */);
+    // We are fine with a null FilterConfig here since we ensure that MockBuilder never invokes its parent here
+    RateLimitManager.Builder builder = new MockBuilder(null /* dummy FilterConfig */, new MockRequestRateLimiter(rateLimiterConfig, 5));
+    RateLimitManager rateLimitManager = builder.build();
+
+    solrDispatchFilter.replaceRateLimitManager(rateLimitManager);
+
+    processTest(client);
+
+    MockRequestRateLimiter mockQueryRateLimiter = (MockRequestRateLimiter) rateLimitManager.getRequestRateLimiter(SolrRequest.SolrRequestType.QUERY);
+
+    assertEquals(25, mockQueryRateLimiter.incomingRequestCount.get());
+    assertTrue("Incoming accepted new request count did not match. Expected 5 incoming " + mockQueryRateLimiter.acceptedNewRequestCount.get(),
+        mockQueryRateLimiter.acceptedNewRequestCount.get() < 25);
+    assertTrue("Incoming rejected new request count did not match. Expected 20 incoming " + mockQueryRateLimiter.rejectedRequestCount.get(),
+        mockQueryRateLimiter.rejectedRequestCount.get() > 0);
+    assertEquals(mockQueryRateLimiter.incomingRequestCount.get(),
+        mockQueryRateLimiter.acceptedNewRequestCount.get() + mockQueryRateLimiter.rejectedRequestCount.get());
+  }
+

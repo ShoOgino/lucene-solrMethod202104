@@ -1,0 +1,45 @@
+  private void processTest(CloudSolrClient client) throws Exception {
+
+    for (int i = 0; i < 100; i++) {
+      SolrInputDocument doc = new SolrInputDocument();
+
+      doc.setField("id", i);
+      doc.setField("text", "foo");
+      client.add(doc);
+    }
+
+    client.commit();
+
+    ExecutorService executor = ExecutorUtil.newMDCAwareCachedThreadPool("threadpool");
+    List<Callable<Boolean>> callableList = new ArrayList<>();
+    List<Future<Boolean>> futures;
+
+    try {
+      for (int i = 0; i < 25; i++) {
+        callableList.add(() -> {
+          try {
+            QueryResponse response = client.query(new SolrQuery("*:*"));
+
+            assertEquals(100, response.getResults().getNumFound());
+          } catch (Exception e) {
+            throw new RuntimeException(e.getMessage());
+          }
+
+          return true;
+        });
+      }
+
+      futures = executor.invokeAll(callableList);
+
+      for (Future<?> future : futures) {
+        try {
+          assertTrue(future.get() != null);
+        } catch (Exception e) {
+          assertThat(e.getMessage(), containsString("non ok status: 429, message:Too Many Requests"));
+        }
+      }
+    } finally {
+      executor.shutdown();
+    }
+  }
+

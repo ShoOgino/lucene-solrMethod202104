@@ -1,0 +1,36 @@
+  public void testCloseWhileNewWritersLocked() throws IOException, InterruptedException {
+    try (Directory directory = newDirectory()) {
+      DocumentsWriterPerThreadPool pool = new DocumentsWriterPerThreadPool(() ->
+          new DocumentsWriterPerThread(Version.LATEST.major, "", directory, directory,
+              newIndexWriterConfig(), new DocumentsWriterDeleteQueue(null), null, new AtomicLong(), false));
+
+      DocumentsWriterPerThread first = pool.getAndLock();
+      pool.lockNewWriters();
+      CountDownLatch latch = new CountDownLatch(1);
+      Thread t = new Thread(() -> {
+        try {
+          latch.countDown();
+          pool.getAndLock();
+          fail();
+        } catch (AlreadyClosedException e) {
+          // fine
+        } catch (IOException e) {
+          throw new AssertionError(e);
+        }
+      });
+      t.start();
+      latch.await();
+      while (t.getState().equals(Thread.State.WAITING) == false) {
+        Thread.yield();
+      }
+      first.unlock();
+      pool.close();
+      pool.unlockNewWriters();
+      for (DocumentsWriterPerThread perThread : pool.filterAndLock(x -> true)) {
+        assertTrue(pool.checkout(perThread));
+        perThread.unlock();
+      }
+      assertEquals(0, pool.size());
+    }
+  }
+

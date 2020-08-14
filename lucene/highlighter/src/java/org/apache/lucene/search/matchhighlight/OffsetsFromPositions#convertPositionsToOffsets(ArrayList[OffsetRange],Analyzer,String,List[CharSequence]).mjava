@@ -1,0 +1,84 @@
+  private static ArrayList<OffsetRange> convertPositionsToOffsets(
+      ArrayList<OffsetRange> ranges,
+      Analyzer analyzer,
+      String fieldName,
+      List<CharSequence> values)
+      throws IOException {
+
+    if (ranges.isEmpty()) {
+      return ranges;
+    }
+
+    class LeftRight {
+      int left = Integer.MAX_VALUE;
+      int right = Integer.MIN_VALUE;
+
+      @Override
+      public String toString() {
+        return "[" + "L: " + left + ", R: " + right + ']';
+      }
+    }
+
+    Map<Integer, LeftRight> requiredPositionSpans = new HashMap<>();
+    int minPosition = Integer.MAX_VALUE;
+    int maxPosition = Integer.MIN_VALUE;
+    for (OffsetRange range : ranges) {
+      requiredPositionSpans.computeIfAbsent(range.from, (key) -> new LeftRight());
+      requiredPositionSpans.computeIfAbsent(range.to, (key) -> new LeftRight());
+      minPosition = Math.min(minPosition, range.from);
+      maxPosition = Math.max(maxPosition, range.to);
+    }
+
+    int position = -1;
+    int valueOffset = 0;
+    for (int valueIndex = 0, max = values.size(); valueIndex < max; valueIndex++) {
+      final String value = values.get(valueIndex).toString();
+      final boolean lastValue = valueIndex + 1 == max;
+
+      TokenStream ts = analyzer.tokenStream(fieldName, value);
+      OffsetAttribute offsetAttr = ts.getAttribute(OffsetAttribute.class);
+      PositionIncrementAttribute posAttr = ts.getAttribute(PositionIncrementAttribute.class);
+      ts.reset();
+      while (ts.incrementToken()) {
+        position += posAttr.getPositionIncrement();
+
+        if (position >= minPosition) {
+          LeftRight leftRight = requiredPositionSpans.get(position);
+          if (leftRight != null) {
+            int startOffset = valueOffset + offsetAttr.startOffset();
+            int endOffset = valueOffset + offsetAttr.endOffset();
+
+            leftRight.left = Math.min(leftRight.left, startOffset);
+            leftRight.right = Math.max(leftRight.right, endOffset);
+          }
+
+          // Only short-circuit if we're on the last value (which should be the common
+          // case since most fields would only have a single value anyway). We need
+          // to make sure of this because otherwise offsetAttr would have incorrect value.
+          if (position > maxPosition && lastValue) {
+            break;
+          }
+        }
+      }
+      ts.end();
+      position += posAttr.getPositionIncrement() + analyzer.getPositionIncrementGap(fieldName);
+      valueOffset += offsetAttr.endOffset() + analyzer.getOffsetGap(fieldName);
+      ts.close();
+    }
+
+    ArrayList<OffsetRange> converted = new ArrayList<>();
+    for (OffsetRange range : ranges) {
+      LeftRight left = requiredPositionSpans.get(range.from);
+      LeftRight right = requiredPositionSpans.get(range.to);
+      if (left == null
+          || right == null
+          || left.left == Integer.MAX_VALUE
+          || right.right == Integer.MIN_VALUE) {
+        throw new RuntimeException("Position not properly initialized for range: " + range);
+      }
+      converted.add(new OffsetRange(left.left, right.right));
+    }
+
+    return converted;
+  }
+

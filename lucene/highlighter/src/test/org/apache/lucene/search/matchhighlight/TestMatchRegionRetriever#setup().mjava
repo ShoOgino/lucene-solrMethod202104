@@ -1,0 +1,63 @@
+  @Before
+  public void setup() {
+    TYPE_STORED_WITH_OFFSETS = new FieldType(TextField.TYPE_STORED);
+    TYPE_STORED_WITH_OFFSETS.setIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS);
+    TYPE_STORED_WITH_OFFSETS.freeze();
+
+    TYPE_STORED_NO_POSITIONS = new FieldType(TextField.TYPE_STORED);
+    TYPE_STORED_NO_POSITIONS.setIndexOptions(IndexOptions.DOCS_AND_FREQS);
+    TYPE_STORED_NO_POSITIONS.freeze();
+
+    Analyzer whitespaceAnalyzer =
+        new Analyzer() {
+          final int offsetGap = RandomizedTest.randomIntBetween(0, 2);
+          final int positionGap = RandomizedTest.randomFrom(new int[]{0, 1, 100});
+
+          @Override
+          protected TokenStreamComponents createComponents(String fieldName) {
+            WhitespaceTokenizer tokenizer =
+                new WhitespaceTokenizer(CharTokenizer.DEFAULT_MAX_WORD_LEN);
+            return new TokenStreamComponents(tokenizer);
+          }
+
+          @Override
+          public int getOffsetGap(String fieldName) {
+            return offsetGap;
+          }
+
+          @Override
+          public int getPositionIncrementGap(String fieldName) {
+            return positionGap;
+          }
+        };
+
+    Map<String, Analyzer> fieldAnalyzers = new HashMap<>();
+    fieldAnalyzers.put(FLD_TEXT_POS, whitespaceAnalyzer);
+    fieldAnalyzers.put(FLD_TEXT_POS_OFFS, whitespaceAnalyzer);
+    fieldAnalyzers.put(FLD_TEXT_POS_OFFS1, whitespaceAnalyzer);
+    fieldAnalyzers.put(FLD_TEXT_POS_OFFS2, whitespaceAnalyzer);
+    fieldAnalyzers.put(FLD_TEXT_NOPOS, whitespaceAnalyzer);
+
+    try {
+      SynonymMap.Builder b = new SynonymMap.Builder();
+      b.add(new CharsRef("foo\u0000bar"), new CharsRef("syn1"), true);
+      b.add(new CharsRef("baz"), new CharsRef("syn2\u0000syn3"), true);
+      SynonymMap synonymMap = b.build();
+      Analyzer synonymsAnalyzer =
+          new Analyzer() {
+            @Override
+            protected TokenStreamComponents createComponents(String fieldName) {
+              Tokenizer tokenizer = new WhitespaceTokenizer();
+              TokenStream tokenStream = new SynonymGraphFilter(tokenizer, synonymMap, true);
+              return new TokenStreamComponents(tokenizer, tokenStream);
+            }
+          };
+      fieldAnalyzers.put(FLD_TEXT_SYNONYMS_POS_OFFS, synonymsAnalyzer);
+      fieldAnalyzers.put(FLD_TEXT_SYNONYMS_POS, synonymsAnalyzer);
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
+
+    analyzer = new PerFieldAnalyzerWrapper(new MissingAnalyzer(), fieldAnalyzers);
+  }
+

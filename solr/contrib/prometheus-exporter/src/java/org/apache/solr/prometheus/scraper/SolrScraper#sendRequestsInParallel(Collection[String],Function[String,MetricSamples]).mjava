@@ -2,16 +2,31 @@
       Collection<String> items,
       Function<String, MetricSamples> samplesCallable) throws IOException {
 
-    List<CompletableFuture<Pair<String, MetricSamples>>> futures = items.stream()
-        .map(item -> CompletableFuture.supplyAsync(() -> new Pair<>(item, samplesCallable.apply(item)), executor))
-        .collect(Collectors.toList());
-
-    Future<List<Pair<String, MetricSamples>>> allComplete = Async.waitForAllSuccessfulResponses(futures);
+    Map<String, MetricSamples> result = new HashMap<>(); // sync on this when adding to it below
 
     try {
-      return allComplete.get().stream().collect(Collectors.toMap(Pair::first, Pair::second));
-    } catch (InterruptedException | ExecutionException e) {
-      throw new IOException(e);
+      // invoke each samplesCallable with each item and putting the results in the above "result" map.
+      executor.invokeAll(
+          items.stream()
+              .map(item -> (Callable<MetricSamples>) () -> {
+                try {
+                  final MetricSamples samples = samplesCallable.apply(item);
+                  synchronized (result) {
+                    result.put(item, samples);
+                  }
+                } catch (Exception e) {
+                  // do NOT totally fail; just log and move on
+                  log.warn("Error occurred during metrics collection", e);
+                }
+                return null;//not used
+              })
+              .collect(Collectors.toList())
+      );
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new RuntimeException(e);
     }
+
+    return result;
   }
 

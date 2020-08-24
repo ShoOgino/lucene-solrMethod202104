@@ -1,0 +1,61 @@
+  void stressUpdateSameDocumentWithMergeOnX(boolean useGetReader) throws IOException, InterruptedException {
+    try (Directory directory = newDirectory()) {
+      try (RandomIndexWriter writer = new RandomIndexWriter(random(), directory, newIndexWriterConfig()
+          .setMergePolicy(new MergeOnXMergePolicy(newMergePolicy(), useGetReader ? MergeTrigger.GET_READER : MergeTrigger.COMMIT))
+          .setMaxFullFlushMergeWaitMillis(10 + random().nextInt(2000))
+          .setSoftDeletesField("soft_delete")
+          .setMergeScheduler(new ConcurrentMergeScheduler()))) {
+        Document d1 = new Document();
+        d1.add(new StringField("id", "1", Field.Store.NO));
+        writer.updateDocument(new Term("id", "1"), d1);
+        writer.commit();
+
+        AtomicInteger iters = new AtomicInteger(100 + random().nextInt(TEST_NIGHTLY ? 5000 : 1000));
+        AtomicInteger numFullFlushes = new AtomicInteger(10 + random().nextInt(TEST_NIGHTLY ? 500 : 100));
+        AtomicBoolean done = new AtomicBoolean(false);
+        Thread[] threads = new Thread[1 + random().nextInt(4)];
+        for (int i = 0; i < threads.length; i++) {
+          Thread t = new Thread(() -> {
+            try {
+              while (iters.decrementAndGet() > 0 || numFullFlushes.get() > 0) {
+                writer.updateDocument(new Term("id", "1"), d1);
+                if (random().nextBoolean()) {
+                  writer.addDocument(new Document());
+                }
+              }
+            } catch (Exception e) {
+              throw new AssertionError(e);
+            } finally {
+              done.set(true);
+            }
+
+          });
+          t.start();
+          threads[i] = t;
+        }
+        try {
+          while (done.get() == false) {
+            if (useGetReader) {
+              try (DirectoryReader reader = writer.getReader()) {
+                assertEquals(1, new IndexSearcher(reader).search(new TermQuery(new Term("id", "1")), 10).totalHits.value);
+              }
+            } else {
+              if (random().nextBoolean()) {
+                writer.commit();
+              }
+              try (DirectoryReader open = new SoftDeletesDirectoryReaderWrapper(DirectoryReader.open(directory), "___soft_deletes")) {
+                assertEquals(1, new IndexSearcher(open).search(new TermQuery(new Term("id", "1")), 10).totalHits.value);
+              }
+            }
+            numFullFlushes.decrementAndGet();
+          }
+        } finally {
+          numFullFlushes.set(0);
+          for (Thread t : threads) {
+            t.join();
+          }
+        }
+      }
+    }
+  }
+

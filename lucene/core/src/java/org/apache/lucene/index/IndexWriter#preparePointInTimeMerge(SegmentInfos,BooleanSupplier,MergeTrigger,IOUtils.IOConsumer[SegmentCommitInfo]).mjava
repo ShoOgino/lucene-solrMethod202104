@@ -1,19 +1,22 @@
   /**
-   * This optimization allows a commit to wait for merges on smallish segments to
-   * reduce the eventual number of tiny segments in the commit point.  We wrap a {@code OneMerge} to
-   * update the {@code committingSegmentInfos} once the merge has finished.  We replace the source segments
-   * in the SIS that we are going to commit with the freshly merged segment, but ignore all deletions and updates
-   * that are made to documents in the merged segment while it was merging.  The updates that are made do not belong to
-   * the point-in-time commit point and should therefore not be included. See the clone call in {@code onMergeComplete}
+   * This optimization allows a commit/getReader to wait for merges on smallish segments to
+   * reduce the eventual number of tiny segments in the commit point / NRT Reader.  We wrap a {@code OneMerge} to
+   * update the {@code mergingSegmentInfos} once the merge has finished. We replace the source segments
+   * in the SIS that we are going to commit / open the reader on with the freshly merged segment, but ignore all deletions and updates
+   * that are made to documents in the merged segment while it was merging. The updates that are made do not belong to
+   * the point-in-time commit point / NRT READER and should therefore not be included. See the clone call in {@code onMergeComplete}
    * below.  We also ensure that we pull the merge readers while holding {@code IndexWriter}'s lock.  Otherwise
    * we could see concurrent deletions/updates applied that do not belong to the segment.
    */
-  private MergePolicy.MergeSpecification prepareOnCommitMerge(SegmentInfos committingSegmentInfos, AtomicBoolean includeInCommit) throws IOException {
+  private MergePolicy.MergeSpecification preparePointInTimeMerge(SegmentInfos mergingSegmentInfos, BooleanSupplier stopCollectingMergeResults,
+                                                                 MergeTrigger trigger,
+                                                                 IOUtils.IOConsumer<SegmentCommitInfo> mergeFinished) throws IOException {
     assert Thread.holdsLock(this);
-    MergePolicy.MergeSpecification onCommitMerges = updatePendingMerges(new OneMergeWrappingMergePolicy(config.getMergePolicy(), toWrap ->
+    assert trigger == MergeTrigger.GET_READER || trigger == MergeTrigger.COMMIT : "illegal trigger: " + trigger;
+    MergePolicy.MergeSpecification pointInTimeMerges = updatePendingMerges(new OneMergeWrappingMergePolicy(config.getMergePolicy(), toWrap ->
         new MergePolicy.OneMerge(toWrap.segments) {
           SegmentCommitInfo origInfo;
-          AtomicBoolean onlyOnce = new AtomicBoolean(false);
+          final AtomicBoolean onlyOnce = new AtomicBoolean(false);
 
           @Override
           public void mergeFinished(boolean committed, boolean segmentDropped) throws IOException {
@@ -21,50 +24,65 @@
 
             // includedInCommit will be set (above, by our caller) to false if the allowed max wall clock
             // time (IWC.getMaxCommitMergeWaitMillis()) has elapsed, which means we did not make the timeout
-            // and will not commit our merge to the to-be-commited SegmentInfos
-            
+            // and will not commit our merge to the to-be-committed SegmentInfos
             if (segmentDropped == false
                 && committed
-                && includeInCommit.get()) {
+                && stopCollectingMergeResults.getAsBoolean() == false) {
+
+              // make sure onMergeComplete really was called:
+              assert origInfo != null;
 
               if (infoStream.isEnabled("IW")) {
                 infoStream.message("IW", "now apply merge during commit: " + toWrap.segString());
               }
 
-              // make sure onMergeComplete really was called:
-              assert origInfo != null;
-
-              deleter.incRef(origInfo.files());
+              if (trigger == MergeTrigger.COMMIT) {
+                // if we do this in a getReader call here this is obsolete since we already hold a reader that has
+                // incRef'd these files
+                deleter.incRef(origInfo.files());
+              }
               Set<String> mergedSegmentNames = new HashSet<>();
               for (SegmentCommitInfo sci : segments) {
                 mergedSegmentNames.add(sci.info.name);
               }
               List<SegmentCommitInfo> toCommitMergedAwaySegments = new ArrayList<>();
-              for (SegmentCommitInfo sci : committingSegmentInfos) {
+              for (SegmentCommitInfo sci : mergingSegmentInfos) {
                 if (mergedSegmentNames.contains(sci.info.name)) {
                   toCommitMergedAwaySegments.add(sci);
-                  deleter.decRef(sci.files());
+                  if (trigger == MergeTrigger.COMMIT) {
+                    // if we do this in a getReader call here this is obsolete since we already hold a reader that has
+                    // incRef'd these files and will decRef them when it's closed
+                    deleter.decRef(sci.files());
+                  }
                 }
               }
               // Construct a OneMerge that applies to toCommit
               MergePolicy.OneMerge applicableMerge = new MergePolicy.OneMerge(toCommitMergedAwaySegments);
               applicableMerge.info = origInfo;
               long segmentCounter = Long.parseLong(origInfo.info.name.substring(1), Character.MAX_RADIX);
-              committingSegmentInfos.counter = Math.max(committingSegmentInfos.counter, segmentCounter + 1);
-              committingSegmentInfos.applyMergeChanges(applicableMerge, false);
+              mergingSegmentInfos.counter = Math.max(mergingSegmentInfos.counter, segmentCounter + 1);
+              mergingSegmentInfos.applyMergeChanges(applicableMerge, false);
             } else {
               if (infoStream.isEnabled("IW")) {
                 infoStream.message("IW", "skip apply merge during commit: " + toWrap.segString());
               }
             }
-            toWrap.mergeFinished(committed, false);
+            toWrap.mergeFinished(committed, segmentDropped);
             super.mergeFinished(committed, segmentDropped);
           }
 
           @Override
-          void onMergeComplete() {
-            // clone the target info to make sure we have the original info without the updated del and update gens
-            origInfo = info.clone();
+          void onMergeComplete() throws IOException {
+            assert Thread.holdsLock(IndexWriter.this);
+            if (stopCollectingMergeResults.getAsBoolean() == false
+                && isAborted() == false
+                && info.info.maxDoc() > 0/* never do this if the segment if dropped / empty */) {
+              mergeFinished.accept(info);
+              // clone the target info to make sure we have the original info without the updated del and update gens
+              origInfo = info.clone();
+            }
+            toWrap.onMergeComplete();
+            super.onMergeComplete();
           }
 
           @Override
@@ -81,11 +99,11 @@
             return toWrap.wrapForMerge(reader); // must delegate
           }
         }
-    ), MergeTrigger.COMMIT, UNBOUNDED_MAX_MERGE_SEGMENTS);
-    if (onCommitMerges != null) {
+    ), trigger, UNBOUNDED_MAX_MERGE_SEGMENTS);
+    if (pointInTimeMerges != null) {
       boolean closeReaders = true;
       try {
-        for (MergePolicy.OneMerge merge : onCommitMerges.merges) {
+        for (MergePolicy.OneMerge merge : pointInTimeMerges.merges) {
           IOContext context = new IOContext(merge.getStoreMergeInfo());
           merge.initMergeReaders(
               sci -> {
@@ -99,16 +117,19 @@
         closeReaders = false;
       } finally {
         if (closeReaders) {
-          IOUtils.applyToAll(onCommitMerges.merges, merge -> {
+          IOUtils.applyToAll(pointInTimeMerges.merges, merge -> {
             // that merge is broken we need to clean up after it - it's fine we still have the IW lock to do this
             boolean removed = pendingMerges.remove(merge);
             assert removed: "merge should be pending but isn't: " + merge.segString();
-            abortOneMerge(merge);
-            mergeFinish(merge);
+            try {
+              abortOneMerge(merge);
+            } finally {
+              mergeFinish(merge);
+            }
           });
         }
       }
     }
-    return onCommitMerges;
+    return pointInTimeMerges;
   }
 

@@ -72,9 +72,10 @@
     // obtained during this flush are pooled, the first time
     // this method is called:
     readerPool.enableReaderPooling();
-    DirectoryReader r = null;
+    StandardDirectoryReader r = null;
     doBeforeFlush();
-    boolean anyChanges = false;
+    boolean anyChanges;
+    final long maxFullFlushMergeWaitMillis = config.getMaxFullFlushMergeWaitMillis();
     /*
      * for releasing a NRT reader we must ensure that 
      * DW doesn't add any segments or deletes until we are
@@ -82,8 +83,46 @@
      * We release the two stage full flush after we are done opening the
      * directory reader!
      */
+    MergePolicy.MergeSpecification onGetReaderMerges = null;
+    final AtomicBoolean stopCollectingMergedReaders = new AtomicBoolean(false);
+    final Map<String, SegmentReader> mergedReaders = new HashMap<>();
+    final Map<String, SegmentReader> openedReadOnlyClones = new HashMap<>();
+    // this function is used to control which SR are opened in order to keep track of them
+    // and to reuse them in the case we wait for merges in this getReader call.
+    IOUtils.IOFunction<SegmentCommitInfo, SegmentReader> readerFactory = sci -> {
+      final ReadersAndUpdates rld = getPooledInstance(sci, true);
+      try {
+        assert Thread.holdsLock(IndexWriter.this);
+        SegmentReader segmentReader = rld.getReadOnlyClone(IOContext.READ);
+        if (maxFullFlushMergeWaitMillis > 0) { // only track this if we actually do fullFlush merges
+          openedReadOnlyClones.put(sci.info.name, segmentReader);
+        }
+        return segmentReader;
+      } finally {
+        release(rld);
+      }
+    };
+    Closeable onGetReaderMergeResources = null;
+    SegmentInfos openingSegmentInfos = null;
     boolean success2 = false;
     try {
+      /* this is the essential part of the getReader method. We need to take care of the following things:
+       *  - flush all currently in-memory DWPTs to disk
+       *  - apply all deletes & updates to new and to the existing DWPTs
+       *  - prevent flushes and applying deletes of concurrently indexing DWPTs to be applied
+       *  - open a SDR on the updated SIS
+       *
+       * in order to prevent concurrent flushes we call DocumentsWriter#flushAllThreads that swaps out the deleteQueue
+       *  (this enforces a happens before relationship between this and the subsequent full flush) and informs the
+       * FlushControl (#markForFullFlush()) that it should prevent any new DWPTs from flushing until we are \
+       * done (DocumentsWriter#finishFullFlush(boolean)). All this is guarded by the fullFlushLock to prevent multiple
+       * full flushes from happening concurrently. Once the DocWriter has initiated a full flush we can sequentially flush
+       * and apply deletes & updates to the written segments without worrying about concurrently indexing DWPTs. The important
+       * aspect is that it all happens between DocumentsWriter#flushAllThread() and DocumentsWriter#finishFullFlush(boolean)
+       * since once the flush is marked as done deletes start to be applied to the segments on disk without guarantees that
+       * the corresponding added documents (in the update case) are flushed and visible when opening a SDR.
+       *
+       */
       boolean success = false;
       synchronized (fullFlushLock) {
         try {
@@ -100,7 +139,6 @@
           if (applyAllDeletes) {
             applyAllDeletesAndUpdates();
           }
-
           synchronized(this) {
 
             // NOTE: we cannot carry doc values updates in memory yet, so we always must write them through to disk and re-open each
@@ -108,15 +146,49 @@
 
             // TODO: we could instead just clone SIS and pull/incref readers in sync'd block, and then do this w/o IW's lock?
             // Must do this sync'd on IW to prevent a merge from completing at the last second and failing to write its DV updates:
-           writeReaderPool(writeAllDeletes);
+            writeReaderPool(writeAllDeletes);
 
             // Prevent segmentInfos from changing while opening the
             // reader; in theory we could instead do similar retry logic,
             // just like we do when loading segments_N
-            
-            r = StandardDirectoryReader.open(this, segmentInfos, applyAllDeletes, writeAllDeletes);
+            r = StandardDirectoryReader.open(this, readerFactory, segmentInfos, applyAllDeletes, writeAllDeletes);
             if (infoStream.isEnabled("IW")) {
               infoStream.message("IW", "return reader version=" + r.getVersion() + " reader=" + r);
+            }
+            if (maxFullFlushMergeWaitMillis > 0) {
+              // we take the SIS from the reader which has already pruned away fully deleted readers
+              // this makes pulling the readers below after the merge simpler since we can be safe that
+              // they are not closed. Every segment has a corresponding SR in the SDR we opened if we use
+              // this SIS
+              // we need to do this rather complicated management of SRs and infos since we can't wait for merges
+              // while we hold the fullFlushLock since the merge might hit a tragic event and that must not be reported
+              // while holding that lock. Merging outside of the lock ie. after calling docWriter.finishFullFlush(boolean) would
+              // yield wrong results because deletes might sneak in during the merge
+              openingSegmentInfos = r.getSegmentInfos().clone();
+              onGetReaderMerges = preparePointInTimeMerge(openingSegmentInfos, stopCollectingMergedReaders::get, MergeTrigger.GET_READER,
+                  sci -> {
+                    assert stopCollectingMergedReaders.get() == false : "illegal state  merge reader must be not pulled since we already stopped waiting for merges";
+                    SegmentReader apply = readerFactory.apply(sci);
+                    mergedReaders.put(sci.info.name, apply);
+                    // we need to incRef the files of the opened SR otherwise it's possible that another merge
+                    // removes the segment before we pass it on to the SDR
+                    deleter.incRef(sci.files());
+                  });
+              onGetReaderMergeResources = () -> {
+                // this needs to be closed once after we are done. In the case of an exception it releases
+                // all resources, closes the merged readers and decrements the files references.
+                // this only happens for readers that haven't been removed from the mergedReaders and release elsewhere
+                synchronized (this) {
+                  stopCollectingMergedReaders.set(true);
+                  IOUtils.close(mergedReaders.values().stream().map(sr -> (Closeable) () -> {
+                    try {
+                      deleter.decRef(sr.getSegmentInfo().files());
+                    } finally {
+                      sr.close();
+                    }
+                  }).collect(Collectors.toList()));
+                }
+              };
             }
           }
           success = true;
@@ -134,6 +206,19 @@
           }
         }
       }
+      if (onGetReaderMerges != null) { // only relevant if we do merge on getReader
+        StandardDirectoryReader mergedReader = finishGetReaderMerge(stopCollectingMergedReaders, mergedReaders,
+            openedReadOnlyClones, openingSegmentInfos, applyAllDeletes,
+            writeAllDeletes, onGetReaderMerges, maxFullFlushMergeWaitMillis);
+        if (mergedReader != null) {
+          try {
+            r.close();
+          } finally {
+            r = mergedReader;
+          }
+        }
+      }
+
       anyChanges |= maybeMerge.getAndSet(false);
       if (anyChanges) {
         maybeMerge(config.getMergePolicy(), MergeTrigger.FULL_FLUSH, UNBOUNDED_MAX_MERGE_SEGMENTS);
@@ -148,10 +233,12 @@
     } finally {
       if (!success2) {
         try {
-          IOUtils.closeWhileHandlingException(r);
+          IOUtils.closeWhileHandlingException(r, onGetReaderMergeResources);
         } finally {
           maybeCloseOnTragicEvent();
         }
+      } else {
+        IOUtils.close(onGetReaderMergeResources);
       }
     }
     return r;

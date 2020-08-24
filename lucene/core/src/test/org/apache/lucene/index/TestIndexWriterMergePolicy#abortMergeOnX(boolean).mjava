@@ -1,13 +1,10 @@
-  /**
-   * This test makes sure we release the merge readers on abort. MDW will fail if it
-   * can't close all files
-   */
-  public void testAbortCommitMerge() throws IOException, InterruptedException {
+  void abortMergeOnX(boolean useGetReader) throws IOException, InterruptedException {
     try (Directory directory = newDirectory()) {
       CountDownLatch waitForMerge = new CountDownLatch(1);
       CountDownLatch waitForDeleteAll = new CountDownLatch(1);
       try (IndexWriter writer = new IndexWriter(directory, newIndexWriterConfig()
-          .setMergePolicy(MERGE_ON_COMMIT_POLICY).setMaxCommitMergeWaitMillis(30 * 1000)
+          .setMergePolicy(new MergeOnXMergePolicy(newMergePolicy(), useGetReader ? MergeTrigger.GET_READER : MergeTrigger.COMMIT))
+          .setMaxFullFlushMergeWaitMillis(30 * 1000)
           .setMergeScheduler(new SerialMergeScheduler() {
             @Override
             public synchronized void merge(MergeSource mergeSource, MergeTrigger trigger) throws IOException {
@@ -31,10 +28,20 @@
         writer.flush();
         writer.addDocument(d2);
         Thread t = new Thread(() -> {
+          boolean success = false;
           try {
-            writer.commit();
+            if (useGetReader) {
+              writer.getReader().close();
+            } else {
+              writer.commit();
+            }
+            success = true;
           } catch (IOException e) {
             throw new AssertionError(e);
+          } finally {
+            if (success == false) {
+              waitForMerge.countDown();
+            }
           }
         });
         t.start();

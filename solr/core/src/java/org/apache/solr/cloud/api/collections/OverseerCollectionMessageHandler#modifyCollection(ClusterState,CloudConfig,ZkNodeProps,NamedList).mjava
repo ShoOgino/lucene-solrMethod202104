@@ -1,0 +1,51 @@
+  private void modifyCollection(ClusterState clusterState, CloudConfig cloudConfig, ZkNodeProps message, @SuppressWarnings({"rawtypes"})NamedList results)
+      throws Exception {
+
+    final String collectionName = message.getStr(ZkStateReader.COLLECTION_PROP);
+    //the rest of the processing is based on writing cluster state properties
+    //remove the property here to avoid any errors down the pipeline due to this property appearing
+    String configName = (String) message.getProperties().remove(CollectionAdminParams.COLL_CONF);
+
+    if(configName != null) {
+      validateConfigOrThrowSolrException(configName);
+
+      createConfNode(cloudManager.getDistribStateManager(), configName, collectionName);
+      reloadCollection(null, cloudConfig, new ZkNodeProps(NAME, collectionName), results);
+    }
+
+    overseer.offerStateUpdate(Utils.toJSON(message));
+
+    TimeOut timeout = new TimeOut(30, TimeUnit.SECONDS, timeSource);
+    boolean areChangesVisible = true;
+    while (!timeout.hasTimedOut()) {
+      DocCollection collection = cloudManager.getClusterStateProvider().getClusterState().getCollection(collectionName);
+      areChangesVisible = true;
+      for (Map.Entry<String,Object> updateEntry : message.getProperties().entrySet()) {
+        String updateKey = updateEntry.getKey();
+
+        if (!updateKey.equals(ZkStateReader.COLLECTION_PROP)
+            && !updateKey.equals(Overseer.QUEUE_OPERATION)
+            && updateEntry.getValue() != null // handled below in a separate conditional
+            && !updateEntry.getValue().equals(collection.get(updateKey))) {
+          areChangesVisible = false;
+          break;
+        }
+
+        if (updateEntry.getValue() == null && collection.containsKey(updateKey)) {
+          areChangesVisible = false;
+          break;
+        }
+      }
+      if (areChangesVisible) break;
+      timeout.sleep(100);
+    }
+
+    if (!areChangesVisible)
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Could not modify collection " + message);
+
+    // if switching to/from read-only mode reload the collection
+    if (message.keySet().contains(ZkStateReader.READ_ONLY)) {
+      reloadCollection(null, cloudConfig, new ZkNodeProps(NAME, collectionName), results);
+    }
+  }
+

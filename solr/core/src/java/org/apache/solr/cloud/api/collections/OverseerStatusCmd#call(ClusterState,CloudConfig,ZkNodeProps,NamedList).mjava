@@ -1,0 +1,72 @@
+  @Override
+  @SuppressWarnings("unchecked")
+  public void call(ClusterState state, CloudConfig cloudConfig, ZkNodeProps message, @SuppressWarnings({"rawtypes"})NamedList results) throws Exception {
+    ZkStateReader zkStateReader = ocmh.zkStateReader;
+    String leaderNode = OverseerTaskProcessor.getLeaderNode(zkStateReader.getZkClient());
+    results.add("leader", leaderNode);
+    Stat stat = new Stat();
+    zkStateReader.getZkClient().getData("/overseer/queue",null, stat, true);
+    results.add("overseer_queue_size", stat.getNumChildren());
+    stat = new Stat();
+    zkStateReader.getZkClient().getData("/overseer/queue-work",null, stat, true);
+    results.add("overseer_work_queue_size", stat.getNumChildren());
+    stat = new Stat();
+    zkStateReader.getZkClient().getData("/overseer/collection-queue-work",null, stat, true);
+    results.add("overseer_collection_queue_size", stat.getNumChildren());
+
+    @SuppressWarnings({"rawtypes"})
+    NamedList overseerStats = new NamedList();
+    @SuppressWarnings({"rawtypes"})
+    NamedList collectionStats = new NamedList();
+    @SuppressWarnings({"rawtypes"})
+    NamedList stateUpdateQueueStats = new NamedList();
+    @SuppressWarnings({"rawtypes"})
+    NamedList workQueueStats = new NamedList();
+    @SuppressWarnings({"rawtypes"})
+    NamedList collectionQueueStats = new NamedList();
+    Stats stats = ocmh.stats;
+    for (Map.Entry<String, Stats.Stat> entry : stats.getStats().entrySet()) {
+      String key = entry.getKey();
+      NamedList<Object> lst = new SimpleOrderedMap<>();
+      if (key.startsWith("collection_"))  {
+        collectionStats.add(key.substring(11), lst);
+        int successes = stats.getSuccessCount(entry.getKey());
+        int errors = stats.getErrorCount(entry.getKey());
+        lst.add("requests", successes);
+        lst.add("errors", errors);
+        List<Stats.FailedOp> failureDetails = stats.getFailureDetails(key);
+        if (failureDetails != null) {
+          List<SimpleOrderedMap<Object>> failures = new ArrayList<>();
+          for (Stats.FailedOp failedOp : failureDetails) {
+            SimpleOrderedMap<Object> fail = new SimpleOrderedMap<>();
+            fail.add("request", failedOp.req.getProperties());
+            fail.add("response", failedOp.resp.getResponse());
+            failures.add(fail);
+          }
+          lst.add("recent_failures", failures);
+        }
+      } else if (key.startsWith("/overseer/queue_"))  {
+        stateUpdateQueueStats.add(key.substring(16), lst);
+      } else if (key.startsWith("/overseer/queue-work_"))  {
+        workQueueStats.add(key.substring(21), lst);
+      } else if (key.startsWith("/overseer/collection-queue-work_"))  {
+        collectionQueueStats.add(key.substring(32), lst);
+      } else  {
+        // overseer stats
+        overseerStats.add(key, lst);
+        int successes = stats.getSuccessCount(entry.getKey());
+        int errors = stats.getErrorCount(entry.getKey());
+        lst.add("requests", successes);
+        lst.add("errors", errors);
+      }
+      Timer timer = entry.getValue().requestTime;
+      MetricUtils.addMetrics(lst, timer);
+    }
+    results.add("overseer_operations", overseerStats);
+    results.add("collection_operations", collectionStats);
+    results.add("overseer_queue", stateUpdateQueueStats);
+    results.add("overseer_internal_queue", workQueueStats);
+    results.add("collection_queue", collectionQueueStats);
+
+  }
+

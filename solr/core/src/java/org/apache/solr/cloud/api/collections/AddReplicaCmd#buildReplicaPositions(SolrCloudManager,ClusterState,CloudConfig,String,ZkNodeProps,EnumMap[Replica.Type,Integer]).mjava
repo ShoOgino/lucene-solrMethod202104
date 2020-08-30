@@ -1,0 +1,49 @@
+  public static List<ReplicaPosition> buildReplicaPositions(SolrCloudManager cloudManager, ClusterState clusterState, CloudConfig cloudConfig,
+                                                            String collectionName, ZkNodeProps message,
+                                                            EnumMap<Replica.Type, Integer> replicaTypeVsCount) throws IOException, InterruptedException {
+    boolean skipCreateReplicaInClusterState = message.getBool(SKIP_CREATE_REPLICA_IN_CLUSTER_STATE, false);
+    boolean skipNodeAssignment = message.getBool(CollectionAdminParams.SKIP_NODE_ASSIGNMENT, false);
+    String sliceName = message.getStr(SHARD_ID_PROP);
+    DocCollection collection = clusterState.getCollection(collectionName);
+
+    int numNrtReplicas = replicaTypeVsCount.get(Replica.Type.NRT);
+    int numPullReplicas = replicaTypeVsCount.get(Replica.Type.PULL);
+    int numTlogReplicas = replicaTypeVsCount.get(Replica.Type.TLOG);
+    int totalReplicas = numNrtReplicas + numPullReplicas + numTlogReplicas;
+
+    String node = message.getStr(CoreAdminParams.NODE);
+    Object createNodeSetStr = message.get(OverseerCollectionMessageHandler.CREATE_NODE_SET);
+    if (createNodeSetStr == null) {
+      if (node != null) {
+        message.getProperties().put(OverseerCollectionMessageHandler.CREATE_NODE_SET, node);
+        createNodeSetStr = node;
+      }
+    }
+
+    List<ReplicaPosition> positions = null;
+    if (!skipCreateReplicaInClusterState && !skipNodeAssignment) {
+
+      positions = Assign.getNodesForNewReplicas(clusterState, cloudConfig, collection.getName(), sliceName, numNrtReplicas,
+                    numTlogReplicas, numPullReplicas, createNodeSetStr, cloudManager);
+    }
+
+    if (positions == null)  {
+      assert node != null;
+      if (node == null) {
+        // in case asserts are disabled
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,
+            "A node should have been identified to add replica but wasn't. Please inform solr developers at SOLR-9317");
+      }
+      // it is unlikely that multiple replicas have been requested to be created on
+      // the same node, but we've got to accommodate.
+      positions = new ArrayList<>(totalReplicas);
+      int i = 0;
+      for (Map.Entry<Replica.Type, Integer> entry : replicaTypeVsCount.entrySet()) {
+        for (int j = 0; j < entry.getValue(); j++) {
+          positions.add(new ReplicaPosition(sliceName, i++, entry.getKey(), node));
+        }
+      }
+    }
+    return positions;
+  }
+

@@ -1,0 +1,89 @@
+  private ModifiableSolrParams getReplicaParams(ClusterState clusterState, CloudConfig cloudConfig, ZkNodeProps message, @SuppressWarnings({"rawtypes"})NamedList results, String collectionName, DocCollection coll, boolean skipCreateReplicaInClusterState, String asyncId, ShardHandler shardHandler, CreateReplica createReplica) throws IOException, InterruptedException, KeeperException {
+    if (coll.getStr(WITH_COLLECTION) != null) {
+      String withCollectionName = coll.getStr(WITH_COLLECTION);
+      DocCollection withCollection = clusterState.getCollection(withCollectionName);
+      if (withCollection.getActiveSlices().size() > 1)  {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "The `withCollection` must have only one shard, found: " + withCollection.getActiveSlices().size());
+      }
+      String withCollectionShard = withCollection.getActiveSlices().iterator().next().getName();
+
+      List<Replica> replicas = withCollection.getReplicas(createReplica.node);
+      if (replicas == null || replicas.isEmpty()) {
+        // create a replica of withCollection on the identified node before proceeding further
+        ZkNodeProps props = new ZkNodeProps(
+            Overseer.QUEUE_OPERATION, ADDREPLICA.toString(),
+            ZkStateReader.COLLECTION_PROP, withCollectionName,
+            ZkStateReader.SHARD_ID_PROP, withCollectionShard,
+            "node", createReplica.node,
+            // since we already computed node assignments (which include assigning a node for this withCollection replica) we want to skip the assignment step
+            CollectionAdminParams.SKIP_NODE_ASSIGNMENT, "true",
+            CommonAdminParams.WAIT_FOR_FINAL_STATE, Boolean.TRUE.toString()); // set to true because we want `withCollection` to be ready after this collection is created
+        addReplica(clusterState, cloudConfig, props, results, null);
+      }
+    }
+
+    ModifiableSolrParams params = new ModifiableSolrParams();
+
+    ZkStateReader zkStateReader = ocmh.zkStateReader;
+    if (!skipCreateReplicaInClusterState) {
+      ZkNodeProps props = new ZkNodeProps(
+          Overseer.QUEUE_OPERATION, ADDREPLICA.toLower(),
+          ZkStateReader.COLLECTION_PROP, collectionName,
+          ZkStateReader.SHARD_ID_PROP, createReplica.sliceName,
+          ZkStateReader.CORE_NAME_PROP, createReplica.coreName,
+          ZkStateReader.STATE_PROP, Replica.State.DOWN.toString(),
+          ZkStateReader.BASE_URL_PROP, zkStateReader.getBaseUrlForNodeName(createReplica.node),
+          ZkStateReader.NODE_NAME_PROP, createReplica.node,
+          ZkStateReader.REPLICA_TYPE, createReplica.replicaType.name());
+      if (createReplica.coreNodeName != null) {
+        props = props.plus(ZkStateReader.CORE_NODE_NAME_PROP, createReplica.coreNodeName);
+      }
+      try {
+        ocmh.overseer.offerStateUpdate(Utils.toJSON(props));
+      } catch (Exception e) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Exception updating Overseer state queue", e);
+      }
+    }
+    params.set(CoreAdminParams.CORE_NODE_NAME,
+        ocmh.waitToSeeReplicasInState(collectionName, Collections.singletonList(createReplica.coreName)).get(createReplica.coreName).getName());
+
+    String configName = zkStateReader.readConfigName(collectionName);
+    String routeKey = message.getStr(ShardParams._ROUTE_);
+    String dataDir = message.getStr(CoreAdminParams.DATA_DIR);
+    String ulogDir = message.getStr(CoreAdminParams.ULOG_DIR);
+    String instanceDir = message.getStr(CoreAdminParams.INSTANCE_DIR);
+
+    params.set(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.CREATE.toString());
+    params.set(CoreAdminParams.NAME, createReplica.coreName);
+    params.set(COLL_CONF, configName);
+    params.set(CoreAdminParams.COLLECTION, collectionName);
+    params.set(CoreAdminParams.REPLICA_TYPE, createReplica.replicaType.name());
+    if (createReplica.sliceName != null) {
+      params.set(CoreAdminParams.SHARD, createReplica.sliceName);
+    } else if (routeKey != null) {
+      Collection<Slice> slices = coll.getRouter().getSearchSlicesSingle(routeKey, null, coll);
+      if (slices.isEmpty()) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "No active shard serving _route_=" + routeKey + " found");
+      } else {
+        params.set(CoreAdminParams.SHARD, slices.iterator().next().getName());
+      }
+    } else {
+      throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Specify either 'shard' or _route_ param");
+    }
+    if (dataDir != null) {
+      params.set(CoreAdminParams.DATA_DIR, dataDir);
+    }
+    if (ulogDir != null) {
+      params.set(CoreAdminParams.ULOG_DIR, ulogDir);
+    }
+    if (instanceDir != null) {
+      params.set(CoreAdminParams.INSTANCE_DIR, instanceDir);
+    }
+    if (createReplica.coreNodeName != null) {
+      params.set(CoreAdminParams.CORE_NODE_NAME, createReplica.coreNodeName);
+    }
+    ocmh.addPropertyParams(message, params);
+
+    return params;
+  }
+

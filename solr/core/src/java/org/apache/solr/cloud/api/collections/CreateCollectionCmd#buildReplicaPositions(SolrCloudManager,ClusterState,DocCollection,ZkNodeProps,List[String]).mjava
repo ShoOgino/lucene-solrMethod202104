@@ -1,0 +1,49 @@
+  public static List<ReplicaPosition> buildReplicaPositions(SolrCloudManager cloudManager, ClusterState clusterState,
+                                                            DocCollection docCollection,
+                                                            ZkNodeProps message,
+                                                            List<String> shardNames) throws IOException, InterruptedException, Assign.AssignmentException {
+    final String collectionName = message.getStr(NAME);
+    // look at the replication factor and see if it matches reality
+    // if it does not, find best nodes to create more cores
+    int numTlogReplicas = message.getInt(TLOG_REPLICAS, 0);
+    int numNrtReplicas = message.getInt(NRT_REPLICAS, message.getInt(REPLICATION_FACTOR, numTlogReplicas>0?0:1));
+    int numPullReplicas = message.getInt(PULL_REPLICAS, 0);
+
+    int numSlices = shardNames.size();
+
+    // we need to look at every node and see how many cores it serves
+    // add our new cores to existing nodes serving the least number of cores
+    // but (for now) require that each core goes on a distinct node.
+
+    List<ReplicaPosition> replicaPositions;
+    List<String> nodeList = Assign.getLiveOrLiveAndCreateNodeSetList(clusterState.getLiveNodes(), message, OverseerCollectionMessageHandler.RANDOM);
+    if (nodeList.isEmpty()) {
+      log.warn("It is unusual to create a collection ({}) without cores.", collectionName);
+
+      replicaPositions = new ArrayList<>();
+    } else {
+      int totalNumReplicas = numNrtReplicas + numTlogReplicas + numPullReplicas;
+      if (totalNumReplicas > nodeList.size()) {
+        log.warn("Specified number of replicas of {} on collection {} is higher than the number of Solr instances currently live or live and part of your {}({}). {}"
+            , totalNumReplicas
+            , collectionName
+            , OverseerCollectionMessageHandler.CREATE_NODE_SET
+            , nodeList.size()
+            , "It's unusual to run two replica of the same slice on the same Solr-instance.");
+      }
+
+      Assign.AssignRequest assignRequest = new Assign.AssignRequestBuilder()
+          .forCollection(collectionName)
+          .forShard(shardNames)
+          .assignNrtReplicas(numNrtReplicas)
+          .assignTlogReplicas(numTlogReplicas)
+          .assignPullReplicas(numPullReplicas)
+          .onNodes(nodeList)
+          .build();
+      Assign.AssignStrategyFactory assignStrategyFactory = new Assign.AssignStrategyFactory(cloudManager);
+      Assign.AssignStrategy assignStrategy = assignStrategyFactory.create(clusterState, docCollection);
+      replicaPositions = assignStrategy.assign(cloudManager, assignRequest);
+    }
+    return replicaPositions;
+  }
+

@@ -1,0 +1,77 @@
+    /** 
+     * Loops over the 'model' of every document we've indexed, asserting that
+     * parent/child queries wrapping an '<code>id:foo</code> using various paths
+     * match the expected ancestors/descendents
+     */
+    public void checkParentAndChildQueriesOfEachDocument() {
+      assertFalse("You didn't build any docs", allDocs.isEmpty());
+      
+      for (String doc_id : allDocs.keySet()) {
+        final String doc_path = allDocs.get(doc_id).getFieldValue("test_path_s").toString();
+        
+        if ( ! doc_path.equals("/") ) {
+          
+          // doc_id -> descdentId must have at least one ancestor (since it's not a root level document)
+          final String descendentId = doc_id;
+          assert allDocs.get(descendentId).containsKey("ancestor_ids_ss");
+          final List<Object> allAncestorIds = new ArrayList<>(allDocs.get(descendentId).getFieldValues("ancestor_ids_ss"));
+          
+          // pick a random ancestor to use in our testing...
+          final String ancestorId = allAncestorIds.get(random().nextInt(allAncestorIds.size())).toString();
+          final String ancestor_path = allDocs.get(ancestorId).getFieldValue("test_path_s").toString();
+          
+          final Collection<Object> allOfAncestorsDescendentIds
+            = allDocs.get(ancestorId).getFieldValues("descendent_ids_ss");
+          
+          assertTrue("Sanity check " + ancestorId + " ancestor of " + descendentId,
+                     allOfAncestorsDescendentIds.contains(descendentId));
+          
+          // now we should be able to assert that a 'parent' query wrapped around a query for the descendentId
+          // using the ancestor_path should match exactly one doc: our ancestorId...
+          assertQ(req(parentQueryMaker(ancestor_path, "id:" + descendentId),
+                      "_trace_path_tested", ancestor_path,
+                      "fl", "id",
+                      "indent", "true")
+                  , "//result/@numFound=1"
+                  , "//doc/str[@name='id'][.='"+ancestorId+"']"
+                  );
+          
+          // meanwhile, a 'child' query wrapped arround a query for the ancestorId, using the ancestor_path,
+          // should match all of it's descendents (for simplicity we'll check just the numFound and the
+          // 'descendentId' we started with)
+          assertQ(req(childQueryMaker(ancestor_path, "id:" + ancestorId),
+                      "_trace_path_tested", ancestor_path,
+                      "rows", "9999",
+                      "fl", "id",
+                      "indent", "true")
+                  , "//result/@numFound="+allOfAncestorsDescendentIds.size()
+                  , "//doc/str[@name='id'][.='"+descendentId+"']"
+                  );
+          
+        }
+        
+        // regardless of wether doc_id has an ancestor or not, a 'parent' query with a path that isn't a
+        // prefix of the path of the (child) doc_id in the wrapped query should match 0 docs w/o failing
+        assertQ(req(parentQueryMaker("/xxx/yyy", "id:" + doc_id),
+                    "_trace_path_tested", "/xxx/yyy",
+                    "indent", "true")
+                , "//result/@numFound=0");
+        
+        // likewise: a 'child' query wrapped around a query for our doc_id (regardless of wether if has
+        // any kids), using a path that doesn't start with the same prefix as doc_id, should match 0
+        // docs w/o failing
+        assertQ(req(childQueryMaker("/xxx/yyy", "id:" + doc_id),
+                    "_trace_path_tested", "/xxx/yyy",
+                    "indent", "true")
+                , "//result/@numFound=0");
+        
+        // lastly: wrapping a child query around a query for our doc_id, using a path that "extends" 
+        // the doc_id's path should always get 0 results if that path doesn't match any actual kids
+        // (regardless of wether doc_id has any children/descendents)
+        assertQ(req(childQueryMaker(doc_path + "/xxx/yyy", "id:" + doc_id),
+                    "_trace_path_tested", doc_path + "/xxx/yyy",
+                    "indent", "true")
+                , "//result/@numFound=0");
+      }
+    }
+

@@ -1,0 +1,90 @@
+  @Override
+  public DocValuesProducer getDocValuesReader() {
+    final DocValuesProducer delegate = in.getDocValuesReader();
+    return new DocValuesProducer() {
+      @Override
+      public NumericDocValues getNumeric(FieldInfo field) throws IOException {
+        return produceNumericDocValues(field,delegate.getNumeric(field), cachedNumericDVs);
+      }
+
+      @Override
+      public BinaryDocValues getBinary(FieldInfo field) throws IOException {
+        final BinaryDocValues oldDocValues = delegate.getBinary(field);
+        BinaryDocValuesWriter.CachedBinaryDVs dvs;
+        synchronized (cachedBinaryDVs) {
+          dvs = cachedBinaryDVs.get(field);
+          if (dvs == null) {
+            dvs = BinaryDocValuesWriter.sortDocValues(maxDoc(), docMap, oldDocValues);
+            cachedBinaryDVs.put(field.name, dvs);
+          }
+        }
+        return new BinaryDocValuesWriter.SortingBinaryDocValues(dvs);
+      }
+
+      @Override
+      public SortedDocValues getSorted(FieldInfo field) throws IOException {
+        SortedDocValues oldDocValues = delegate.getSorted(field);
+        int[] ords;
+        synchronized (cachedSortedDVs) {
+          ords = cachedSortedDVs.get(field);
+          if (ords == null) {
+            ords = new int[maxDoc()];
+            Arrays.fill(ords, -1);
+            int docID;
+            while ((docID = oldDocValues.nextDoc()) != NO_MORE_DOCS) {
+              int newDocID = docMap.oldToNew(docID);
+              ords[newDocID] = oldDocValues.ordValue();
+            }
+            cachedSortedDVs.put(field.name, ords);
+          }
+        }
+
+        return new SortedDocValuesWriter.SortingSortedDocValues(oldDocValues, ords);
+      }
+
+      @Override
+      public SortedNumericDocValues getSortedNumeric(FieldInfo field) throws IOException {
+        final SortedNumericDocValues oldDocValues = delegate.getSortedNumeric(field);
+        long[][] values;
+        synchronized (cachedSortedNumericDVs) {
+          values = cachedSortedNumericDVs.get(field);
+          if (values == null) {
+            values = SortedNumericDocValuesWriter.sortDocValues(maxDoc(), docMap, oldDocValues);
+            cachedSortedNumericDVs.put(field.name, values);
+          }
+        }
+
+        return new SortedNumericDocValuesWriter.SortingSortedNumericDocValues(oldDocValues, values);
+      }
+
+      @Override
+      public SortedSetDocValues getSortedSet(FieldInfo field) throws IOException {
+        SortedSetDocValues oldDocValues = delegate.getSortedSet(field);
+        long[][] ords;
+        synchronized (cachedSortedSetDVs) {
+          ords = cachedSortedSetDVs.get(field);
+          if (ords == null) {
+            ords = SortedSetDocValuesWriter.sortDocValues(maxDoc(), docMap, oldDocValues);
+            cachedSortedSetDVs.put(field.name, ords);
+          }
+        }
+        return new SortedSetDocValuesWriter.SortingSortedSetDocValues(oldDocValues, ords);
+      }
+
+      @Override
+      public void checkIntegrity() throws IOException {
+        delegate.checkIntegrity();
+      }
+
+      @Override
+      public void close() throws IOException {
+        delegate.close();
+      }
+
+      @Override
+      public long ramBytesUsed() {
+        return delegate.ramBytesUsed();
+      }
+    };
+  }
+

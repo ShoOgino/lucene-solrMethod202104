@@ -1,0 +1,35 @@
+  private void verify(BKDConfig config, Directory dir, PointWriter points, long start, long end, long middle, int sortedOnHeap) throws IOException{
+    BKDRadixSelector radixSelector = new BKDRadixSelector(config, sortedOnHeap, dir, "test");
+    int dataOnlyDims = config.numDims - config.numIndexDims;
+    // we only split by indexed dimension so we check for each only those dimension
+    for (int splitDim = 0; splitDim < config.numIndexDims; splitDim++) {
+      // We need to make a copy of the data as it is deleted in the process
+      BKDRadixSelector.PathSlice inputSlice = new BKDRadixSelector.PathSlice(copyPoints(config, dir, points), 0, points.count());
+      int commonPrefixLengthInput = getRandomCommonPrefix(config, inputSlice, splitDim);
+      BKDRadixSelector.PathSlice[] slices = new BKDRadixSelector.PathSlice[2];
+      byte[] partitionPoint = radixSelector.select(inputSlice, slices, start, end, middle, splitDim, commonPrefixLengthInput);
+      assertEquals(middle - start, slices[0].count);
+      assertEquals(end - middle, slices[1].count);
+      // check that left and right slices contain the correct points
+      byte[] max = getMax(config, slices[0], splitDim);
+      byte[] min = getMin(config, slices[1], splitDim);
+      int cmp = Arrays.compareUnsigned(max, 0, config.bytesPerDim, min, 0, config.bytesPerDim);
+      assertTrue(cmp <= 0);
+      if (cmp == 0) {
+        byte[] maxDataDim = getMaxDataDimension(config, slices[0], max, splitDim);
+        byte[] minDataDim = getMinDataDimension(config, slices[1], min, splitDim);
+        cmp = Arrays.compareUnsigned(maxDataDim, 0, dataOnlyDims * config.bytesPerDim, minDataDim, 0, dataOnlyDims * config.bytesPerDim);
+        assertTrue(cmp <= 0);
+        if (cmp == 0) {
+          int maxDocID = getMaxDocId(config, slices[0], splitDim, partitionPoint, maxDataDim);
+          int minDocId = getMinDocId(config, slices[1], splitDim, partitionPoint, minDataDim);
+          assertTrue(minDocId >= maxDocID);
+        }
+      }
+      assertTrue(Arrays.equals(partitionPoint, min));
+      slices[0].writer.destroy();
+      slices[1].writer.destroy();
+    }
+    points.destroy();
+  }
+

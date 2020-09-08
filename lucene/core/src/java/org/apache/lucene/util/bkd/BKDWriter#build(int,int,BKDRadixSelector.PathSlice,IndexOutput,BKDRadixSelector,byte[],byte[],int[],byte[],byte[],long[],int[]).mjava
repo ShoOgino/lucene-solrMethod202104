@@ -31,17 +31,17 @@
 
       int sortedDim = 0;
       int sortedDimCardinality = Integer.MAX_VALUE;
-      FixedBitSet[] usedBytes = new FixedBitSet[numDataDims];
-      for (int dim = 0; dim < numDataDims; ++dim) {
-        if (commonPrefixLengths[dim] < bytesPerDim) {
+      FixedBitSet[] usedBytes = new FixedBitSet[config.numDims];
+      for (int dim = 0; dim < config.numDims; ++dim) {
+        if (commonPrefixLengths[dim] < config.bytesPerDim) {
           usedBytes[dim] = new FixedBitSet(256);
         }
       }
       //Find the dimension to compress
-      for (int dim = 0; dim < numDataDims; dim++) {
+      for (int dim = 0; dim < config.numDims; dim++) {
         int prefix = commonPrefixLengths[dim];
-        if (prefix < bytesPerDim) {
-          int offset = dim * bytesPerDim;
+        if (prefix < config.bytesPerDim) {
+          int offset = dim * config.bytesPerDim;
           for (int i = from; i < to; ++i) {
             PointValue value = heapSource.getPackedValueSlice(i);
             BytesRef packedValue = value.packedValue();
@@ -59,7 +59,7 @@
       // sort the chosen dimension
       radixSelector.heapRadixSort(heapSource, from, to, sortedDim, commonPrefixLengths[sortedDim]);
       // compute cardinality
-      int leafCardinality = heapSource.computeCardinality(from ,to, numDataDims, bytesPerDim, commonPrefixLengths);
+      int leafCardinality = heapSource.computeCardinality(from, to, commonPrefixLengths);
 
       // Save the block file pointer:
       leafBlockFPs[leavesOffset] = out.getFilePointer();
@@ -88,7 +88,7 @@
         final BytesRef scratch = new BytesRef();
 
         {
-          scratch.length = packedBytesLength;
+          scratch.length = config.packedBytesLength;
         }
 
         @Override
@@ -97,7 +97,7 @@
           return value.packedValue();
         }
       };
-      assert valuesInOrderAndBounds(count, sortedDim, minPackedValue, maxPackedValue, packedValues,
+      assert valuesInOrderAndBounds(config, count, sortedDim, minPackedValue, maxPackedValue, packedValues,
           docIDs, 0);
       writeLeafBlockPackedValues(out, commonPrefixLengths, count, sortedDim, packedValues, leafCardinality);
 
@@ -105,13 +105,13 @@
       // Inner node: partition/recurse
 
       final int splitDim;
-      if (numIndexDims == 1) {
+      if (config.numIndexDims == 1) {
         splitDim = 0;
       } else {
         // for dimensions > 2 we recompute the bounds for the current inner node to help the algorithm choose best
         // split dimensions. Because it is an expensive operation, the frequency we recompute the bounds is given
         // by SPLITS_BEFORE_EXACT_BOUNDS.
-        if (numLeaves != leafBlockFPs.length && numIndexDims > 2 && Arrays.stream(parentSplits).sum() % SPLITS_BEFORE_EXACT_BOUNDS == 0) {
+        if (numLeaves != leafBlockFPs.length && config.numIndexDims > 2 && Arrays.stream(parentSplits).sum() % SPLITS_BEFORE_EXACT_BOUNDS == 0) {
           computePackedValueBounds(points, minPackedValue, maxPackedValue);
         }
         splitDim = split(minPackedValue, maxPackedValue, parentSplits);
@@ -122,15 +122,15 @@
       // How many leaves will be in the left tree:
       final int numLeftLeafNodes = getNumLeftLeafNodes(numLeaves);
       // How many points will be in the left tree:
-      final long leftCount = numLeftLeafNodes * maxPointsInLeafNode;
+      final long leftCount = numLeftLeafNodes * config.maxPointsInLeafNode;
 
       BKDRadixSelector.PathSlice[] slices = new BKDRadixSelector.PathSlice[2];
 
-      int commonPrefixLen = Arrays.mismatch(minPackedValue, splitDim * bytesPerDim,
-          splitDim * bytesPerDim + bytesPerDim, maxPackedValue, splitDim * bytesPerDim,
-          splitDim * bytesPerDim + bytesPerDim);
+      int commonPrefixLen = Arrays.mismatch(minPackedValue, splitDim * config.bytesPerDim,
+          splitDim * config.bytesPerDim + config.bytesPerDim, maxPackedValue, splitDim * config.bytesPerDim,
+          splitDim * config.bytesPerDim + config.bytesPerDim);
       if (commonPrefixLen == -1) {
-        commonPrefixLen = bytesPerDim;
+        commonPrefixLen = config.bytesPerDim;
       }
 
       byte[] splitValue = radixSelector.select(points, slices, points.start, points.start + points.count,  points.start + leftCount, splitDim, commonPrefixLen);
@@ -139,17 +139,17 @@
       final int splitValueOffset = rightOffset - 1;
 
       splitDimensionValues[splitValueOffset] = (byte) splitDim;
-      int address = splitValueOffset * bytesPerDim;
-      System.arraycopy(splitValue, 0, splitPackedValues, address, bytesPerDim);
+      int address = splitValueOffset * config.bytesPerDim;
+      System.arraycopy(splitValue, 0, splitPackedValues, address, config.bytesPerDim);
 
-      byte[] minSplitPackedValue = new byte[packedIndexBytesLength];
-      System.arraycopy(minPackedValue, 0, minSplitPackedValue, 0, packedIndexBytesLength);
+      byte[] minSplitPackedValue = new byte[config.packedIndexBytesLength];
+      System.arraycopy(minPackedValue, 0, minSplitPackedValue, 0, config.packedIndexBytesLength);
 
-      byte[] maxSplitPackedValue = new byte[packedIndexBytesLength];
-      System.arraycopy(maxPackedValue, 0, maxSplitPackedValue, 0, packedIndexBytesLength);
+      byte[] maxSplitPackedValue = new byte[config.packedIndexBytesLength];
+      System.arraycopy(maxPackedValue, 0, maxSplitPackedValue, 0, config.packedIndexBytesLength);
 
-      System.arraycopy(splitValue, 0, minSplitPackedValue, splitDim * bytesPerDim, bytesPerDim);
-      System.arraycopy(splitValue, 0, maxSplitPackedValue, splitDim * bytesPerDim, bytesPerDim);
+      System.arraycopy(splitValue, 0, minSplitPackedValue, splitDim * config.bytesPerDim, config.bytesPerDim);
+      System.arraycopy(splitValue, 0, maxSplitPackedValue, splitDim * config.bytesPerDim, config.bytesPerDim);
 
       parentSplits[splitDim]++;
       // Recurse on left tree:

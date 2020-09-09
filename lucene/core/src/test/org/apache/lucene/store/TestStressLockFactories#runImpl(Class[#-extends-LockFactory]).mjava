@@ -1,0 +1,51 @@
+  private void runImpl(Class<? extends LockFactory> impl) throws Exception {
+    final int clients = TEST_NIGHTLY ? 5 : 2;
+    final String host = "127.0.0.1";
+    final int delay = 1;
+    final int rounds = (TEST_NIGHTLY ? 30000 : 500) * RANDOM_MULTIPLIER;
+    
+    final Path dir = createTempDir(impl.getSimpleName());
+    
+    final List<Process> processes = new ArrayList<>(clients);
+
+    LockVerifyServer.run(host, clients, addr -> {
+      // spawn clients as separate Java processes
+      for (int i = 0; i < clients; i++) {
+        try {
+          processes.add(applyRedirection(new ProcessBuilder(
+              Paths.get(System.getProperty("java.home"), "bin", "java").toString(),
+              "-Xmx32M",
+              "-cp",
+              System.getProperty("java.class.path"),
+              LockStressTest.class.getName(),
+              Integer.toString(i),
+              addr.getHostString(),
+              Integer.toString(addr.getPort()),
+              impl.getName(),
+              dir.toString(),
+              Integer.toString(delay),
+              Integer.toString(rounds)
+            ), i, dir).start());
+        } catch (IOException ioe) {
+          throw new AssertionError("Failed to start child process.", ioe);
+        }
+      }
+    });
+     
+    // wait for all processes to exit...
+    try {
+      for (Process p : processes) {
+        if (p.waitFor(15, TimeUnit.SECONDS)) {
+          assertEquals("Process " + p.pid() + " died abnormally?", 0, p.waitFor());
+        }
+      }
+    } finally {
+      // kill all processes, which are still alive.
+      for (Process p : processes) {
+        if (p.isAlive()) {
+          p.destroyForcibly().waitFor();
+        }
+      }
+    }
+  }
+

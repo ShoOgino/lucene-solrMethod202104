@@ -1,0 +1,101 @@
+  @Test
+  public void testHighlightMoreQueriesAtOnceShowoff() throws IOException {
+    // Match highlighter underlying components are powerful enough to build interesting,
+    // if not always super-practical, things. In this case, we would like to highlight
+    // a set of matches of *more than one* query over the same set of input documents. This includes
+    // highest-scoring passage resolution (from multiple hits) and different highlight markers
+    // for each query.
+    new IndexBuilder(this::toField)
+        .doc(FLD_TEXT1, "foo bar baz")
+        .doc(FLD_TEXT1, "foo baz bar")
+        .build(analyzer, reader -> {
+          // Let's start with the two queries. The first one will be an unordered
+          // query for (foo, baz) with a max gap of 1; let's use intervals for this.
+          Query q1 = new IntervalQuery(FLD_TEXT1,
+                  Intervals.maxgaps(1,
+                      Intervals.unordered(
+                          Intervals.term("foo"),
+                          Intervals.term("baz"))));
+
+          // The second one will be a simpler term query for "bar".
+          Query q2 = new TermQuery(new Term(FLD_TEXT1, "bar"));
+
+          // Let's fetch matching documents by combining the two into a Boolean query.
+          Query query = new BooleanQuery.Builder()
+              .add(q1, BooleanClause.Occur.SHOULD)
+              .add(q2, BooleanClause.Occur.SHOULD)
+              .build();
+
+          IndexSearcher searcher = new IndexSearcher(reader);
+          Sort sortOrder = Sort.INDEXORDER; // So that results are consistently ordered.
+          TopDocs topDocs = searcher.search(query, 10, sortOrder);
+
+          // If we use the "regular" highlighter, the result will be slightly odd: a nested
+          // highlight over "bar" within the first match. Also, you can't distinguish which of the sub-queries
+          // caused which highlight marker... but if it were HTML then you could give the span
+          // some semi-translucent background and layered matches would be visible.
+          MatchHighlighter highlighter =
+              new MatchHighlighter(searcher, analyzer)
+                  .appendFieldHighlighter(FieldValueHighlighters.highlighted(
+                      80 * 3, 1, new PassageFormatter("...", "<span>", "</span>"), FLD_TEXT1::equals))
+                  .appendFieldHighlighter(FieldValueHighlighters.skipRemaining());
+
+          assertHighlights(toDocList(highlighter.highlight(topDocs, query)),
+              "0. text1: <span>foo <span>bar</span> baz</span>",
+              "1. text1: <span>foo baz</span> <span>bar</span>");
+
+          // To separate highlights for multiple queries we'll pass them separately to the
+          // highlighter and differentiate highlight markers upon their application. Let's start with the customized
+          // field highlighter first. This utilizes the fact that match ranges passed from MatchHighlighter
+          // contain a reference to the original query which brought up the match.
+          class SeparateMarkerFieldHighlighter implements MatchHighlighter.FieldValueHighlighter {
+            private final String field;
+            private final Map<Query, String> queryClassMap;
+
+            SeparateMarkerFieldHighlighter(String field, Map<Query, String> queryClassMap) {
+              this.field = field;
+              this.queryClassMap = queryClassMap;
+            }
+
+            @Override
+            public boolean isApplicable(String field, boolean hasMatches) {
+              return Objects.equals(field, this.field) && hasMatches;
+            }
+
+            @Override
+            public List<String> format(String field, String[] values, String contiguousValue,
+                                       List<OffsetRange> valueRanges, List<MatchHighlighter.QueryOffsetRange> matchOffsets) {
+              PassageSelector passageSelector = new PassageSelector();
+              int maxPassageWindow = 80;
+              int maxPassages = 3;
+              List<Passage> bestPassages =
+                  passageSelector.pickBest(contiguousValue, matchOffsets, maxPassageWindow, maxPassages, valueRanges);
+
+              // We know the offset ranges passed to us by MatchHighlighter are instances of QueryOffsetRange
+              // so we compute the class based on that.
+              Function<OffsetRange, String> queryToClass =
+                  (range) -> queryClassMap.get(((MatchHighlighter.QueryOffsetRange) range).query);
+
+              PassageFormatter passageFormatter = new PassageFormatter("...",
+                  (range) -> "<span class='" + queryToClass.apply(range) + "'>",
+                  (range) -> "</span>");
+
+              return passageFormatter.format(contiguousValue, bestPassages, valueRanges);
+            }
+          }
+
+          // And this is pretty much it. We now set up query classes to display, set up the highlighter...
+          Map<Query, String> queryClassMap = Map.of(q1, "q1", q2, "q2");
+          highlighter =
+              new MatchHighlighter(searcher, analyzer)
+                  .appendFieldHighlighter(new SeparateMarkerFieldHighlighter(FLD_TEXT1, queryClassMap))
+                  .appendFieldHighlighter(FieldValueHighlighters.skipRemaining());
+
+          // ...and run highlighting. Note the query passed to the highlighter are individual sub-clauses
+          // of the Boolean query used to fetch documents.
+          assertHighlights(toDocList(highlighter.highlight(topDocs, q1, q2)),
+              "0. text1: <span class='q1'>foo <span class='q2'>bar</span> baz</span>",
+              "1. text1: <span class='q1'>foo baz</span> <span class='q2'>bar</span>");
+        });
+  }
+

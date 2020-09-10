@@ -1,0 +1,28 @@
+  public Stream<DocHighlights> highlight(TopDocs topDocs, Query... queries) throws IOException {
+    // We want to preserve topDocs document ordering and MatchRegionRetriever is optimized
+    // for streaming, so we'll just prepopulate the map in proper order.
+    LinkedHashMap<Integer, DocHit> docHits = new LinkedHashMap<>();
+    for (ScoreDoc scoreDoc : topDocs.scoreDocs) {
+      docHits.put(scoreDoc.doc, null);
+    }
+
+    // Collect match ranges for each query and associate each range to the origin query.
+    for (Query q : queries) {
+      MatchRegionRetriever highlighter =
+          new MatchRegionRetriever(searcher, searcher.rewrite(q), offsetsRetrievalStrategies);
+      highlighter.highlightDocuments(topDocs,
+          (int docId, LeafReader leafReader, int leafDocId, Map<String, List<OffsetRange>> hits) -> {
+            DocHit docHit = docHits.get(docId);
+            if (docHit == null) {
+              docHit = new DocHit(docId, leafReader, leafDocId);
+              docHits.put(docId, docHit);
+            }
+            docHit.addMatches(q, hits);
+          });
+    }
+
+    return docHits.values().stream()
+        .filter(Objects::nonNull) // This should always the case?
+        .map(this::computeDocFieldValues);
+  }
+

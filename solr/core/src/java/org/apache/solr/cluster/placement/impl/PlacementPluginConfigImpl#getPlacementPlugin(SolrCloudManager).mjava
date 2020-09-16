@@ -1,0 +1,45 @@
+  /**
+   * <p>This is where the plugin configuration is being read (from wherever in Solr it lives, and this will likely change with time),
+   * a {@link org.apache.solr.cluster.placement.PlacementPluginFactory} (as configured) instantiated and a plugin instance
+   * created from this factory.</p>
+   *
+   * <p>The initial implementation you see here is crude! the configuration is read anew each time and the factory class
+   * as well as the plugin class instantiated each time.
+   * This has to be changed once the code is accepted overall, to register a listener that is notified when the configuration
+   * changes (see {@link org.apache.solr.common.cloud.ZkStateReader#registerClusterPropertiesListener})
+   * and that will either create a new instance of the plugin with new configuration using the existing factory (if the factory
+   * class has not changed - we need to keep track of this one) of create a new factory altogether (then a new plugin instance).</p>
+   */
+  @SuppressWarnings({"unchecked"})
+  public static PlacementPlugin getPlacementPlugin(SolrCloudManager solrCloudManager) {
+    Map<String, Object> props = solrCloudManager.getClusterStateProvider().getClusterProperties();
+    Map<String, Object> pluginConfigMap = (Map<String, Object>) props.get(PLACEMENT_PLUGIN_CONFIG_KEY);
+
+    if (pluginConfigMap == null) {
+      return null;
+    }
+
+    String pluginFactoryClassName = (String) pluginConfigMap.get(CONFIG_CLASS);
+
+    // Get the configured plugin factory class. Is there a way to load a resource in Solr without being in the context of
+    // CoreContainer? Here the placement code is unrelated to the presence of cores (and one can imagine it running on
+    // specialized nodes not having a CoreContainer). I guess the loading code below is not totally satisfying (although
+    // it's not the only place in Solr doing it that way), but I didn't find more satisfying alternatives. Open to suggestions.
+    PlacementPluginFactory placementPluginFactory;
+    try {
+      Class<? extends PlacementPluginFactory> factoryClazz =
+              Class.forName(pluginFactoryClassName, true, PlacementPluginConfigImpl.class.getClassLoader())
+                      .asSubclass(PlacementPluginFactory.class);
+
+      placementPluginFactory = factoryClazz.getConstructor().newInstance(); // no args constructor - that's why we introduced a factory...
+    } catch (Exception e) {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR,  "Unable to instantiate placement-plugin factory: " +
+              Utils.toJSONString(pluginConfigMap) + " please review /clusterprops.json config for " + PLACEMENT_PLUGIN_CONFIG_KEY, e);
+    }
+
+    // Translate the config from the properties where they are defined into the abstraction seen by the plugin
+    PlacementPluginConfig pluginConfig = createConfigFromProperties(pluginConfigMap);
+
+    return placementPluginFactory.createPluginInstance(pluginConfig);
+  }
+

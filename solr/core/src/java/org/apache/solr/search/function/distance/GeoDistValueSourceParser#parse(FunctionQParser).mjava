@@ -2,21 +2,8 @@
   public ValueSource parse(FunctionQParser fp) throws SyntaxError {
     // TODO: dispatch through SpatialQueryable in the future?
 
-    //note: parseValueSourceList can't handle a field reference to an AbstractSpatialFieldType,
-    // so those fields are expressly handled via sfield=
-    List<ValueSource> sources;
-    try {
-      sources = fp.parseValueSourceList();
-    } catch (SolrException e) {
-      if (e.getMessage().equals("A ValueSource isn't directly available from this field. " +
-          "Instead try a query using the distance as the score.")) {
-        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "geodist() does not support field names in its arguments " +
-            "when stated fields are solr.LatLonPointSpatialField spatial type, requires sfield param instead");
-      }
-      else {
-        throw e;
-      }
-    }
+    //note: return fields as FieldNameValueSource from parser to support AbstractSpatialFieldType as geodist argument
+    List<ValueSource> sources = transformFieldSources(fp, fp.parseValueSourceList(FLAG_DEFAULT | FLAG_CONSUME_DELIMITER | FLAG_USE_FIELDNAME_SOURCE));
 
     // "m" is a multi-value source, "x" is a single-value source
     // allow (m,m) (m,x,x) (x,x,m) (x,x,x,x)
@@ -45,7 +32,6 @@
       }
     } else if (sources.size()==3) {
       ValueSource vs1 = sources.get(0);
-      ValueSource vs2 = sources.get(1);
       if (vs1 instanceof MultiValueSource) {     // (m,x,x)
         mv1 = (MultiValueSource)vs1;
         mv2 = makeMV(sources.subList(1, 3), sources);
@@ -60,7 +46,7 @@
     } else if (sources.size()==4) {
       mv1 = makeMV(sources.subList(0, 2), sources);
       mv2 = makeMV(sources.subList(2, 4), sources);
-    } else if (sources.size() > 4) {
+    } else {
       throw new SyntaxError("geodist - invalid parameters:" + sources);
     }
 
@@ -91,14 +77,14 @@
     // * HaversineConstFunction
     // * HaversineFunction
 
-    // sfield can only be in mv2, according to the logic above
-    if (mv2 instanceof SpatialStrategyMultiValueSource) {
+    SpatialStrategyMultiValueSource spatialStrategyMultiValueSource = findSpatialStrategyMultiValueSource(mv1, mv2);
+    if (spatialStrategyMultiValueSource != null) {
       if (constants == null)
         throw new SyntaxError("When using AbstractSpatialFieldType (e.g. RPT not LatLonType)," +
             " the point must be supplied as constants");
       // note: uses Haversine by default but can be changed via distCalc=...
-      SpatialStrategy strategy = ((SpatialStrategyMultiValueSource) mv2).strategy;
-      DistanceUnits distanceUnits = ((SpatialStrategyMultiValueSource) mv2).distanceUnits;
+      SpatialStrategy strategy = spatialStrategyMultiValueSource.strategy;
+      DistanceUnits distanceUnits = spatialStrategyMultiValueSource.distanceUnits;
       Point queryPoint = strategy.getSpatialContext().makePoint(constants[1], constants[0]);
       return ValueSource.fromDoubleValuesSource(strategy.makeDistanceValueSource(queryPoint, distanceUnits.multiplierFromDegreesToThisUnit()));
     }

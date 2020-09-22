@@ -13,7 +13,9 @@
     SolrZkClient zkClient = coreContainer.getZkController().getZkClient();
     String configPathInZk = ZkConfigManager.CONFIGS_ZKNODE + "/" + configSetName;
 
-    if (zkClient.exists(configPathInZk, true)) {
+    boolean overwritesExisting = zkClient.exists(configPathInZk, true);
+
+    if (overwritesExisting && !req.getParams().getBool(ConfigSetParams.OVERWRITE, false)) {
       throw new SolrException(ErrorCode.BAD_REQUEST,
           "The configuration " + configSetName + " already exists in zookeeper");
     }
@@ -28,21 +30,33 @@
     InputStream inputStream = contentStreamsIterator.next().getStream();
 
     // Create a node for the configuration in zookeeper
-    boolean trusted = getTrusted(req);
-    zkClient.makePath(configPathInZk, ("{\"trusted\": " + Boolean.toString(trusted) + "}").
-        getBytes(StandardCharsets.UTF_8), true);
+    boolean cleanup = req.getParams().getBool(ConfigSetParams.CLEANUP, false);
+    
+    Set<String> filesToDelete;
+    if (overwritesExisting && cleanup) {
+      filesToDelete = getAllConfigsetFiles(zkClient, configPathInZk);
+    } else {
+      filesToDelete = Collections.emptySet();
+    }
+    createBaseZnode(zkClient, overwritesExisting, isTrusted(req), cleanup, configPathInZk);
 
     ZipInputStream zis = new ZipInputStream(inputStream, StandardCharsets.UTF_8);
     ZipEntry zipEntry = null;
     while ((zipEntry = zis.getNextEntry()) != null) {
       String filePathInZk = configPathInZk + "/" + zipEntry.getName();
+      if (filePathInZk.endsWith("/")) {
+        filesToDelete.remove(filePathInZk.substring(0, filePathInZk.length() -1));
+      } else {
+        filesToDelete.remove(filePathInZk);
+      }
       if (zipEntry.isDirectory()) {
-        zkClient.makePath(filePathInZk, true);
+        zkClient.makePath(filePathInZk, false,  true);
       } else {
         createZkNodeIfNotExistsAndSetData(zkClient, filePathInZk,
             IOUtils.toByteArray(zis));
       }
     }
     zis.close();
+    deleteUnusedFiles(zkClient, filesToDelete);
   }
 

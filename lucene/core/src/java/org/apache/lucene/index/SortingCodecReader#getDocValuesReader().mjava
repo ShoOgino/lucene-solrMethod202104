@@ -4,71 +4,42 @@
     return new DocValuesProducer() {
       @Override
       public NumericDocValues getNumeric(FieldInfo field) throws IOException {
-        return produceNumericDocValues(field,delegate.getNumeric(field), cachedNumericDVs);
+        return new NumericDocValuesWriter.SortingNumericDocValues(getOrCreateDV(field.name, () -> getNumericDocValues(delegate.getNumeric(field))));
       }
 
       @Override
       public BinaryDocValues getBinary(FieldInfo field) throws IOException {
-        final BinaryDocValues oldDocValues = delegate.getBinary(field);
-        BinaryDocValuesWriter.CachedBinaryDVs dvs;
-        synchronized (cachedBinaryDVs) {
-          dvs = cachedBinaryDVs.get(field);
-          if (dvs == null) {
-            dvs = new BinaryDocValuesWriter.CachedBinaryDVs(maxDoc(), docMap, oldDocValues);
-            cachedBinaryDVs.put(field.name, dvs);
-          }
-        }
-        return new BinaryDocValuesWriter.SortingBinaryDocValues(dvs);
+        return new BinaryDocValuesWriter.SortingBinaryDocValues(getOrCreateDV(field.name,
+            () -> new BinaryDocValuesWriter.BinaryDVs(maxDoc(), docMap, delegate.getBinary(field))));
       }
 
       @Override
       public SortedDocValues getSorted(FieldInfo field) throws IOException {
         SortedDocValues oldDocValues = delegate.getSorted(field);
-        int[] ords;
-        synchronized (cachedSortedDVs) {
-          ords = cachedSortedDVs.get(field);
-          if (ords == null) {
-            ords = new int[maxDoc()];
-            Arrays.fill(ords, -1);
-            int docID;
-            while ((docID = oldDocValues.nextDoc()) != NO_MORE_DOCS) {
-              int newDocID = docMap.oldToNew(docID);
-              ords[newDocID] = oldDocValues.ordValue();
-            }
-            cachedSortedDVs.put(field.name, ords);
+        return new SortedDocValuesWriter.SortingSortedDocValues(oldDocValues, getOrCreateDV(field.name, () -> {
+          int[] ords = new int[maxDoc()];
+          Arrays.fill(ords, -1);
+          int docID;
+          while ((docID = oldDocValues.nextDoc()) != NO_MORE_DOCS) {
+            int newDocID = docMap.oldToNew(docID);
+            ords[newDocID] = oldDocValues.ordValue();
           }
-        }
-
-        return new SortedDocValuesWriter.SortingSortedDocValues(oldDocValues, ords);
+          return ords;
+        }));
       }
 
       @Override
       public SortedNumericDocValues getSortedNumeric(FieldInfo field) throws IOException {
         final SortedNumericDocValues oldDocValues = delegate.getSortedNumeric(field);
-        SortedNumericDocValuesWriter.LongValues values;
-        synchronized (cachedSortedNumericDVs) {
-          values = cachedSortedNumericDVs.get(field);
-          if (values == null) {
-            values = new SortedNumericDocValuesWriter.LongValues(maxDoc(), docMap, oldDocValues, PackedInts.FAST);
-            cachedSortedNumericDVs.put(field.name, values);
-          }
-        }
-
-        return new SortedNumericDocValuesWriter.SortingSortedNumericDocValues(oldDocValues, values);
+        return new SortedNumericDocValuesWriter.SortingSortedNumericDocValues(oldDocValues, getOrCreateDV(field.name, () ->
+            new SortedNumericDocValuesWriter.LongValues(maxDoc(), docMap, oldDocValues, PackedInts.FAST)));
       }
 
       @Override
       public SortedSetDocValues getSortedSet(FieldInfo field) throws IOException {
         SortedSetDocValues oldDocValues = delegate.getSortedSet(field);
-        SortedSetDocValuesWriter.DocOrds ords;
-        synchronized (cachedSortedSetDVs) {
-          ords = cachedSortedSetDVs.get(field);
-          if (ords == null) {
-            ords = new SortedSetDocValuesWriter.DocOrds(maxDoc(), docMap, oldDocValues, PackedInts.FASTEST);
-            cachedSortedSetDVs.put(field.name, ords);
-          }
-        }
-        return new SortedSetDocValuesWriter.SortingSortedSetDocValues(oldDocValues, ords);
+        return new SortedSetDocValuesWriter.SortingSortedSetDocValues(oldDocValues, getOrCreateDV(field.name, () ->
+            new SortedSetDocValuesWriter.DocOrds(maxDoc(), docMap, oldDocValues, PackedInts.FAST)));
       }
 
       @Override

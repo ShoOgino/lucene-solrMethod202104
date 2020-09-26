@@ -1,0 +1,47 @@
+  Lucene90VectorReader(SegmentReadState state) throws IOException {
+    this.fieldInfos = state.fieldInfos;
+    this.maxDoc = state.segmentInfo.maxDoc();
+
+    String metaFileName = IndexFileNames.segmentFileName(state.segmentInfo.name, state.segmentSuffix, Lucene90VectorFormat.META_EXTENSION);
+    int versionMeta = -1;
+    try (ChecksumIndexInput meta = state.directory.openChecksumInput(metaFileName, state.context)) {
+      Throwable priorE = null;
+      try {
+        versionMeta = CodecUtil.checkIndexHeader(meta,
+            Lucene90VectorFormat.META_CODEC_NAME,
+            Lucene90VectorFormat.VERSION_START,
+            Lucene90VectorFormat.VERSION_CURRENT,
+            state.segmentInfo.getId(),
+            state.segmentSuffix);
+        readFields(meta, state.fieldInfos);
+      } catch (Throwable exception) {
+        priorE = exception;
+      } finally {
+        CodecUtil.checkFooter(meta, priorE);
+      }
+    }
+
+    boolean success = false;
+
+    String vectorDataFileName = IndexFileNames.segmentFileName(state.segmentInfo.name, state.segmentSuffix, Lucene90VectorFormat.VECTOR_DATA_EXTENSION);
+    this.vectorData = state.directory.openInput(vectorDataFileName, state.context);
+    try {
+      int versionVectorData = CodecUtil.checkIndexHeader(vectorData,
+          Lucene90VectorFormat.VECTOR_DATA_CODEC_NAME,
+          Lucene90VectorFormat.VERSION_START,
+          Lucene90VectorFormat.VERSION_CURRENT,
+          state.segmentInfo.getId(),
+          state.segmentSuffix);
+      if (versionMeta != versionVectorData) {
+        throw new CorruptIndexException("Format versions mismatch: meta=" + versionMeta + ", vector data=" + versionVectorData, vectorData);
+      }
+      CodecUtil.retrieveChecksum(vectorData);
+
+      success = true;
+    } finally {
+      if (!success) {
+        IOUtils.closeWhileHandlingException(this.vectorData);
+      }
+    }
+  }
+

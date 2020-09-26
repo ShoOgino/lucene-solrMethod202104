@@ -1,0 +1,44 @@
+  /** Writes all buffered vectors. */
+  private void writeVectors(SegmentWriteState state, Sorter.DocMap sortMap) throws IOException {
+    VectorWriter vectorWriter = null;
+    boolean success = false;
+    try {
+      for (int i = 0; i<fieldHash.length; i++) {
+        PerField perField = fieldHash[i];
+        while (perField != null) {
+          if (perField.vectorValuesWriter != null) {
+            if (perField.fieldInfo.getVectorDimension() == 0) {
+              // BUG
+              throw new AssertionError("segment=" + state.segmentInfo + ": field=\"" + perField.fieldInfo.name + "\" has no vectors but wrote them");
+            }
+            if (vectorWriter == null) {
+              // lazy init
+              VectorFormat fmt = state.segmentInfo.getCodec().vectorFormat();
+              if (fmt == null) {
+                throw new IllegalStateException("field=\"" + perField.fieldInfo.name + "\" was indexed as vectors but codec does not support vectors");
+              }
+              vectorWriter = fmt.fieldsWriter(state);
+            }
+
+            perField.vectorValuesWriter.flush(sortMap, vectorWriter);
+            perField.vectorValuesWriter = null;
+          } else if (perField.fieldInfo.getVectorDimension() != 0) {
+            // BUG
+            throw new AssertionError("segment=" + state.segmentInfo + ": field=\"" + perField.fieldInfo.name + "\" has vectors but did not write them");
+          }
+          perField = perField.next;
+        }
+      }
+      if (vectorWriter != null) {
+        vectorWriter.finish();
+      }
+      success = true;
+    } finally {
+      if (success) {
+        IOUtils.close(vectorWriter);
+      } else {
+        IOUtils.closeWhileHandlingException(vectorWriter);
+      }
+    }
+  }
+

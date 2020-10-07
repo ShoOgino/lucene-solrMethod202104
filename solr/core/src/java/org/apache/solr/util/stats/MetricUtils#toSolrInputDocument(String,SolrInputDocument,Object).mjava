@@ -5,20 +5,42 @@
    * @param o an instance of converted metric, either a Map or a flat Object
    */
   static void toSolrInputDocument(String prefix, SolrInputDocument doc, Object o) {
-    if (!(o instanceof Map)) {
+    final BiConsumer<Object, Object> consumer = (k, v) -> {
+      if ((v instanceof Map) || (v instanceof MapWriter) || (v instanceof IteratorWriter)) {
+        toSolrInputDocument(k.toString(), doc, v);
+      } else {
+        String key = prefix != null ? prefix + "." + k : k.toString();
+        doc.addField(key, v);
+      }
+    };
+    if (o instanceof MapWriter) {
+      @SuppressWarnings({"unchecked"})
+      MapWriter writer = (MapWriter) o;
+      writer._forEachEntry(consumer);
+    } else if (o instanceof Map) {
+      @SuppressWarnings({"unchecked"})
+      Map<String, Object> map = (Map<String, Object>) o;
+      for (Map.Entry<String, Object> entry : map.entrySet()) {
+        consumer.accept(entry.getKey(), entry.getValue());
+      }
+    } else if (o instanceof IteratorWriter) {
+      @SuppressWarnings({"unchecked"})
+      IteratorWriter writer = (IteratorWriter) o;
+      final String name = prefix != null ? prefix : "value";
+      try {
+        writer.writeIter(new IteratorWriter.ItemWriter() {
+          @Override
+          public IteratorWriter.ItemWriter add(Object o) throws IOException {
+            consumer.accept(name, o);
+            return this;
+          }
+        });
+      } catch (IOException e) {
+        throw new RuntimeException("this should never happen", e);
+      }
+    } else {
       String key = prefix != null ? prefix : VALUE;
       doc.addField(key, o);
-      return;
-    }
-    @SuppressWarnings({"unchecked"})
-    Map<String, Object> map = (Map<String, Object>)o;
-    for (Map.Entry<String, Object> entry : map.entrySet()) {
-      if (entry.getValue() instanceof Map) { // flatten recursively
-        toSolrInputDocument(entry.getKey(), doc, entry.getValue());
-      } else {
-        String key = prefix != null ? prefix + "." + entry.getKey() : entry.getKey();
-        doc.addField(key, entry.getValue());
-      }
     }
   }
 

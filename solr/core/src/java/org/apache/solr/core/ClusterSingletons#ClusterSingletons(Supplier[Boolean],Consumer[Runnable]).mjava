@@ -1,0 +1,54 @@
+  /**
+   * Create a helper to manage singletons.
+   * @param runSingletons this function returns true when singletons should be running. It's
+   *                      Used when adding or modifying existing plugins, and when invoking
+   *                      {@link #startClusterSingletons()}.
+   * @param asyncRunner async runner that will be used for starting up each singleton.
+   */
+  public ClusterSingletons(Supplier<Boolean> runSingletons, Consumer<Runnable> asyncRunner) {
+    this.runSingletons = runSingletons;
+    this.asyncRunner = asyncRunner;
+    // create plugin registry listener
+    pluginListener = new CustomContainerPlugins.PluginRegistryListener() {
+      @Override
+      public void added(CustomContainerPlugins.ApiInfo plugin) {
+        if (plugin == null || plugin.getInstance() == null) {
+          return;
+        }
+        // register new api
+        Object instance = plugin.getInstance();
+        if (instance instanceof ClusterSingleton) {
+          ClusterSingleton singleton = (ClusterSingleton) instance;
+          singletonMap.put(singleton.getName(), singleton);
+          // check to see if we should immediately start this singleton
+          if (isReady() && runSingletons.get()) {
+            try {
+              singleton.start();
+            } catch (Exception exc) {
+              log.warn("Exception starting ClusterSingleton {}: {}", plugin, exc);
+            }
+          }
+        }
+      }
+
+      @Override
+      public void deleted(CustomContainerPlugins.ApiInfo plugin) {
+        if (plugin == null || plugin.getInstance() == null) {
+          return;
+        }
+        Object instance = plugin.getInstance();
+        if (instance instanceof ClusterSingleton) {
+          ClusterSingleton singleton = (ClusterSingleton) instance;
+          singleton.stop();
+          singletonMap.remove(singleton.getName());
+        }
+      }
+
+      @Override
+      public void modified(CustomContainerPlugins.ApiInfo old, CustomContainerPlugins.ApiInfo replacement) {
+        added(replacement);
+        deleted(old);
+      }
+    };
+  }
+

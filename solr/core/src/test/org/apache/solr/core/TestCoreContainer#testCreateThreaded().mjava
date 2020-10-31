@@ -1,0 +1,52 @@
+  @Test
+  public void testCreateThreaded() throws Exception {
+    final CoreContainer cc = init(CONFIGSETS_SOLR_XML);
+    final int NUM_THREADS = 3;
+
+
+    // Try this a few times to increase the chances of failure.
+    for (int idx = 0; idx < 3; ++idx) {
+      TestCreateThread[] threads = new TestCreateThread[NUM_THREADS];
+      // Let's add a little stress in here by using the same core name each
+      // time around. The final unload in the loop should delete the core and
+      // allow the next time around to succeed.
+      // This also checks the bookkeeping in CoreContainer.create
+      // that prevents muliple simulatneous creations,
+      // currently "inFlightCreations"
+      String testName = "coreToTest";
+      for (int thread = 0; thread < NUM_THREADS; ++thread) {
+        threads[thread] = new TestCreateThread(cc, testName);
+      }
+      // only one of these should succeed.
+      for (int thread = 0; thread < NUM_THREADS; ++thread) {
+        threads[thread].start();
+      }
+
+      for (int thread = 0; thread < NUM_THREADS; ++thread) {
+        threads[thread].join();
+      }
+
+      // We can't guarantee that which thread failed, so go find it
+      int goodCount = 0;
+      for (int thread = 0; thread < NUM_THREADS; ++thread) {
+        goodCount += threads[thread].verifyMe();
+      }
+      assertEquals("Only one create should have succeeded", 1, goodCount);
+
+
+      // Check bookkeeping by removing and creating the core again, making sure
+      // we didn't leave the record of trying to create this core around.
+      // NOTE: unloading the core closes it too.
+      cc.unload(testName, true, true, true);
+      cc.create(testName, ImmutableMap.of("configSet", "minimal"));
+      // This call should fail with a different error because the core was
+      // created successfully.
+      SolrException thrown = expectThrows(SolrException.class, () ->
+          cc.create(testName, ImmutableMap.of("configSet", "minimal")));
+      assertTrue("Should have 'already exists' error", thrown.getMessage().contains("already exists"));
+
+      cc.unload(testName, true, true, true);
+    }
+    cc.shutdown();
+  }
+

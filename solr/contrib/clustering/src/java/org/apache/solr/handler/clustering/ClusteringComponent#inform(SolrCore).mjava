@@ -1,55 +1,32 @@
   @SuppressWarnings("unchecked")
   @Override
   public void inform(SolrCore core) {
-    if (initParams != null) {
-      log.info("Initializing Clustering Engines");
-
-      // Our target list of engines, split into search-results and document clustering.
-      SolrResourceLoader loader = core.getResourceLoader();
-  
-      for (Map.Entry<String,Object> entry : initParams) {
-        if ("engine".equals(entry.getKey())) {
-          NamedList<Object> engineInitParams = (NamedList<Object>) entry.getValue();
-          Boolean optional = engineInitParams.getBooleanArg("optional");
-          optional = (optional == null ? Boolean.FALSE : optional);
-
-          String engineClassName = StringUtils.defaultIfBlank( 
-              (String) engineInitParams.get("classname"),
-              CarrotClusteringEngine.class.getName()); 
-  
-          // Instantiate the clustering engine and split to appropriate map. 
-          final ClusteringEngine engine = loader.newInstance(engineClassName, ClusteringEngine.class);
-          final String name = StringUtils.defaultIfBlank(engine.init(engineInitParams, core), "");
-
-          if (!engine.isAvailable()) {
-            if (optional) {
-              log.info("Optional clustering engine not available: {}", name);
-            } else {
-              throw new SolrException(ErrorCode.SERVER_ERROR, 
-                  "A required clustering engine failed to initialize, check the logs: " + name);
-            }
+    declaredEngines.forEach(engineEntry -> {
+      if (!engineEntry.initialize(core)) {
+        if (engineEntry.optional) {
+          if (log.isInfoEnabled()) {
+            log.info("Optional clustering engine is not available: {}", engineEntry.engineName);
           }
-          
-          final ClusteringEngine previousEntry;
-          if (engine instanceof SearchClusteringEngine) {
-            previousEntry = searchClusteringEngines.put(name, (SearchClusteringEngine) engine);
-          } else if (engine instanceof DocumentClusteringEngine) {
-            previousEntry = documentClusteringEngines.put(name, (DocumentClusteringEngine) engine);
-          } else {
-            log.warn("Unknown type of a clustering engine for class: {}", engineClassName);
-            continue;
-          }
-          if (previousEntry != null) {
-            log.warn("Duplicate clustering engine component named '{}'.", name);
-          }
+        } else {
+          throw new SolrException(ErrorCode.SERVER_ERROR,
+              "A required clustering engine failed to initialize, check the logs: " + engineEntry.engineName);
+        }
+      } else {
+        if (engines.put(engineEntry.engineName, engineEntry) != null) {
+          throw new SolrException(ErrorCode.SERVER_ERROR,
+              String.format(Locale.ROOT,
+                  "Duplicate clustering engine named '%s'.", engineEntry.engineName));
         }
       }
+    });
 
-      // Set up the default engine key for both types of engines.
-      setupDefaultEngine("search results clustering", searchClusteringEngines);
-      setupDefaultEngine("document clustering", documentClusteringEngines);
-
-      log.info("Finished Initializing Clustering Engines");
+    if (engines.size() > 0) {
+      if (log.isInfoEnabled()) {
+        log.info("The following clustering engines are available: {}",
+            String.join(", ", engines.keySet()));
+      }
+    } else {
+      log.warn("No clustering engines are available.");
     }
   }
 

@@ -1,30 +1,27 @@
   @Override
   public void finishStage(ResponseBuilder rb) {
-    SolrParams params = rb.req.getParams();
-    if (!params.getBool(COMPONENT_NAME, false) || 
-        !params.getBool(ClusteringParams.USE_SEARCH_RESULTS, false)) {
+    if (!isComponentEnabled(rb)) {
       return;
     }
 
     if (rb.stage == ResponseBuilder.STAGE_GET_FIELDS) {
-      String name = getClusteringEngineName(rb);
-      SearchClusteringEngine engine = searchClusteringEngines.get(name);
-      if (engine != null) {
-        checkAvailable(name, engine);
-        SolrDocumentList solrDocList = (SolrDocumentList) rb.rsp.getResponse();
-        // TODO: Currently, docIds is set to null in distributed environment.
-        // This causes CarrotParams.PRODUCE_SUMMARY doesn't work.
-        // To work CarrotParams.PRODUCE_SUMMARY under distributed mode, we can choose either one of:
-        // (a) In each shard, ClusteringComponent produces summary and finishStage()
-        //     merges these summaries.
-        // (b) Adding doHighlighting(SolrDocumentList, ...) method to SolrHighlighter and
-        //     making SolrHighlighter uses "external text" rather than stored values to produce snippets.
-        Map<SolrDocument,Integer> docIds = null;
-        Object clusters = engine.cluster(rb.getQuery(), solrDocList, docIds, rb.req);
-        rb.rsp.add("clusters", clusters);
-      } else {
-        log.warn("No engine named: {}", name);
-      }
+      List<InputDocument> inputs = new ArrayList<>();
+      rb.finished.stream()
+          .filter(shardRequest -> (shardRequest.purpose & ShardRequest.PURPOSE_GET_FIELDS) != 0)
+          .flatMap(shardRequest -> shardRequest.responses.stream())
+          .filter(rsp -> rsp.getException() == null)
+          .map(rsp -> rsp.getSolrResponse().getResponse())
+          .forEach(response -> {
+            @SuppressWarnings("unchecked")
+            List<NamedList<Object>> partialInputs = (List<NamedList<Object>>) response.get(RESPONSE_SECTION_INPUT_DOCUMENTS);
+            if (partialInputs != null) {
+              inputs.addAll(documentsFromNamedList(partialInputs));
+            }
+          });
+
+      EngineEntry engine = getEngine(rb);
+      EngineParameters parameters = engine.defaults.derivedFrom(rb.req.getParams());
+      doCluster(rb, engine, inputs, parameters);
     }
   }
 

@@ -1,45 +1,25 @@
+  /**
+   * Entry point for clustering in local server mode (non-distributed).
+   *
+   * @param rb The {@link ResponseBuilder}.
+   * @throws IOException Propagated if an I/O exception occurs.
+   */
   @Override
   public void process(ResponseBuilder rb) throws IOException {
-    SolrParams params = rb.req.getParams();
-    if (!params.getBool(COMPONENT_NAME, false)) {
+    if (!isComponentEnabled(rb)) {
       return;
     }
 
-    final String name = getClusteringEngineName(rb);
-    boolean useResults = params.getBool(ClusteringParams.USE_SEARCH_RESULTS, false);
-    if (useResults == true) {
-      SearchClusteringEngine engine = searchClusteringEngines.get(name);
-      if (engine != null) {
-        checkAvailable(name, engine);
-        DocListAndSet results = rb.getResults();
-        Map<SolrDocument,Integer> docIds = new HashMap<>(results.docList.size());
-        SolrDocumentList solrDocList = docListToSolrDocumentList(
-            results.docList, rb.req.getSearcher(), engine.getFieldsToLoad(rb.req), docIds);
-        Object clusters = engine.cluster(rb.getQuery(), solrDocList, docIds, rb.req);
-        rb.rsp.add("clusters", clusters);
-      } else {
-        log.warn("No engine named: {}", name);
-      }
-    }
+    EngineEntry engine = getEngine(rb);
+    EngineParameters parameters = engine.defaults.derivedFrom(rb.req.getParams());
 
-    boolean useCollection = params.getBool(ClusteringParams.USE_COLLECTION, false);
-    if (useCollection == true) {
-      DocumentClusteringEngine engine = documentClusteringEngines.get(name);
-      if (engine != null) {
-        checkAvailable(name, engine);
-        boolean useDocSet = params.getBool(ClusteringParams.USE_DOC_SET, false);
-        NamedList<?> nl = null;
+    List<InputDocument> inputs = getDocuments(rb, parameters);
 
-        // TODO: This likely needs to be made into a background task that runs in an executor
-        if (useDocSet == true) {
-          nl = engine.cluster(rb.getResults().docSet, params);
-        } else {
-          nl = engine.cluster(params);
-        }
-        rb.rsp.add("clusters", nl);
-      } else {
-        log.warn("No engine named: {}", name);
-      }
+    if (rb.req.getParams().getBool(ShardParams.IS_SHARD, false) &&
+        rb.req.getParams().getBool(REQUEST_PARAM_COLLECT_INPUTS, false)) {
+      rb.rsp.add(RESPONSE_SECTION_INPUT_DOCUMENTS, documentsToNamedList(inputs));
+    } else {
+      doCluster(rb, engine, inputs, parameters);
     }
   }
 

@@ -1,0 +1,127 @@
+  // ClusterSingleton lifecycle methods
+  @Override
+  public synchronized void start() {
+    if (cc == null) {
+      liveNodesListener = null;
+      cloudCollectionsListener = null;
+      clusterPropertiesListener = null;
+      state = State.STOPPED;
+      return;
+    }
+    if (state == State.RUNNING) {
+      log.warn("Double start() invoked on {}, ignoring", this);
+      return;
+    }
+    state = State.STARTING;
+    this.zkController = this.cc.getZkController();
+
+    // clean up any previous instances
+    doStop();
+
+    // register liveNodesListener
+    liveNodesListener = (oldNodes, newNodes) -> {
+      // already closed but still registered
+      if (state == State.STOPPING || state == State.STOPPED) {
+        // remove the listener
+        return true;
+      }
+      // spurious event, ignore but keep listening
+      if (oldNodes.equals(newNodes)) {
+        return false;
+      }
+      final Instant now = Instant.now();
+      final Set<String> downNodes = new HashSet<>(oldNodes);
+      downNodes.removeAll(newNodes);
+      if (!downNodes.isEmpty()) {
+        fireEvent(new NodesDownEvent() {
+          @Override
+          public Iterator<String> getNodeNames() {
+            return downNodes.iterator();
+          }
+
+          @Override
+          public Instant getTimestamp() {
+            return now;
+          }
+        });
+      }
+      final Set<String> upNodes = new HashSet<>(newNodes);
+      upNodes.removeAll(oldNodes);
+      if (!upNodes.isEmpty()) {
+        fireEvent(new NodesUpEvent() {
+          @Override
+          public Iterator<String> getNodeNames() {
+            return upNodes.iterator();
+          }
+
+          @Override
+          public Instant getTimestamp() {
+            return now;
+          }
+        });
+      }
+      return false;
+    };
+    zkController.zkStateReader.registerLiveNodesListener(liveNodesListener);
+
+    cloudCollectionsListener = ((oldCollections, newCollections) -> {
+      if (oldCollections.equals(newCollections)) {
+        return;
+      }
+      final Instant now = Instant.now();
+      final Set<String> removed = new HashSet<>(oldCollections);
+      removed.removeAll(newCollections);
+      if (!removed.isEmpty()) {
+        fireEvent(new CollectionsRemovedEvent() {
+          @Override
+          public Iterator<String> getCollectionNames() {
+            return removed.iterator();
+          }
+
+          @Override
+          public Instant getTimestamp() {
+            return now;
+          }
+        });
+      }
+      final Set<String> added = new HashSet<>(newCollections);
+      added.removeAll(oldCollections);
+      if (!added.isEmpty()) {
+        fireEvent(new CollectionsAddedEvent() {
+          @Override
+          public Iterator<String> getCollectionNames() {
+            return added.iterator();
+          }
+
+          @Override
+          public Instant getTimestamp() {
+            return now;
+          }
+        });
+      }
+    });
+    zkController.zkStateReader.registerCloudCollectionsListener(cloudCollectionsListener);
+
+    clusterPropertiesListener = (newProperties) -> {
+      fireEvent(new ClusterPropertiesChangedEvent() {
+        final Instant now = Instant.now();
+        @Override
+        public Map<String, Object> getNewClusterProperties() {
+          return newProperties;
+        }
+
+        @Override
+        public Instant getTimestamp() {
+          return now;
+        }
+      });
+      return false;
+    };
+    zkController.zkStateReader.registerClusterPropertiesListener(clusterPropertiesListener);
+
+    // XXX register collection state listener?
+    // XXX not sure how to efficiently monitor for REPLICA_DOWN events
+
+    state = State.RUNNING;
+  }
+

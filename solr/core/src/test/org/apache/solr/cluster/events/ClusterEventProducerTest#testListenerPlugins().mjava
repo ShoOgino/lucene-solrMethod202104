@@ -1,0 +1,101 @@
+  @Test
+  public void testListenerPlugins() throws Exception {
+    PluginMeta plugin = new PluginMeta();
+    plugin.klass = DefaultClusterEventProducer.class.getName();
+    plugin.name = ClusterEventProducer.PLUGIN_NAME;
+    V2Request req = new V2Request.Builder("/cluster/plugin")
+        .withMethod(POST)
+        .withPayload(Collections.singletonMap("add", plugin))
+        .build();
+    V2Response rsp = req.process(cluster.getSolrClient());
+    assertEquals(0, rsp.getStatus());
+
+    plugin = new PluginMeta();
+    plugin.name = "testplugin";
+    plugin.klass = DummyEventListener.class.getName();
+    req = new V2Request.Builder("/cluster/plugin")
+        .forceV2(true)
+        .withMethod(POST)
+        .withPayload(singletonMap("add", plugin))
+        .build();
+    rsp = req.process(cluster.getSolrClient());
+    //just check if the plugin is indeed registered
+    V2Request readPluginState = new V2Request.Builder("/cluster/plugin")
+        .forceV2(true)
+        .withMethod(GET)
+        .build();
+    rsp = readPluginState.process(cluster.getSolrClient());
+    assertEquals(DummyEventListener.class.getName(), rsp._getStr("/plugin/testplugin/class", null));
+
+    String collection = "testListenerPlugins_collection";
+    CollectionAdminRequest.Create create = CollectionAdminRequest.createCollection(collection, "conf", 1, 1);
+    cluster.getSolrClient().request(create);
+    cluster.waitForActiveCollection(collection, 1, 1);
+    boolean await = dummyEventLatch.await(30, TimeUnit.SECONDS);
+    if (!await) {
+      fail("Timed out waiting for COLLECTIONS_ADDED event, " + collection);
+    }
+    assertNotNull("lastEvent should be COLLECTIONS_ADDED", lastEvent);
+    assertEquals("lastEvent should be COLLECTIONS_ADDED", ClusterEvent.EventType.COLLECTIONS_ADDED, lastEvent.getType());
+    // verify timestamp
+    Instant now = Instant.now();
+    assertTrue("timestamp of the event is in the future", now.isAfter(lastEvent.getTimestamp()));
+    assertEquals(collection, ((CollectionsAddedEvent)lastEvent).getCollectionNames().next());
+
+    dummyEventLatch = new CountDownLatch(1);
+    lastEvent = null;
+
+    CollectionAdminRequest.Delete delete = CollectionAdminRequest.deleteCollection(collection);
+    cluster.getSolrClient().request(delete);
+    await = dummyEventLatch.await(30, TimeUnit.SECONDS);
+    if (!await) {
+      fail("Timed out waiting for COLLECTIONS_REMOVED event, " + collection);
+    }
+    assertNotNull("lastEvent should be COLLECTIONS_REMOVED", lastEvent);
+    assertEquals("lastEvent should be COLLECTIONS_REMOVED", ClusterEvent.EventType.COLLECTIONS_REMOVED, lastEvent.getType());
+    // verify timestamp
+    now = Instant.now();
+    assertTrue("timestamp of the event is in the future", now.isAfter(lastEvent.getTimestamp()));
+    assertEquals(collection, ((CollectionsRemovedEvent)lastEvent).getCollectionNames().next());
+
+    // test changing the ClusterEventProducer plugin dynamically
+
+    // remove the plugin (a NoOpProducer will be used instead)
+    req = new V2Request.Builder("/cluster/plugin")
+        .withMethod(POST)
+        .withPayload(Collections.singletonMap("remove", ClusterEventProducer.PLUGIN_NAME))
+        .build();
+    req.process(cluster.getSolrClient());
+
+    dummyEventLatch = new CountDownLatch(1);
+    lastEvent = null;
+    // should not receive any events now
+    cluster.getSolrClient().request(create);
+    cluster.waitForActiveCollection(collection, 1, 1);
+    await = dummyEventLatch.await(5, TimeUnit.SECONDS);
+    if (await) {
+      fail("should not receive any events but got " + lastEvent);
+    }
+    // reinstall the plugin
+    plugin = new PluginMeta();
+    plugin.klass = DefaultClusterEventProducer.class.getName();
+    plugin.name = ClusterEventProducer.PLUGIN_NAME;
+    req = new V2Request.Builder("/cluster/plugin")
+        .withMethod(POST)
+        .withPayload(Collections.singletonMap("add", plugin))
+        .build();
+    rsp = req.process(cluster.getSolrClient());
+    assertEquals(0, rsp.getStatus());
+
+    dummyEventLatch = new CountDownLatch(1);
+    lastEvent = null;
+
+    cluster.getSolrClient().request(delete);
+    await = dummyEventLatch.await(30, TimeUnit.SECONDS);
+    if (!await) {
+      fail("Timed out waiting for COLLECTIONS_REMOVED event, " + collection);
+    }
+    assertNotNull("lastEvent should be COLLECTIONS_REMOVED", lastEvent);
+    assertEquals("lastEvent should be COLLECTIONS_REMOVED", ClusterEvent.EventType.COLLECTIONS_REMOVED, lastEvent.getType());
+  }
+

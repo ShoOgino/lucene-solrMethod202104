@@ -1,5 +1,19 @@
   private BinaryEntry readBinary(ChecksumIndexInput meta) throws IOException {
     BinaryEntry entry = new BinaryEntry();
+    if (version >= Lucene80DocValuesFormat.VERSION_CONFIGURABLE_COMPRESSION) {
+      int b = meta.readByte();
+      switch (b) {
+        case 0:
+        case 1:
+          // valid
+          break;
+        default:
+          throw new CorruptIndexException("Unexpected byte: " + b + ", expected 0 or 1", meta);
+      }
+      entry.compressed = b != 0;
+    } else {
+      entry.compressed = version >= Lucene80DocValuesFormat.VERSION_BIN_COMPRESSED;
+    }
     entry.dataOffset = meta.readLong();
     entry.dataLength = meta.readLong();
     entry.docsWithFieldOffset = meta.readLong();
@@ -9,19 +23,19 @@
     entry.numDocsWithField = meta.readInt();
     entry.minLength = meta.readInt();
     entry.maxLength = meta.readInt();
-    if ((version >= Lucene80DocValuesFormat.VERSION_BIN_COMPRESSED && entry.numDocsWithField > 0) ||  entry.minLength < entry.maxLength) {
+    if ((entry.compressed && entry.numDocsWithField > 0) ||  entry.minLength < entry.maxLength) {
       entry.addressesOffset = meta.readLong();
 
       // Old count of uncompressed addresses 
       long numAddresses = entry.numDocsWithField + 1L;
       // New count of compressed addresses - the number of compresseed blocks
-      if (version >= Lucene80DocValuesFormat.VERSION_BIN_COMPRESSED) {
+      if (entry.compressed) {
         entry.numCompressedChunks = meta.readVInt();
         entry.docsPerChunkShift = meta.readVInt();
         entry.maxUncompressedChunkSize = meta.readVInt();
         numAddresses = entry.numCompressedChunks;
       }      
-      
+
       final int blockShift = meta.readVInt();
       entry.addressesMeta = DirectMonotonicReader.loadMeta(meta, numAddresses, blockShift);
       ramBytesUsed += entry.addressesMeta.ramBytesUsed();

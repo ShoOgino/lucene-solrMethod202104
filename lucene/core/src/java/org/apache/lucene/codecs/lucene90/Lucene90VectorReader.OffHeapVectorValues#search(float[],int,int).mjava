@@ -1,5 +1,25 @@
     @Override
-    public TopDocs search(float[] target, int k, int fanout) {
-      throw new UnsupportedOperationException();
+    public TopDocs search(float[] vector, int topK, int fanout) throws IOException {
+      // use a seed that is fixed for the index so we get reproducible results for the same query
+      final Random random = new Random(checksumSeed);
+      Neighbors results = HnswGraph.search(vector, topK + fanout, topK + fanout, randomAccess(), getGraphValues(fieldEntry), random);
+      while (results.size() > topK) {
+        results.pop();
+      }
+      int i = 0;
+      ScoreDoc[] scoreDocs = new ScoreDoc[Math.min(results.size(), topK)];
+      boolean reversed = searchStrategy().reversed;
+      while (results.size() > 0) {
+        Neighbor n = results.pop();
+        float score;
+        if (reversed) {
+          score = (float) Math.exp(- n.score() / vector.length);
+        } else {
+          score = n.score();
+        }
+        scoreDocs[scoreDocs.length - ++i] = new ScoreDoc(fieldEntry.ordToDoc[n.node()], score);
+      }
+      // always return >= the case where we can assert == is only when there are fewer than topK vectors in the index
+      return new TopDocs(new TotalHits(results.visitedCount(), TotalHits.Relation.GREATER_THAN_OR_EQUAL_TO), scoreDocs);
     }
 

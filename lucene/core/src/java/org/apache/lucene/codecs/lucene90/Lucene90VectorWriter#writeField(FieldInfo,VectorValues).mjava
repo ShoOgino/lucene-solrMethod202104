@@ -1,17 +1,32 @@
   @Override
   public void writeField(FieldInfo fieldInfo, VectorValues vectors) throws IOException {
     long vectorDataOffset = vectorData.getFilePointer();
+
     // TODO - use a better data structure; a bitset? DocsWithFieldSet is p.p. in o.a.l.index
-    List<Integer> docIds = new ArrayList<>();
-    int docV, ord = 0;
-    for (docV = vectors.nextDoc(); docV != NO_MORE_DOCS; docV = vectors.nextDoc(), ord++) {
+    int[] docIds = new int[vectors.size()];
+    int count = 0;
+    for (int docV = vectors.nextDoc(); docV != NO_MORE_DOCS; docV = vectors.nextDoc(), count++) {
+      // write vector
       writeVectorValue(vectors);
-      docIds.add(docV);
-      // TODO: write knn graph value
+      docIds[count] = docV;
     }
+    // count may be < vectors.size() e,g, if some documents were deleted
+    long[] offsets = new long[count];
     long vectorDataLength = vectorData.getFilePointer() - vectorDataOffset;
+    long vectorIndexOffset = vectorIndex.getFilePointer();
+    if (vectors.searchStrategy().isHnsw()) {
+      if (vectors instanceof RandomAccessVectorValuesProducer) {
+        writeGraph(vectorIndex, (RandomAccessVectorValuesProducer) vectors, vectorIndexOffset, offsets, count);
+      } else {
+        throw new IllegalArgumentException("Indexing an HNSW graph requires a random access vector values, got " + vectors);
+      }
+    }
+    long vectorIndexLength = vectorIndex.getFilePointer() - vectorIndexOffset;
     if (vectorDataLength > 0) {
-      writeMeta(fieldInfo, vectorDataOffset, vectorDataLength, docIds);
+      writeMeta(fieldInfo, vectorDataOffset, vectorDataLength, vectorIndexOffset, vectorIndexLength, count, docIds);
+      if (vectors.searchStrategy().isHnsw()) {
+        writeGraphOffsets(meta, offsets);
+      }
     }
   }
 

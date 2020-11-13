@@ -1,0 +1,65 @@
+  /**
+   * Searches for the nearest neighbors of a query vector.
+   * @param query search query vector
+   * @param topK the number of nodes to be returned
+   * @param numSeed the number of random entry points to sample
+   * @param vectors vector values
+   * @param graphValues the graph values. May represent the entire graph, or a level in a hierarchical graph.
+   * @param random a source of randomness, used for generating entry points to the graph
+   * @return a priority queue holding the neighbors found
+   */
+  public static Neighbors search(float[] query, int topK, int numSeed, RandomAccessVectorValues vectors, KnnGraphValues graphValues,
+                                 Random random) throws IOException {
+    VectorValues.SearchStrategy searchStrategy = vectors.searchStrategy();
+    // TODO: use unbounded priority queue
+    TreeSet<Neighbor> candidates;
+    if (searchStrategy.reversed) {
+      candidates = new TreeSet<>(Comparator.reverseOrder());
+    } else {
+      candidates = new TreeSet<>();
+    }
+    int size = vectors.size();
+    for (int i = 0; i < numSeed && i < size; i++) {
+      int entryPoint = random.nextInt(size);
+      candidates.add(new Neighbor(entryPoint, searchStrategy.compare(query, vectors.vectorValue(entryPoint))));
+    }
+    // set of ordinals that have been visited by search on this layer, used to avoid backtracking
+    Set<Integer> visited = new HashSet<>();
+    // TODO: use PriorityQueue's sentinel optimization?
+    Neighbors results = Neighbors.create(topK, searchStrategy.reversed);
+    for (Neighbor c : candidates) {
+      visited.add(c.node());
+      results.insertWithOverflow(c);
+    }
+    // Set the bound to the worst current result and below reject any newly-generated candidates failing
+    // to exceed this bound
+    BoundsChecker bound = BoundsChecker.create(searchStrategy.reversed);
+    bound.bound = results.top().score();
+    while (candidates.size() > 0) {
+      // get the best candidate (closest or best scoring)
+      Neighbor c = candidates.pollLast();
+      if (results.size() >= topK) {
+        if (bound.check(c.score())) {
+          break;
+        }
+      }
+      graphValues.seek(c.node());
+      int friendOrd;
+      while ((friendOrd = graphValues.nextNeighbor()) != NO_MORE_DOCS) {
+        if (visited.contains(friendOrd)) {
+          continue;
+        }
+        visited.add(friendOrd);
+        float score = searchStrategy.compare(query, vectors.vectorValue(friendOrd));
+        if (results.size() < topK || bound.check(score) == false) {
+          Neighbor n = new Neighbor(friendOrd, score);
+          candidates.add(n);
+          results.insertWithOverflow(n);
+          bound.bound = results.top().score();
+        }
+      }
+    }
+    results.setVisitedCount(visited.size());
+    return results;
+  }
+

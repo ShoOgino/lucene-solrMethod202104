@@ -1,0 +1,84 @@
+  // For each leaf, verify that its graph nodes are 1-1 with vectors, that the vectors are the expected values,
+  // and that the graph is fully connected and symmetric.
+  // NOTE: when we impose max-fanout on the graph it wil no longer be symmetric, but should still
+  // be fully connected. Is there any other invariant we can test? Well, we can check that max fanout
+  // is respected. We can test *desirable* properties of the graph like small-world (the graph diameter
+  // should be tightly bounded).
+  private void assertConsistentGraph(IndexWriter iw, float[][] values) throws IOException {
+    int totalGraphDocs = 0;
+    try (DirectoryReader dr = DirectoryReader.open(iw)) {
+      for (LeafReaderContext ctx: dr.leaves()) {
+        LeafReader reader = ctx.reader();
+        VectorValues vectorValues = reader.getVectorValues(KNN_GRAPH_FIELD);
+        Lucene90VectorReader vectorReader = ((Lucene90VectorReader) ((CodecReader) reader).getVectorReader());
+        if (vectorReader == null) {
+          continue;
+        }
+        KnnGraphValues graphValues = vectorReader.getGraphValues(KNN_GRAPH_FIELD);
+        assertTrue((vectorValues == null) == (graphValues == null));
+        if (vectorValues == null) {
+          continue;
+        }
+        int[][] graph = new int[reader.maxDoc()][];
+        boolean foundOrphan= false;
+        int graphSize = 0;
+        int node = -1;
+        for (int i = 0; i < reader.maxDoc(); i++) {
+          int nextDocWithVectors = vectorValues.advance(i);
+          //System.out.println("advanced to " + nextDocWithVectors);
+          while (i < nextDocWithVectors && i < reader.maxDoc()) {
+            int id = Integer.parseInt(reader.document(i).get("id"));
+            assertNull("document " + id + " has no vector, but was expected to", values[id]);
+            ++i;
+          }
+          if (nextDocWithVectors == NO_MORE_DOCS) {
+            break;
+          }
+          int id = Integer.parseInt(reader.document(i).get("id"));
+          graphValues.seek(++node);
+          // documents with KnnGraphValues have the expected vectors
+          float[] scratch = vectorValues.vectorValue();
+          assertArrayEquals("vector did not match for doc " + i + ", id=" + id + ": " + Arrays.toString(scratch),
+              values[id], scratch, 0f);
+          // We collect neighbors for analysis below
+          List<Integer> friends = new ArrayList<>();
+          int arc;
+          while ((arc = graphValues.nextNeighbor()) != NO_MORE_DOCS) {
+            friends.add(arc);
+          }
+          if (friends.size() == 0) {
+            //System.out.printf("knngraph @%d is singleton (advance returns %d)\n", i, nextWithNeighbors);
+            foundOrphan = true;
+          } else {
+            // NOTE: these friends are dense ordinals, not docIds.
+            int[] friendCopy = new int[friends.size()];
+            for (int j = 0; j < friends.size(); j++) {
+              friendCopy[j] = friends.get(j);
+            }
+            graph[graphSize] = friendCopy;
+            //System.out.printf("knngraph @%d => %s\n", i, Arrays.toString(graph[i]));
+          }
+          graphSize++;
+        }
+        assertEquals(NO_MORE_DOCS, vectorValues.nextDoc());
+        if (foundOrphan) {
+          assertEquals("graph is not fully connected", 1, graphSize);
+        } else {
+          assertTrue("Graph has " + graphSize + " nodes, but one of them has no neighbors", graphSize > 1);
+        }
+        // assert that the graph in each leaf is connected and undirected (ie links are reciprocated)
+        // assertReciprocal(graph);
+        assertConnected(graph);
+        assertMaxConn(graph, HnswGraphBuilder.DEFAULT_MAX_CONN);
+        totalGraphDocs += graphSize;
+      }
+    }
+    int expectedCount = 0;
+    for (float[] friends : values) {
+      if (friends != null) {
+        ++expectedCount;
+      }
+    }
+    assertEquals(expectedCount, totalGraphDocs);
+  }
+

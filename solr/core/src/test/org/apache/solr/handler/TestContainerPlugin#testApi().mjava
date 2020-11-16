@@ -12,7 +12,7 @@
       //test with an invalid class
       V2Request req = new V2Request.Builder("/cluster/plugin")
           .forceV2(true)
-          .withMethod(POST)
+          .POST()
           .withPayload(singletonMap("add", plugin))
           .build();
       expectError(req, cluster.getSolrClient(), errPath, "No method with @Command in class");
@@ -24,7 +24,7 @@
       //just check if the plugin is indeed registered
       V2Request readPluginState = new V2Request.Builder("/cluster/plugin")
           .forceV2(true)
-          .withMethod(GET)
+          .GET()
           .build();
       V2Response rsp = readPluginState.process(cluster.getSolrClient());
       assertEquals(C3.class.getName(), rsp._getStr("/plugin/testplugin/class", null));
@@ -33,13 +33,13 @@
       TestDistribPackageStore.assertResponseValues(10,
           () -> new V2Request.Builder("/plugin/my/plugin")
               .forceV2(true)
-              .withMethod(GET)
+              .GET()
               .build().process(cluster.getSolrClient()),
           ImmutableMap.of("/testkey", "testval"));
 
       //now remove the plugin
       new V2Request.Builder("/cluster/plugin")
-          .withMethod(POST)
+          .POST()
           .forceV2(true)
           .withPayload("{remove : testplugin}")
           .build()
@@ -64,19 +64,19 @@
       TestDistribPackageStore.assertResponseValues(10,
           () -> new V2Request.Builder("/my-random-name/my/plugin")
               .forceV2(true)
-              .withMethod(GET)
+              .GET()
               .build().process(cluster.getSolrClient()),
           ImmutableMap.of("/method.name", "m1"));
 
   TestDistribPackageStore.assertResponseValues(10,
           () -> new V2Request.Builder("/my-random-prefix/their/plugin")
               .forceV2(true)
-              .withMethod(GET)
+              .GET()
               .build().process(cluster.getSolrClient()),
           ImmutableMap.of("/method.name", "m2"));
       //now remove the plugin
       new V2Request.Builder("/cluster/plugin")
-          .withMethod(POST)
+          .POST()
           .forceV2(true)
           .withPayload("{remove : my-random-name}")
           .build()
@@ -84,12 +84,12 @@
 
       expectFail( () -> new V2Request.Builder("/my-random-prefix/their/plugin")
           .forceV2(true)
-          .withMethod(GET)
+          .GET()
           .build()
           .process(cluster.getSolrClient()));
       expectFail(() -> new V2Request.Builder("/my-random-prefix/their/plugin")
           .forceV2(true)
-          .withMethod(GET)
+          .GET()
           .build()
           .process(cluster.getSolrClient()));
 
@@ -101,7 +101,7 @@
       //just check if the plugin is indeed registered
       readPluginState = new V2Request.Builder("/cluster/plugin")
           .forceV2(true)
-          .withMethod(GET)
+          .GET()
           .build();
       rsp = readPluginState.process(cluster.getSolrClient());
       assertEquals(C6.class.getName(), rsp._getStr("/plugin/clusterSingleton/class", null));
@@ -109,7 +109,47 @@
       assertTrue("ccProvided", C6.ccProvided);
       assertTrue("startCalled", C6.startCalled);
       assertFalse("stopCalled", C6.stopCalled);
-      // kill the Overseer leader
+
+      assertEquals( CConfig.class, ContainerPluginsRegistry.getConfigClass(new CC()));
+      assertEquals( CConfig.class, ContainerPluginsRegistry.getConfigClass(new CC1()));
+      assertEquals( CConfig.class, ContainerPluginsRegistry.getConfigClass(new CC2()));
+
+      CConfig p = new CConfig();
+      p.boolVal = Boolean.TRUE;
+      p.strVal = "Something";
+      p.longVal = 1234L;
+      p.name = "hello";
+      p.klass = CC.class.getName();
+
+      new V2Request.Builder("/cluster/plugin")
+          .forceV2(true)
+          .POST()
+          .withPayload(singletonMap("add", p))
+          .build()
+          .process(cluster.getSolrClient());
+      TestDistribPackageStore.assertResponseValues(10,
+          () -> new V2Request.Builder("hello/plugin")
+              .forceV2(true)
+              .GET()
+              .build().process(cluster.getSolrClient()),
+          ImmutableMap.of("/config/boolVal", "true", "/config/strVal", "Something","/config/longVal", "1234" ));
+
+        p.strVal = "Something else";
+        new V2Request.Builder("/cluster/plugin")
+                .forceV2(true)
+                .POST()
+                .withPayload(singletonMap("update", p))
+                .build()
+                .process(cluster.getSolrClient());
+
+        TestDistribPackageStore.assertResponseValues(10,
+                () -> new V2Request.Builder("hello/plugin")
+                        .forceV2(true)
+                        .GET()
+                        .build().process(cluster.getSolrClient()),
+                ImmutableMap.of("/config/boolVal", "true", "/config/strVal", p.strVal,"/config/longVal", "1234" ));
+
+        // kill the Overseer leader
       for (JettySolrRunner jetty : cluster.getJettySolrRunners()) {
         if (!jetty.getCoreContainer().getZkController().getOverseer().isClosed()) {
           cluster.stopJettySolrRunner(jetty);

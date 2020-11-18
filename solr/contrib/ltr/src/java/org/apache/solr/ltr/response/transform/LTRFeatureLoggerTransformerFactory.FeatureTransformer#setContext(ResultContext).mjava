@@ -18,52 +18,14 @@
       if (threadManager != null) {
         threadManager.setExecutor(context.getRequest().getCore().getCoreContainer().getUpdateShardHandler().getUpdateExecutor());
       }
-      
-      // Setup LTRScoringQuery
-      scoringQuery = SolrQueryRequestContextUtils.getScoringQuery(req);
-      docsWereNotReranked = (scoringQuery == null);
-      String featureStoreName = SolrQueryRequestContextUtils.getFvStoreName(req);
-      if (docsWereNotReranked || (featureStoreName != null && (!featureStoreName.equals(scoringQuery.getScoringModel().getFeatureStoreName())))) {
-        // if store is set in the transformer we should overwrite the logger
 
-        final ManagedFeatureStore fr = ManagedFeatureStore.getManagedFeatureStore(req.getCore());
+      rerankingQueriesFromContext = SolrQueryRequestContextUtils.getScoringQueries(req);
+      docsWereNotReranked = (rerankingQueriesFromContext == null || rerankingQueriesFromContext.length == 0);
+      String transformerFeatureStore = SolrQueryRequestContextUtils.getFvStoreName(req);
+      Map<String, String[]> transformerExternalFeatureInfo = LTRQParserPlugin.extractEFIParams(localparams);
 
-        final FeatureStore store = fr.getFeatureStore(featureStoreName);
-        featureStoreName = store.getName(); // if featureStoreName was null before this gets actual name
-
-        try {
-          final LoggingModel lm = new LoggingModel(loggingModelName,
-              featureStoreName, store.getFeatures());
-
-          scoringQuery = new LTRScoringQuery(lm,
-              LTRQParserPlugin.extractEFIParams(localparams),
-              true,
-              threadManager); // request feature weights to be created for all features
-
-        }catch (final Exception e) {
-          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
-              "retrieving the feature store "+featureStoreName, e);
-        }
-      }
-
-      if (scoringQuery.getOriginalQuery() == null) {
-        scoringQuery.setOriginalQuery(context.getQuery());
-      }
-      if (scoringQuery.getFeatureLogger() == null){
-        scoringQuery.setFeatureLogger( SolrQueryRequestContextUtils.getFeatureLogger(req) );
-      }
-      scoringQuery.setRequest(req);
-
-      featureLogger = scoringQuery.getFeatureLogger();
-
-      try {
-        modelWeight = scoringQuery.createWeight(searcher, ScoreMode.COMPLETE, 1f);
-      } catch (final IOException e) {
-        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e.getMessage(), e);
-      }
-      if (modelWeight == null) {
-        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
-            "error logging the features, model weight is null");
-      }
+      final LoggingModel loggingModel = createLoggingModel(transformerFeatureStore);
+      setupRerankingQueriesForLogging(transformerFeatureStore, transformerExternalFeatureInfo, loggingModel);
+      setupRerankingWeightsForLogging(context);
     }
 

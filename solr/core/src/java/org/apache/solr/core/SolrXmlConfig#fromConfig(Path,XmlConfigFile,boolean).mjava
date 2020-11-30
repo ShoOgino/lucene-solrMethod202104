@@ -2,13 +2,28 @@
 
     checkForIllegalConfig(config);
 
+    // sanity check: if our config came from zookeeper, then there *MUST* be Node Properties that tell us
+    // what zkHost was used to read it (either via webapp context attribute, or that SolrDispatchFilter
+    // filled in for us from system properties)
+    assert ( (! fromZookeeper) || (null != config.getSubstituteProperties()
+                                   && null != config.getSubstituteProperties().getProperty(ZK_HOST)));
+    
+    // Regardless of where/how we this XmlConfigFile was loaded from, if it contains a zkHost property,
+    // we're going to use that as our "default" and only *directly* check the system property if it's not specified.
+    //
+    // (checking the sys prop here is really just for tests that by-pass SolrDispatchFilter. In non-test situations,
+    // SolrDispatchFilter will check the system property if needed in order to try and load solr.xml from ZK, and
+    // should have put the sys prop value in the node properties for us)
+    final String defaultZkHost
+      = wrapAndSetZkHostFromSysPropIfNeeded(config.getSubstituteProperties()).getProperty(ZK_HOST);
+    
     CloudConfig cloudConfig = null;
     UpdateShardHandlerConfig deprecatedUpdateConfig = null;
 
     if (config.getNodeList("solr/solrcloud", false).getLength() > 0) {
       NamedList<Object> cloudSection = readNodeListAsNamedList(config, "solr/solrcloud/*[@name]", "<solrcloud>");
       deprecatedUpdateConfig = loadUpdateConfig(cloudSection, false);
-      cloudConfig = fillSolrCloudSection(cloudSection);
+      cloudConfig = fillSolrCloudSection(cloudSection, config, defaultZkHost);
     }
 
     NamedList<Object> entries = readNodeListAsNamedList(config, "solr/*[@name]", "<solr>");
@@ -41,6 +56,7 @@
     configBuilder.setBackupRepositoryPlugins(getBackupRepositoryPluginInfos(config));
     configBuilder.setMetricsConfig(getMetricsConfig(config));
     configBuilder.setFromZookeeper(fromZookeeper);
+    configBuilder.setDefaultZkHost(defaultZkHost);
     return fillSolrSection(configBuilder, entries);
   }
 

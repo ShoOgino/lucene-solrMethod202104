@@ -1,0 +1,44 @@
+  /**
+   * Tests that existing collection replicas are taken into account when preventing more than one replica per shard to be
+   * placed on any node.
+   */
+  @Test
+  public void testPlacementWithExistingReplicas() throws Exception {
+    String collectionName = "existingCollection";
+
+    // Cluster nodes and their attributes
+    Builders.ClusterBuilder clusterBuilder = Builders.newClusterBuilder().initializeLiveNodes(5);
+    LinkedList<Builders.NodeBuilder> nodeBuilders = clusterBuilder.getLiveNodeBuilders();
+    int coresOnNode = 10;
+    for (Builders.NodeBuilder nodeBuilder : nodeBuilders) {
+      nodeBuilder.setCoreCount(coresOnNode).setFreeDiskGB(PRIORITIZED_FREE_DISK_GB + 1);
+      coresOnNode += 10;
+    }
+
+    // The collection already exists with shards and replicas
+    Builders.CollectionBuilder collectionBuilder = Builders.newCollectionBuilder(collectionName);
+    // Note that the collection as defined below is in a state that would NOT be returned by the placement plugin:
+    // shard 1 has two replicas on node 0.
+    // The plugin should still be able to place additional replicas as long as they don't break the rules.
+    List<List<String>> shardsReplicas = List.of(
+        List.of("NRT 0", "TLOG 0", "NRT 3"), // shard 1
+        List.of("NRT 1", "NRT 3", "TLOG 2")); // shard 2
+    collectionBuilder.customCollectionSetup(shardsReplicas, nodeBuilders);
+    SolrCollection solrCollection = collectionBuilder.build();
+
+    List<Node> liveNodes = clusterBuilder.buildLiveNodes();
+
+    // Place an additional NRT and an additional TLOG replica for each shard
+    PlacementRequestImpl placementRequest = new PlacementRequestImpl(solrCollection, solrCollection.getShardNames(), new HashSet<>(liveNodes),
+        1, 1, 0);
+
+    // The replicas must be placed on the most appropriate nodes, i.e. those that do not already have a replica for the
+    // shard and then on the node with the lowest number of cores.
+    // NRT are placed first and given the cluster state here the placement is deterministic (easier to test, only one good placement).
+    PlacementPlan pp = plugin.computePlacement(clusterBuilder.build(), placementRequest, clusterBuilder.buildAttributeFetcher(), new PlacementPlanFactoryImpl());
+
+    // Each expected placement is represented as a string "shard replica-type node"
+    Set<String> expectedPlacements = Set.of("1 NRT 1", "1 TLOG 2", "2 NRT 0", "2 TLOG 4");
+    verifyPlacements(expectedPlacements, pp, collectionBuilder.getShardBuilders(), liveNodes);
+  }
+

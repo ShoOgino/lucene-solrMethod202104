@@ -1,0 +1,54 @@
+    /**
+     * Initializes shard and replica builders for the collection based on passed parameters. Replicas are assigned round
+     * robin to the nodes. The shard leader is the first NRT replica of each shard (or first TLOG is no NRT).
+     * Shard and replica configuration can be modified afterwards, the returned builder hierarchy is a convenient starting point.
+     */
+    public CollectionBuilder initializeShardsReplicas(int countShards, int countNrtReplicas, int countTlogReplicas,
+                                               int countPullReplicas, List<NodeBuilder> nodes) {
+      Iterator<NodeBuilder> nodeIterator = nodes.iterator();
+
+      shardBuilders = new LinkedList<>();
+
+      for (int shardNumber = 1; shardNumber <= countShards; shardNumber++) {
+        String shardName = buildShardName(shardNumber);
+
+        LinkedList<ReplicaBuilder> replicas = new LinkedList<>();
+        ReplicaBuilder leader = null;
+
+        // Iterate on requested counts, NRT then TLOG then PULL. Leader chosen as first NRT (or first TLOG if no NRT)
+        List<Pair<Replica.ReplicaType, Integer>> replicaTypes = List.of(
+            new Pair<>(Replica.ReplicaType.NRT, countNrtReplicas),
+            new Pair<>(Replica.ReplicaType.TLOG, countTlogReplicas),
+            new Pair<>(Replica.ReplicaType.PULL, countPullReplicas));
+
+        for (Pair<Replica.ReplicaType, Integer> tc : replicaTypes) {
+          Replica.ReplicaType type = tc.first();
+          int count = tc.second();
+          for (int r = 0; r < count; r++) {
+            if (!nodeIterator.hasNext()) {
+              nodeIterator = nodes.iterator();
+            }
+            // If the nodes set is empty, this call will fail
+            final NodeBuilder node = nodeIterator.next();
+
+            String replicaName = buildReplicaName(shardName, type);
+
+            ReplicaBuilder replicaBuilder = new ReplicaBuilder();
+            replicaBuilder.setReplicaName(replicaName).setCoreName(buildCoreName(replicaName)).setReplicaType(type)
+                .setReplicaState(Replica.ReplicaState.ACTIVE).setReplicaNode(node);
+            replicas.add(replicaBuilder);
+
+            if (leader == null && type != Replica.ReplicaType.PULL) {
+              leader = replicaBuilder;
+            }
+          }
+        }
+
+        ShardBuilder shardBuilder = new ShardBuilder();
+        shardBuilder.setShardName(shardName).setReplicaBuilders(replicas).setLeader(leader);
+        shardBuilders.add(shardBuilder);
+      }
+
+      return this;
+    }
+

@@ -1,0 +1,25 @@
+  private Replica corruptLeader(String collection) throws IOException, SolrServerException {
+    try {
+      TestInjection.leaderTragedy = "true:100";
+
+      DocCollection dc = getCollectionState(collection);
+      Replica oldLeader = dc.getLeader("shard1");
+      log.info("Will crash leader : {}", oldLeader);
+
+      try (HttpSolrClient solrClient = new HttpSolrClient.Builder(dc.getLeader("shard1").getCoreUrl()).build()) {
+        new UpdateRequest().add("id", "99").commit(solrClient, null);
+        fail("Should have injected tragedy");
+      } catch (RemoteSolrException e) {
+        // solrClient.add would throw RemoteSolrException with code 500
+        // or 404 if the bad replica has already been deleted
+        MatcherAssert.assertThat(e.code(), anyOf(is(500), is(404)));
+      } catch (AlreadyClosedException e) {
+        // If giving up leadership, might be already closed/closing
+      }
+
+      return oldLeader;
+    } finally {
+      TestInjection.leaderTragedy = null;
+    }
+  }
+

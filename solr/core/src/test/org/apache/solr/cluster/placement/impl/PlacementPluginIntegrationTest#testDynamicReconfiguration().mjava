@@ -1,0 +1,88 @@
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testDynamicReconfiguration() throws Exception {
+    PlacementPluginFactory<? extends PlacementPluginConfig> pluginFactory = cc.getPlacementPluginFactory();
+    assertTrue("wrong type " + pluginFactory.getClass().getName(), pluginFactory instanceof DelegatingPlacementPluginFactory);
+    DelegatingPlacementPluginFactory wrapper = (DelegatingPlacementPluginFactory) pluginFactory;
+
+    int version = wrapper.getVersion();
+    log.debug("--initial version={}", version);
+
+    PluginMeta plugin = new PluginMeta();
+    plugin.name = PlacementPluginFactory.PLUGIN_NAME;
+    plugin.klass = MinimizeCoresPlacementFactory.class.getName();
+    V2Request req = new V2Request.Builder("/cluster/plugin")
+        .forceV2(true)
+        .POST()
+        .withPayload(singletonMap("add", plugin))
+        .build();
+    req.process(cluster.getSolrClient());
+
+    version = waitForVersionChange(version, wrapper, 10);
+
+    assertTrue("wrong version " + version, version > 0);
+    PlacementPluginFactory<? extends PlacementPluginConfig> factory = wrapper.getDelegate();
+    assertTrue("wrong type " + factory.getClass().getName(), factory instanceof MinimizeCoresPlacementFactory);
+
+    // reconfigure
+    plugin.klass = AffinityPlacementFactory.class.getName();
+    plugin.config = new AffinityPlacementConfig(1, 2);
+    req = new V2Request.Builder("/cluster/plugin")
+        .forceV2(true)
+        .POST()
+        .withPayload(singletonMap("update", plugin))
+        .build();
+    req.process(cluster.getSolrClient());
+
+    version = waitForVersionChange(version, wrapper, 10);
+
+    factory = wrapper.getDelegate();
+    assertTrue("wrong type " + factory.getClass().getName(), factory instanceof AffinityPlacementFactory);
+    AffinityPlacementConfig config = ((AffinityPlacementFactory) factory).getConfig();
+    assertEquals("minimalFreeDiskGB", 1, config.minimalFreeDiskGB);
+    assertEquals("prioritizedFreeDiskGB", 2, config.prioritizedFreeDiskGB);
+
+    // change plugin config
+    plugin.config = new AffinityPlacementConfig(3, 4);
+    req = new V2Request.Builder("/cluster/plugin")
+        .forceV2(true)
+        .POST()
+        .withPayload(singletonMap("update", plugin))
+        .build();
+    req.process(cluster.getSolrClient());
+
+    version = waitForVersionChange(version, wrapper, 10);
+    factory = wrapper.getDelegate();
+    assertTrue("wrong type " + factory.getClass().getName(), factory instanceof AffinityPlacementFactory);
+    config = ((AffinityPlacementFactory) factory).getConfig();
+    assertEquals("minimalFreeDiskGB", 3, config.minimalFreeDiskGB);
+    assertEquals("prioritizedFreeDiskGB", 4, config.prioritizedFreeDiskGB);
+
+    // add plugin of the right type but with the wrong name
+    plugin.name = "myPlugin";
+    req = new V2Request.Builder("/cluster/plugin")
+        .forceV2(true)
+        .POST()
+        .withPayload(singletonMap("add", plugin))
+        .build();
+    req.process(cluster.getSolrClient());
+    try {
+      int newVersion = waitForVersionChange(version, wrapper, 5);
+      if (newVersion != version) {
+        fail("factory configuration updated but plugin name was wrong: " + plugin);
+      }
+    } catch (TimeoutException te) {
+      // expected
+    }
+    // remove plugin
+    req = new V2Request.Builder("/cluster/plugin")
+        .forceV2(true)
+        .POST()
+        .withPayload("{remove: '" + PlacementPluginFactory.PLUGIN_NAME + "'}")
+        .build();
+    req.process(cluster.getSolrClient());
+    waitForVersionChange(version, wrapper, 10);
+    factory = wrapper.getDelegate();
+    assertNull("no factory should be present", factory);
+  }
+

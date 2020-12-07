@@ -1,0 +1,58 @@
+  static List<Replica> getReplicas(String zkHost,
+                                   String collection,
+                                   StreamContext streamContext,
+                                   SolrParams requestParams)
+      throws IOException {
+    List<Replica> replicas = new LinkedList<>();
+
+    //SolrCloud Sharding
+    SolrClientCache solrClientCache = (streamContext != null ? streamContext.getSolrClientCache() : null);
+    final SolrClientCache localSolrClientCache; // tracks any locally allocated cache that needs to be closed locally
+    if (solrClientCache == null) { // streamContext was null OR streamContext.getSolrClientCache() returned null
+      solrClientCache = localSolrClientCache = new SolrClientCache();
+    } else {
+      localSolrClientCache = null;
+    }
+
+    if (zkHost == null) {
+      throw new IOException(String.format(Locale.ROOT,"invalid expression - zkHost not found for collection '%s'",collection));
+    }
+
+    CloudSolrClient cloudSolrClient = solrClientCache.getCloudSolrClient(zkHost);
+    ZkStateReader zkStateReader = cloudSolrClient.getZkStateReader();
+    ClusterState clusterState = zkStateReader.getClusterState();
+    Slice[] slices = CloudSolrStream.getSlices(collection, zkStateReader, true);
+    Set<String> liveNodes = clusterState.getLiveNodes();
+
+    RequestReplicaListTransformerGenerator requestReplicaListTransformerGenerator;
+    final ModifiableSolrParams solrParams;
+    if (streamContext != null) {
+      solrParams = new ModifiableSolrParams(streamContext.getRequestParams());
+      requestReplicaListTransformerGenerator = streamContext.getRequestReplicaListTransformerGenerator();
+    } else {
+      solrParams = new ModifiableSolrParams();
+      requestReplicaListTransformerGenerator = null;
+    }
+    if (requestReplicaListTransformerGenerator == null) {
+      requestReplicaListTransformerGenerator = new RequestReplicaListTransformerGenerator();
+    }
+    solrParams.add(requestParams);
+
+    ReplicaListTransformer replicaListTransformer = requestReplicaListTransformerGenerator.getReplicaListTransformer(solrParams);
+
+    final String coreFilter = streamContext != null && streamContext.isLocal() ? (String)streamContext.get("core") : null;
+    List<Replica> sortedReplicas = new ArrayList<>();
+    for(Slice slice : slices) {
+      slice.getReplicas().stream().filter(r -> r.isActive(liveNodes)).forEach(sortedReplicas::add);
+      replicaListTransformer.transform(sortedReplicas);
+      sortedReplicas.stream().filter(r -> coreFilter == null || coreFilter.equals(r.core)).findFirst().ifPresent(replicas::add);
+      sortedReplicas.clear();
+    }
+
+    if (localSolrClientCache != null) {
+      localSolrClientCache.close();
+    }
+
+    return replicas;
+  }
+

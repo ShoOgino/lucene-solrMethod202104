@@ -1,0 +1,73 @@
+  /** 
+   * Loads fields and dynamic fields.
+   * 
+   * @return a map from field name to explicit required value  
+   */ 
+  protected synchronized Map<String,Boolean> loadFields(ConfigNode n) {
+    // Hang on to the fields that say if they are required -- this lets us set a reasonable default for the unique key
+    Map<String,Boolean> explicitRequiredProp = new HashMap<>();
+    
+    ArrayList<DynamicField> dFields = new ArrayList<>();
+
+    List<ConfigNode> nodes = n.children(null,  FIELD_KEYS);
+    ConfigNode child = n.child(FIELDS);
+    if(child != null) {
+      nodes.addAll(child.children(null, FIELD_KEYS));
+    }
+
+    for (ConfigNode node : nodes) {
+      String name = DOMUtil.getAttr(node, NAME, "field definition");
+      log.trace("reading field def {}", name);
+      String type = DOMUtil.getAttr(node, TYPE, "field " + name);
+
+      FieldType ft = fieldTypes.get(type);
+      if (ft == null) {
+        throw new SolrException
+            (ErrorCode.BAD_REQUEST, "Unknown " + FIELD_TYPE + " '" + type + "' specified on field " + name);
+      }
+
+      Map<String, String> args = DOMUtil.toMapExcept(node, NAME, TYPE);
+      if (null != args.get(REQUIRED)) {
+        explicitRequiredProp.put(name, Boolean.valueOf(args.get(REQUIRED)));
+      }
+
+      SchemaField f = SchemaField.create(name, ft, args);
+
+      if (node.name().equals(FIELD)) {
+        SchemaField old = fields.put(f.getName(), f);
+        if (old != null) {
+          String msg = "[schema.xml] Duplicate field definition for '"
+              + f.getName() + "' [[[" + old.toString() + "]]] and [[[" + f.toString() + "]]]";
+          throw new SolrException(ErrorCode.SERVER_ERROR, msg);
+        }
+        log.debug("field defined: {}", f);
+        if (f.getDefaultValue() != null) {
+          if (log.isDebugEnabled()) {
+            log.debug("{} contains default value {}", name, f.getDefaultValue());
+          }
+          fieldsWithDefaultValue.add(f);
+        }
+        if (f.isRequired()) {
+          log.debug("{} is required in this schema", name);
+          requiredFields.add(f);
+        }
+      } else if (node.name().equals(DYNAMIC_FIELD)) {
+        if (isValidDynamicField(dFields, f)) {
+          addDynamicFieldNoDupCheck(dFields, f);
+        }
+      } else {
+        // we should never get here
+        throw new RuntimeException("Unknown field type");
+      }
+    }
+
+    //fields with default values are by definition required
+    //add them to required fields, and we only have to loop once
+    // in DocumentBuilder.getDoc()
+    requiredFields.addAll(fieldsWithDefaultValue);
+
+    dynamicFields = dynamicFieldListToSortedArray(dFields);
+                                                                   
+    return explicitRequiredProp;
+  }
+

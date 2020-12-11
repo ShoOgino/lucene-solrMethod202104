@@ -1,0 +1,24 @@
+  @SuppressWarnings("unchecked")
+  public static ConfigSetService.ConfigResource getConfigResource(ConfigSetService configSetService, InputStream schemaInputStream, SolrResourceLoader loader, String name) throws IOException {
+    if (configSetService instanceof CloudConfigSetService && schemaInputStream instanceof ZkSolrResourceLoader.ZkByteArrayInputStream) {
+      ZkSolrResourceLoader.ZkByteArrayInputStream is = (ZkSolrResourceLoader.ZkByteArrayInputStream) schemaInputStream;
+      Map<String, VersionedConfig> configCache = (Map<String, VersionedConfig>) ((CloudConfigSetService) configSetService).getSolrCloudManager().getObjectCache()
+              .computeIfAbsent(ConfigSetService.ConfigResource.class.getName(), s -> new ConcurrentHashMap<>());
+      VersionedConfig cached = configCache.get(is.fileName);
+      if (cached != null) {
+        if (cached.version != is.getStat().getVersion()) {
+          configCache.remove(is.fileName);// this is stale. remove from cache
+        } else {
+          return () -> cached.data;
+        }
+      }
+      return () -> {
+        ConfigNode data = ConfigSetService.getParsedSchema(schemaInputStream, loader, name);// either missing or stale. create a new one
+        configCache.put(is.fileName, new VersionedConfig(is.getStat().getVersion(), data));
+        return data;
+      };
+    }
+    //this is not cacheable as it does not come from ZK
+    return () -> ConfigSetService.getParsedSchema(schemaInputStream,loader, name);
+  }
+

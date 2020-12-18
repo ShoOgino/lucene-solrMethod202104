@@ -1,0 +1,45 @@
+  // Verify that we can call deleteAll repeatedly without leaking field numbers such that we trigger OOME
+  // on creation of FieldInfos. See https://issues.apache.org/jira/browse/LUCENE-9617
+  @Nightly // Takes 1-2 minutes to run on a 16-core machine
+  public void testDeleteAllRepeated() throws IOException, InterruptedException {
+    final int breakingFieldCount = 50_000_000;
+    try  (Directory dir = newDirectory()) {
+      // Avoid flushing until the end of the test to save time.
+      IndexWriterConfig conf = newIndexWriterConfig()
+              .setMaxBufferedDocs(1000)
+              .setRAMBufferSizeMB(1000)
+              .setRAMPerThreadHardLimitMB(1000)
+              .setCheckPendingFlushUpdate(false);
+      try (IndexWriter modifier = new IndexWriter(dir, conf)) {
+        Document document = new Document();
+        int fieldsPerDoc = 1_000;
+        for (int i = 0; i < fieldsPerDoc; i++) {
+          document.add(new StoredField("field" + i, ""));
+        }
+        AtomicLong numFields = new AtomicLong(0);
+        List<Thread> threads = new ArrayList<>();
+        int nThreads = atLeast(8);
+        for (int i = 0; i < nThreads; i++) {
+          Thread t = new Thread(() -> {
+            try {
+              while (numFields.getAndAdd(fieldsPerDoc) < breakingFieldCount) {
+                modifier.addDocument(document);
+                modifier.deleteAll();
+              }
+            } catch (IOException e) {
+              throw new UncheckedIOException(e);
+            }
+          });
+          t.start();
+          threads.add(t);
+        }
+        for (Thread t : threads) {
+          t.join();
+        }
+        // Add one last document and flush to build FieldInfos.
+        modifier.addDocument(document);
+        modifier.flush();
+      }
+    }
+  }
+

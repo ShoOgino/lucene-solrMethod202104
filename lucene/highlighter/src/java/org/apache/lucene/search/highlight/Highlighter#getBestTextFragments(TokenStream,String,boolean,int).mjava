@@ -1,30 +1,28 @@
   /**
-   * Low level api to get the most relevant (formatted) sections of the document.
-   * This method has been made public to allow visibility of score information held in TextFragment objects.
-   * Thanks to Jason Calabrese for help in redefining the interface.
+   * Low level api to get the most relevant (formatted) sections of the document. This method has
+   * been made public to allow visibility of score information held in TextFragment objects. Thanks
+   * to Jason Calabrese for help in redefining the interface.
+   *
    * @throws IOException If there is a low-level I/O error
-   * @throws InvalidTokenOffsetsException thrown if any token's endOffset exceeds the provided text's length
+   * @throws InvalidTokenOffsetsException thrown if any token's endOffset exceeds the provided
+   *     text's length
    */
   public final TextFragment[] getBestTextFragments(
-    TokenStream tokenStream,
-    String text,
-    boolean mergeContiguousFragments,
-    int maxNumFragments)
-    throws IOException, InvalidTokenOffsetsException
-  {
+      TokenStream tokenStream, String text, boolean mergeContiguousFragments, int maxNumFragments)
+      throws IOException, InvalidTokenOffsetsException {
     ArrayList<TextFragment> docFrags = new ArrayList<>();
-    StringBuilder newText=new StringBuilder();
+    StringBuilder newText = new StringBuilder();
 
     CharTermAttribute termAtt = tokenStream.addAttribute(CharTermAttribute.class);
     OffsetAttribute offsetAtt = tokenStream.addAttribute(OffsetAttribute.class);
-    TextFragment currentFrag =  new TextFragment(newText,newText.length(), docFrags.size());
+    TextFragment currentFrag = new TextFragment(newText, newText.length(), docFrags.size());
 
     if (fragmentScorer instanceof QueryScorer) {
       ((QueryScorer) fragmentScorer).setMaxDocCharsToAnalyze(maxDocCharsToAnalyze);
     }
 
     TokenStream newStream = fragmentScorer.init(tokenStream);
-    if(newStream != null) {
+    if (newStream != null) {
       tokenStream = newStream;
     }
     fragmentScorer.startFragment(currentFrag);
@@ -32,8 +30,7 @@
 
     FragmentQueue fragQueue = new FragmentQueue(maxNumFragments);
 
-    try
-    {
+    try {
 
       String tokenText;
       int startOffset;
@@ -41,42 +38,39 @@
       int lastEndOffset = 0;
       textFragmenter.start(text, tokenStream);
 
-      TokenGroup tokenGroup=new TokenGroup(tokenStream);
+      TokenGroup tokenGroup = new TokenGroup(tokenStream);
 
       tokenStream.reset();
-      for (boolean next = tokenStream.incrementToken(); next && (offsetAtt.startOffset()< maxDocCharsToAnalyze);
-            next = tokenStream.incrementToken())
-      {
-        if(  (offsetAtt.endOffset()>text.length())
-          ||
-          (offsetAtt.startOffset()>text.length())
-          )
-        {
-          throw new InvalidTokenOffsetsException("Token "+ termAtt.toString()
-              +" exceeds length of provided text sized "+text.length());
+      for (boolean next = tokenStream.incrementToken();
+          next && (offsetAtt.startOffset() < maxDocCharsToAnalyze);
+          next = tokenStream.incrementToken()) {
+        if ((offsetAtt.endOffset() > text.length()) || (offsetAtt.startOffset() > text.length())) {
+          throw new InvalidTokenOffsetsException(
+              "Token "
+                  + termAtt.toString()
+                  + " exceeds length of provided text sized "
+                  + text.length());
         }
-        if((tokenGroup.getNumTokens() >0)&&(tokenGroup.isDistinct()))
-        {
-          //the current token is distinct from previous tokens -
+        if ((tokenGroup.getNumTokens() > 0) && (tokenGroup.isDistinct())) {
+          // the current token is distinct from previous tokens -
           // markup the cached token group info
           startOffset = tokenGroup.getStartOffset();
           endOffset = tokenGroup.getEndOffset();
           tokenText = text.substring(startOffset, endOffset);
-          String markedUpText=formatter.highlightTerm(encoder.encodeText(tokenText), tokenGroup);
-          //store any whitespace etc from between this and last group
+          String markedUpText = formatter.highlightTerm(encoder.encodeText(tokenText), tokenGroup);
+          // store any whitespace etc from between this and last group
           if (startOffset > lastEndOffset)
             newText.append(encoder.encodeText(text.substring(lastEndOffset, startOffset)));
           newText.append(markedUpText);
-          lastEndOffset=Math.max(endOffset, lastEndOffset);
+          lastEndOffset = Math.max(endOffset, lastEndOffset);
           tokenGroup.clear();
 
-          //check if current token marks the start of a new fragment
-          if(textFragmenter.isNewFragment())
-          {
+          // check if current token marks the start of a new fragment
+          if (textFragmenter.isNewFragment()) {
             currentFrag.setScore(fragmentScorer.getFragmentScore());
-            //record stats for a new fragment
+            // record stats for a new fragment
             currentFrag.textEndPos = newText.length();
-            currentFrag =new TextFragment(newText, newText.length(), docFrags.size());
+            currentFrag = new TextFragment(newText, newText.length(), docFrags.size());
             fragmentScorer.startFragment(currentFrag);
             docFrags.add(currentFrag);
           }
@@ -84,48 +78,44 @@
 
         tokenGroup.addToken(fragmentScorer.getTokenScore());
 
-//        if(lastEndOffset>maxDocBytesToAnalyze)
-//        {
-//          break;
-//        }
+        //        if(lastEndOffset>maxDocBytesToAnalyze)
+        //        {
+        //          break;
+        //        }
       }
       currentFrag.setScore(fragmentScorer.getFragmentScore());
 
-      if(tokenGroup.getNumTokens() >0)
-      {
-        //flush the accumulated text (same code as in above loop)
+      if (tokenGroup.getNumTokens() > 0) {
+        // flush the accumulated text (same code as in above loop)
         startOffset = tokenGroup.getStartOffset();
         endOffset = tokenGroup.getEndOffset();
         tokenText = text.substring(startOffset, endOffset);
-        String markedUpText=formatter.highlightTerm(encoder.encodeText(tokenText), tokenGroup);
-        //store any whitespace etc from between this and last group
+        String markedUpText = formatter.highlightTerm(encoder.encodeText(tokenText), tokenGroup);
+        // store any whitespace etc from between this and last group
         if (startOffset > lastEndOffset)
           newText.append(encoder.encodeText(text.substring(lastEndOffset, startOffset)));
         newText.append(markedUpText);
-        lastEndOffset=Math.max(lastEndOffset,endOffset);
+        lastEndOffset = Math.max(lastEndOffset, endOffset);
       }
 
-      //Test what remains of the original text beyond the point where we stopped analyzing
+      // Test what remains of the original text beyond the point where we stopped analyzing
       if (
-//          if there is text beyond the last token considered..
-          (lastEndOffset < text.length())
+      //          if there is text beyond the last token considered..
+      (lastEndOffset < text.length())
           &&
-//          and that text is not too large...
-          (text.length()<= maxDocCharsToAnalyze)
-        )
-      {
-        //append it to the last fragment
+          //          and that text is not too large...
+          (text.length() <= maxDocCharsToAnalyze)) {
+        // append it to the last fragment
         newText.append(encoder.encodeText(text.substring(lastEndOffset)));
       }
 
       currentFrag.textEndPos = newText.length();
 
-      //sort the most relevant sections of the text
-      for (Iterator<TextFragment> i = docFrags.iterator(); i.hasNext();)
-      {
+      // sort the most relevant sections of the text
+      for (Iterator<TextFragment> i = docFrags.iterator(); i.hasNext(); ) {
         currentFrag = i.next();
 
-        //If you are running with a version of Lucene before 11th Sept 03
+        // If you are running with a version of Lucene before 11th Sept 03
         // you do not have PriorityQueue.insert() - so uncomment the code below
         /*
                   if (currentFrag.getScore() >= minScore)
@@ -140,48 +130,38 @@
 
                   }
         */
-        //The above code caused a problem as a result of Christoph Goller's 11th Sept 03
-        //fix to PriorityQueue. The correct method to use here is the new "insert" method
+        // The above code caused a problem as a result of Christoph Goller's 11th Sept 03
+        // fix to PriorityQueue. The correct method to use here is the new "insert" method
         // USE ABOVE CODE IF THIS DOES NOT COMPILE!
         fragQueue.insertWithOverflow(currentFrag);
       }
 
-      //return the most relevant fragments
+      // return the most relevant fragments
       TextFragment frag[] = new TextFragment[fragQueue.size()];
-      for (int i = frag.length - 1; i >= 0; i--)
-      {
+      for (int i = frag.length - 1; i >= 0; i--) {
         frag[i] = fragQueue.pop();
       }
 
-      //merge any contiguous fragments to improve readability
-      if(mergeContiguousFragments)
-      {
+      // merge any contiguous fragments to improve readability
+      if (mergeContiguousFragments) {
         mergeContiguousFragments(frag);
         ArrayList<TextFragment> fragTexts = new ArrayList<>();
-        for (int i = 0; i < frag.length; i++)
-        {
-          if ((frag[i] != null) && (frag[i].getScore() > 0))
-          {
+        for (int i = 0; i < frag.length; i++) {
+          if ((frag[i] != null) && (frag[i].getScore() > 0)) {
             fragTexts.add(frag[i]);
           }
         }
-        frag= fragTexts.toArray(new TextFragment[0]);
+        frag = fragTexts.toArray(new TextFragment[0]);
       }
 
       return frag;
 
-    }
-    finally
-    {
-      if (tokenStream != null)
-      {
-        try
-        {
+    } finally {
+      if (tokenStream != null) {
+        try {
           tokenStream.end();
           tokenStream.close();
-        }
-        catch (Exception e)
-        {
+        } catch (Exception e) {
         }
       }
     }

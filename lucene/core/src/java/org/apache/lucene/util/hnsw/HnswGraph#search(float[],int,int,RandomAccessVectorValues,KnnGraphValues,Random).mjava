@@ -2,37 +2,40 @@
    * Searches for the nearest neighbors of a query vector.
    * @param query search query vector
    * @param topK the number of nodes to be returned
-   * @param numSeed the number of random entry points to sample
+   * @param numSeed the size of the queue maintained while searching, and controls the number of random entry points to sample
    * @param vectors vector values
    * @param graphValues the graph values. May represent the entire graph, or a level in a hierarchical graph.
    * @param random a source of randomness, used for generating entry points to the graph
-   * @return a priority queue holding the neighbors found
+   * @return a priority queue holding the closest neighbors found
    */
-  public static Neighbors search(float[] query, int topK, int numSeed, RandomAccessVectorValues vectors, KnnGraphValues graphValues,
-                                 Random random) throws IOException {
+  public static NeighborQueue search(float[] query, int topK, int numSeed, RandomAccessVectorValues vectors, KnnGraphValues graphValues,
+                                     Random random) throws IOException {
     VectorValues.SearchStrategy searchStrategy = vectors.searchStrategy();
+    int size = graphValues.size();
 
-    Neighbors results = Neighbors.create(topK, searchStrategy);
-    Neighbors candidates = Neighbors.createReversed(-numSeed, searchStrategy);
+    // MIN heap, holding the top results
+    NeighborQueue results = new NeighborQueue(numSeed, searchStrategy.reversed);
+
     // set of ordinals that have been visited by search on this layer, used to avoid backtracking
-    Set<Integer> visited = new HashSet<>();
-
-    int size = vectors.size();
+    SparseFixedBitSet visited = new SparseFixedBitSet(size);
+    // get initial candidates at random
     int boundedNumSeed = Math.min(numSeed, 2 * size);
     for (int i = 0; i < boundedNumSeed; i++) {
       int entryPoint = random.nextInt(size);
-      if (visited.add(entryPoint)) {
-        results.insertWithOverflow(entryPoint, searchStrategy.compare(query, vectors.vectorValue(entryPoint)));
+      if (visited.get(entryPoint) == false) {
+        visited.set(entryPoint);
+        // explore the topK starting points of some random numSeed probes
+        results.add(entryPoint, searchStrategy.compare(query, vectors.vectorValue(entryPoint)));
       }
     }
-    Neighbors.NeighborIterator it = results.iterator();
-    for (int nbr = it.next(); nbr != NO_MORE_DOCS; nbr = it.next()) {
-      candidates.add(nbr, it.score());
-    }
+
+    // MAX heap, from which to pull the candidate nodes
+    NeighborQueue candidates = results.copy(!searchStrategy.reversed);
+
     // Set the bound to the worst current result and below reject any newly-generated candidates failing
     // to exceed this bound
     BoundsChecker bound = BoundsChecker.create(searchStrategy.reversed);
-    bound.bound = results.topScore();
+    bound.set(results.topScore());
     while (candidates.size() > 0) {
       // get the best candidate (closest or best scoring)
       float topCandidateScore = candidates.topScore();
@@ -45,18 +48,21 @@
       graphValues.seek(topCandidateNode);
       int friendOrd;
       while ((friendOrd = graphValues.nextNeighbor()) != NO_MORE_DOCS) {
-        if (visited.contains(friendOrd)) {
+        if (visited.get(friendOrd)) {
           continue;
         }
-        visited.add(friendOrd);
+        visited.set(friendOrd);
         float score = searchStrategy.compare(query, vectors.vectorValue(friendOrd));
         if (results.insertWithOverflow(friendOrd, score)) {
           candidates.add(friendOrd, score);
-          bound.bound = results.topScore();
+          bound.set(results.topScore());
         }
       }
     }
-    results.setVisitedCount(visited.size());
+    while (results.size() > topK) {
+      results.pop();
+    }
+    results.setVisitedCount(visited.approximateCardinality());
     return results;
   }
 

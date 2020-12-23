@@ -2,7 +2,7 @@
     final Directory dir = newDirectory();
     IndexWriterConfig conf = newIndexWriterConfig(new MockAnalyzer(random()));
     final IndexWriter writer = new IndexWriter(dir, conf);
-    
+
     // create index
     final int numFields = TestUtil.nextInt(random(), 1, 4);
     final int numDocs = TEST_NIGHTLY ? atLeast(2000) : atLeast(200);
@@ -19,90 +19,103 @@
       for (int j = 0; j < numFields; j++) {
         long value = random().nextInt();
         doc.add(new BinaryDocValuesField("f" + j, toBytes(value)));
-        doc.add(new BinaryDocValuesField("cf" + j, toBytes(value * 2))); // control, always updated to f * 2
+        doc.add(
+            new BinaryDocValuesField(
+                "cf" + j, toBytes(value * 2))); // control, always updated to f * 2
       }
       writer.addDocument(doc);
     }
-    
+
     final int numThreads = TEST_NIGHTLY ? TestUtil.nextInt(random(), 3, 6) : 2;
     final CountDownLatch done = new CountDownLatch(numThreads);
     final AtomicInteger numUpdates = new AtomicInteger(atLeast(100));
-    
+
     // same thread updates a field as well as reopens
     Thread[] threads = new Thread[numThreads];
     for (int i = 0; i < threads.length; i++) {
-      threads[i] = new Thread("UpdateThread-" + i) {
-        @Override
-        public void run() {
-          DirectoryReader reader = null;
-          boolean success = false;
-          try {
-            Random random = random();
-            while (numUpdates.getAndDecrement() > 0) {
-              double group = random.nextDouble();
-              Term t;
-              if (group < 0.1) t = new Term("updKey", "g0");
-              else if (group < 0.5) t = new Term("updKey", "g1");
-              else if (group < 0.8) t = new Term("updKey", "g2");
-              else t = new Term("updKey", "g3");
+      threads[i] =
+          new Thread("UpdateThread-" + i) {
+            @Override
+            public void run() {
+              DirectoryReader reader = null;
+              boolean success = false;
+              try {
+                Random random = random();
+                while (numUpdates.getAndDecrement() > 0) {
+                  double group = random.nextDouble();
+                  Term t;
+                  if (group < 0.1) t = new Term("updKey", "g0");
+                  else if (group < 0.5) t = new Term("updKey", "g1");
+                  else if (group < 0.8) t = new Term("updKey", "g2");
+                  else t = new Term("updKey", "g3");
 
-              final int field = random().nextInt(numFields);
-              final String f = "f" + field;
-              final String cf = "cf" + field;
-//              System.out.println("[" + Thread.currentThread().getName() + "] numUpdates=" + numUpdates + " updateTerm=" + t + " field=" + field);
-              long updValue = random.nextInt();
-              writer.updateDocValues(t, new BinaryDocValuesField(f, toBytes(updValue)), new BinaryDocValuesField(cf, toBytes(updValue*2)));
-              
-              if (random.nextDouble() < 0.2) {
-                // delete a random document
-                int doc = random.nextInt(numDocs);
-//                System.out.println("[" + Thread.currentThread().getName() + "] deleteDoc=doc" + doc);
-                writer.deleteDocuments(new Term("id", "doc" + doc));
-              }
-  
-              if (random.nextDouble() < 0.05) { // commit every 20 updates on average
-//                  System.out.println("[" + Thread.currentThread().getName() + "] commit");
-                writer.commit();
-              }
-              
-              if (random.nextDouble() < 0.1) { // reopen NRT reader (apply updates), on average once every 10 updates
-                if (reader == null) {
-//                  System.out.println("[" + Thread.currentThread().getName() + "] open NRT");
-                  reader = DirectoryReader.open(writer);
-                } else {
-//                  System.out.println("[" + Thread.currentThread().getName() + "] reopen NRT");
-                  DirectoryReader r2 = DirectoryReader.openIfChanged(reader, writer);
-                  if (r2 != null) {
-                    reader.close();
-                    reader = r2;
+                  final int field = random().nextInt(numFields);
+                  final String f = "f" + field;
+                  final String cf = "cf" + field;
+                  //              System.out.println("[" + Thread.currentThread().getName() + "]
+                  // numUpdates=" + numUpdates + " updateTerm=" + t + " field=" + field);
+                  long updValue = random.nextInt();
+                  writer.updateDocValues(
+                      t,
+                      new BinaryDocValuesField(f, toBytes(updValue)),
+                      new BinaryDocValuesField(cf, toBytes(updValue * 2)));
+
+                  if (random.nextDouble() < 0.2) {
+                    // delete a random document
+                    int doc = random.nextInt(numDocs);
+                    //                System.out.println("[" + Thread.currentThread().getName() + "]
+                    // deleteDoc=doc" + doc);
+                    writer.deleteDocuments(new Term("id", "doc" + doc));
+                  }
+
+                  if (random.nextDouble() < 0.05) { // commit every 20 updates on average
+                    //                  System.out.println("[" + Thread.currentThread().getName() +
+                    // "] commit");
+                    writer.commit();
+                  }
+
+                  if (random.nextDouble()
+                      < 0.1) { // reopen NRT reader (apply updates), on average once every 10
+                    // updates
+                    if (reader == null) {
+                      //                  System.out.println("[" + Thread.currentThread().getName()
+                      // + "] open NRT");
+                      reader = DirectoryReader.open(writer);
+                    } else {
+                      //                  System.out.println("[" + Thread.currentThread().getName()
+                      // + "] reopen NRT");
+                      DirectoryReader r2 = DirectoryReader.openIfChanged(reader, writer);
+                      if (r2 != null) {
+                        reader.close();
+                        reader = r2;
+                      }
+                    }
                   }
                 }
-              }
-            }
-//            System.out.println("[" + Thread.currentThread().getName() + "] DONE");
-            success = true;
-          } catch (IOException e) {
-            throw new RuntimeException(e);
-          } finally {
-            if (reader != null) {
-              try {
-                reader.close();
+                //            System.out.println("[" + Thread.currentThread().getName() + "] DONE");
+                success = true;
               } catch (IOException e) {
-                if (success) { // suppress this exception only if there was another exception
-                  throw new RuntimeException(e);
+                throw new RuntimeException(e);
+              } finally {
+                if (reader != null) {
+                  try {
+                    reader.close();
+                  } catch (IOException e) {
+                    if (success) { // suppress this exception only if there was another exception
+                      throw new RuntimeException(e);
+                    }
+                  }
                 }
+                done.countDown();
               }
             }
-            done.countDown();
-          }
-        }
-      };
+          };
     }
-    
+
     for (Thread t : threads) t.start();
     done.await();
     writer.close();
-    
+
     DirectoryReader reader = DirectoryReader.open(dir);
     for (LeafReaderContext context : reader.leaves()) {
       LeafReader r = context.reader();
@@ -120,7 +133,7 @@
       }
     }
     reader.close();
-    
+
     dir.close();
   }
 

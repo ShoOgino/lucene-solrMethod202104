@@ -1,54 +1,77 @@
-  private IntersectVisitor getIntersectVisitor(DocIdSetBuilder result, Component2D tree, GeoEncodingUtils.Component2DPredicate component2DPredicate,
-                                               byte[] minLat, byte[] maxLat, byte[] minLon, byte[] maxLon) {
+  private IntersectVisitor getIntersectVisitor(
+      DocIdSetBuilder result,
+      Component2D tree,
+      GeoEncodingUtils.Component2DPredicate component2DPredicate,
+      byte[] minLat,
+      byte[] maxLat,
+      byte[] minLon,
+      byte[] maxLon) {
     return new IntersectVisitor() {
-          DocIdSetBuilder.BulkAdder adder;
+      DocIdSetBuilder.BulkAdder adder;
 
-          @Override
-          public void grow(int count) {
-            adder = result.grow(count);
+      @Override
+      public void grow(int count) {
+        adder = result.grow(count);
+      }
+
+      @Override
+      public void visit(int docID) {
+        adder.add(docID);
+      }
+
+      @Override
+      public void visit(int docID, byte[] packedValue) {
+        if (component2DPredicate.test(
+            NumericUtils.sortableBytesToInt(packedValue, 0),
+            NumericUtils.sortableBytesToInt(packedValue, Integer.BYTES))) {
+          visit(docID);
+        }
+      }
+
+      @Override
+      public void visit(DocIdSetIterator iterator, byte[] packedValue) throws IOException {
+        if (component2DPredicate.test(
+            NumericUtils.sortableBytesToInt(packedValue, 0),
+            NumericUtils.sortableBytesToInt(packedValue, Integer.BYTES))) {
+          int docID;
+          while ((docID = iterator.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+            visit(docID);
           }
+        }
+      }
 
-          @Override
-          public void visit(int docID) {
-            adder.add(docID);
-          }
+      @Override
+      public Relation compare(byte[] minPackedValue, byte[] maxPackedValue) {
+        if (Arrays.compareUnsigned(minPackedValue, 0, Integer.BYTES, maxLat, 0, Integer.BYTES) > 0
+            || Arrays.compareUnsigned(maxPackedValue, 0, Integer.BYTES, minLat, 0, Integer.BYTES)
+                < 0
+            || Arrays.compareUnsigned(
+                    minPackedValue,
+                    Integer.BYTES,
+                    Integer.BYTES + Integer.BYTES,
+                    maxLon,
+                    0,
+                    Integer.BYTES)
+                > 0
+            || Arrays.compareUnsigned(
+                    maxPackedValue,
+                    Integer.BYTES,
+                    Integer.BYTES + Integer.BYTES,
+                    minLon,
+                    0,
+                    Integer.BYTES)
+                < 0) {
+          // outside of global bounding box range
+          return Relation.CELL_OUTSIDE_QUERY;
+        }
 
-          @Override
-          public void visit(int docID, byte[] packedValue) {
-            if (component2DPredicate.test(NumericUtils.sortableBytesToInt(packedValue, 0),
-                NumericUtils.sortableBytesToInt(packedValue, Integer.BYTES))) {
-              visit(docID);
-            }
-          }
+        double cellMinLat = decodeLatitude(minPackedValue, 0);
+        double cellMinLon = decodeLongitude(minPackedValue, Integer.BYTES);
+        double cellMaxLat = decodeLatitude(maxPackedValue, 0);
+        double cellMaxLon = decodeLongitude(maxPackedValue, Integer.BYTES);
 
-          @Override
-          public void visit(DocIdSetIterator iterator, byte[] packedValue) throws IOException {
-            if (component2DPredicate.test(NumericUtils.sortableBytesToInt(packedValue, 0),
-                NumericUtils.sortableBytesToInt(packedValue, Integer.BYTES))) {
-              int docID;
-              while ((docID = iterator.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-                visit(docID);
-              }
-            }
-          }
-
-          @Override
-          public Relation compare(byte[] minPackedValue, byte[] maxPackedValue) {
-            if (Arrays.compareUnsigned(minPackedValue, 0, Integer.BYTES, maxLat, 0, Integer.BYTES) > 0 ||
-                Arrays.compareUnsigned(maxPackedValue, 0, Integer.BYTES, minLat, 0, Integer.BYTES) < 0 ||
-                Arrays.compareUnsigned(minPackedValue, Integer.BYTES, Integer.BYTES + Integer.BYTES, maxLon, 0, Integer.BYTES) > 0 ||
-                Arrays.compareUnsigned(maxPackedValue, Integer.BYTES, Integer.BYTES + Integer.BYTES, minLon, 0, Integer.BYTES) < 0) {
-              // outside of global bounding box range
-              return Relation.CELL_OUTSIDE_QUERY;
-            }
-
-            double cellMinLat = decodeLatitude(minPackedValue, 0);
-            double cellMinLon = decodeLongitude(minPackedValue, Integer.BYTES);
-            double cellMaxLat = decodeLatitude(maxPackedValue, 0);
-            double cellMaxLon = decodeLongitude(maxPackedValue, Integer.BYTES);
-
-            return tree.relate(cellMinLon, cellMaxLon, cellMinLat, cellMaxLat);
-          }
-        };
+        return tree.relate(cellMinLon, cellMaxLon, cellMinLat, cellMaxLat);
+      }
+    };
   }
 

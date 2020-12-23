@@ -1,12 +1,18 @@
-  OrdinalMap(IndexReader.CacheKey owner, TermsEnum subs[], SegmentMap segmentMap, float acceptableOverheadRatio) throws IOException {
-    // create the ordinal mappings by pulling a termsenum over each sub's 
+  OrdinalMap(
+      IndexReader.CacheKey owner,
+      TermsEnum subs[],
+      SegmentMap segmentMap,
+      float acceptableOverheadRatio)
+      throws IOException {
+    // create the ordinal mappings by pulling a termsenum over each sub's
     // unique terms, and walking a multitermsenum over those
     this.owner = owner;
     this.segmentMap = segmentMap;
     // even though we accept an overhead ratio, we keep these ones with COMPACT
     // since they are only used to resolve values given a global ord, which is
     // slow anyway
-    PackedLongValues.Builder globalOrdDeltas = PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
+    PackedLongValues.Builder globalOrdDeltas =
+        PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
     PackedLongValues.Builder firstSegments = PackedLongValues.packedBuilder(PackedInts.COMPACT);
     long firstSegmentBits = 0L;
     final PackedLongValues.Builder[] ordDeltas = new PackedLongValues.Builder[subs.length];
@@ -17,13 +23,14 @@
     long[] segmentOrds = new long[subs.length];
 
     // Just merge-sorts by term:
-    PriorityQueue<TermsEnumIndex> queue = new PriorityQueue<TermsEnumIndex>(subs.length) {
-        @Override
-        protected boolean lessThan(TermsEnumIndex a, TermsEnumIndex b) {
-          return a.currentTerm.compareTo(b.currentTerm) < 0;
-        }
-      };
-    
+    PriorityQueue<TermsEnumIndex> queue =
+        new PriorityQueue<TermsEnumIndex>(subs.length) {
+          @Override
+          protected boolean lessThan(TermsEnumIndex a, TermsEnumIndex b) {
+            return a.currentTerm.compareTo(b.currentTerm) < 0;
+          }
+        };
+
     for (int i = 0; i < subs.length; i++) {
       TermsEnumIndex sub = new TermsEnumIndex(subs[segmentMap.newToOld(i)], i);
       if (sub.next() != null) {
@@ -32,7 +39,7 @@
     }
 
     BytesRefBuilder scratch = new BytesRefBuilder();
-      
+
     long globalOrd = 0;
     while (queue.size() != 0) {
       TermsEnumIndex top = queue.top();
@@ -67,7 +74,7 @@
           ordDeltas[segmentIndex].add(delta);
           segmentOrds[segmentIndex]++;
         } while (segmentOrds[segmentIndex] <= segmentOrd);
-        
+
         if (top.next() == null) {
           queue.pop();
           if (queue.size() == 0) {
@@ -114,33 +121,37 @@
         // likely in case of low cardinalities and large segments
         segmentToGlobalOrds[i] = LongValues.IDENTITY;
       } else {
-        final int bitsRequired = ordDeltaBits[i] < 0 ? 64 : PackedInts.bitsRequired(ordDeltaBits[i]);
+        final int bitsRequired =
+            ordDeltaBits[i] < 0 ? 64 : PackedInts.bitsRequired(ordDeltaBits[i]);
         final long monotonicBits = deltas.ramBytesUsed() * 8;
         final long packedBits = bitsRequired * deltas.size();
         if (deltas.size() <= Integer.MAX_VALUE
             && packedBits <= monotonicBits * (1 + acceptableOverheadRatio)) {
           // monotonic compression mostly adds overhead, let's keep the mapping in plain packed ints
           final int size = (int) deltas.size();
-          final PackedInts.Mutable newDeltas = PackedInts.getMutable(size, bitsRequired, acceptableOverheadRatio);
+          final PackedInts.Mutable newDeltas =
+              PackedInts.getMutable(size, bitsRequired, acceptableOverheadRatio);
           final PackedLongValues.Iterator it = deltas.iterator();
           for (int ord = 0; ord < size; ++ord) {
             newDeltas.set(ord, it.next());
           }
           assert it.hasNext() == false;
-          segmentToGlobalOrds[i] = new LongValues() {
-              @Override
-              public long get(long ord) {
-                return ord + newDeltas.get((int) ord);
-              }
-            };
+          segmentToGlobalOrds[i] =
+              new LongValues() {
+                @Override
+                public long get(long ord) {
+                  return ord + newDeltas.get((int) ord);
+                }
+              };
           ramBytesUsed += newDeltas.ramBytesUsed();
         } else {
-          segmentToGlobalOrds[i] = new LongValues() {
-              @Override
-              public long get(long ord) {
-                return ord + deltas.get(ord);
-              }
-            };
+          segmentToGlobalOrds[i] =
+              new LongValues() {
+                @Override
+                public long get(long ord) {
+                  return ord + deltas.get(ord);
+                }
+              };
           ramBytesUsed += deltas.ramBytesUsed();
         }
         ramBytesUsed += RamUsageEstimator.shallowSizeOf(segmentToGlobalOrds[i]);

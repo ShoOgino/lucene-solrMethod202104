@@ -9,7 +9,8 @@
     analyzer.setMaxTokenLength(TestUtil.nextInt(random(), 1, IndexWriter.MAX_TERM_LENGTH));
 
     writerRef.set(new IndexWriter(d, newIndexWriterConfig(analyzer)));
-    // Make initial commit so the test doesn't trip "corrupt first commit" when virus checker refuses to delete partial segments_N file:
+    // Make initial commit so the test doesn't trip "corrupt first commit" when virus checker
+    // refuses to delete partial segments_N file:
     writerRef.get().commit();
     final LineFileDocs docs = new LineFileDocs(random());
     final Thread[] threads = new Thread[threadCount];
@@ -17,68 +18,76 @@
     final AtomicBoolean failed = new AtomicBoolean();
     final Lock rollbackLock = new ReentrantLock();
     final Lock commitLock = new ReentrantLock();
-    for(int threadID=0;threadID<threadCount;threadID++) {
-      threads[threadID] = new Thread() {
-          @Override
-          public void run() {
-            for(int iter=0;iter<iters && !failed.get();iter++) {
-              //final int x = random().nextInt(5);
-              final int x = random().nextInt(3);
-              try {
-                switch(x) {
-                case 0:
-                  rollbackLock.lock();
-                  if (VERBOSE) {
-                    System.out.println("\nTEST: " + Thread.currentThread().getName() + ": now rollback");
+    for (int threadID = 0; threadID < threadCount; threadID++) {
+      threads[threadID] =
+          new Thread() {
+            @Override
+            public void run() {
+              for (int iter = 0; iter < iters && !failed.get(); iter++) {
+                // final int x = random().nextInt(5);
+                final int x = random().nextInt(3);
+                try {
+                  switch (x) {
+                    case 0:
+                      rollbackLock.lock();
+                      if (VERBOSE) {
+                        System.out.println(
+                            "\nTEST: " + Thread.currentThread().getName() + ": now rollback");
+                      }
+                      try {
+                        writerRef.get().rollback();
+                        if (VERBOSE) {
+                          System.out.println(
+                              "TEST: "
+                                  + Thread.currentThread().getName()
+                                  + ": rollback done; now open new writer");
+                        }
+                        writerRef.set(
+                            new IndexWriter(d, newIndexWriterConfig(new MockAnalyzer(random()))));
+                      } finally {
+                        rollbackLock.unlock();
+                      }
+                      break;
+                    case 1:
+                      commitLock.lock();
+                      if (VERBOSE) {
+                        System.out.println(
+                            "\nTEST: " + Thread.currentThread().getName() + ": now commit");
+                      }
+                      try {
+                        if (random().nextBoolean()) {
+                          writerRef.get().prepareCommit();
+                        }
+                        writerRef.get().commit();
+                      } catch (AlreadyClosedException | NullPointerException ace) {
+                        // ok
+                      } finally {
+                        commitLock.unlock();
+                      }
+                      break;
+                    case 2:
+                      if (VERBOSE) {
+                        System.out.println(
+                            "\nTEST: " + Thread.currentThread().getName() + ": now add");
+                      }
+                      try {
+                        writerRef.get().addDocument(docs.nextDoc());
+                      } catch (AlreadyClosedException | NullPointerException | AssertionError ace) {
+                        // ok
+                      }
+                      break;
                   }
-                  try {
-                    writerRef.get().rollback();
-                    if (VERBOSE) {
-                      System.out.println("TEST: " + Thread.currentThread().getName() + ": rollback done; now open new writer");
-                    }
-                    writerRef.set(new IndexWriter(d, newIndexWriterConfig(new MockAnalyzer(random()))));
-                  } finally {
-                    rollbackLock.unlock();
-                  }
-                  break;
-                case 1:
-                  commitLock.lock();
-                  if (VERBOSE) {
-                    System.out.println("\nTEST: " + Thread.currentThread().getName() + ": now commit");
-                  }
-                  try {
-                    if (random().nextBoolean()) {
-                      writerRef.get().prepareCommit();
-                    }
-                    writerRef.get().commit();
-                  } catch (AlreadyClosedException | NullPointerException ace) {
-                    // ok
-                  } finally {
-                    commitLock.unlock();
-                  }
-                  break;
-                case 2:
-                  if (VERBOSE) {
-                    System.out.println("\nTEST: " + Thread.currentThread().getName() + ": now add");
-                  }
-                  try {
-                    writerRef.get().addDocument(docs.nextDoc());
-                  } catch (AlreadyClosedException | NullPointerException | AssertionError ace) {
-                    // ok
-                  }
-                  break;
+                } catch (Throwable t) {
+                  failed.set(true);
+                  throw new RuntimeException(t);
                 }
-              } catch (Throwable t) {
-                failed.set(true);
-                throw new RuntimeException(t);
               }
             }
-          }
-        };
+          };
       threads[threadID].start();
     }
 
-    for(int threadID=0;threadID<threadCount;threadID++) {
+    for (int threadID = 0; threadID < threadCount; threadID++) {
       threads[threadID].join();
     }
 

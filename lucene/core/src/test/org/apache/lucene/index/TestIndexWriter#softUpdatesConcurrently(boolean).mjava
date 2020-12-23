@@ -4,48 +4,52 @@
     indexWriterConfig.setSoftDeletesField("soft_delete");
     AtomicBoolean mergeAwaySoftDeletes = new AtomicBoolean(random().nextBoolean());
     if (mixDeletes == false) {
-      indexWriterConfig.setMergePolicy(new OneMergeWrappingMergePolicy(indexWriterConfig.getMergePolicy(), towrap ->
-          new MergePolicy.OneMerge(towrap.segments) {
+      indexWriterConfig.setMergePolicy(
+          new OneMergeWrappingMergePolicy(
+              indexWriterConfig.getMergePolicy(),
+              towrap ->
+                  new MergePolicy.OneMerge(towrap.segments) {
+                    @Override
+                    public CodecReader wrapForMerge(CodecReader reader) throws IOException {
+                      if (mergeAwaySoftDeletes.get()) {
+                        return towrap.wrapForMerge(reader);
+                      } else {
+                        CodecReader wrapped = towrap.wrapForMerge(reader);
+                        return new FilterCodecReader(wrapped) {
+                          @Override
+                          public CacheHelper getCoreCacheHelper() {
+                            return in.getCoreCacheHelper();
+                          }
+
+                          @Override
+                          public CacheHelper getReaderCacheHelper() {
+                            return in.getReaderCacheHelper();
+                          }
+
+                          @Override
+                          public Bits getLiveDocs() {
+                            return null; // everything is live
+                          }
+
+                          @Override
+                          public int numDocs() {
+                            return maxDoc();
+                          }
+                        };
+                      }
+                    }
+                  }) {
             @Override
-            public CodecReader wrapForMerge(CodecReader reader) throws IOException {
+            public int numDeletesToMerge(
+                SegmentCommitInfo info, int delCount, IOSupplier<CodecReader> readerSupplier)
+                throws IOException {
               if (mergeAwaySoftDeletes.get()) {
-                return towrap.wrapForMerge(reader);
+                return super.numDeletesToMerge(info, delCount, readerSupplier);
               } else {
-                CodecReader wrapped = towrap.wrapForMerge(reader);
-                return new FilterCodecReader(wrapped) {
-                  @Override
-                  public CacheHelper getCoreCacheHelper() {
-                    return in.getCoreCacheHelper();
-                  }
-
-                  @Override
-                  public CacheHelper getReaderCacheHelper() {
-                    return in.getReaderCacheHelper();
-                  }
-
-                  @Override
-                  public Bits getLiveDocs() {
-                    return null; // everything is live
-                  }
-
-                  @Override
-                  public int numDocs() {
-                    return maxDoc();
-                  }
-                };
+                return 0;
               }
             }
-          }
-      ) {
-        @Override
-        public int numDeletesToMerge(SegmentCommitInfo info, int delCount, IOSupplier<CodecReader> readerSupplier) throws IOException {
-          if (mergeAwaySoftDeletes.get()) {
-            return super.numDeletesToMerge(info, delCount, readerSupplier);
-          } else {
-            return 0;
-          }
-        }
-      });
+          });
     }
     IndexWriter writer = new IndexWriter(dir, indexWriterConfig);
     Thread[] threads = new Thread[2 + random().nextInt(3)];
@@ -54,37 +58,41 @@
     boolean updateSeveralDocs = random().nextBoolean();
     Set<String> ids = Collections.synchronizedSet(new HashSet<>());
     for (int i = 0; i < threads.length; i++) {
-      threads[i] = new Thread(() -> {
-        try {
-          started.countDown();
-          startLatch.await();
-          for (int d = 0;  d < 100; d++) {
-            String id = String.valueOf(random().nextInt(10));
-            if (updateSeveralDocs) {
-              Document doc = new Document();
-              doc.add(new StringField("id", id, Field.Store.YES));
-              if (mixDeletes && random().nextBoolean()) {
-                writer.updateDocuments(new Term("id", id), Arrays.asList(doc, doc));
-              } else {
-                writer.softUpdateDocuments(new Term("id", id), Arrays.asList(doc, doc),
-                    new NumericDocValuesField("soft_delete", 1));
-              }
-            } else {
-              Document doc = new Document();
-              doc.add(new StringField("id", id, Field.Store.YES));
-              if (mixDeletes && random().nextBoolean()) {
-                writer.updateDocument(new Term("id", id), doc);
-              } else {
-                writer.softUpdateDocument(new Term("id", id), doc,
-                    new NumericDocValuesField("soft_delete", 1));
-              }
-            }
-            ids.add(id);
-          }
-        } catch (IOException | InterruptedException e) {
-          throw new AssertionError(e);
-        }
-      });
+      threads[i] =
+          new Thread(
+              () -> {
+                try {
+                  started.countDown();
+                  startLatch.await();
+                  for (int d = 0; d < 100; d++) {
+                    String id = String.valueOf(random().nextInt(10));
+                    if (updateSeveralDocs) {
+                      Document doc = new Document();
+                      doc.add(new StringField("id", id, Field.Store.YES));
+                      if (mixDeletes && random().nextBoolean()) {
+                        writer.updateDocuments(new Term("id", id), Arrays.asList(doc, doc));
+                      } else {
+                        writer.softUpdateDocuments(
+                            new Term("id", id),
+                            Arrays.asList(doc, doc),
+                            new NumericDocValuesField("soft_delete", 1));
+                      }
+                    } else {
+                      Document doc = new Document();
+                      doc.add(new StringField("id", id, Field.Store.YES));
+                      if (mixDeletes && random().nextBoolean()) {
+                        writer.updateDocument(new Term("id", id), doc);
+                      } else {
+                        writer.softUpdateDocument(
+                            new Term("id", id), doc, new NumericDocValuesField("soft_delete", 1));
+                      }
+                    }
+                    ids.add(id);
+                  }
+                } catch (IOException | InterruptedException e) {
+                  throw new AssertionError(e);
+                }
+              });
       threads[i].start();
     }
     started.await();

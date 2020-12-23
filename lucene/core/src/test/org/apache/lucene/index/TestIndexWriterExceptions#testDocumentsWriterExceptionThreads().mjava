@@ -1,86 +1,104 @@
   public void testDocumentsWriterExceptionThreads() throws Exception {
-    Analyzer analyzer = new Analyzer(Analyzer.PER_FIELD_REUSE_STRATEGY) {
-      @Override
-      public TokenStreamComponents createComponents(String fieldName) {
-        MockTokenizer tokenizer = new MockTokenizer(MockTokenizer.WHITESPACE, false);
-        tokenizer.setEnableChecks(false); // disable workflow checking as we forcefully close() in exceptional cases.
-        return new TokenStreamComponents(tokenizer, new CrashingFilter(fieldName, tokenizer));
-      }
-    };
+    Analyzer analyzer =
+        new Analyzer(Analyzer.PER_FIELD_REUSE_STRATEGY) {
+          @Override
+          public TokenStreamComponents createComponents(String fieldName) {
+            MockTokenizer tokenizer = new MockTokenizer(MockTokenizer.WHITESPACE, false);
+            tokenizer.setEnableChecks(
+                false); // disable workflow checking as we forcefully close() in exceptional cases.
+            return new TokenStreamComponents(tokenizer, new CrashingFilter(fieldName, tokenizer));
+          }
+        };
 
     final int NUM_THREAD = 3;
     final int NUM_ITER = atLeast(10);
 
-    for(int i=0;i<2;i++) {
+    for (int i = 0; i < 2; i++) {
       Directory dir = newDirectory();
       {
-        final IndexWriter writer = new IndexWriter(dir, newIndexWriterConfig(analyzer)
-            .setMaxBufferedDocs(Integer.MAX_VALUE)
-            .setRAMBufferSizeMB(-1) // we don't want to flush automatically
-            .setMergePolicy(new FilterMergePolicy(NoMergePolicy.INSTANCE) {
-              // don't use a merge policy here they depend on the DWPThreadPool and its max thread states etc.
-              // we also need to keep fully deleted segments since otherwise we clean up fully deleted ones and if we
-              // flush the one that has only the failed document the docFreq checks will be off below.
-              @Override
-              public boolean keepFullyDeletedSegment(IOSupplier<CodecReader> readerIOSupplier) {
-                return true;
-              }
-            }));
+        final IndexWriter writer =
+            new IndexWriter(
+                dir,
+                newIndexWriterConfig(analyzer)
+                    .setMaxBufferedDocs(Integer.MAX_VALUE)
+                    .setRAMBufferSizeMB(-1) // we don't want to flush automatically
+                    .setMergePolicy(
+                        new FilterMergePolicy(NoMergePolicy.INSTANCE) {
+                          // don't use a merge policy here they depend on the DWPThreadPool and its
+                          // max thread states etc.
+                          // we also need to keep fully deleted segments since otherwise we clean up
+                          // fully deleted ones and if we
+                          // flush the one that has only the failed document the docFreq checks will
+                          // be off below.
+                          @Override
+                          public boolean keepFullyDeletedSegment(
+                              IOSupplier<CodecReader> readerIOSupplier) {
+                            return true;
+                          }
+                        }));
 
         final int finalI = i;
 
         Thread[] threads = new Thread[NUM_THREAD];
-        for(int t=0;t<NUM_THREAD;t++) {
-          threads[t] = new Thread() {
-              @Override
-              public void run() {
-                try {
-                  for(int iter=0;iter<NUM_ITER;iter++) {
-                    Document doc = new Document();
-                    doc.add(newField("contents", "here are some contents", DocCopyIterator.custom5));
-                    writer.addDocument(doc);
-                    writer.addDocument(doc);
-                    doc.add(newField("crash", "this should crash after 4 terms", DocCopyIterator.custom5));
-                    doc.add(newField("other", "this will not get indexed", DocCopyIterator.custom5));
-                    expectThrows(IOException.class, () -> {
+        for (int t = 0; t < NUM_THREAD; t++) {
+          threads[t] =
+              new Thread() {
+                @Override
+                public void run() {
+                  try {
+                    for (int iter = 0; iter < NUM_ITER; iter++) {
+                      Document doc = new Document();
+                      doc.add(
+                          newField("contents", "here are some contents", DocCopyIterator.custom5));
                       writer.addDocument(doc);
-                    });
+                      writer.addDocument(doc);
+                      doc.add(
+                          newField(
+                              "crash", "this should crash after 4 terms", DocCopyIterator.custom5));
+                      doc.add(
+                          newField("other", "this will not get indexed", DocCopyIterator.custom5));
+                      expectThrows(
+                          IOException.class,
+                          () -> {
+                            writer.addDocument(doc);
+                          });
 
-                    if (0 == finalI) {
-                      Document extraDoc = new Document();
-                      extraDoc.add(newField("contents", "here are some contents", DocCopyIterator.custom5));
-                      writer.addDocument(extraDoc);
-                      writer.addDocument(extraDoc);
+                      if (0 == finalI) {
+                        Document extraDoc = new Document();
+                        extraDoc.add(
+                            newField(
+                                "contents", "here are some contents", DocCopyIterator.custom5));
+                        writer.addDocument(extraDoc);
+                        writer.addDocument(extraDoc);
+                      }
                     }
+                  } catch (Throwable t) {
+                    synchronized (this) {
+                      System.out.println(
+                          Thread.currentThread().getName() + ": ERROR: hit unexpected exception");
+                      t.printStackTrace(System.out);
+                    }
+                    fail();
                   }
-                } catch (Throwable t) {
-                  synchronized(this) {
-                    System.out.println(Thread.currentThread().getName() + ": ERROR: hit unexpected exception");
-                    t.printStackTrace(System.out);
-                  }
-                  fail();
                 }
-              }
-            };
+              };
           threads[t].start();
         }
 
-        for(int t=0;t<NUM_THREAD;t++)
-          threads[t].join();
+        for (int t = 0; t < NUM_THREAD; t++) threads[t].join();
 
         writer.close();
       }
 
       IndexReader reader = DirectoryReader.open(dir);
-      int expected = (3+(1-i)*2)*NUM_THREAD*NUM_ITER;
+      int expected = (3 + (1 - i) * 2) * NUM_THREAD * NUM_ITER;
       assertEquals("i=" + i, expected, reader.docFreq(new Term("contents", "here")));
       assertEquals(expected, reader.maxDoc());
       int numDel = 0;
       final Bits liveDocs = MultiBits.getLiveDocs(reader);
       assertNotNull(liveDocs);
-      for(int j=0;j<reader.maxDoc();j++) {
-        if (!liveDocs.get(j))
-          numDel++;
+      for (int j = 0; j < reader.maxDoc(); j++) {
+        if (!liveDocs.get(j)) numDel++;
         else {
           reader.document(j);
           reader.getTermVectors(j);
@@ -88,23 +106,22 @@
       }
       reader.close();
 
-      assertEquals(NUM_THREAD*NUM_ITER, numDel);
+      assertEquals(NUM_THREAD * NUM_ITER, numDel);
 
-      IndexWriter writer = new IndexWriter(dir, newIndexWriterConfig(analyzer)
-                                                  .setMaxBufferedDocs(10));
+      IndexWriter writer =
+          new IndexWriter(dir, newIndexWriterConfig(analyzer).setMaxBufferedDocs(10));
       Document doc = new Document();
       doc.add(newField("contents", "here are some contents", DocCopyIterator.custom5));
-      for(int j=0;j<17;j++)
-        writer.addDocument(doc);
+      for (int j = 0; j < 17; j++) writer.addDocument(doc);
       writer.forceMerge(1);
       writer.close();
 
       reader = DirectoryReader.open(dir);
-      expected += 17-NUM_THREAD*NUM_ITER;
+      expected += 17 - NUM_THREAD * NUM_ITER;
       assertEquals(expected, reader.docFreq(new Term("contents", "here")));
       assertEquals(expected, reader.maxDoc());
       assertNull(MultiBits.getLiveDocs(reader));
-      for(int j=0;j<reader.maxDoc();j++) {
+      for (int j = 0; j < reader.maxDoc(); j++) {
         reader.document(j);
         reader.getTermVectors(j);
       }

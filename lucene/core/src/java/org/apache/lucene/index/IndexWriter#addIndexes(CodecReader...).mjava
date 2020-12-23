@@ -1,38 +1,26 @@
   /**
    * Merges the provided indexes into this index.
-   * 
-   * <p>
-   * The provided IndexReaders are not closed.
-   * 
-   * <p>
-   * See {@link #addIndexes} for details on transactional semantics, temporary
-   * free space required in the Directory, and non-CFS segments on an Exception.
-   * 
-   * <p>
-   * <b>NOTE:</b> empty segments are dropped by this method and not added to this
-   * index.
-   * 
-   * <p>
-   * <b>NOTE:</b> this merges all given {@link LeafReader}s in one
-   * merge. If you intend to merge a large number of readers, it may be better
-   * to call this method multiple times, each time with a small set of readers.
-   * In principle, if you use a merge policy with a {@code mergeFactor} or
-   * {@code maxMergeAtOnce} parameter, you should pass that many readers in one
-   * call.
-   * 
-   * <p>
-   * <b>NOTE:</b> this method does not call or make use of the {@link MergeScheduler},
-   * so any custom bandwidth throttling is at the moment ignored.
-   * 
-   * @return The <a href="#sequence_number">sequence number</a>
-   * for this operation
    *
-   * @throws CorruptIndexException
-   *           if the index is corrupt
-   * @throws IOException
-   *           if there is a low-level IO error
-   * @throws IllegalArgumentException
-   *           if addIndexes would cause the index to exceed {@link #MAX_DOCS}
+   * <p>The provided IndexReaders are not closed.
+   *
+   * <p>See {@link #addIndexes} for details on transactional semantics, temporary free space
+   * required in the Directory, and non-CFS segments on an Exception.
+   *
+   * <p><b>NOTE:</b> empty segments are dropped by this method and not added to this index.
+   *
+   * <p><b>NOTE:</b> this merges all given {@link LeafReader}s in one merge. If you intend to merge
+   * a large number of readers, it may be better to call this method multiple times, each time with
+   * a small set of readers. In principle, if you use a merge policy with a {@code mergeFactor} or
+   * {@code maxMergeAtOnce} parameter, you should pass that many readers in one call.
+   *
+   * <p><b>NOTE:</b> this method does not call or make use of the {@link MergeScheduler}, so any
+   * custom bandwidth throttling is at the moment ignored.
+   *
+   * @return The <a href="#sequence_number">sequence number</a> for this operation
+   * @throws CorruptIndexException if the index is corrupt
+   * @throws IOException if there is a low-level IO error
+   * @throws IllegalArgumentException if addIndexes would cause the index to exceed {@link
+   *     #MAX_DOCS}
    */
   public long addIndexes(CodecReader... readers) throws IOException {
     ensureOpen();
@@ -52,28 +40,44 @@
         numDocs += leaf.numDocs();
         validateMergeReader(leaf);
         if (softDeletesEnabled) {
-            Bits liveDocs = leaf.getLiveDocs();
-            numSoftDeleted += PendingSoftDeletes.countSoftDeletes(
-            DocValuesFieldExistsQuery.getDocValuesDocIdSetIterator(config.getSoftDeletesField(), leaf), liveDocs);
+          Bits liveDocs = leaf.getLiveDocs();
+          numSoftDeleted +=
+              PendingSoftDeletes.countSoftDeletes(
+                  DocValuesFieldExistsQuery.getDocValuesDocIdSetIterator(
+                      config.getSoftDeletesField(), leaf),
+                  liveDocs);
         }
       }
-      
+
       // Best-effort up front check:
       testReserveDocs(numDocs);
 
-      final IOContext context = new IOContext(new MergeInfo(Math.toIntExact(numDocs), -1, false, UNBOUNDED_MAX_MERGE_SEGMENTS));
+      final IOContext context =
+          new IOContext(
+              new MergeInfo(Math.toIntExact(numDocs), -1, false, UNBOUNDED_MAX_MERGE_SEGMENTS));
 
       // TODO: somehow we should fix this merge so it's
       // abortable so that IW.close(false) is able to stop it
       TrackingDirectoryWrapper trackingDir = new TrackingDirectoryWrapper(directory);
       Codec codec = config.getCodec();
       // We set the min version to null for now, it will be set later by SegmentMerger
-      SegmentInfo info = new SegmentInfo(directoryOrig, Version.LATEST, null, mergedName, -1,
-                                         false, codec, Collections.emptyMap(), StringHelper.randomId(), Collections.emptyMap(), config.getIndexSort());
+      SegmentInfo info =
+          new SegmentInfo(
+              directoryOrig,
+              Version.LATEST,
+              null,
+              mergedName,
+              -1,
+              false,
+              codec,
+              Collections.emptyMap(),
+              StringHelper.randomId(),
+              Collections.emptyMap(),
+              config.getIndexSort());
 
-      SegmentMerger merger = new SegmentMerger(Arrays.asList(readers), info, infoStream, trackingDir,
-                                               globalFieldNumberMap, 
-                                               context);
+      SegmentMerger merger =
+          new SegmentMerger(
+              Arrays.asList(readers), info, infoStream, trackingDir, globalFieldNumberMap, context);
 
       if (!merger.shouldMerge()) {
         return docWriter.getNextSequenceNumber();
@@ -85,23 +89,24 @@
         runningAddIndexesMerges.add(merger);
       }
       try {
-        merger.merge();  // merge 'em
+        merger.merge(); // merge 'em
       } finally {
         synchronized (this) {
           runningAddIndexesMerges.remove(merger);
           notifyAll();
         }
       }
-      SegmentCommitInfo infoPerCommit = new SegmentCommitInfo(info, 0, numSoftDeleted, -1L, -1L, -1L, StringHelper.randomId());
+      SegmentCommitInfo infoPerCommit =
+          new SegmentCommitInfo(info, 0, numSoftDeleted, -1L, -1L, -1L, StringHelper.randomId());
 
       info.setFiles(new HashSet<>(trackingDir.getCreatedFiles()));
       trackingDir.clearCreatedFiles();
-                                         
+
       setDiagnostics(info, SOURCE_ADDINDEXES_READERS);
 
       final MergePolicy mergePolicy = config.getMergePolicy();
       boolean useCompoundFile;
-      synchronized(this) { // Guard segmentInfos
+      synchronized (this) { // Guard segmentInfos
         if (merges.areEnabled() == false) {
           // Safe: these files must exist
           deleteNewFiles(infoPerCommit.files());
@@ -137,7 +142,7 @@
       info.addFiles(trackingDir.getCreatedFiles());
 
       // Register the new segment
-      synchronized(this) {
+      synchronized (this) {
         if (merges.areEnabled() == false) {
           // Safe: these files must exist
           deleteNewFiles(infoPerCommit.files());
@@ -148,7 +153,7 @@
 
         // Now reserve the docs, just before we update SIS:
         reserveDocs(numDocs);
-      
+
         segmentInfos.add(infoPerCommit);
         seqNo = docWriter.getNextSequenceNumber();
         checkpoint();

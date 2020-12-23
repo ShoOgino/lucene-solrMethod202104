@@ -3,23 +3,28 @@
       boolean useSoftDeletes = random().nextBoolean();
       CountDownLatch waitForMerge = new CountDownLatch(1);
       CountDownLatch waitForUpdate = new CountDownLatch(1);
-      try (IndexWriter writer = new IndexWriter(directory, newIndexWriterConfig()
-          .setMergePolicy(new MergeOnXMergePolicy(NoMergePolicy.INSTANCE, MergeTrigger.COMMIT)).setMaxFullFlushMergeWaitMillis(30 * 1000)
-          .setSoftDeletesField("soft_delete")
-          .setMaxBufferedDocs(Integer.MAX_VALUE)
-          .setRAMBufferSizeMB(100)
-          .setMergeScheduler(new ConcurrentMergeScheduler())) {
-        @Override
-        protected void merge(MergePolicy.OneMerge merge) throws IOException {
-          waitForMerge.countDown();
-          try {
-            waitForUpdate.await();
-          } catch (InterruptedException e) {
-            throw new AssertionError(e);
-          }
-          super.merge(merge);
-        }
-      }) {
+      try (IndexWriter writer =
+          new IndexWriter(
+              directory,
+              newIndexWriterConfig()
+                  .setMergePolicy(
+                      new MergeOnXMergePolicy(NoMergePolicy.INSTANCE, MergeTrigger.COMMIT))
+                  .setMaxFullFlushMergeWaitMillis(30 * 1000)
+                  .setSoftDeletesField("soft_delete")
+                  .setMaxBufferedDocs(Integer.MAX_VALUE)
+                  .setRAMBufferSizeMB(100)
+                  .setMergeScheduler(new ConcurrentMergeScheduler())) {
+            @Override
+            protected void merge(MergePolicy.OneMerge merge) throws IOException {
+              waitForMerge.countDown();
+              try {
+                waitForUpdate.await();
+              } catch (InterruptedException e) {
+                throw new AssertionError(e);
+              }
+              super.merge(merge);
+            }
+          }) {
 
         Document d1 = new Document();
         d1.add(new StringField("id", "1", Field.Store.NO));
@@ -32,37 +37,41 @@
         writer.addDocument(d2);
         boolean addThreeDocs = random().nextBoolean();
         int expectedNumDocs = 2;
-        if (addThreeDocs) { // sometimes add another doc to ensure we don't have a fully deleted segment
+        if (addThreeDocs) { // sometimes add another doc to ensure we don't have a fully deleted
+          // segment
           expectedNumDocs = 3;
           writer.addDocument(d3);
         }
-        Thread t = new Thread(() -> {
-          try {
-            waitForMerge.await();
-            if (useSoftDeletes) {
-              writer.softUpdateDocument(new Term("id", "2"), d2, new NumericDocValuesField("soft_delete", 1));
-            } else {
-              writer.updateDocument(new Term("id", "2"), d2);
-            }
-            writer.flush();
-          } catch (Exception e) {
-            throw new AssertionError(e);
-          } finally {
-            waitForUpdate.countDown();
-          }
-
-        });
+        Thread t =
+            new Thread(
+                () -> {
+                  try {
+                    waitForMerge.await();
+                    if (useSoftDeletes) {
+                      writer.softUpdateDocument(
+                          new Term("id", "2"), d2, new NumericDocValuesField("soft_delete", 1));
+                    } else {
+                      writer.updateDocument(new Term("id", "2"), d2);
+                    }
+                    writer.flush();
+                  } catch (Exception e) {
+                    throw new AssertionError(e);
+                  } finally {
+                    waitForUpdate.countDown();
+                  }
+                });
         t.start();
         writer.commit();
         t.join();
-        try (DirectoryReader open = new SoftDeletesDirectoryReaderWrapper(DirectoryReader.open(directory), "soft_delete")) {
+        try (DirectoryReader open =
+            new SoftDeletesDirectoryReaderWrapper(DirectoryReader.open(directory), "soft_delete")) {
           assertEquals(expectedNumDocs, open.numDocs());
           assertEquals("we should not have any deletes", expectedNumDocs, open.maxDoc());
         }
 
         try (DirectoryReader open = DirectoryReader.open(writer)) {
           assertEquals(expectedNumDocs, open.numDocs());
-          assertEquals("we should not have one delete", expectedNumDocs+1, open.maxDoc());
+          assertEquals("we should not have one delete", expectedNumDocs + 1, open.maxDoc());
         }
       }
     }

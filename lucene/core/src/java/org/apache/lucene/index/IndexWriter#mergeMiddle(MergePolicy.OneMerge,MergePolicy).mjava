@@ -1,6 +1,7 @@
-  /** Does the actual (time-consuming) work of the merge,
-   *  but without holding synchronized lock on IndexWriter
-   *  instance */
+  /**
+   * Does the actual (time-consuming) work of the merge, but without holding synchronized lock on
+   * IndexWriter instance
+   */
   private int mergeMiddle(MergePolicy.OneMerge merge, MergePolicy mergePolicy) throws IOException {
     testPoint("mergeMiddleStart");
     merge.checkAborted();
@@ -18,11 +19,12 @@
     // closed:
     boolean success = false;
     try {
-      merge.initMergeReaders(sci -> {
-        final ReadersAndUpdates rld = getPooledInstance(sci, true);
-        rld.setIsMerging();
-        return rld.getReaderForMerge(context);
-      });
+      merge.initMergeReaders(
+          sci -> {
+            final ReadersAndUpdates rld = getPooledInstance(sci, true);
+            rld.setIsMerging();
+            return rld.getReaderForMerge(context);
+          });
       // Let the merge wrap readers
       List<CodecReader> mergeReaders = new ArrayList<>();
       Counter softDeleteCount = Counter.newCounter(false);
@@ -31,30 +33,39 @@
         CodecReader wrappedReader = merge.wrapForMerge(reader);
         validateMergeReader(wrappedReader);
         if (softDeletesEnabled) {
-          if (reader != wrappedReader) { // if we don't have a wrapped reader we won't preserve any soft-deletes
+          if (reader != wrappedReader) { // if we don't have a wrapped reader we won't preserve any
+            // soft-deletes
             Bits hardLiveDocs = mergeReader.hardLiveDocs;
-            if (hardLiveDocs != null) { // we only need to do this accounting if we have mixed deletes
+            // we only need to do this accounting if we have mixed deletes
+            if (hardLiveDocs != null) {
               Bits wrappedLiveDocs = wrappedReader.getLiveDocs();
               Counter hardDeleteCounter = Counter.newCounter(false);
-              countSoftDeletes(wrappedReader, wrappedLiveDocs, hardLiveDocs, softDeleteCount, hardDeleteCounter);
+              countSoftDeletes(
+                  wrappedReader, wrappedLiveDocs, hardLiveDocs, softDeleteCount, hardDeleteCounter);
               int hardDeleteCount = Math.toIntExact(hardDeleteCounter.get());
               // Wrap the wrapped reader again if we have excluded some hard-deleted docs
               if (hardDeleteCount > 0) {
-                Bits liveDocs = wrappedLiveDocs == null ? hardLiveDocs : new Bits() {
-                  @Override
-                  public boolean get(int index) {
-                    return hardLiveDocs.get(index) && wrappedLiveDocs.get(index);
-                  }
+                Bits liveDocs =
+                    wrappedLiveDocs == null
+                        ? hardLiveDocs
+                        : new Bits() {
+                          @Override
+                          public boolean get(int index) {
+                            return hardLiveDocs.get(index) && wrappedLiveDocs.get(index);
+                          }
 
-                  @Override
-                  public int length() {
-                    return hardLiveDocs.length();
-                  }
-                };
-                wrappedReader = FilterCodecReader.wrapLiveDocs(wrappedReader, liveDocs, wrappedReader.numDocs() - hardDeleteCount);
+                          @Override
+                          public int length() {
+                            return hardLiveDocs.length();
+                          }
+                        };
+                wrappedReader =
+                    FilterCodecReader.wrapLiveDocs(
+                        wrappedReader, liveDocs, wrappedReader.numDocs() - hardDeleteCount);
               }
             } else {
-              final int carryOverSoftDeletes = reader.getSegmentInfo().getSoftDelCount() - wrappedReader.numDeletedDocs();
+              final int carryOverSoftDeletes =
+                  reader.getSegmentInfo().getSoftDelCount() - wrappedReader.numDeletedDocs();
               assert carryOverSoftDeletes >= 0 : "carry-over soft-deletes must be positive";
               assert assertSoftDeletesCount(wrappedReader, carryOverSoftDeletes);
               softDeleteCount.addAndGet(carryOverSoftDeletes);
@@ -63,10 +74,9 @@
         }
         mergeReaders.add(wrappedReader);
       }
-      final SegmentMerger merger = new SegmentMerger(mergeReaders,
-                                                     merge.info.info, infoStream, dirWrapper,
-                                                     globalFieldNumberMap,
-                                                     context);
+      final SegmentMerger merger =
+          new SegmentMerger(
+              mergeReaders, merge.info.info, infoStream, dirWrapper, globalFieldNumberMap, context);
       merge.info.setSoftDelCount(Math.toIntExact(softDeleteCount.get()));
       merge.checkAborted();
 
@@ -83,40 +93,52 @@
       Codec codec = config.getCodec();
       if (infoStream.isEnabled("IW")) {
         if (merger.shouldMerge()) {
-          String pauseInfo = merge.getMergeProgress().getPauseTimes().entrySet()
-            .stream()
-            .filter((e) -> e.getValue() > 0)
-            .map((e) -> String.format(Locale.ROOT, "%.1f sec %s",
-                e.getValue() / 1000000000.,
-                e.getKey().name().toLowerCase(Locale.ROOT)))
-            .collect(Collectors.joining(", "));
+          String pauseInfo =
+              merge.getMergeProgress().getPauseTimes().entrySet().stream()
+                  .filter((e) -> e.getValue() > 0)
+                  .map(
+                      (e) ->
+                          String.format(
+                              Locale.ROOT,
+                              "%.1f sec %s",
+                              e.getValue() / 1000000000.,
+                              e.getKey().name().toLowerCase(Locale.ROOT)))
+                  .collect(Collectors.joining(", "));
           if (!pauseInfo.isEmpty()) {
             pauseInfo = " (" + pauseInfo + ")";
           }
 
           long t1 = System.nanoTime();
-          double sec = (t1-merge.mergeStartNS)/1000000000.;
-          double segmentMB = (merge.info.sizeInBytes()/1024./1024.);
-          infoStream.message("IW", "merge codec=" + codec + " maxDoc=" + merge.info.info.maxDoc() + "; merged segment has " +
-                             (mergeState.mergeFieldInfos.hasVectors() ? "vectors" : "no vectors") + "; " +
-                             (mergeState.mergeFieldInfos.hasNorms() ? "norms" : "no norms") + "; " +
-                             (mergeState.mergeFieldInfos.hasDocValues() ? "docValues" : "no docValues") + "; " +
-                             (mergeState.mergeFieldInfos.hasProx() ? "prox" : "no prox") + "; " +
-                             (mergeState.mergeFieldInfos.hasProx() ? "freqs" : "no freqs") + "; " +
-                             (mergeState.mergeFieldInfos.hasPointValues() ? "points" : "no points") + "; " +
-                             String.format(Locale.ROOT,
-                                           "%.1f sec%s to merge segment [%.2f MB, %.2f MB/sec]",
-                                           sec,
-                                           pauseInfo,
-                                           segmentMB,
-                                           segmentMB / sec));
+          double sec = (t1 - merge.mergeStartNS) / 1000000000.;
+          double segmentMB = (merge.info.sizeInBytes() / 1024. / 1024.);
+          infoStream.message(
+              "IW",
+              ("merge codec=" + codec)
+                  + (" maxDoc=" + merge.info.info.maxDoc())
+                  + ("; merged segment has "
+                      + (mergeState.mergeFieldInfos.hasVectors() ? "vectors" : "no vectors"))
+                  + ("; " + (mergeState.mergeFieldInfos.hasNorms() ? "norms" : "no norms"))
+                  + ("; "
+                      + (mergeState.mergeFieldInfos.hasDocValues() ? "docValues" : "no docValues"))
+                  + ("; " + (mergeState.mergeFieldInfos.hasProx() ? "prox" : "no prox"))
+                  + ("; " + (mergeState.mergeFieldInfos.hasProx() ? "freqs" : "no freqs"))
+                  + ("; " + (mergeState.mergeFieldInfos.hasPointValues() ? "points" : "no points"))
+                  + ("; "
+                      + String.format(
+                          Locale.ROOT,
+                          "%.1f sec%s to merge segment [%.2f MB, %.2f MB/sec]",
+                          sec,
+                          pauseInfo,
+                          segmentMB,
+                          segmentMB / sec)));
         } else {
           infoStream.message("IW", "skip merging fully deleted segments");
         }
       }
 
       if (merger.shouldMerge() == false) {
-        // Merge would produce a 0-doc segment, so we do nothing except commit the merge to remove all the 0-doc segments that we "merged":
+        // Merge would produce a 0-doc segment, so we do nothing except commit the merge to remove
+        // all the 0-doc segments that we "merged":
         assert merge.info.info.maxDoc() == 0;
         commitMerge(merge, mergeState);
         success = true;
@@ -139,16 +161,18 @@
         Collection<String> filesToRemove = merge.info.files();
         TrackingDirectoryWrapper trackingCFSDir = new TrackingDirectoryWrapper(mergeDirectory);
         try {
-          createCompoundFile(infoStream, trackingCFSDir, merge.info.info, context, this::deleteNewFiles);
+          createCompoundFile(
+              infoStream, trackingCFSDir, merge.info.info, context, this::deleteNewFiles);
           success = true;
         } catch (Throwable t) {
-          synchronized(this) {
+          synchronized (this) {
             if (merge.isAborted()) {
               // This can happen if rollback is called while we were building
               // our CFS -- fall through to logic below to remove the non-CFS
               // merged files:
               if (infoStream.isEnabled("IW")) {
-                infoStream.message("IW", "hit merge abort exception creating compound file during merge");
+                infoStream.message(
+                    "IW", "hit merge abort exception creating compound file during merge");
               }
               return 0;
             } else {
@@ -170,7 +194,7 @@
         // per-segment readers in the finally clause below:
         success = false;
 
-        synchronized(this) {
+        synchronized (this) {
 
           // delete new non cfs files directly: they were never
           // registered with IFD
@@ -214,7 +238,13 @@
       // lost...
 
       if (infoStream.isEnabled("IW")) {
-        infoStream.message("IW", String.format(Locale.ROOT, "merged segment size=%.3f MB vs estimate=%.3f MB", merge.info.sizeInBytes()/1024./1024., merge.estimatedMergeBytes/1024/1024.));
+        infoStream.message(
+            "IW",
+            String.format(
+                Locale.ROOT,
+                "merged segment size=%.3f MB vs estimate=%.3f MB",
+                merge.info.sizeInBytes() / 1024. / 1024.,
+                merge.estimatedMergeBytes / 1024 / 1024.));
       }
 
       final IndexReaderWarmer mergedSegmentWarmer = config.getMergedSegmentWarmer();
@@ -224,7 +254,7 @@
         try {
           mergedSegmentWarmer.warm(sr);
         } finally {
-          synchronized(this) {
+          synchronized (this) {
             rld.release(sr);
             release(rld);
           }

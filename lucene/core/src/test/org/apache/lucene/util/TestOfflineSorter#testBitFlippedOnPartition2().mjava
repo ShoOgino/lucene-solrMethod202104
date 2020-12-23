@@ -1,49 +1,67 @@
-  /** Make sure corruption on a temp file (partition) is caught, if the corruption did confuse OfflineSorter! */
+  /**
+   * Make sure corruption on a temp file (partition) is caught, if the corruption did confuse
+   * OfflineSorter!
+   */
   public void testBitFlippedOnPartition2() throws Exception {
 
     try (Directory dir0 = newMockDirectory()) {
 
-      Directory dir = new FilterDirectory(dir0) {
+      Directory dir =
+          new FilterDirectory(dir0) {
 
-        boolean corrupted;
+            boolean corrupted;
 
-        @Override
-        public IndexOutput createTempOutput(String prefix, String suffix, IOContext context) throws IOException {
-          IndexOutput out = in.createTempOutput(prefix, suffix, context);
-          if (corrupted == false && suffix.equals("sort")) {
-            corrupted = true;
-            return new CorruptingIndexOutput(dir0, 544677, out) {
-              @Override
-              protected void corruptFile() throws IOException {
-                String newTempName;
-                try(IndexOutput tmpOut = dir0.createTempOutput("tmp", "tmp", IOContext.DEFAULT);
-                    IndexInput in = dir0.openInput(out.getName(), IOContext.DEFAULT)) {
-                  newTempName = tmpOut.getName();
-                  tmpOut.copyBytes(in, 1025905);
-                  short v = in.readShort();
-                  assertEquals(254, v);
-                  tmpOut.writeShort(Short.MAX_VALUE);
-                  tmpOut.copyBytes(in, in.length()-1025905-Short.BYTES);
-                }
+            @Override
+            public IndexOutput createTempOutput(String prefix, String suffix, IOContext context)
+                throws IOException {
+              IndexOutput out = in.createTempOutput(prefix, suffix, context);
+              if (corrupted == false && suffix.equals("sort")) {
+                corrupted = true;
+                return new CorruptingIndexOutput(dir0, 544677, out) {
+                  @Override
+                  protected void corruptFile() throws IOException {
+                    String newTempName;
+                    try (IndexOutput tmpOut =
+                            dir0.createTempOutput("tmp", "tmp", IOContext.DEFAULT);
+                        IndexInput in = dir0.openInput(out.getName(), IOContext.DEFAULT)) {
+                      newTempName = tmpOut.getName();
+                      tmpOut.copyBytes(in, 1025905);
+                      short v = in.readShort();
+                      assertEquals(254, v);
+                      tmpOut.writeShort(Short.MAX_VALUE);
+                      tmpOut.copyBytes(in, in.length() - 1025905 - Short.BYTES);
+                    }
 
-                // Delete original and copy corrupt version back:
-                dir0.deleteFile(out.getName());
-                dir0.copyFrom(dir0, newTempName, out.getName(), IOContext.DEFAULT);
-                dir0.deleteFile(newTempName);
+                    // Delete original and copy corrupt version back:
+                    dir0.deleteFile(out.getName());
+                    dir0.copyFrom(dir0, newTempName, out.getName(), IOContext.DEFAULT);
+                    dir0.deleteFile(newTempName);
+                  }
+                };
+              } else {
+                return out;
               }
-            };
-          } else {
-            return out;
-          }
-        }
-      };
+            }
+          };
 
       IndexOutput unsorted = dir.createTempOutput("unsorted", "tmp", IOContext.DEFAULT);
       writeAll(unsorted, generateFixed((int) (OfflineSorter.MB * 3)));
 
-      CorruptIndexException e = expectThrows(CorruptIndexException.class, () -> {
-          new OfflineSorter(dir, "foo", OfflineSorter.DEFAULT_COMPARATOR, BufferSize.megabytes(1), 10, -1, null, 0).sort(unsorted.getName());
-        });
+      CorruptIndexException e =
+          expectThrows(
+              CorruptIndexException.class,
+              () -> {
+                new OfflineSorter(
+                        dir,
+                        "foo",
+                        OfflineSorter.DEFAULT_COMPARATOR,
+                        BufferSize.megabytes(1),
+                        10,
+                        -1,
+                        null,
+                        0)
+                    .sort(unsorted.getName());
+              });
       assertTrue(e.getMessage().contains("checksum failed (hardware problem?)"));
     }
   }

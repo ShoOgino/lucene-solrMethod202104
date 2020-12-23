@@ -1,31 +1,39 @@
   public void testIntermediateClose() throws IOException, InterruptedException {
     Directory dir = newDirectory();
     // Test can deadlock if we use SMS:
-    IndexWriter writer = new IndexWriter(dir, newIndexWriterConfig(
-        new MockAnalyzer(random())).setMergeScheduler(new ConcurrentMergeScheduler()));
+    IndexWriter writer =
+        new IndexWriter(
+            dir,
+            newIndexWriterConfig(new MockAnalyzer(random()))
+                .setMergeScheduler(new ConcurrentMergeScheduler()));
     writer.addDocument(new Document());
     writer.commit();
     final CountDownLatch awaitEnterWarm = new CountDownLatch(1);
     final CountDownLatch awaitClose = new CountDownLatch(1);
     final AtomicBoolean triedReopen = new AtomicBoolean(false);
-    final ExecutorService es = random().nextBoolean() ? null : Executors.newCachedThreadPool(new NamedThreadFactory("testIntermediateClose"));
-    final SearcherFactory factory = new SearcherFactory() {
-      @Override
-      public IndexSearcher newSearcher(IndexReader r, IndexReader previous) {
-        try {
-          if (triedReopen.get()) {
-            awaitEnterWarm.countDown();
-            awaitClose.await();
+    final ExecutorService es =
+        random().nextBoolean()
+            ? null
+            : Executors.newCachedThreadPool(new NamedThreadFactory("testIntermediateClose"));
+    final SearcherFactory factory =
+        new SearcherFactory() {
+          @Override
+          public IndexSearcher newSearcher(IndexReader r, IndexReader previous) {
+            try {
+              if (triedReopen.get()) {
+                awaitEnterWarm.countDown();
+                awaitClose.await();
+              }
+            } catch (InterruptedException e) {
+              //
+            }
+            return new IndexSearcher(r, es);
           }
-        } catch (InterruptedException e) {
-          //
-        }
-        return new IndexSearcher(r, es);
-      }
-    };
-    final SearcherManager searcherManager = random().nextBoolean() 
-        ? new SearcherManager(dir, factory) 
-      : new SearcherManager(writer, random().nextBoolean(), false, factory);
+        };
+    final SearcherManager searcherManager =
+        random().nextBoolean()
+            ? new SearcherManager(dir, factory)
+            : new SearcherManager(writer, random().nextBoolean(), false, factory);
     if (VERBOSE) {
       System.out.println("sm created");
     }
@@ -39,30 +47,31 @@
     writer.commit();
     final AtomicBoolean success = new AtomicBoolean(false);
     final Throwable[] exc = new Throwable[1];
-    Thread thread = new Thread(new Runnable() {
-      @Override
-      public void run() {
-        try {
-          triedReopen.set(true);
-          if (VERBOSE) {
-            System.out.println("NOW call maybeRefresh");
-          }
-          searcherManager.maybeRefresh();
-          success.set(true);
-        } catch (AlreadyClosedException e) {
-          // expected
-        } catch (Throwable e) {
-          if (VERBOSE) {
-            System.out.println("FAIL: unexpected exc");
-            e.printStackTrace(System.out);
-          }
-          exc[0] = e;
-          // use success as the barrier here to make sure we see the write
-          success.set(false);
-
-        }
-      }
-    });
+    Thread thread =
+        new Thread(
+            new Runnable() {
+              @Override
+              public void run() {
+                try {
+                  triedReopen.set(true);
+                  if (VERBOSE) {
+                    System.out.println("NOW call maybeRefresh");
+                  }
+                  searcherManager.maybeRefresh();
+                  success.set(true);
+                } catch (AlreadyClosedException e) {
+                  // expected
+                } catch (Throwable e) {
+                  if (VERBOSE) {
+                    System.out.println("FAIL: unexpected exc");
+                    e.printStackTrace(System.out);
+                  }
+                  exc[0] = e;
+                  // use success as the barrier here to make sure we see the write
+                  success.set(false);
+                }
+              }
+            });
     thread.start();
     if (VERBOSE) {
       System.out.println("THREAD started");
@@ -74,9 +83,11 @@
     searcherManager.close();
     awaitClose.countDown();
     thread.join();
-    expectThrows(AlreadyClosedException.class, () -> {
-      searcherManager.acquire();
-    });
+    expectThrows(
+        AlreadyClosedException.class,
+        () -> {
+          searcherManager.acquire();
+        });
     assertFalse(success.get());
     assertTrue(triedReopen.get());
     assertNull("" + exc[0], exc[0]);

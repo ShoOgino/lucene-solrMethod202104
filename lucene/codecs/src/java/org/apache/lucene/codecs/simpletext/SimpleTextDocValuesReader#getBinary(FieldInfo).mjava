@@ -8,64 +8,77 @@
 
     final IndexInput in = data.clone();
     final BytesRefBuilder scratch = new BytesRefBuilder();
-    final DecimalFormat decoder = new DecimalFormat(field.pattern, new DecimalFormatSymbols(Locale.ROOT));
+    final DecimalFormat decoder =
+        new DecimalFormat(field.pattern, new DecimalFormatSymbols(Locale.ROOT));
 
     DocValuesIterator docsWithField = getBinaryDocsWithField(fieldInfo);
-    
-    IntFunction<BytesRef> values = new IntFunction<BytesRef>() {
-      final BytesRefBuilder term = new BytesRefBuilder();
 
-      @Override
-      public BytesRef apply(int docID) {
-        try {
-          if (docID < 0 || docID >= maxDoc) {
-            throw new IndexOutOfBoundsException("docID must be 0 .. " + (maxDoc-1) + "; got " + docID);
+    IntFunction<BytesRef> values =
+        new IntFunction<BytesRef>() {
+          final BytesRefBuilder term = new BytesRefBuilder();
+
+          @Override
+          public BytesRef apply(int docID) {
+            try {
+              if (docID < 0 || docID >= maxDoc) {
+                throw new IndexOutOfBoundsException(
+                    "docID must be 0 .. " + (maxDoc - 1) + "; got " + docID);
+              }
+              in.seek(
+                  field.dataStartFilePointer
+                      + (9 + field.pattern.length() + field.maxLength + 2) * docID);
+              SimpleTextUtil.readLine(in, scratch);
+              assert StringHelper.startsWith(scratch.get(), LENGTH);
+              int len;
+              try {
+                len =
+                    decoder
+                        .parse(
+                            new String(
+                                scratch.bytes(),
+                                LENGTH.length,
+                                scratch.length() - LENGTH.length,
+                                StandardCharsets.UTF_8))
+                        .intValue();
+              } catch (ParseException pe) {
+                throw new CorruptIndexException("failed to parse int length", in, pe);
+              }
+              term.grow(len);
+              term.setLength(len);
+              in.readBytes(term.bytes(), 0, len);
+              return term.get();
+            } catch (IOException ioe) {
+              throw new RuntimeException(ioe);
+            }
           }
-          in.seek(field.dataStartFilePointer + (9+field.pattern.length() + field.maxLength+2)*docID);
-          SimpleTextUtil.readLine(in, scratch);
-          assert StringHelper.startsWith(scratch.get(), LENGTH);
-          int len;
-          try {
-            len = decoder.parse(new String(scratch.bytes(), LENGTH.length, scratch.length() - LENGTH.length, StandardCharsets.UTF_8)).intValue();
-          } catch (ParseException pe) {
-            throw new CorruptIndexException("failed to parse int length", in, pe);
-          }
-          term.grow(len);
-          term.setLength(len);
-          in.readBytes(term.bytes(), 0, len);
-          return term.get();
-        } catch (IOException ioe) {
-          throw new RuntimeException(ioe);
-        }
-      }
-    };
+        };
     return new BinaryDocValues() {
-      
+
       @Override
       public int nextDoc() throws IOException {
         return docsWithField.nextDoc();
       }
-      
+
       @Override
       public int docID() {
         return docsWithField.docID();
       }
-      
+
       @Override
       public long cost() {
         return docsWithField.cost();
       }
-      
+
       @Override
       public int advance(int target) throws IOException {
         return docsWithField.advance(target);
       }
-      
+
       @Override
       public boolean advanceExact(int target) throws IOException {
         return docsWithField.advanceExact(target);
       }
-      
+
       @Override
       public BytesRef binaryValue() throws IOException {
         return values.apply(docsWithField.docID());

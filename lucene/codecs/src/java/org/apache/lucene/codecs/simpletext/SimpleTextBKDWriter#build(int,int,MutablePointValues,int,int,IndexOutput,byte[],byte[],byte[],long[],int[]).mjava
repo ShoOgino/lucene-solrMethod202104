@@ -1,11 +1,17 @@
   /* Recursively reorders the provided reader and writes the bkd-tree on the fly. */
-  private void build(int nodeID, int leafNodeOffset,
-      MutablePointValues reader, int from, int to,
+  private void build(
+      int nodeID,
+      int leafNodeOffset,
+      MutablePointValues reader,
+      int from,
+      int to,
       IndexOutput out,
-      byte[] minPackedValue, byte[] maxPackedValue,
+      byte[] minPackedValue,
+      byte[] maxPackedValue,
       byte[] splitPackedValues,
       long[] leafBlockFPs,
-      int[] spareDocIds) throws IOException {
+      int[] spareDocIds)
+      throws IOException {
 
     if (nodeID >= leafNodeOffset) {
       // leaf node
@@ -17,10 +23,11 @@
       reader.getValue(from, scratchBytesRef1);
       for (int i = from + 1; i < to; ++i) {
         reader.getValue(i, scratchBytesRef2);
-        for (int dim=0;dim<config.numDims;dim++) {
+        for (int dim = 0; dim < config.numDims; dim++) {
           final int offset = dim * config.bytesPerDim;
-          for(int j=0;j<commonPrefixLengths[dim];j++) {
-            if (scratchBytesRef1.bytes[scratchBytesRef1.offset+offset+j] != scratchBytesRef2.bytes[scratchBytesRef2.offset+offset+j]) {
+          for (int j = 0; j < commonPrefixLengths[dim]; j++) {
+            if (scratchBytesRef1.bytes[scratchBytesRef1.offset + offset + j]
+                != scratchBytesRef2.bytes[scratchBytesRef2.offset + offset + j]) {
               commonPrefixLengths[dim] = j;
               break;
             }
@@ -36,7 +43,7 @@
         }
       }
       for (int i = from + 1; i < to; ++i) {
-        for (int dim=0;dim<config.numDims;dim++) {
+        for (int dim = 0; dim < config.numDims; dim++) {
           if (usedBytes[dim] != null) {
             byte b = reader.getByteAt(i, dim * config.bytesPerDim + commonPrefixLengths[dim]);
             usedBytes[dim].set(Byte.toUnsignedInt(b));
@@ -56,8 +63,15 @@
       }
 
       // sort by sortedDim
-      MutablePointsReaderUtils.sortByDim(config, sortedDim, commonPrefixLengths,
-                                         reader, from, to, scratchBytesRef1, scratchBytesRef2);
+      MutablePointsReaderUtils.sortByDim(
+          config,
+          sortedDim,
+          commonPrefixLengths,
+          reader,
+          from,
+          to,
+          scratchBytesRef1,
+          scratchBytesRef2);
 
       // Save the block file pointer:
       leafBlockFPs[nodeID - leafNodeOffset] = out.getFilePointer();
@@ -71,18 +85,20 @@
 
       // Write the common prefixes:
       reader.getValue(from, scratchBytesRef1);
-      System.arraycopy(scratchBytesRef1.bytes, scratchBytesRef1.offset, scratch1, 0, config.packedBytesLength);
+      System.arraycopy(
+          scratchBytesRef1.bytes, scratchBytesRef1.offset, scratch1, 0, config.packedBytesLength);
 
       // Write the full values:
-      IntFunction<BytesRef> packedValues = new IntFunction<BytesRef>() {
-        @Override
-        public BytesRef apply(int i) {
-          reader.getValue(from + i, scratchBytesRef1);
-          return scratchBytesRef1;
-        }
-      };
-      assert valuesInOrderAndBounds(count, sortedDim, minPackedValue, maxPackedValue, packedValues,
-          docIDs, 0);
+      IntFunction<BytesRef> packedValues =
+          new IntFunction<BytesRef>() {
+            @Override
+            public BytesRef apply(int i) {
+              reader.getValue(from + i, scratchBytesRef1);
+              return scratchBytesRef1;
+            }
+          };
+      assert valuesInOrderAndBounds(
+          count, sortedDim, minPackedValue, maxPackedValue, packedValues, docIDs, 0);
       writeLeafBlockPackedValues(out, commonPrefixLengths, count, sortedDim, packedValues);
 
     } else {
@@ -94,32 +110,77 @@
 
       int commonPrefixLen = config.bytesPerDim;
       for (int i = 0; i < config.bytesPerDim; ++i) {
-        if (minPackedValue[splitDim * config.bytesPerDim + i] != maxPackedValue[splitDim * config.bytesPerDim + i]) {
+        if (minPackedValue[splitDim * config.bytesPerDim + i]
+            != maxPackedValue[splitDim * config.bytesPerDim + i]) {
           commonPrefixLen = i;
           break;
         }
       }
-      MutablePointsReaderUtils.partition(config, maxDoc, splitDim, commonPrefixLen,
-          reader, from, to, mid, scratchBytesRef1, scratchBytesRef2);
+      MutablePointsReaderUtils.partition(
+          config,
+          maxDoc,
+          splitDim,
+          commonPrefixLen,
+          reader,
+          from,
+          to,
+          mid,
+          scratchBytesRef1,
+          scratchBytesRef2);
 
       // set the split value
-      final int address = nodeID * (1+config.bytesPerDim);
+      final int address = nodeID * (1 + config.bytesPerDim);
       splitPackedValues[address] = (byte) splitDim;
       reader.getValue(mid, scratchBytesRef1);
-      System.arraycopy(scratchBytesRef1.bytes, scratchBytesRef1.offset + splitDim * config.bytesPerDim, splitPackedValues, address + 1, config.bytesPerDim);
+      System.arraycopy(
+          scratchBytesRef1.bytes,
+          scratchBytesRef1.offset + splitDim * config.bytesPerDim,
+          splitPackedValues,
+          address + 1,
+          config.bytesPerDim);
 
-      byte[] minSplitPackedValue = ArrayUtil.copyOfSubArray(minPackedValue, 0, config.packedIndexBytesLength);
-      byte[] maxSplitPackedValue = ArrayUtil.copyOfSubArray(maxPackedValue, 0, config.packedIndexBytesLength);
-      System.arraycopy(scratchBytesRef1.bytes, scratchBytesRef1.offset + splitDim * config.bytesPerDim,
-          minSplitPackedValue, splitDim * config.bytesPerDim, config.bytesPerDim);
-      System.arraycopy(scratchBytesRef1.bytes, scratchBytesRef1.offset + splitDim * config.bytesPerDim,
-          maxSplitPackedValue, splitDim * config.bytesPerDim, config.bytesPerDim);
+      byte[] minSplitPackedValue =
+          ArrayUtil.copyOfSubArray(minPackedValue, 0, config.packedIndexBytesLength);
+      byte[] maxSplitPackedValue =
+          ArrayUtil.copyOfSubArray(maxPackedValue, 0, config.packedIndexBytesLength);
+      System.arraycopy(
+          scratchBytesRef1.bytes,
+          scratchBytesRef1.offset + splitDim * config.bytesPerDim,
+          minSplitPackedValue,
+          splitDim * config.bytesPerDim,
+          config.bytesPerDim);
+      System.arraycopy(
+          scratchBytesRef1.bytes,
+          scratchBytesRef1.offset + splitDim * config.bytesPerDim,
+          maxSplitPackedValue,
+          splitDim * config.bytesPerDim,
+          config.bytesPerDim);
 
       // recurse
-      build(nodeID * 2, leafNodeOffset, reader, from, mid, out,
-          minPackedValue, maxSplitPackedValue, splitPackedValues, leafBlockFPs, spareDocIds);
-      build(nodeID * 2 + 1, leafNodeOffset, reader, mid, to, out,
-          minSplitPackedValue, maxPackedValue, splitPackedValues, leafBlockFPs, spareDocIds);
+      build(
+          nodeID * 2,
+          leafNodeOffset,
+          reader,
+          from,
+          mid,
+          out,
+          minPackedValue,
+          maxSplitPackedValue,
+          splitPackedValues,
+          leafBlockFPs,
+          spareDocIds);
+      build(
+          nodeID * 2 + 1,
+          leafNodeOffset,
+          reader,
+          mid,
+          to,
+          out,
+          minSplitPackedValue,
+          maxPackedValue,
+          splitPackedValues,
+          leafBlockFPs,
+          spareDocIds);
     }
   }
 

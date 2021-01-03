@@ -1,22 +1,29 @@
   /** The array (sized numDims) of PathSlice describe the cell we have currently recursed to. */
-  private void build(int nodeID, int leafNodeOffset,
-                     BKDRadixSelector.PathSlice points,
-                     IndexOutput out,
-                     BKDRadixSelector radixSelector,
-                     byte[] minPackedValue, byte[] maxPackedValue,
-                     byte[] splitPackedValues,
-                     long[] leafBlockFPs,
-                     int[] spareDocIds) throws IOException {
+  private void build(
+      int nodeID,
+      int leafNodeOffset,
+      BKDRadixSelector.PathSlice points,
+      IndexOutput out,
+      BKDRadixSelector radixSelector,
+      byte[] minPackedValue,
+      byte[] maxPackedValue,
+      byte[] splitPackedValues,
+      long[] leafBlockFPs,
+      int[] spareDocIds)
+      throws IOException {
 
     if (nodeID >= leafNodeOffset) {
 
       // Leaf node: write block
-      // We can write the block in any order so by default we write it sorted by the dimension that has the
-      // least number of unique bytes at commonPrefixLengths[dim], which makes compression more efficient
+      // We can write the block in any order so by default we write it sorted by the dimension that
+      // has the
+      // least number of unique bytes at commonPrefixLengths[dim], which makes compression more
+      // efficient
       HeapPointWriter heapSource;
       if (points.writer instanceof HeapPointWriter == false) {
-        // Adversarial cases can cause this, e.g. merging big segments with most of the points deleted
-        heapSource  = switchToHeap(points.writer);
+        // Adversarial cases can cause this, e.g. merging big segments with most of the points
+        // deleted
+        heapSource = switchToHeap(points.writer);
       } else {
         heapSource = (HeapPointWriter) points.writer;
       }
@@ -24,7 +31,7 @@
       int from = Math.toIntExact(points.start);
       int to = Math.toIntExact(points.start + points.count);
 
-      //we store common prefix on scratch1
+      // we store common prefix on scratch1
       computeCommonPrefixLength(heapSource, scratch1);
 
       int sortedDim = 0;
@@ -35,7 +42,7 @@
           usedBytes[dim] = new FixedBitSet(256);
         }
       }
-      //Find the dimension to compress
+      // Find the dimension to compress
       for (int dim = 0; dim < config.numDims; dim++) {
         int prefix = commonPrefixLengths[dim];
         if (prefix < config.bytesPerDim) {
@@ -59,12 +66,12 @@
 
       // Save the block file pointer:
       leafBlockFPs[nodeID - leafNodeOffset] = out.getFilePointer();
-      //System.out.println("  write leaf block @ fp=" + out.getFilePointer());
+      // System.out.println("  write leaf block @ fp=" + out.getFilePointer());
 
       // Write docIDs first, as their own chunk, so that at intersect time we can add all docIDs w/o
       // loading the values:
       int count = to - from;
-      assert count > 0: "nodeID=" + nodeID + " leafNodeOffset=" + leafNodeOffset;
+      assert count > 0 : "nodeID=" + nodeID + " leafNodeOffset=" + leafNodeOffset;
       // Write doc IDs
       int[] docIDs = spareDocIds;
       for (int i = 0; i < count; i++) {
@@ -72,25 +79,27 @@
       }
       writeLeafBlockDocs(out, spareDocIds, 0, count);
 
-      // TODO: minor opto: we don't really have to write the actual common prefixes, because BKDReader on recursing can regenerate it for us
+      // TODO: minor opto: we don't really have to write the actual common prefixes, because
+      // BKDReader on recursing can regenerate it for us
       // from the index, much like how terms dict does so from the FST:
 
       // Write the full values:
-      IntFunction<BytesRef> packedValues = new IntFunction<BytesRef>() {
-        final BytesRef scratch = new BytesRef();
+      IntFunction<BytesRef> packedValues =
+          new IntFunction<BytesRef>() {
+            final BytesRef scratch = new BytesRef();
 
-        {
-          scratch.length = config.packedBytesLength;
-        }
+            {
+              scratch.length = config.packedBytesLength;
+            }
 
-        @Override
-        public BytesRef apply(int i) {
-          PointValue value = heapSource.getPackedValueSlice(from + i);
-          return value.packedValue();
-        }
-      };
-      assert valuesInOrderAndBounds(count, sortedDim, minPackedValue, maxPackedValue, packedValues,
-          docIDs, 0);
+            @Override
+            public BytesRef apply(int i) {
+              PointValue value = heapSource.getPackedValueSlice(from + i);
+              return value.packedValue();
+            }
+          };
+      assert valuesInOrderAndBounds(
+          count, sortedDim, minPackedValue, maxPackedValue, packedValues, docIDs, 0);
       writeLeafBlockPackedValues(out, commonPrefixLengths, count, sortedDim, packedValues);
 
     } else {
@@ -103,22 +112,36 @@
         splitDim = 0;
       }
 
-      assert nodeID < splitPackedValues.length : "nodeID=" + nodeID + " splitValues.length=" + splitPackedValues.length;
+      assert nodeID < splitPackedValues.length
+          : "nodeID=" + nodeID + " splitValues.length=" + splitPackedValues.length;
 
       // How many points will be in the left tree:
       long rightCount = points.count / 2;
       long leftCount = points.count - rightCount;
 
-      int commonPrefixLen = Arrays.mismatch(minPackedValue, splitDim * config.bytesPerDim,
-          splitDim * config.bytesPerDim + config.bytesPerDim, maxPackedValue, splitDim * config.bytesPerDim,
-          splitDim * config.bytesPerDim + config.bytesPerDim);
+      int commonPrefixLen =
+          Arrays.mismatch(
+              minPackedValue,
+              splitDim * config.bytesPerDim,
+              splitDim * config.bytesPerDim + config.bytesPerDim,
+              maxPackedValue,
+              splitDim * config.bytesPerDim,
+              splitDim * config.bytesPerDim + config.bytesPerDim);
       if (commonPrefixLen == -1) {
         commonPrefixLen = config.bytesPerDim;
       }
 
       BKDRadixSelector.PathSlice[] pathSlices = new BKDRadixSelector.PathSlice[2];
 
-      byte[] splitValue =  radixSelector.select(points, pathSlices, points.start, points.start + points.count,  points.start + leftCount, splitDim, commonPrefixLen);
+      byte[] splitValue =
+          radixSelector.select(
+              points,
+              pathSlices,
+              points.start,
+              points.start + points.count,
+              points.start + leftCount,
+              splitDim,
+              commonPrefixLen);
 
       int address = nodeID * (1 + config.bytesPerDim);
       splitPackedValues[address] = (byte) splitDim;
@@ -130,17 +153,37 @@
       byte[] maxSplitPackedValue = new byte[config.packedIndexBytesLength];
       System.arraycopy(maxPackedValue, 0, maxSplitPackedValue, 0, config.packedIndexBytesLength);
 
-      System.arraycopy(splitValue, 0, minSplitPackedValue, splitDim * config.bytesPerDim, config.bytesPerDim);
-      System.arraycopy(splitValue, 0, maxSplitPackedValue, splitDim * config.bytesPerDim, config.bytesPerDim);
+      System.arraycopy(
+          splitValue, 0, minSplitPackedValue, splitDim * config.bytesPerDim, config.bytesPerDim);
+      System.arraycopy(
+          splitValue, 0, maxSplitPackedValue, splitDim * config.bytesPerDim, config.bytesPerDim);
 
       // Recurse on left tree:
-      build(2*nodeID, leafNodeOffset, pathSlices[0], out, radixSelector,
-            minPackedValue, maxSplitPackedValue, splitPackedValues, leafBlockFPs, spareDocIds);
+      build(
+          2 * nodeID,
+          leafNodeOffset,
+          pathSlices[0],
+          out,
+          radixSelector,
+          minPackedValue,
+          maxSplitPackedValue,
+          splitPackedValues,
+          leafBlockFPs,
+          spareDocIds);
 
       // TODO: we could "tail recurse" here?  have our parent discard its refs as we recurse right?
       // Recurse on right tree:
-      build(2*nodeID+1, leafNodeOffset, pathSlices[1], out, radixSelector,
-            minSplitPackedValue, maxPackedValue, splitPackedValues, leafBlockFPs, spareDocIds);
+      build(
+          2 * nodeID + 1,
+          leafNodeOffset,
+          pathSlices[1],
+          out,
+          radixSelector,
+          minSplitPackedValue,
+          maxPackedValue,
+          splitPackedValues,
+          leafBlockFPs,
+          spareDocIds);
     }
   }
 

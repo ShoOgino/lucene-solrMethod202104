@@ -2,151 +2,169 @@
 
     // TODO: we should also mess with any recent file renames, file deletions, if
     // syncMetaData was not called!!
-    
+
     // Must make a copy because we change the incoming unsyncedFiles
     // when we create temp files, delete, etc., below:
     final List<String> filesToCorrupt = new ArrayList<>(files);
     // sort the files otherwise we have reproducibility issues
     // across JVMs if the incoming collection is a hashSet etc.
     CollectionUtil.timSort(filesToCorrupt);
-    for(String name : filesToCorrupt) {
+    for (String name : filesToCorrupt) {
       int damage = randomState.nextInt(6);
       if (alwaysCorrupt && damage == 3) {
         damage = 4;
       }
       String action = null;
 
-      switch(damage) {
+      switch (damage) {
+        case 0:
+          action = "deleted";
+          deleteFile(name);
+          break;
 
-      case 0:
-        action = "deleted";
-        deleteFile(name);
-        break;
-
-      case 1:
-        action = "zeroed";
-        // Zero out file entirely
-        long length;
-        try {
-          length = fileLength(name);
-        } catch (IOException ioe) {
-          throw new RuntimeException("hit unexpected IOException while trying to corrupt file " + name, ioe);
-        }
-
-        // Delete original and write zeros back:
-        deleteFile(name);
-        
-        byte[] zeroes = new byte[256];
-        long upto = 0;
-        try (IndexOutput out = in.createOutput(name, LuceneTestCase.newIOContext(randomState))) {
-          while(upto < length) {
-            final int limit = (int) Math.min(length-upto, zeroes.length);
-            out.writeBytes(zeroes, 0, limit);
-            upto += limit;
-          }
-        } catch (IOException ioe) {
-          throw new RuntimeException("hit unexpected IOException while trying to corrupt file " + name, ioe);
-        }
-        break;
-
-      case 2:
-        {
-          action = "partially truncated";
-          // Partially Truncate the file:
-
-          // First, make temp file and copy only half this
-          // file over:
-          String tempFileName = null;
-          try (IndexOutput tempOut = in.createTempOutput("name", "mdw_corrupt", LuceneTestCase.newIOContext(randomState));
-               IndexInput ii = in.openInput(name, LuceneTestCase.newIOContext(randomState))) {
-              tempFileName = tempOut.getName();
-              tempOut.copyBytes(ii, ii.length()/2);
+        case 1:
+          action = "zeroed";
+          // Zero out file entirely
+          long length;
+          try {
+            length = fileLength(name);
           } catch (IOException ioe) {
-            throw new RuntimeException("hit unexpected IOException while trying to corrupt file " + name, ioe);
+            throw new RuntimeException(
+                "hit unexpected IOException while trying to corrupt file " + name, ioe);
           }
 
-          // Delete original and copy bytes back:
+          // Delete original and write zeros back:
           deleteFile(name);
 
-          try (IndexOutput out = in.createOutput(name, LuceneTestCase.newIOContext(randomState));
-               IndexInput ii = in.openInput(tempFileName, LuceneTestCase.newIOContext(randomState))) {
-              out.copyBytes(ii, ii.length());
-          } catch (IOException ioe) {
-            throw new RuntimeException("hit unexpected IOException while trying to corrupt file " + name, ioe);
-          }
-          deleteFile(tempFileName);
-        }
-        break;
-      
-      case 3:
-        // The file survived intact:
-        action = "didn't change";
-        break;
-
-      case 4:
-        // Corrupt one bit randomly in the file:
-
-        {
-
-          String tempFileName = null;
-          try (IndexOutput tempOut = in.createTempOutput("name", "mdw_corrupt", LuceneTestCase.newIOContext(randomState));
-               IndexInput ii = in.openInput(name, LuceneTestCase.newIOContext(randomState))) {
-            tempFileName = tempOut.getName();
-            if (ii.length() > 0) {
-              // Copy first part unchanged:
-              long byteToCorrupt = (long) (randomState.nextDouble() * ii.length());
-              if (byteToCorrupt > 0) {
-                tempOut.copyBytes(ii, byteToCorrupt);
-              }
-
-              // Randomly flip one bit from this byte:
-              byte b = ii.readByte();
-              int bitToFlip = randomState.nextInt(8);
-              b = (byte) (b ^ (1 << bitToFlip));
-              tempOut.writeByte(b);
-
-              action = "flip bit " + bitToFlip + " of byte " + byteToCorrupt + " out of " + ii.length() + " bytes";
-
-              // Copy last part unchanged:
-              long bytesLeft = ii.length() - byteToCorrupt - 1;
-              if (bytesLeft > 0) {
-                tempOut.copyBytes(ii, bytesLeft);
-              }
-            } else {
-              action = "didn't change";
+          byte[] zeroes = new byte[256];
+          long upto = 0;
+          try (IndexOutput out = in.createOutput(name, LuceneTestCase.newIOContext(randomState))) {
+            while (upto < length) {
+              final int limit = (int) Math.min(length - upto, zeroes.length);
+              out.writeBytes(zeroes, 0, limit);
+              upto += limit;
             }
           } catch (IOException ioe) {
-            throw new RuntimeException("hit unexpected IOException while trying to corrupt file " + name, ioe);
+            throw new RuntimeException(
+                "hit unexpected IOException while trying to corrupt file " + name, ioe);
           }
+          break;
 
-          // Delete original and copy bytes back:
+        case 2:
+          {
+            action = "partially truncated";
+            // Partially Truncate the file:
+
+            // First, make temp file and copy only half this
+            // file over:
+            String tempFileName = null;
+            try (IndexOutput tempOut =
+                    in.createTempOutput(
+                        "name", "mdw_corrupt", LuceneTestCase.newIOContext(randomState));
+                IndexInput ii = in.openInput(name, LuceneTestCase.newIOContext(randomState))) {
+              tempFileName = tempOut.getName();
+              tempOut.copyBytes(ii, ii.length() / 2);
+            } catch (IOException ioe) {
+              throw new RuntimeException(
+                  "hit unexpected IOException while trying to corrupt file " + name, ioe);
+            }
+
+            // Delete original and copy bytes back:
+            deleteFile(name);
+
+            try (IndexOutput out = in.createOutput(name, LuceneTestCase.newIOContext(randomState));
+                IndexInput ii =
+                    in.openInput(tempFileName, LuceneTestCase.newIOContext(randomState))) {
+              out.copyBytes(ii, ii.length());
+            } catch (IOException ioe) {
+              throw new RuntimeException(
+                  "hit unexpected IOException while trying to corrupt file " + name, ioe);
+            }
+            deleteFile(tempFileName);
+          }
+          break;
+
+        case 3:
+          // The file survived intact:
+          action = "didn't change";
+          break;
+
+        case 4:
+          // Corrupt one bit randomly in the file:
+
+          {
+            String tempFileName = null;
+            try (IndexOutput tempOut =
+                    in.createTempOutput(
+                        "name", "mdw_corrupt", LuceneTestCase.newIOContext(randomState));
+                IndexInput ii = in.openInput(name, LuceneTestCase.newIOContext(randomState))) {
+              tempFileName = tempOut.getName();
+              if (ii.length() > 0) {
+                // Copy first part unchanged:
+                long byteToCorrupt = (long) (randomState.nextDouble() * ii.length());
+                if (byteToCorrupt > 0) {
+                  tempOut.copyBytes(ii, byteToCorrupt);
+                }
+
+                // Randomly flip one bit from this byte:
+                byte b = ii.readByte();
+                int bitToFlip = randomState.nextInt(8);
+                b = (byte) (b ^ (1 << bitToFlip));
+                tempOut.writeByte(b);
+
+                action =
+                    "flip bit "
+                        + bitToFlip
+                        + " of byte "
+                        + byteToCorrupt
+                        + " out of "
+                        + ii.length()
+                        + " bytes";
+
+                // Copy last part unchanged:
+                long bytesLeft = ii.length() - byteToCorrupt - 1;
+                if (bytesLeft > 0) {
+                  tempOut.copyBytes(ii, bytesLeft);
+                }
+              } else {
+                action = "didn't change";
+              }
+            } catch (IOException ioe) {
+              throw new RuntimeException(
+                  "hit unexpected IOException while trying to corrupt file " + name, ioe);
+            }
+
+            // Delete original and copy bytes back:
+            deleteFile(name);
+
+            try (IndexOutput out = in.createOutput(name, LuceneTestCase.newIOContext(randomState));
+                IndexInput ii =
+                    in.openInput(tempFileName, LuceneTestCase.newIOContext(randomState))) {
+              out.copyBytes(ii, ii.length());
+            } catch (IOException ioe) {
+              throw new RuntimeException(
+                  "hit unexpected IOException while trying to corrupt file " + name, ioe);
+            }
+
+            deleteFile(tempFileName);
+          }
+          break;
+
+        case 5:
+          action = "fully truncated";
+          // Totally truncate the file to zero bytes
           deleteFile(name);
 
-          try (IndexOutput out = in.createOutput(name, LuceneTestCase.newIOContext(randomState));
-               IndexInput ii = in.openInput(tempFileName, LuceneTestCase.newIOContext(randomState))) {
-            out.copyBytes(ii, ii.length());
+          try (IndexOutput out = in.createOutput(name, LuceneTestCase.newIOContext(randomState))) {
+            out.getFilePointer(); // just fake access to prevent compiler warning
           } catch (IOException ioe) {
-            throw new RuntimeException("hit unexpected IOException while trying to corrupt file " + name, ioe);
+            throw new RuntimeException(
+                "hit unexpected IOException while trying to corrupt file " + name, ioe);
           }
+          break;
 
-          deleteFile(tempFileName);
-        }
-        break;
-        
-      case 5:
-        action = "fully truncated";
-        // Totally truncate the file to zero bytes
-        deleteFile(name);
-
-        try (IndexOutput out = in.createOutput(name, LuceneTestCase.newIOContext(randomState))) {
-          out.getFilePointer(); // just fake access to prevent compiler warning
-        } catch (IOException ioe) {
-          throw new RuntimeException("hit unexpected IOException while trying to corrupt file " + name, ioe);
-        }
-        break;
-
-      default:
-        throw new AssertionError();
+        default:
+          throw new AssertionError();
       }
 
       if (LuceneTestCase.VERBOSE) {

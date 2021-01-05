@@ -15,141 +15,149 @@
     // wrap sourceDirFactory to return a MockDirWrapper so we can simulate errors
     final SourceDirectoryFactory in = sourceDirFactory;
     final AtomicInteger failures = new AtomicInteger(atLeast(10));
-    sourceDirFactory = new SourceDirectoryFactory() {
-      
-      private long clientMaxSize = 100, handlerIndexMaxSize = 100, handlerTaxoMaxSize = 100;
-      private double clientExRate = 1.0, handlerIndexExRate = 1.0, handlerTaxoExRate = 1.0;
-      
-      @Override
-      public void cleanupSession(String sessionID) throws IOException {
-        in.cleanupSession(sessionID);
-      }
-      
-      @SuppressWarnings("synthetic-access")
-      @Override
-      public Directory getDirectory(String sessionID, String source) throws IOException {
-        Directory dir = in.getDirectory(sessionID, source);
-        if (random().nextBoolean() && failures.get() > 0) { // client should fail, return wrapped dir
-          MockDirectoryWrapper mdw = new MockDirectoryWrapper(random(), dir);
-          mdw.setRandomIOExceptionRateOnOpen(clientExRate);
-          mdw.setMaxSizeInBytes(clientMaxSize);
-          mdw.setRandomIOExceptionRate(clientExRate);
-          mdw.setCheckIndexOnClose(false);
-          clientMaxSize *= 2;
-          clientExRate /= 2;
-          return mdw;
-        }
-        
-        if (failures.get() > 0 && random().nextBoolean()) { // handler should fail
-          if (random().nextBoolean()) { // index dir fail
-            handlerIndexDir.setMaxSizeInBytes(handlerIndexMaxSize);
-            handlerIndexDir.setRandomIOExceptionRate(handlerIndexExRate);
-            handlerIndexDir.setRandomIOExceptionRateOnOpen(handlerIndexExRate);
-            handlerIndexMaxSize *= 2;
-            handlerIndexExRate /= 2;
-          } else { // taxo dir fail
-            handlerTaxoDir.setMaxSizeInBytes(handlerTaxoMaxSize);
-            handlerTaxoDir.setRandomIOExceptionRate(handlerTaxoExRate);
-            handlerTaxoDir.setRandomIOExceptionRateOnOpen(handlerTaxoExRate);
-            handlerTaxoDir.setCheckIndexOnClose(false);
-            handlerTaxoMaxSize *= 2;
-            handlerTaxoExRate /= 2;
-          }
-        } else {
-          // disable all errors
-          handlerIndexDir.setMaxSizeInBytes(0);
-          handlerIndexDir.setRandomIOExceptionRate(0.0);
-          handlerIndexDir.setRandomIOExceptionRateOnOpen(0.0);
-          handlerTaxoDir.setMaxSizeInBytes(0);
-          handlerTaxoDir.setRandomIOExceptionRate(0.0);
-          handlerTaxoDir.setRandomIOExceptionRateOnOpen(0.0);
-        }
+    sourceDirFactory =
+        new SourceDirectoryFactory() {
 
-        return dir;
-      }
-    };
-    
-    handler = new IndexAndTaxonomyReplicationHandler(handlerIndexDir, handlerTaxoDir, new Callable<Boolean>() {
-      @Override
-      public Boolean call() throws Exception {
-        if (random().nextDouble() < 0.2 && failures.get() > 0) {
-          throw new RuntimeException("random exception from callback");
-        }
-        return null;
-      }
-    });
+          private long clientMaxSize = 100, handlerIndexMaxSize = 100, handlerTaxoMaxSize = 100;
+          private double clientExRate = 1.0, handlerIndexExRate = 1.0, handlerTaxoExRate = 1.0;
+
+          @Override
+          public void cleanupSession(String sessionID) throws IOException {
+            in.cleanupSession(sessionID);
+          }
+
+          @SuppressWarnings("synthetic-access")
+          @Override
+          public Directory getDirectory(String sessionID, String source) throws IOException {
+            Directory dir = in.getDirectory(sessionID, source);
+            if (random().nextBoolean()
+                && failures.get() > 0) { // client should fail, return wrapped dir
+              MockDirectoryWrapper mdw = new MockDirectoryWrapper(random(), dir);
+              mdw.setRandomIOExceptionRateOnOpen(clientExRate);
+              mdw.setMaxSizeInBytes(clientMaxSize);
+              mdw.setRandomIOExceptionRate(clientExRate);
+              mdw.setCheckIndexOnClose(false);
+              clientMaxSize *= 2;
+              clientExRate /= 2;
+              return mdw;
+            }
+
+            if (failures.get() > 0 && random().nextBoolean()) { // handler should fail
+              if (random().nextBoolean()) { // index dir fail
+                handlerIndexDir.setMaxSizeInBytes(handlerIndexMaxSize);
+                handlerIndexDir.setRandomIOExceptionRate(handlerIndexExRate);
+                handlerIndexDir.setRandomIOExceptionRateOnOpen(handlerIndexExRate);
+                handlerIndexMaxSize *= 2;
+                handlerIndexExRate /= 2;
+              } else { // taxo dir fail
+                handlerTaxoDir.setMaxSizeInBytes(handlerTaxoMaxSize);
+                handlerTaxoDir.setRandomIOExceptionRate(handlerTaxoExRate);
+                handlerTaxoDir.setRandomIOExceptionRateOnOpen(handlerTaxoExRate);
+                handlerTaxoDir.setCheckIndexOnClose(false);
+                handlerTaxoMaxSize *= 2;
+                handlerTaxoExRate /= 2;
+              }
+            } else {
+              // disable all errors
+              handlerIndexDir.setMaxSizeInBytes(0);
+              handlerIndexDir.setRandomIOExceptionRate(0.0);
+              handlerIndexDir.setRandomIOExceptionRateOnOpen(0.0);
+              handlerTaxoDir.setMaxSizeInBytes(0);
+              handlerTaxoDir.setRandomIOExceptionRate(0.0);
+              handlerTaxoDir.setRandomIOExceptionRateOnOpen(0.0);
+            }
+
+            return dir;
+          }
+        };
+
+    handler =
+        new IndexAndTaxonomyReplicationHandler(
+            handlerIndexDir,
+            handlerTaxoDir,
+            new Callable<Boolean>() {
+              @Override
+              public Boolean call() throws Exception {
+                if (random().nextDouble() < 0.2 && failures.get() > 0) {
+                  throw new RuntimeException("random exception from callback");
+                }
+                return null;
+              }
+            });
 
     final AtomicBoolean failed = new AtomicBoolean();
 
     // wrap handleUpdateException so we can act on the thrown exception
-    client = new ReplicationClient(replicator, handler, sourceDirFactory) {
-      @SuppressWarnings("synthetic-access")
-      @Override
-      protected void handleUpdateException(Throwable t) {
-        if (t instanceof IOException) {
-          try {
-            if (VERBOSE) {
-              System.out.println("hit exception during update: " + t);
-              t.printStackTrace(System.out);
-            }
-
-            // test that the index can be read and also some basic statistics
-            DirectoryReader reader = DirectoryReader.open(handlerIndexDir.getDelegate());
-            try {
-              int numDocs = reader.numDocs();
-              int version = Integer.parseInt(reader.getIndexCommit().getUserData().get(VERSION_ID), 16);
-              assertEquals(numDocs, version);
-            } finally {
-              reader.close();
-            }
-            // verify index is fully consistent
-            TestUtil.checkIndex(handlerIndexDir.getDelegate());
-            
-            // verify taxonomy index is fully consistent (since we only add one
-            // category to all documents, there's nothing much more to validate.
-            ByteArrayOutputStream bos = new ByteArrayOutputStream(1024);
-            CheckIndex.Status indexStatus = null;
-
-            try (CheckIndex checker = new CheckIndex(handlerTaxoDir.getDelegate())) {
-              checker.setFailFast(true);
-              checker.setInfoStream(new PrintStream(bos, false, IOUtils.UTF_8), false);
+    client =
+        new ReplicationClient(replicator, handler, sourceDirFactory) {
+          @SuppressWarnings("synthetic-access")
+          @Override
+          protected void handleUpdateException(Throwable t) {
+            if (t instanceof IOException) {
               try {
-                indexStatus = checker.checkIndex(null);
-              } catch (IOException | RuntimeException ioe) {
-                // ok: we fallback below
-              }
-            }
+                if (VERBOSE) {
+                  System.out.println("hit exception during update: " + t);
+                  t.printStackTrace(System.out);
+                }
 
-          } catch (IOException e) {
-            failed.set(true);
-            throw new RuntimeException(e);
-          } catch (RuntimeException e) {
-            failed.set(true);
-            throw e;
-          } finally {
-            // count-down number of failures
-            failures.decrementAndGet();
-            assert failures.get() >= 0 : "handler failed too many times: " + failures.get();
-            if (VERBOSE) {
-              if (failures.get() == 0) {
-                System.out.println("no more failures expected");
-              } else {
-                System.out.println("num failures left: " + failures.get());
+                // test that the index can be read and also some basic statistics
+                DirectoryReader reader = DirectoryReader.open(handlerIndexDir.getDelegate());
+                try {
+                  int numDocs = reader.numDocs();
+                  int version =
+                      Integer.parseInt(reader.getIndexCommit().getUserData().get(VERSION_ID), 16);
+                  assertEquals(numDocs, version);
+                } finally {
+                  reader.close();
+                }
+                // verify index is fully consistent
+                TestUtil.checkIndex(handlerIndexDir.getDelegate());
+
+                // verify taxonomy index is fully consistent (since we only add one
+                // category to all documents, there's nothing much more to validate.
+                ByteArrayOutputStream bos = new ByteArrayOutputStream(1024);
+                CheckIndex.Status indexStatus = null;
+
+                try (CheckIndex checker = new CheckIndex(handlerTaxoDir.getDelegate())) {
+                  checker.setFailFast(true);
+                  checker.setInfoStream(new PrintStream(bos, false, IOUtils.UTF_8), false);
+                  try {
+                    indexStatus = checker.checkIndex(null);
+                  } catch (IOException | RuntimeException ioe) {
+                    // ok: we fallback below
+                  }
+                }
+
+              } catch (IOException e) {
+                failed.set(true);
+                throw new RuntimeException(e);
+              } catch (RuntimeException e) {
+                failed.set(true);
+                throw e;
+              } finally {
+                // count-down number of failures
+                failures.decrementAndGet();
+                assert failures.get() >= 0 : "handler failed too many times: " + failures.get();
+                if (VERBOSE) {
+                  if (failures.get() == 0) {
+                    System.out.println("no more failures expected");
+                  } else {
+                    System.out.println("num failures left: " + failures.get());
+                  }
+                }
               }
+            } else {
+              failed.set(true);
+              if (t instanceof RuntimeException) {
+                throw (RuntimeException) t;
+              }
+              throw new RuntimeException(t);
             }
           }
-        } else {
-          failed.set(true);
-          if (t instanceof RuntimeException) {
-            throw (RuntimeException) t;
-          }
-          throw new RuntimeException(t);
-        }
-      }
-    };
-    
+        };
+
     client.startUpdateThread(10, "indexAndTaxo");
-    
+
     final Directory baseHandlerIndexDir = handlerIndexDir.getDelegate();
     int numRevisions = atLeast(20) + 2;
     for (int i = 2; i < numRevisions && failed.get() == false; i++) {
@@ -158,7 +166,7 @@
     }
 
     // disable errors -- maybe randomness didn't exhaust all allowed failures,
-    // and we don't want e.g. CheckIndex to hit false errors. 
+    // and we don't want e.g. CheckIndex to hit false errors.
     handlerIndexDir.setMaxSizeInBytes(0);
     handlerIndexDir.setRandomIOExceptionRate(0.0);
     handlerIndexDir.setRandomIOExceptionRateOnOpen(0.0);

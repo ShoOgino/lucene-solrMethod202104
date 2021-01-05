@@ -1,4 +1,7 @@
-  /** Start up this replica, which possibly requires heavy copying of files from the primary node, if we were down for a long time */
+  /**
+   * Start up this replica, which possibly requires heavy copying of files from the primary node, if
+   * we were down for a long time
+   */
   protected synchronized void start(long curPrimaryGen) throws IOException {
 
     if (state.equals("init") == false) {
@@ -11,13 +14,18 @@
       // Figure out what state our local index is in now:
       String segmentsFileName = SegmentInfos.getLastCommitSegmentsFileName(dir);
 
-      // Also look for any pending_segments_N, in case we crashed mid-commit.  We must "inflate" our infos gen to at least this, since
-      // otherwise we may wind up re-using the pending_segments_N file name on commit, and then our deleter can get angry because it still
+      // Also look for any pending_segments_N, in case we crashed mid-commit.  We must "inflate" our
+      // infos gen to at least this, since
+      // otherwise we may wind up re-using the pending_segments_N file name on commit, and then our
+      // deleter can get angry because it still
       // wants to delete this file:
       long maxPendingGen = -1;
-      for(String fileName : dir.listAll()) {
+      for (String fileName : dir.listAll()) {
         if (fileName.startsWith(IndexFileNames.PENDING_SEGMENTS)) {
-          long gen = Long.parseLong(fileName.substring(IndexFileNames.PENDING_SEGMENTS.length()+1), Character.MAX_RADIX);
+          long gen =
+              Long.parseLong(
+                  fileName.substring(IndexFileNames.PENDING_SEGMENTS.length() + 1),
+                  Character.MAX_RADIX);
           if (gen > maxPendingGen) {
             maxPendingGen = gen;
           }
@@ -49,7 +57,8 @@
 
       message("top: delete unknown files on init: all files=" + Arrays.toString(dir.listAll()));
       deleter.deleteUnknownFiles(segmentsFileName);
-      message("top: done delete unknown files on init: all files=" + Arrays.toString(dir.listAll()));
+      message(
+          "top: done delete unknown files on init: all files=" + Arrays.toString(dir.listAll()));
 
       String s = infos.getUserData().get(PRIMARY_GEN_KEY);
       long myPrimaryGen;
@@ -67,21 +76,28 @@
 
         assert myPrimaryGen < curPrimaryGen;
 
-        // Primary changed while we were down.  In this case, we must sync from primary before opening a reader, because it's possible current
-        // files we have will need to be overwritten with different ones (if index rolled back and "forked"), and we can't overwrite open
+        // Primary changed while we were down.  In this case, we must sync from primary before
+        // opening a reader, because it's possible current
+        // files we have will need to be overwritten with different ones (if index rolled back and
+        // "forked"), and we can't overwrite open
         // files on Windows:
 
         final long initSyncStartNS = System.nanoTime();
 
-        message("top: init: primary changed while we were down myPrimaryGen=" + myPrimaryGen +
-                " vs curPrimaryGen=" + curPrimaryGen +
-                "; sync now before mgr init");
+        message(
+            "top: init: primary changed while we were down myPrimaryGen="
+                + myPrimaryGen
+                + " vs curPrimaryGen="
+                + curPrimaryGen
+                + "; sync now before mgr init");
 
         // Try until we succeed in copying over the latest NRT point:
         CopyJob job = null;
 
-        // We may need to overwrite files referenced by our latest commit, either right now on initial sync, or on a later sync.  To make
-        // sure the index is never even in an "apparently" corrupt state (where an old segments_N references invalid files) we forcefully
+        // We may need to overwrite files referenced by our latest commit, either right now on
+        // initial sync, or on a later sync.  To make
+        // sure the index is never even in an "apparently" corrupt state (where an old segments_N
+        // references invalid files) we forcefully
         // remove the commit now, and refuse to start the replica if this delete fails:
         message("top: now delete starting commit point " + segmentsFileName);
 
@@ -90,9 +106,13 @@
         deleter.decRef(Collections.singleton(segmentsFileName));
 
         if (dir.getPendingDeletions().isEmpty() == false) {
-          // If e.g. virus checker blocks us from deleting, we absolutely cannot start this node else there is a definite window during
+          // If e.g. virus checker blocks us from deleting, we absolutely cannot start this node
+          // else there is a definite window during
           // which if we carsh, we cause corruption:
-          throw new RuntimeException("replica cannot start: existing segments file=" + segmentsFileName + " must be removed in order to start, but the file delete failed");
+          throw new RuntimeException(
+              "replica cannot start: existing segments file="
+                  + segmentsFileName
+                  + " must be removed in order to start, but the file delete failed");
         }
 
         // So we don't later try to decRef it (illegally) again:
@@ -100,17 +120,21 @@
         assert didRemove;
 
         while (true) {
-          job = newCopyJob("sync on startup replica=" + name() + " myVersion=" + infos.getVersion(),
-                           null,
-                           null,
-                           true,
-                           null);
+          job =
+              newCopyJob(
+                  "sync on startup replica=" + name() + " myVersion=" + infos.getVersion(),
+                  null,
+                  null,
+                  true,
+                  null);
           job.start();
 
           message("top: init: sync sis.version=" + job.getCopyState().version);
 
-          // Force this copy job to finish while we wait, now.  Note that this can be very time consuming!
-          // NOTE: newNRTPoint detects we are still in init (mgr is null) and does not cancel our copy if a flush happens
+          // Force this copy job to finish while we wait, now.  Note that this can be very time
+          // consuming!
+          // NOTE: newNRTPoint detects we are still in init (mgr is null) and does not cancel our
+          // copy if a flush happens
           try {
             job.runBlocking();
             job.finish();
@@ -131,9 +155,9 @@
         lastPrimaryGen = job.getCopyState().primaryGen;
         byte[] infosBytes = job.getCopyState().infosBytes;
 
-        SegmentInfos syncInfos = SegmentInfos.readCommit(dir,
-                                                         toIndexInput(job.getCopyState().infosBytes),
-                                                         job.getCopyState().gen);
+        SegmentInfos syncInfos =
+            SegmentInfos.readCommit(
+                dir, toIndexInput(job.getCopyState().infosBytes), job.getCopyState().gen);
 
         // Must always commit to a larger generation than what's currently in the index:
         syncInfos.updateGeneration(infos);
@@ -151,11 +175,14 @@
 
         message("top: init: set lastNRTFiles=" + lastNRTFiles);
         lastFileMetaData = job.getCopyState().files;
-        message(String.format(Locale.ROOT, "top: %d: start: done sync: took %.3fs for %s, opened NRT reader version=%d",
-                              id,
-                              (System.nanoTime()-initSyncStartNS)/1000000000.0,
-                              bytesToString(job.getTotalBytesCopied()),
-                              job.getCopyState().version));
+        message(
+            String.format(
+                Locale.ROOT,
+                "top: %d: start: done sync: took %.3fs for %s, opened NRT reader version=%d",
+                id,
+                (System.nanoTime() - initSyncStartNS) / 1000000000.0,
+                bytesToString(job.getTotalBytesCopied()),
+                job.getCopyState().version));
 
         doCommit = true;
       } else {
@@ -165,11 +192,13 @@
       }
 
       if (infos.getGeneration() < maxPendingGen) {
-        message("top: move infos generation from " + infos.getGeneration() + " to " + maxPendingGen);
+        message(
+            "top: move infos generation from " + infos.getGeneration() + " to " + maxPendingGen);
         infos.setNextWriteGeneration(maxPendingGen);
       }
 
-      // Notify primary we started, to give it a chance to send any warming merges our way to reduce NRT latency of first sync:
+      // Notify primary we started, to give it a chance to send any warming merges our way to reduce
+      // NRT latency of first sync:
       sendNewReplica();
 
       // Finally, we are open for business, since our index now "agrees" with the primary:
@@ -177,7 +206,8 @@
 
       // Must commit after init mgr:
       if (doCommit) {
-        // Very important to commit what we just sync'd over, because we removed the pre-existing commit point above if we had to
+        // Very important to commit what we just sync'd over, because we removed the pre-existing
+        // commit point above if we had to
         // overwrite any files it referenced:
         commit();
       }

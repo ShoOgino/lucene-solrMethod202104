@@ -7,83 +7,96 @@
     final AtomicInteger totTermCount = new AtomicInteger(100);
 
     // TODO: we should enrich this to do more interesting searches
-    for(int thread=0;thread<searchThreads.length;thread++) {
-      searchThreads[thread] = new Thread() {
-          @Override
-          public void run() {
-            if (VERBOSE) {
-              System.out.println(Thread.currentThread().getName() + ": launch search thread");
-            }
-            while (System.currentTimeMillis() < stopTimeMS && !failed.get()) {
-              try {
-                final IndexSearcher s = getCurrentSearcher();
+    for (int thread = 0; thread < searchThreads.length; thread++) {
+      searchThreads[thread] =
+          new Thread() {
+            @Override
+            public void run() {
+              if (VERBOSE) {
+                System.out.println(Thread.currentThread().getName() + ": launch search thread");
+              }
+              while (System.currentTimeMillis() < stopTimeMS && !failed.get()) {
                 try {
-                  // Verify 1) IW is correctly setting
-                  // diagnostics, and 2) segment warming for
-                  // merged segments is actually happening:
-                  for(final LeafReaderContext sub : s.getIndexReader().leaves()) {
-                    SegmentReader segReader = (SegmentReader) sub.reader();
-                    Map<String,String> diagnostics = segReader.getSegmentInfo().info.getDiagnostics();
-                    assertNotNull(diagnostics);
-                    String source = diagnostics.get("source");
-                    assertNotNull(source);
-                    if (source.equals("merge")) {
-                      assertTrue("sub reader " + sub + " wasn't warmed: warmed=" + warmed + " diagnostics=" + diagnostics + " si=" + segReader.getSegmentInfo(),
-                                 !assertMergedSegmentsWarmed || warmed.containsKey(segReader.core));
-                    }
-                  }
-                  if (s.getIndexReader().numDocs() > 0) {
-                    smokeTestSearcher(s);
-                    Terms terms = MultiTerms.getTerms(s.getIndexReader(), "body");
-                    if (terms == null) {
-                      continue;
-                    }
-                    TermsEnum termsEnum = terms.iterator();
-                    int seenTermCount = 0;
-                    int shift;
-                    int trigger; 
-                    if (totTermCount.get() < 30) {
-                      shift = 0;
-                      trigger = 1;
-                    } else {
-                      trigger = totTermCount.get()/30;
-                      shift = random().nextInt(trigger);
-                    }
-                    while (System.currentTimeMillis() < stopTimeMS) {
-                      BytesRef term = termsEnum.next();
-                      if (term == null) {
-                        totTermCount.set(seenTermCount);
-                        break;
-                      }
-                      seenTermCount++;
-                      // search 30 terms
-                      if ((seenTermCount + shift) % trigger == 0) {
-                        //if (VERBOSE) {
-                        //System.out.println(Thread.currentThread().getName() + " now search body:" + term.utf8ToString());
-                        //}
-                        totHits.addAndGet(runQuery(s, new TermQuery(new Term("body", BytesRef.deepCopyOf(term)))));
+                  final IndexSearcher s = getCurrentSearcher();
+                  try {
+                    // Verify 1) IW is correctly setting
+                    // diagnostics, and 2) segment warming for
+                    // merged segments is actually happening:
+                    for (final LeafReaderContext sub : s.getIndexReader().leaves()) {
+                      SegmentReader segReader = (SegmentReader) sub.reader();
+                      Map<String, String> diagnostics =
+                          segReader.getSegmentInfo().info.getDiagnostics();
+                      assertNotNull(diagnostics);
+                      String source = diagnostics.get("source");
+                      assertNotNull(source);
+                      if (source.equals("merge")) {
+                        assertTrue(
+                            "sub reader "
+                                + sub
+                                + " wasn't warmed: warmed="
+                                + warmed
+                                + " diagnostics="
+                                + diagnostics
+                                + " si="
+                                + segReader.getSegmentInfo(),
+                            !assertMergedSegmentsWarmed || warmed.containsKey(segReader.core));
                       }
                     }
-                    //if (VERBOSE) {
-                    //System.out.println(Thread.currentThread().getName() + ": search done");
-                    //}
+                    if (s.getIndexReader().numDocs() > 0) {
+                      smokeTestSearcher(s);
+                      Terms terms = MultiTerms.getTerms(s.getIndexReader(), "body");
+                      if (terms == null) {
+                        continue;
+                      }
+                      TermsEnum termsEnum = terms.iterator();
+                      int seenTermCount = 0;
+                      int shift;
+                      int trigger;
+                      if (totTermCount.get() < 30) {
+                        shift = 0;
+                        trigger = 1;
+                      } else {
+                        trigger = totTermCount.get() / 30;
+                        shift = random().nextInt(trigger);
+                      }
+                      while (System.currentTimeMillis() < stopTimeMS) {
+                        BytesRef term = termsEnum.next();
+                        if (term == null) {
+                          totTermCount.set(seenTermCount);
+                          break;
+                        }
+                        seenTermCount++;
+                        // search 30 terms
+                        if ((seenTermCount + shift) % trigger == 0) {
+                          // if (VERBOSE) {
+                          // System.out.println(Thread.currentThread().getName() + " now search
+                          // body:" + term.utf8ToString());
+                          // }
+                          totHits.addAndGet(
+                              runQuery(
+                                  s, new TermQuery(new Term("body", BytesRef.deepCopyOf(term)))));
+                        }
+                      }
+                      // if (VERBOSE) {
+                      // System.out.println(Thread.currentThread().getName() + ": search done");
+                      // }
+                    }
+                  } finally {
+                    releaseSearcher(s);
                   }
-                } finally {
-                  releaseSearcher(s);
+                } catch (Throwable t) {
+                  System.out.println(Thread.currentThread().getName() + ": hit exc");
+                  failed.set(true);
+                  t.printStackTrace(System.out);
+                  throw new RuntimeException(t);
                 }
-              } catch (Throwable t) {
-                System.out.println(Thread.currentThread().getName() + ": hit exc");
-                failed.set(true);
-                t.printStackTrace(System.out);
-                throw new RuntimeException(t);
               }
             }
-          }
-        };
+          };
       searchThreads[thread].start();
     }
 
-    for(Thread thread : searchThreads) {
+    for (Thread thread : searchThreads) {
       thread.join();
     }
 

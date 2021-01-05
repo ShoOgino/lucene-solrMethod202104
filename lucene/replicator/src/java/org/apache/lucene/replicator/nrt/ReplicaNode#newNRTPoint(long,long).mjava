@@ -1,15 +1,22 @@
-  /** Call this to notify this replica node that a new NRT infos is available on the primary.
-   *  We kick off a job (runs in the background) to copy files across, and open a new reader once that's done. */
+  /**
+   * Call this to notify this replica node that a new NRT infos is available on the primary. We kick
+   * off a job (runs in the background) to copy files across, and open a new reader once that's
+   * done.
+   */
   public synchronized CopyJob newNRTPoint(long newPrimaryGen, long version) throws IOException {
 
     if (isClosed()) {
       throw new AlreadyClosedException("this replica is closed: state=" + state);
     }
 
-    // Cutover (possibly) to new primary first, so we discard any pre-copied merged segments up front, before checking for which files need
-    // copying.  While it's possible the pre-copied merged segments could still be useful to us, in the case that the new primary is either
-    // the same primary (just e.g. rebooted), or a promoted replica that had a newer NRT point than we did that included the pre-copied
-    // merged segments, it's still a bit risky to rely solely on checksum/file length to catch the difference, so we defensively discard
+    // Cutover (possibly) to new primary first, so we discard any pre-copied merged segments up
+    // front, before checking for which files need
+    // copying.  While it's possible the pre-copied merged segments could still be useful to us, in
+    // the case that the new primary is either
+    // the same primary (just e.g. rebooted), or a promoted replica that had a newer NRT point than
+    // we did that included the pre-copied
+    // merged segments, it's still a bit risky to rely solely on checksum/file length to catch the
+    // difference, so we defensively discard
     // here and re-copy in that case:
     maybeNewPrimary(newPrimaryGen);
 
@@ -31,8 +38,14 @@
     }
 
     if (version < curVersion) {
-      // This can happen, if two syncs happen close together, and due to thread scheduling, the incoming older version runs after the newer version
-      message("top: new NRT point (version=" + version + ") is older than current (version=" + curVersion + "); skipping");
+      // This can happen, if two syncs happen close together, and due to thread scheduling, the
+      // incoming older version runs after the newer version
+      message(
+          "top: new NRT point (version="
+              + version
+              + ") is older than current (version="
+              + curVersion
+              + "); skipping");
       return null;
     }
 
@@ -41,24 +54,26 @@
     message("top: newNRTPoint");
     CopyJob job = null;
     try {
-      job = newCopyJob("NRT point sync version=" + version,
-                       null,
-                       lastFileMetaData,
-                       true,
-                       new CopyJob.OnceDone() {
-                         @Override
-                         public void run(CopyJob job) {
-                           try {
-                             finishNRTCopy(job, startNS);
-                           } catch (IOException ioe) {
-                             throw new RuntimeException(ioe);
-                           }
-                         }
-                       });
+      job =
+          newCopyJob(
+              "NRT point sync version=" + version,
+              null,
+              lastFileMetaData,
+              true,
+              new CopyJob.OnceDone() {
+                @Override
+                public void run(CopyJob job) {
+                  try {
+                    finishNRTCopy(job, startNS);
+                  } catch (IOException ioe) {
+                    throw new RuntimeException(ioe);
+                  }
+                }
+              });
     } catch (NodeCommunicationException nce) {
       // E.g. primary could crash/close when we are asking it for the copy state:
       message("top: ignoring communication exception creating CopyJob: " + nce);
-      //nce.printStackTrace(printStream);
+      // nce.printStackTrace(printStream);
       if (state.equals("syncing")) {
         state = "idle";
       }
@@ -78,13 +93,20 @@
 
     curNRTCopy = job;
 
-    for(String fileName : curNRTCopy.getFileNamesToCopy()) {
-      assert lastCommitFiles.contains(fileName) == false: "fileName=" + fileName + " is in lastCommitFiles and is being copied?";
+    for (String fileName : curNRTCopy.getFileNamesToCopy()) {
+      assert lastCommitFiles.contains(fileName) == false
+          : "fileName=" + fileName + " is in lastCommitFiles and is being copied?";
       synchronized (mergeCopyJobs) {
         for (CopyJob mergeJob : mergeCopyJobs) {
           if (mergeJob.getFileNames().contains(fileName)) {
-            // TODO: we could maybe transferAndCancel here?  except CopyJob can't transferAndCancel more than one currently
-            message("top: now cancel merge copy job=" + mergeJob + ": file " + fileName + " is now being copied via NRT point");
+            // TODO: we could maybe transferAndCancel here?  except CopyJob can't transferAndCancel
+            // more than one currently
+            message(
+                "top: now cancel merge copy job="
+                    + mergeJob
+                    + ": file "
+                    + fileName
+                    + " is now being copied via NRT point");
             mergeJob.cancel("newNRTPoint is copying over the same file", null);
           }
         }
@@ -103,7 +125,8 @@
       return null;
     }
 
-    // Runs in the background jobs thread, maybe slowly/throttled, and calls finishSync once it's done:
+    // Runs in the background jobs thread, maybe slowly/throttled, and calls finishSync once it's
+    // done:
     launch(curNRTCopy);
     return curNRTCopy;
   }

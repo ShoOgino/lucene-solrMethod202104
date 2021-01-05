@@ -1,61 +1,68 @@
   @Override
   public PointsFormat pointsFormat() {
-    return new AssertingPointsFormat(new PointsFormat() {
-      @Override
-      public PointsWriter fieldsWriter(SegmentWriteState writeState) throws IOException {
-
-        // Randomize how BKDWriter chooses its splits:
-
-        return new Lucene86PointsWriter(writeState, maxPointsInLeafNode, maxMBSortInHeap) {
+    return new AssertingPointsFormat(
+        new PointsFormat() {
           @Override
-          public void writeField(FieldInfo fieldInfo, PointsReader reader) throws IOException {
+          public PointsWriter fieldsWriter(SegmentWriteState writeState) throws IOException {
 
-            PointValues values = reader.getValues(fieldInfo.name);
+            // Randomize how BKDWriter chooses its splits:
 
-            BKDConfig config = new BKDConfig(fieldInfo.getPointDimensionCount(),
-                fieldInfo.getPointIndexDimensionCount(),
-                fieldInfo.getPointNumBytes(),
-                maxPointsInLeafNode);
+            return new Lucene86PointsWriter(writeState, maxPointsInLeafNode, maxMBSortInHeap) {
+              @Override
+              public void writeField(FieldInfo fieldInfo, PointsReader reader) throws IOException {
 
+                PointValues values = reader.getValues(fieldInfo.name);
 
-            try (BKDWriter writer = new RandomlySplittingBKDWriter(writeState.segmentInfo.maxDoc(),
-                                                                   writeState.directory,
-                                                                   writeState.segmentInfo.name,
-                                                                   config,
-                                                                   maxMBSortInHeap,
-                                                                   values.size(),
-                                                                   bkdSplitRandomSeed ^ fieldInfo.name.hashCode())) {
-                values.intersect(new IntersectVisitor() {
-                    @Override
-                    public void visit(int docID) {
-                      throw new IllegalStateException();
-                    }
+                BKDConfig config =
+                    new BKDConfig(
+                        fieldInfo.getPointDimensionCount(),
+                        fieldInfo.getPointIndexDimensionCount(),
+                        fieldInfo.getPointNumBytes(),
+                        maxPointsInLeafNode);
 
-                    public void visit(int docID, byte[] packedValue) throws IOException {
-                      writer.add(packedValue, docID);
-                    }
+                try (BKDWriter writer =
+                    new RandomlySplittingBKDWriter(
+                        writeState.segmentInfo.maxDoc(),
+                        writeState.directory,
+                        writeState.segmentInfo.name,
+                        config,
+                        maxMBSortInHeap,
+                        values.size(),
+                        bkdSplitRandomSeed ^ fieldInfo.name.hashCode())) {
+                  values.intersect(
+                      new IntersectVisitor() {
+                        @Override
+                        public void visit(int docID) {
+                          throw new IllegalStateException();
+                        }
 
-                    @Override
-                    public PointValues.Relation compare(byte[] minPackedValue, byte[] maxPackedValue) {
-                      return PointValues.Relation.CELL_CROSSES_QUERY;
-                    }
-                  });
+                        public void visit(int docID, byte[] packedValue) throws IOException {
+                          writer.add(packedValue, docID);
+                        }
 
-                // We could have 0 points on merge since all docs with dimensional fields may be deleted:
-                Runnable finalizer = writer.finish(metaOut, indexOut, dataOut);
-                if (finalizer != null) {
-                  metaOut.writeInt(fieldInfo.number);
-                  finalizer.run();
+                        @Override
+                        public PointValues.Relation compare(
+                            byte[] minPackedValue, byte[] maxPackedValue) {
+                          return PointValues.Relation.CELL_CROSSES_QUERY;
+                        }
+                      });
+
+                  // We could have 0 points on merge since all docs with dimensional fields may be
+                  // deleted:
+                  Runnable finalizer = writer.finish(metaOut, indexOut, dataOut);
+                  if (finalizer != null) {
+                    metaOut.writeInt(fieldInfo.number);
+                    finalizer.run();
+                  }
                 }
               }
+            };
           }
-        };
-      }
 
-      @Override
-      public PointsReader fieldsReader(SegmentReadState readState) throws IOException {
-        return new Lucene86PointsReader(readState);
-      }
-    });
+          @Override
+          public PointsReader fieldsReader(SegmentReadState readState) throws IOException {
+            return new Lucene86PointsReader(readState);
+          }
+        });
   }
 

@@ -1,198 +1,235 @@
-  private Thread[] launchIndexingThreads(final LineFileDocs docs,
-                                         int numThreads,
-                                         final long stopTime,
-                                         final Set<String> delIDs,
-                                         final Set<String> delPackIDs,
-                                         final List<SubDocs> allSubDocs) {
+  private Thread[] launchIndexingThreads(
+      final LineFileDocs docs,
+      int numThreads,
+      final long stopTime,
+      final Set<String> delIDs,
+      final Set<String> delPackIDs,
+      final List<SubDocs> allSubDocs) {
     final Thread[] threads = new Thread[numThreads];
-    for(int thread=0;thread<numThreads;thread++) {
-      threads[thread] = new Thread() {
-          @Override
-          public void run() {
-            // TODO: would be better if this were cross thread, so that we make sure one thread deleting anothers added docs works:
-            final List<String> toDeleteIDs = new ArrayList<>();
-            final List<SubDocs> toDeleteSubDocs = new ArrayList<>();
-            while(System.currentTimeMillis() < stopTime && !failed.get()) {
-              try {
+    for (int thread = 0; thread < numThreads; thread++) {
+      threads[thread] =
+          new Thread() {
+            @Override
+            public void run() {
+              // TODO: would be better if this were cross thread, so that we make sure one thread
+              // deleting anothers added docs works:
+              final List<String> toDeleteIDs = new ArrayList<>();
+              final List<SubDocs> toDeleteSubDocs = new ArrayList<>();
+              while (System.currentTimeMillis() < stopTime && !failed.get()) {
+                try {
 
-                // Occasional longish pause if running
-                // nightly
-                if (LuceneTestCase.TEST_NIGHTLY && random().nextInt(6) == 3) {
-                  if (VERBOSE) {
-                    System.out.println(Thread.currentThread().getName() + ": now long sleep");
+                  // Occasional longish pause if running
+                  // nightly
+                  if (LuceneTestCase.TEST_NIGHTLY && random().nextInt(6) == 3) {
+                    if (VERBOSE) {
+                      System.out.println(Thread.currentThread().getName() + ": now long sleep");
+                    }
+                    Thread.sleep(TestUtil.nextInt(random(), 50, 500));
                   }
-                  Thread.sleep(TestUtil.nextInt(random(), 50, 500));
-                }
 
-                // Rate limit ingest rate:
-                if (random().nextInt(7) == 5) {
-                  Thread.sleep(TestUtil.nextInt(random(), 1, 10));
-                  if (VERBOSE) {
-                    System.out.println(Thread.currentThread().getName() + ": done sleep");
+                  // Rate limit ingest rate:
+                  if (random().nextInt(7) == 5) {
+                    Thread.sleep(TestUtil.nextInt(random(), 1, 10));
+                    if (VERBOSE) {
+                      System.out.println(Thread.currentThread().getName() + ": done sleep");
+                    }
                   }
-                }
 
-                Document doc = docs.nextDoc();
-                if (doc == null) {
-                  break;
-                }
+                  Document doc = docs.nextDoc();
+                  if (doc == null) {
+                    break;
+                  }
 
-                // Maybe add randomly named field
-                final String addedField;
-                if (random().nextBoolean()) {
-                  addedField = "extra" + random().nextInt(40);
-                  doc.add(newTextField(addedField, "a random field", Field.Store.YES));
-                } else {
-                  addedField = null;
-                }
-
-                if (random().nextBoolean()) {
+                  // Maybe add randomly named field
+                  final String addedField;
+                  if (random().nextBoolean()) {
+                    addedField = "extra" + random().nextInt(40);
+                    doc.add(newTextField(addedField, "a random field", Field.Store.YES));
+                  } else {
+                    addedField = null;
+                  }
 
                   if (random().nextBoolean()) {
-                    // Add/update doc block:
-                    final String packID;
-                    final SubDocs delSubDocs;
-                    if (toDeleteSubDocs.size() > 0 && random().nextBoolean()) {
-                      delSubDocs = toDeleteSubDocs.get(random().nextInt(toDeleteSubDocs.size()));
-                      assert !delSubDocs.deleted;
-                      toDeleteSubDocs.remove(delSubDocs);
-                      // Update doc block, replacing prior packID
-                      packID = delSubDocs.packID;
-                    } else {
-                      delSubDocs = null;
-                      // Add doc block, using new packID
-                      packID = packCount.getAndIncrement() + "";
-                    }
 
-                    final Field packIDField = newStringField("packID", packID, Field.Store.YES);
-                    final List<String> docIDs = new ArrayList<>();
-                    final SubDocs subDocs = new SubDocs(packID, docIDs);
-                    final List<Document> docsList = new ArrayList<>();
-
-                    allSubDocs.add(subDocs);
-                    doc.add(packIDField);
-                    docsList.add(TestUtil.cloneDocument(doc));
-                    docIDs.add(doc.get("docid"));
-
-                    final int maxDocCount = TestUtil.nextInt(random(), 1, 10);
-                    while(docsList.size() < maxDocCount) {
-                      doc = docs.nextDoc();
-                      if (doc == null) {
-                        break;
+                    if (random().nextBoolean()) {
+                      // Add/update doc block:
+                      final String packID;
+                      final SubDocs delSubDocs;
+                      if (toDeleteSubDocs.size() > 0 && random().nextBoolean()) {
+                        delSubDocs = toDeleteSubDocs.get(random().nextInt(toDeleteSubDocs.size()));
+                        assert !delSubDocs.deleted;
+                        toDeleteSubDocs.remove(delSubDocs);
+                        // Update doc block, replacing prior packID
+                        packID = delSubDocs.packID;
+                      } else {
+                        delSubDocs = null;
+                        // Add doc block, using new packID
+                        packID = packCount.getAndIncrement() + "";
                       }
+
+                      final Field packIDField = newStringField("packID", packID, Field.Store.YES);
+                      final List<String> docIDs = new ArrayList<>();
+                      final SubDocs subDocs = new SubDocs(packID, docIDs);
+                      final List<Document> docsList = new ArrayList<>();
+
+                      allSubDocs.add(subDocs);
+                      doc.add(packIDField);
                       docsList.add(TestUtil.cloneDocument(doc));
                       docIDs.add(doc.get("docid"));
-                    }
-                    addCount.addAndGet(docsList.size());
 
-                    final Term packIDTerm = new Term("packID", packID);
-
-                    if (delSubDocs != null) {
-                      delSubDocs.deleted = true;
-                      delIDs.addAll(delSubDocs.subIDs);
-                      delCount.addAndGet(delSubDocs.subIDs.size());
-                      if (VERBOSE) {
-                        System.out.println(Thread.currentThread().getName() + ": update pack packID=" + delSubDocs.packID + " count=" + docsList.size() + " docs=" + docIDs);
+                      final int maxDocCount = TestUtil.nextInt(random(), 1, 10);
+                      while (docsList.size() < maxDocCount) {
+                        doc = docs.nextDoc();
+                        if (doc == null) {
+                          break;
+                        }
+                        docsList.add(TestUtil.cloneDocument(doc));
+                        docIDs.add(doc.get("docid"));
                       }
-                      updateDocuments(packIDTerm, docsList);
+                      addCount.addAndGet(docsList.size());
+
+                      final Term packIDTerm = new Term("packID", packID);
+
+                      if (delSubDocs != null) {
+                        delSubDocs.deleted = true;
+                        delIDs.addAll(delSubDocs.subIDs);
+                        delCount.addAndGet(delSubDocs.subIDs.size());
+                        if (VERBOSE) {
+                          System.out.println(
+                              Thread.currentThread().getName()
+                                  + ": update pack packID="
+                                  + delSubDocs.packID
+                                  + " count="
+                                  + docsList.size()
+                                  + " docs="
+                                  + docIDs);
+                        }
+                        updateDocuments(packIDTerm, docsList);
+                      } else {
+                        if (VERBOSE) {
+                          System.out.println(
+                              Thread.currentThread().getName()
+                                  + ": add pack packID="
+                                  + packID
+                                  + " count="
+                                  + docsList.size()
+                                  + " docs="
+                                  + docIDs);
+                        }
+                        addDocuments(packIDTerm, docsList);
+                      }
+                      doc.removeField("packID");
+
+                      if (random().nextInt(5) == 2) {
+                        if (VERBOSE) {
+                          System.out.println(
+                              Thread.currentThread().getName() + ": buffer del id:" + packID);
+                        }
+                        toDeleteSubDocs.add(subDocs);
+                      }
+
                     } else {
+                      // Add single doc
+                      final String docid = doc.get("docid");
                       if (VERBOSE) {
-                        System.out.println(Thread.currentThread().getName() + ": add pack packID=" + packID + " count=" + docsList.size() + " docs=" + docIDs);
+                        System.out.println(
+                            Thread.currentThread().getName() + ": add doc docid:" + docid);
                       }
-                      addDocuments(packIDTerm, docsList);
-                    }
-                    doc.removeField("packID");
+                      addDocument(new Term("docid", docid), doc);
+                      addCount.getAndIncrement();
 
-                    if (random().nextInt(5) == 2) {
-                      if (VERBOSE) {
-                        System.out.println(Thread.currentThread().getName() + ": buffer del id:" + packID);
+                      if (random().nextInt(5) == 3) {
+                        if (VERBOSE) {
+                          System.out.println(
+                              Thread.currentThread().getName()
+                                  + ": buffer del id:"
+                                  + doc.get("docid"));
+                        }
+                        toDeleteIDs.add(docid);
                       }
-                      toDeleteSubDocs.add(subDocs);
                     }
-
                   } else {
-                    // Add single doc
-                    final String docid = doc.get("docid");
+
+                    // Update single doc, but we never re-use
+                    // and ID so the delete will never
+                    // actually happen:
                     if (VERBOSE) {
-                      System.out.println(Thread.currentThread().getName() + ": add doc docid:" + docid);
+                      System.out.println(
+                          Thread.currentThread().getName() + ": update doc id:" + doc.get("docid"));
                     }
-                    addDocument(new Term("docid", docid), doc);
+                    final String docid = doc.get("docid");
+                    updateDocument(new Term("docid", docid), doc);
                     addCount.getAndIncrement();
 
                     if (random().nextInt(5) == 3) {
                       if (VERBOSE) {
-                        System.out.println(Thread.currentThread().getName() + ": buffer del id:" + doc.get("docid"));
+                        System.out.println(
+                            Thread.currentThread().getName()
+                                + ": buffer del id:"
+                                + doc.get("docid"));
                       }
                       toDeleteIDs.add(docid);
                     }
                   }
-                } else {
 
-                  // Update single doc, but we never re-use
-                  // and ID so the delete will never
-                  // actually happen:
-                  if (VERBOSE) {
-                    System.out.println(Thread.currentThread().getName() + ": update doc id:" + doc.get("docid"));
-                  }
-                  final String docid = doc.get("docid");
-                  updateDocument(new Term("docid", docid), doc);
-                  addCount.getAndIncrement();
-
-                  if (random().nextInt(5) == 3) {
+                  if (random().nextInt(30) == 17) {
                     if (VERBOSE) {
-                      System.out.println(Thread.currentThread().getName() + ": buffer del id:" + doc.get("docid"));
+                      System.out.println(
+                          Thread.currentThread().getName()
+                              + ": apply "
+                              + toDeleteIDs.size()
+                              + " deletes");
                     }
-                    toDeleteIDs.add(docid);
-                  }
-                }
-
-                if (random().nextInt(30) == 17) {
-                  if (VERBOSE) {
-                    System.out.println(Thread.currentThread().getName() + ": apply " + toDeleteIDs.size() + " deletes");
-                  }
-                  for(String id : toDeleteIDs) {
+                    for (String id : toDeleteIDs) {
+                      if (VERBOSE) {
+                        System.out.println(
+                            Thread.currentThread().getName() + ": del term=id:" + id);
+                      }
+                      deleteDocuments(new Term("docid", id));
+                    }
+                    final int count = delCount.addAndGet(toDeleteIDs.size());
                     if (VERBOSE) {
-                      System.out.println(Thread.currentThread().getName() + ": del term=id:" + id);
+                      System.out.println(
+                          Thread.currentThread().getName() + ": tot " + count + " deletes");
                     }
-                    deleteDocuments(new Term("docid", id));
-                  }
-                  final int count = delCount.addAndGet(toDeleteIDs.size());
-                  if (VERBOSE) {
-                    System.out.println(Thread.currentThread().getName() + ": tot " + count + " deletes");
-                  }
-                  delIDs.addAll(toDeleteIDs);
-                  toDeleteIDs.clear();
+                    delIDs.addAll(toDeleteIDs);
+                    toDeleteIDs.clear();
 
-                  for(SubDocs subDocs : toDeleteSubDocs) {
-                    assert !subDocs.deleted;
-                    delPackIDs.add(subDocs.packID);
-                    deleteDocuments(new Term("packID", subDocs.packID));
-                    subDocs.deleted = true;
-                    if (VERBOSE) {
-                      System.out.println(Thread.currentThread().getName() + ": del subs: " + subDocs.subIDs + " packID=" + subDocs.packID);
+                    for (SubDocs subDocs : toDeleteSubDocs) {
+                      assert !subDocs.deleted;
+                      delPackIDs.add(subDocs.packID);
+                      deleteDocuments(new Term("packID", subDocs.packID));
+                      subDocs.deleted = true;
+                      if (VERBOSE) {
+                        System.out.println(
+                            Thread.currentThread().getName()
+                                + ": del subs: "
+                                + subDocs.subIDs
+                                + " packID="
+                                + subDocs.packID);
+                      }
+                      delIDs.addAll(subDocs.subIDs);
+                      delCount.addAndGet(subDocs.subIDs.size());
                     }
-                    delIDs.addAll(subDocs.subIDs);
-                    delCount.addAndGet(subDocs.subIDs.size());
+                    toDeleteSubDocs.clear();
                   }
-                  toDeleteSubDocs.clear();
+                  if (addedField != null) {
+                    doc.removeField(addedField);
+                  }
+                } catch (Throwable t) {
+                  System.out.println(Thread.currentThread().getName() + ": hit exc");
+                  t.printStackTrace();
+                  failed.set(true);
+                  throw new RuntimeException(t);
                 }
-                if (addedField != null) {
-                  doc.removeField(addedField);
-                }
-              } catch (Throwable t) {
-                System.out.println(Thread.currentThread().getName() + ": hit exc");
-                t.printStackTrace();
-                failed.set(true);
-                throw new RuntimeException(t);
               }
-            }
-            if (VERBOSE) {
-              System.out.println(Thread.currentThread().getName() + ": indexing done");
-            }
+              if (VERBOSE) {
+                System.out.println(Thread.currentThread().getName() + ": indexing done");
+              }
 
-            doAfterIndexingThreadDone();
-          }
-        };
+              doAfterIndexingThreadDone();
+            }
+          };
       threads[thread].start();
     }
 

@@ -1,78 +1,109 @@
   /** check that first skip on just created scorers always goes to the right doc */
   public static void checkFirstSkipTo(final Query q, final IndexSearcher s) throws IOException {
-    //System.out.println("checkFirstSkipTo: "+q);
+    // System.out.println("checkFirstSkipTo: "+q);
     final float maxDiff = 1e-3f;
     final int lastDoc[] = {-1};
     final LeafReader lastReader[] = {null};
     final List<LeafReaderContext> context = s.getTopReaderContext().leaves();
     Query rewritten = s.rewrite(q);
-    s.search(q,new SimpleCollector() {
-      private Scorable scorer;
-      private int leafPtr;
-      @Override
-      public void setScorer(Scorable scorer) {
-        this.scorer = scorer;
-      }
-      @Override
-      public void collect(int doc) throws IOException {
-        float score = scorer.score();
-        try {
-          long startMS = System.currentTimeMillis();
-          for (int i=lastDoc[0]+1; i<=doc; i++) {
-            Weight w = s.createWeight(rewritten, ScoreMode.COMPLETE, 1);
-            Scorer scorer = w.scorer(context.get(leafPtr));
-            assertTrue("query collected "+doc+" but advance("+i+") says no more docs!",scorer.iterator().advance(i) != DocIdSetIterator.NO_MORE_DOCS);
-            assertEquals("query collected "+doc+" but advance("+i+") got to "+scorer.docID(),doc,scorer.docID());
-            float advanceScore = scorer.score();
-            assertEquals("unstable advance("+i+") score!",advanceScore,scorer.score(),maxDiff);
-            assertEquals("query assigned doc "+doc+" a score of <"+score+"> but advance("+i+") has <"+advanceScore+">!",score,advanceScore,maxDiff);
+    s.search(
+        q,
+        new SimpleCollector() {
+          private Scorable scorer;
+          private int leafPtr;
 
-            // Hurry things along if they are going slow (eg
-            // if you got SimpleText codec this will kick in):
-            if (i < doc && System.currentTimeMillis() - startMS > 5) {
-              i = doc-1;
-            }
+          @Override
+          public void setScorer(Scorable scorer) {
+            this.scorer = scorer;
           }
-          lastDoc[0] = doc;
-        } catch (IOException e) {
-          throw new RuntimeException(e);
-        }
-      }
 
-      @Override
-      public ScoreMode scoreMode() {
-        return ScoreMode.COMPLETE;
-      }
+          @Override
+          public void collect(int doc) throws IOException {
+            float score = scorer.score();
+            try {
+              long startMS = System.currentTimeMillis();
+              for (int i = lastDoc[0] + 1; i <= doc; i++) {
+                Weight w = s.createWeight(rewritten, ScoreMode.COMPLETE, 1);
+                Scorer scorer = w.scorer(context.get(leafPtr));
+                assertTrue(
+                    "query collected " + doc + " but advance(" + i + ") says no more docs!",
+                    scorer.iterator().advance(i) != DocIdSetIterator.NO_MORE_DOCS);
+                assertEquals(
+                    "query collected " + doc + " but advance(" + i + ") got to " + scorer.docID(),
+                    doc,
+                    scorer.docID());
+                float advanceScore = scorer.score();
+                assertEquals(
+                    "unstable advance(" + i + ") score!", advanceScore, scorer.score(), maxDiff);
+                assertEquals(
+                    "query assigned doc "
+                        + doc
+                        + " a score of <"
+                        + score
+                        + "> but advance("
+                        + i
+                        + ") has <"
+                        + advanceScore
+                        + ">!",
+                    score,
+                    advanceScore,
+                    maxDiff);
 
-      @Override
-      protected void doSetNextReader(LeafReaderContext context) throws IOException {
-        // confirm that skipping beyond the last doc, on the
-        // previous reader, hits NO_MORE_DOCS
-        if (lastReader[0] != null) {
-          final LeafReader previousReader = lastReader[0];
-          IndexSearcher indexSearcher = LuceneTestCase.newSearcher(previousReader, false);
-          indexSearcher.setSimilarity(s.getSimilarity());
-          Weight w = indexSearcher.createWeight(rewritten, ScoreMode.COMPLETE, 1);
-          Scorer scorer = w.scorer((LeafReaderContext)indexSearcher.getTopReaderContext());
-          if (scorer != null) {
-            DocIdSetIterator iterator = scorer.iterator();
-            boolean more = false;
-            final Bits liveDocs = context.reader().getLiveDocs();
-            for (int d = iterator.advance(lastDoc[0] + 1); d != DocIdSetIterator.NO_MORE_DOCS; d = iterator.nextDoc()) {
-              if (liveDocs == null || liveDocs.get(d)) {
-                more = true;
-                break;
+                // Hurry things along if they are going slow (eg
+                // if you got SimpleText codec this will kick in):
+                if (i < doc && System.currentTimeMillis() - startMS > 5) {
+                  i = doc - 1;
+                }
               }
+              lastDoc[0] = doc;
+            } catch (IOException e) {
+              throw new RuntimeException(e);
             }
-            assertFalse("query's last doc was "+ lastDoc[0] +" but advance("+(lastDoc[0]+1)+") got to "+scorer.docID(),more);
           }
-          leafPtr++;
-        }
 
-        lastReader[0] = context.reader();
-        lastDoc[0] = -1;
-      }
-    });
+          @Override
+          public ScoreMode scoreMode() {
+            return ScoreMode.COMPLETE;
+          }
+
+          @Override
+          protected void doSetNextReader(LeafReaderContext context) throws IOException {
+            // confirm that skipping beyond the last doc, on the
+            // previous reader, hits NO_MORE_DOCS
+            if (lastReader[0] != null) {
+              final LeafReader previousReader = lastReader[0];
+              IndexSearcher indexSearcher = LuceneTestCase.newSearcher(previousReader, false);
+              indexSearcher.setSimilarity(s.getSimilarity());
+              Weight w = indexSearcher.createWeight(rewritten, ScoreMode.COMPLETE, 1);
+              Scorer scorer = w.scorer((LeafReaderContext) indexSearcher.getTopReaderContext());
+              if (scorer != null) {
+                DocIdSetIterator iterator = scorer.iterator();
+                boolean more = false;
+                final Bits liveDocs = context.reader().getLiveDocs();
+                for (int d = iterator.advance(lastDoc[0] + 1);
+                    d != DocIdSetIterator.NO_MORE_DOCS;
+                    d = iterator.nextDoc()) {
+                  if (liveDocs == null || liveDocs.get(d)) {
+                    more = true;
+                    break;
+                  }
+                }
+                assertFalse(
+                    "query's last doc was "
+                        + lastDoc[0]
+                        + " but advance("
+                        + (lastDoc[0] + 1)
+                        + ") got to "
+                        + scorer.docID(),
+                    more);
+              }
+              leafPtr++;
+            }
+
+            lastReader[0] = context.reader();
+            lastDoc[0] = -1;
+          }
+        });
 
     if (lastReader[0] != null) {
       // confirm that skipping beyond the last doc, on the
@@ -81,18 +112,27 @@
       IndexSearcher indexSearcher = LuceneTestCase.newSearcher(previousReader, false);
       indexSearcher.setSimilarity(s.getSimilarity());
       Weight w = indexSearcher.createWeight(rewritten, ScoreMode.COMPLETE, 1);
-      Scorer scorer = w.scorer((LeafReaderContext)indexSearcher.getTopReaderContext());
+      Scorer scorer = w.scorer((LeafReaderContext) indexSearcher.getTopReaderContext());
       if (scorer != null) {
         DocIdSetIterator iterator = scorer.iterator();
         boolean more = false;
         final Bits liveDocs = lastReader[0].getLiveDocs();
-        for (int d = iterator.advance(lastDoc[0] + 1); d != DocIdSetIterator.NO_MORE_DOCS; d = iterator.nextDoc()) {
+        for (int d = iterator.advance(lastDoc[0] + 1);
+            d != DocIdSetIterator.NO_MORE_DOCS;
+            d = iterator.nextDoc()) {
           if (liveDocs == null || liveDocs.get(d)) {
             more = true;
             break;
           }
         }
-        assertFalse("query's last doc was "+ lastDoc[0] +" but advance("+(lastDoc[0]+1)+") got to "+scorer.docID(),more);
+        assertFalse(
+            "query's last doc was "
+                + lastDoc[0]
+                + " but advance("
+                + (lastDoc[0] + 1)
+                + ") got to "
+                + scorer.docID(),
+            more);
       }
     }
   }

@@ -1,21 +1,25 @@
   /**
-   * Collects at most {@link TopSuggestDocsCollector#getCountToCollect()} completions that
-   * match the provided {@link CompletionScorer}.
-   * <p>
-   * The {@link CompletionScorer#automaton} is intersected with the {@link #fst}.
-   * {@link CompletionScorer#weight} is used to compute boosts and/or extract context
-   * for each matched partial paths. A top N search is executed on {@link #fst} seeded with
-   * the matched partial paths. Upon reaching a completed path, {@link CompletionScorer#accept(int, Bits)}
-   * and {@link CompletionScorer#score(float, float)} is used on the document id, index weight
-   * and query boost to filter and score the entry, before being collected via
-   * {@link TopSuggestDocsCollector#collect(int, CharSequence, CharSequence, float)}
+   * Collects at most {@link TopSuggestDocsCollector#getCountToCollect()} completions that match the
+   * provided {@link CompletionScorer}.
+   *
+   * <p>The {@link CompletionScorer#automaton} is intersected with the {@link #fst}. {@link
+   * CompletionScorer#weight} is used to compute boosts and/or extract context for each matched
+   * partial paths. A top N search is executed on {@link #fst} seeded with the matched partial
+   * paths. Upon reaching a completed path, {@link CompletionScorer#accept(int, Bits)} and {@link
+   * CompletionScorer#score(float, float)} is used on the document id, index weight and query boost
+   * to filter and score the entry, before being collected via {@link
+   * TopSuggestDocsCollector#collect(int, CharSequence, CharSequence, float)}
    */
-  public void lookup(final CompletionScorer scorer, Bits acceptDocs, final TopSuggestDocsCollector collector) throws IOException {
-    final double liveDocsRatio = calculateLiveDocRatio(scorer.reader.numDocs(), scorer.reader.maxDoc());
+  public void lookup(
+      final CompletionScorer scorer, Bits acceptDocs, final TopSuggestDocsCollector collector)
+      throws IOException {
+    final double liveDocsRatio =
+        calculateLiveDocRatio(scorer.reader.numDocs(), scorer.reader.maxDoc());
     if (liveDocsRatio == -1) {
       return;
     }
-    final List<FSTUtil.Path<Pair<Long, BytesRef>>> prefixPaths = FSTUtil.intersectPrefixPaths(scorer.automaton, fst);
+    final List<FSTUtil.Path<Pair<Long, BytesRef>>> prefixPaths =
+        FSTUtil.intersectPrefixPaths(scorer.automaton, fst);
     // The topN is increased by a factor of # of intersected path
     // to ensure search admissibility. For example, one suggestion can
     // have multiple contexts, resulting in num_context paths for the
@@ -26,99 +30,113 @@
     // have been collected, regardless of the set topN value. This value is the
     // maximum number of suggestions that can be collected.
     final int topN = collector.getCountToCollect() * prefixPaths.size();
-    final int queueSize = getMaxTopNSearcherQueueSize(topN, scorer.reader.numDocs(), liveDocsRatio, scorer.filtered);
+    final int queueSize =
+        getMaxTopNSearcherQueueSize(topN, scorer.reader.numDocs(), liveDocsRatio, scorer.filtered);
 
     final CharsRefBuilder spare = new CharsRefBuilder();
 
     Comparator<Pair<Long, BytesRef>> comparator = getComparator();
-    Util.TopNSearcher<Pair<Long, BytesRef>> searcher = new Util.TopNSearcher<Pair<Long, BytesRef>>(fst, topN, queueSize, comparator,
-        new ScoringPathComparator(scorer)) {
+    Util.TopNSearcher<Pair<Long, BytesRef>> searcher =
+        new Util.TopNSearcher<Pair<Long, BytesRef>>(
+            fst, topN, queueSize, comparator, new ScoringPathComparator(scorer)) {
 
-      private final ByteArrayDataInput scratchInput = new ByteArrayDataInput();
+          private final ByteArrayDataInput scratchInput = new ByteArrayDataInput();
 
-      @Override
-      protected boolean acceptPartialPath(Util.FSTPath<Pair<Long,BytesRef>> path) {
-        if (collector.doSkipDuplicates()) {
-          // We are removing dups
-          if (path.payload == -1) {
-            // This path didn't yet see the complete surface form; let's see if it just did with the arc output we just added:
-            BytesRef arcOutput = path.arc.output().output2;
-            BytesRef output = path.output.output2;
-            for(int i=0;i<arcOutput.length;i++) {
-              if (arcOutput.bytes[arcOutput.offset + i] == payloadSep) {
-                // OK this arc that the path was just extended by contains the payloadSep, so we now have a full surface form in this path
-                path.payload = output.length - arcOutput.length + i;
-                assert output.bytes[output.offset + path.payload] == payloadSep;
-                break;
+          @Override
+          protected boolean acceptPartialPath(Util.FSTPath<Pair<Long, BytesRef>> path) {
+            if (collector.doSkipDuplicates()) {
+              // We are removing dups
+              if (path.payload == -1) {
+                // This path didn't yet see the complete surface form; let's see if it just did with
+                // the arc output we just added:
+                BytesRef arcOutput = path.arc.output().output2;
+                BytesRef output = path.output.output2;
+                for (int i = 0; i < arcOutput.length; i++) {
+                  if (arcOutput.bytes[arcOutput.offset + i] == payloadSep) {
+                    // OK this arc that the path was just extended by contains the payloadSep, so we
+                    // now have a full surface form in this path
+                    path.payload = output.length - arcOutput.length + i;
+                    assert output.bytes[output.offset + path.payload] == payloadSep;
+                    break;
+                  }
+                }
+              }
+
+              if (path.payload != -1) {
+                BytesRef output = path.output.output2;
+                spare.copyUTF8Bytes(output.bytes, output.offset, path.payload);
+                if (collector.seenSurfaceForms.contains(spare.chars(), 0, spare.length())) {
+                  return false;
+                }
               }
             }
+            return true;
           }
 
-          if (path.payload != -1) {
+          @Override
+          protected boolean acceptResult(Util.FSTPath<Pair<Long, BytesRef>> path) {
             BytesRef output = path.output.output2;
-            spare.copyUTF8Bytes(output.bytes, output.offset, path.payload);
-            if (collector.seenSurfaceForms.contains(spare.chars(), 0, spare.length())) {
+            int payloadSepIndex;
+            if (path.payload != -1) {
+              payloadSepIndex = path.payload;
+              spare.copyUTF8Bytes(output.bytes, output.offset, payloadSepIndex);
+            } else {
+              assert collector.doSkipDuplicates() == false;
+              payloadSepIndex = parseSurfaceForm(output, payloadSep, spare);
+            }
+
+            scratchInput.reset(
+                output.bytes,
+                output.offset + payloadSepIndex + 1,
+                output.length - payloadSepIndex - 1);
+            int docID = scratchInput.readVInt();
+
+            if (!scorer.accept(docID, acceptDocs)) {
               return false;
             }
+            if (collector.doSkipDuplicates()) {
+              // now record that we've seen this surface form:
+              char[] key = new char[spare.length()];
+              System.arraycopy(spare.chars(), 0, key, 0, spare.length());
+              if (collector.seenSurfaceForms.contains(key)) {
+                // we already collected a higher scoring document with this key, in this segment:
+                return false;
+              }
+              collector.seenSurfaceForms.add(key);
+            }
+            try {
+              float score = scorer.score(decode(path.output.output1), path.boost);
+              collector.collect(docID, spare.toCharsRef(), path.context, score);
+              return true;
+            } catch (IOException e) {
+              throw new RuntimeException(e);
+            }
           }
-        }
-        return true;
-      }
-
-      @Override
-      protected boolean acceptResult(Util.FSTPath<Pair<Long, BytesRef>> path) {
-        BytesRef output = path.output.output2;
-        int payloadSepIndex;
-        if (path.payload != -1) {
-          payloadSepIndex = path.payload;
-          spare.copyUTF8Bytes(output.bytes, output.offset, payloadSepIndex);
-        } else {
-          assert collector.doSkipDuplicates() == false;
-          payloadSepIndex = parseSurfaceForm(output, payloadSep, spare);
-        }
-
-        scratchInput.reset(output.bytes, output.offset + payloadSepIndex + 1, output.length - payloadSepIndex - 1);
-        int docID = scratchInput.readVInt();
-        
-        if (!scorer.accept(docID, acceptDocs)) {
-          return false;
-        }
-        if (collector.doSkipDuplicates()) {
-          // now record that we've seen this surface form:
-          char[] key = new char[spare.length()];
-          System.arraycopy(spare.chars(), 0, key, 0, spare.length());
-          if (collector.seenSurfaceForms.contains(key)) {
-            // we already collected a higher scoring document with this key, in this segment:
-            return false;
-          }
-          collector.seenSurfaceForms.add(key);
-        }
-        try {
-          float score = scorer.score(decode(path.output.output1), path.boost);
-          collector.collect(docID, spare.toCharsRef(), path.context, score);
-          return true;
-        } catch (IOException e) {
-          throw new RuntimeException(e);
-        }
-      }
-    };
+        };
 
     for (FSTUtil.Path<Pair<Long, BytesRef>> path : prefixPaths) {
       scorer.weight.setNextMatch(path.input.get());
       BytesRef output = path.output.output2;
       int payload = -1;
       if (collector.doSkipDuplicates()) {
-        for(int j=0;j<output.length;j++) {
-          if (output.bytes[output.offset+j] == payloadSep) {
-            // Important to cache this, else we have a possibly O(N^2) cost where N is the length of suggestions
+        for (int j = 0; j < output.length; j++) {
+          if (output.bytes[output.offset + j] == payloadSep) {
+            // Important to cache this, else we have a possibly O(N^2) cost where N is the length of
+            // suggestions
             payload = j;
             break;
           }
         }
       }
-      
-      searcher.addStartPaths(path.fstNode, path.output, false, path.input, scorer.weight.boost(),
-                             scorer.weight.context(), payload);
+
+      searcher.addStartPaths(
+          path.fstNode,
+          path.output,
+          false,
+          path.input,
+          scorer.weight.boost(),
+          scorer.weight.context(),
+          payload);
     }
     // hits are also returned by search()
     // we do not use it, instead collect at acceptResult

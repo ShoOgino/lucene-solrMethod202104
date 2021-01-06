@@ -9,17 +9,24 @@
       final List<LeafReaderContext> leaves = searcher.getIndexReader().leaves();
       final int seg = ReaderUtil.subIndex(rootDocId, leaves);
       final LeafReaderContext leafReaderContext = leaves.get(seg);
+      final Bits liveDocs = leafReaderContext.reader().getLiveDocs();
       final int segBaseId = leafReaderContext.docBase;
       final int segRootId = rootDocId - segBaseId;
-      final BitSet segParentsBitSet = parentsFilter.getBitSet(leafReaderContext);
-      final Bits liveDocs = leafReaderContext.reader().getLiveDocs();
 
-      if (segParentsBitSet == null) {
-        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
-            "Parent filter '" + parentsFilter + "' doesn't match any parent documents");
+      // can return be -1 and that's okay  (happens for very first block)
+      final int segPrevRootId;
+      if (parentsFilter != null) {
+        segPrevRootId = getPrevRootGivenFilter(leafReaderContext, segRootId);
+      } else {
+        final IndexSchema schema = searcher.getSchema();
+        final String idStr = schema.printableUniqueKey(rootDoc);
+        if (idStr == null) {
+          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST,
+              "[child] requires fl to include the ID");
+        }
+        final BytesRef idBytes = schema.indexableUniqueKey(idStr);
+        segPrevRootId = getPrevRootGivenId(leafReaderContext, rootDocId, idBytes);
       }
-
-      final int segPrevRootId = segRootId==0? -1: segParentsBitSet.prevSetBit(segRootId - 1); // can return -1 and that's okay
 
       if (segPrevRootId == (segRootId - 1)) {
         // doc has no children, return fast

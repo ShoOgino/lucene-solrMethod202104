@@ -1,0 +1,61 @@
+  private static Grid createSubBoxes(
+      double shapeMinLat,
+      double shapeMaxLat,
+      double shapeMinLon,
+      double shapeMaxLon,
+      Function<Rectangle, Relation> boxToRelation) {
+    final int minLat = encodeLatitudeCeil(shapeMinLat);
+    final int maxLat = encodeLatitude(shapeMaxLat);
+    final int minLon = encodeLongitudeCeil(shapeMinLon);
+    final int maxLon = encodeLongitude(shapeMaxLon);
+
+    if (maxLat < minLat || (shapeMaxLon >= shapeMinLon && maxLon < minLon)) {
+      // the box cannot match any quantized point
+      return new Grid(1, 1, 0, 0, 0, 0, new byte[0]);
+    }
+
+    final int latShift, lonShift;
+    final int latBase, lonBase;
+    final int maxLatDelta, maxLonDelta;
+    {
+      long minLat2 = (long) minLat - Integer.MIN_VALUE;
+      long maxLat2 = (long) maxLat - Integer.MIN_VALUE;
+      latShift = computeShift(minLat2, maxLat2);
+      latBase = (int) (minLat2 >>> latShift);
+      maxLatDelta = (int) (maxLat2 >>> latShift) - latBase + 1;
+      assert maxLatDelta > 0;
+    }
+    {
+      long minLon2 = (long) minLon - Integer.MIN_VALUE;
+      long maxLon2 = (long) maxLon - Integer.MIN_VALUE;
+      if (shapeMaxLon < shapeMinLon) { // crosses dateline
+        maxLon2 += 1L << 32; // wrap
+      }
+      lonShift = computeShift(minLon2, maxLon2);
+      lonBase = (int) (minLon2 >>> lonShift);
+      maxLonDelta = (int) (maxLon2 >>> lonShift) - lonBase + 1;
+      assert maxLonDelta > 0;
+    }
+
+    final byte[] relations = new byte[maxLatDelta * maxLonDelta];
+    for (int i = 0; i < maxLatDelta; ++i) {
+      for (int j = 0; j < maxLonDelta; ++j) {
+        final int boxMinLat = ((latBase + i) << latShift) + Integer.MIN_VALUE;
+        final int boxMinLon = ((lonBase + j) << lonShift) + Integer.MIN_VALUE;
+        final int boxMaxLat = boxMinLat + (1 << latShift) - 1;
+        final int boxMaxLon = boxMinLon + (1 << lonShift) - 1;
+
+        relations[i * maxLonDelta + j] =
+            (byte)
+                boxToRelation
+                    .apply(
+                        new Rectangle(
+                            decodeLatitude(boxMinLat), decodeLatitude(boxMaxLat),
+                            decodeLongitude(boxMinLon), decodeLongitude(boxMaxLon)))
+                    .ordinal();
+      }
+    }
+
+    return new Grid(latShift, lonShift, latBase, lonBase, maxLatDelta, maxLonDelta, relations);
+  }
+

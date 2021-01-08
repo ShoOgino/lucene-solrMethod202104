@@ -1,0 +1,34 @@
+    /** Scorer used for INTERSECTS and single value points */
+    private Scorer getSparseScorer(
+        final LeafReader reader, final Weight weight, final float boost, final ScoreMode scoreMode)
+        throws IOException {
+      if (queryRelation == QueryRelation.DISJOINT
+          && values.getDocCount() == reader.maxDoc()
+          && values.getDocCount() == values.size()
+          && cost() > reader.maxDoc() / 2) {
+        // If all docs have exactly one value and the cost is greater
+        // than half the leaf size then maybe we can make things faster
+        // by computing the set of documents that do NOT match the query
+        final FixedBitSet result = new FixedBitSet(reader.maxDoc());
+        result.set(0, reader.maxDoc());
+        final long[] cost = new long[] {reader.maxDoc()};
+        values.intersect(getInverseDenseVisitor(spatialVisitor, queryRelation, result, cost));
+        final DocIdSetIterator iterator = new BitSetIterator(result, cost[0]);
+        return new ConstantScoreScorer(weight, boost, scoreMode, iterator);
+      } else if (values.getDocCount() < (values.size() >>> 2)) {
+        // we use a dense structure so we can skip already visited documents
+        final FixedBitSet result = new FixedBitSet(reader.maxDoc());
+        final long[] cost = new long[] {0};
+        values.intersect(getIntersectsDenseVisitor(spatialVisitor, queryRelation, result, cost));
+        assert cost[0] > 0 || result.cardinality() == 0;
+        final DocIdSetIterator iterator =
+            cost[0] == 0 ? DocIdSetIterator.empty() : new BitSetIterator(result, cost[0]);
+        return new ConstantScoreScorer(weight, boost, scoreMode, iterator);
+      } else {
+        final DocIdSetBuilder docIdSetBuilder = new DocIdSetBuilder(reader.maxDoc(), values, field);
+        values.intersect(getSparseVisitor(spatialVisitor, queryRelation, docIdSetBuilder));
+        final DocIdSetIterator iterator = docIdSetBuilder.build().iterator();
+        return new ConstantScoreScorer(weight, boost, scoreMode, iterator);
+      }
+    }
+

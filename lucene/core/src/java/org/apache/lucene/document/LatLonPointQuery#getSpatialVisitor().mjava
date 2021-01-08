@@ -1,0 +1,76 @@
+  @Override
+  protected SpatialVisitor getSpatialVisitor() {
+    final GeoEncodingUtils.Component2DPredicate component2DPredicate =
+        GeoEncodingUtils.createComponentPredicate(component2D);
+    // bounding box over all geometries, this can speed up tree intersection/cheaply improve
+    // approximation for complex multi-geometries
+    final byte[] minLat = new byte[Integer.BYTES];
+    final byte[] maxLat = new byte[Integer.BYTES];
+    final byte[] minLon = new byte[Integer.BYTES];
+    final byte[] maxLon = new byte[Integer.BYTES];
+    NumericUtils.intToSortableBytes(encodeLatitude(component2D.getMinY()), minLat, 0);
+    NumericUtils.intToSortableBytes(encodeLatitude(component2D.getMaxY()), maxLat, 0);
+    NumericUtils.intToSortableBytes(encodeLongitude(component2D.getMinX()), minLon, 0);
+    NumericUtils.intToSortableBytes(encodeLongitude(component2D.getMaxX()), maxLon, 0);
+
+    return new SpatialVisitor() {
+      @Override
+      protected Relation relate(byte[] minPackedValue, byte[] maxPackedValue) {
+        if (Arrays.compareUnsigned(minPackedValue, 0, Integer.BYTES, maxLat, 0, Integer.BYTES) > 0
+            || Arrays.compareUnsigned(maxPackedValue, 0, Integer.BYTES, minLat, 0, Integer.BYTES)
+                < 0
+            || Arrays.compareUnsigned(
+                    minPackedValue,
+                    Integer.BYTES,
+                    Integer.BYTES + Integer.BYTES,
+                    maxLon,
+                    0,
+                    Integer.BYTES)
+                > 0
+            || Arrays.compareUnsigned(
+                    maxPackedValue,
+                    Integer.BYTES,
+                    Integer.BYTES + Integer.BYTES,
+                    minLon,
+                    0,
+                    Integer.BYTES)
+                < 0) {
+          // outside of global bounding box range
+          return Relation.CELL_OUTSIDE_QUERY;
+        }
+
+        double cellMinLat = decodeLatitude(minPackedValue, 0);
+        double cellMinLon = decodeLongitude(minPackedValue, Integer.BYTES);
+        double cellMaxLat = decodeLatitude(maxPackedValue, 0);
+        double cellMaxLon = decodeLongitude(maxPackedValue, Integer.BYTES);
+
+        return component2D.relate(cellMinLon, cellMaxLon, cellMinLat, cellMaxLat);
+      }
+
+      @Override
+      protected Predicate<byte[]> intersects() {
+        return packedValue ->
+            component2DPredicate.test(
+                NumericUtils.sortableBytesToInt(packedValue, 0),
+                NumericUtils.sortableBytesToInt(packedValue, Integer.BYTES));
+      }
+
+      @Override
+      protected Predicate<byte[]> within() {
+        return packedValue ->
+            component2DPredicate.test(
+                NumericUtils.sortableBytesToInt(packedValue, 0),
+                NumericUtils.sortableBytesToInt(packedValue, Integer.BYTES));
+      }
+
+      @Override
+      protected Function<byte[], Component2D.WithinRelation> contains() {
+        return packedValue ->
+            component2D.withinPoint(
+                GeoEncodingUtils.decodeLongitude(
+                    NumericUtils.sortableBytesToInt(packedValue, Integer.BYTES)),
+                GeoEncodingUtils.decodeLatitude(NumericUtils.sortableBytesToInt(packedValue, 0)));
+      }
+    };
+  }
+

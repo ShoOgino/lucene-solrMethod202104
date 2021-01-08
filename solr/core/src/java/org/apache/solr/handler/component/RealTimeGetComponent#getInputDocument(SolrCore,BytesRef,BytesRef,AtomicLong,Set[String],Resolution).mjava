@@ -1,0 +1,65 @@
+  /**
+   * Obtains the latest document for a given id from the tlog or through the realtime searcher (if not found in the tlog).
+   * Fields that are targets of copy-fields are excluded.
+   *
+   * @param idBytes ID of the document to be fetched.
+   * @param rootIdBytes the root ID of the document being looked up.
+   *                    If there are no child docs, this is always the same as idBytes.
+   * @param versionReturned If a non-null AtomicLong is passed in, it is set to the version of the update returned from the TLog.
+   * @param onlyTheseFields If not-null, this limits the fields that are returned.  However it is only an optimization
+   *                        hint since other fields may be returned.  Copy field targets are never returned.
+   * @param resolveStrategy {@link Resolution#DOC} or {@link Resolution#ROOT_WITH_CHILDREN}.
+   * @see Resolution
+   */
+  public static SolrInputDocument getInputDocument(SolrCore core, BytesRef idBytes, BytesRef rootIdBytes, AtomicLong versionReturned,
+                                                   Set<String> onlyTheseFields, Resolution resolveStrategy) throws IOException {
+    assert resolveStrategy != Resolution.PARTIAL;
+    assert resolveStrategy == Resolution.DOC || idBytes.equals(rootIdBytes); // not needed (yet)
+
+    SolrInputDocument sid =
+        getInputDocumentFromTlog(
+            core, idBytes, rootIdBytes, versionReturned, onlyTheseFields, resolveStrategy);
+    if (sid == DELETED) {
+      return null;
+    }
+
+    if (sid == null) {
+      // didn't find it in the update log, so it should be in the newest searcher opened
+      RefCounted<SolrIndexSearcher> searcherHolder = core.getRealtimeSearcher();
+      try {
+        SolrIndexSearcher searcher = searcherHolder.get();
+
+        int docId =
+            searcher.getFirstMatch(
+                new Term(
+                    core.getLatestSchema().getUniqueKeyField().getName(),
+                    resolveStrategy == Resolution.ROOT_WITH_CHILDREN ? rootIdBytes : idBytes));
+        if (docId < 0) return null;
+
+        if (resolveStrategy == Resolution.ROOT_WITH_CHILDREN
+            && core.getLatestSchema().isUsableForChildDocs()) {
+          // check that this doc is in fact a root document as a prevention measure
+          if (!hasRootTerm(searcher, rootIdBytes)) {
+            throw new SolrException(
+                ErrorCode.BAD_REQUEST,
+                "Attempted an atomic/partial update to a child doc without indicating the _root_ somehow.");
+          }
+        }
+
+        SolrDocument solrDoc =
+            fetchSolrDoc(searcher, docId, makeReturnFields(core, onlyTheseFields, resolveStrategy));
+        sid = toSolrInputDocument(solrDoc, core.getLatestSchema()); // filters copy-field targets
+        // the assertions above furthermore guarantee the result corresponds to idBytes
+      } finally {
+        searcherHolder.decref();
+      }
+    }
+
+    if (versionReturned != null) {
+      if (sid.containsKey(VERSION_FIELD)) {
+        versionReturned.set((long)sid.getFieldValue(VERSION_FIELD));
+      }
+    }
+    return sid;
+  }
+

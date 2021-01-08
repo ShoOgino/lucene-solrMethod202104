@@ -126,11 +126,17 @@
 
    try {
 
-
+     boolean opennedRealtimeSearcher = false;
      BytesRefBuilder idBytes = new BytesRefBuilder();
      for (String idStr : reqIds.allIds) {
        fieldType.readableToIndexed(idStr, idBytes);
-       if (ulog != null) {
+       // if _route_ is passed, id is a child doc.  TODO remove in SOLR-15064
+       if (!opennedRealtimeSearcher && !params.get(ShardParams._ROUTE_, idStr).equals(idStr)) {
+         searcherInfo.clear();
+         resultContext = null;
+         ulog.openRealtimeSearcher();  // force open a new realtime searcher
+         opennedRealtimeSearcher = true;
+       } else if (ulog != null) {
          Object o = ulog.lookup(idBytes.get());
          if (o != null) {
            // should currently be a List<Oper,Ver,Doc/Id>
@@ -144,9 +150,12 @@
 
                if (mustUseRealtimeSearcher) {
                  // close handles to current searchers & result context
-                 searcherInfo.clear();
-                 resultContext = null;
-                 ulog.openRealtimeSearcher();  // force open a new realtime searcher
+                 if (!opennedRealtimeSearcher) {
+                   searcherInfo.clear();
+                   resultContext = null;
+                   ulog.openRealtimeSearcher();  // force open a new realtime searcher
+                   opennedRealtimeSearcher = true;
+                 }
                  o = null;  // pretend we never found this record and fall through to use the searcher
                  break;
                }
@@ -154,20 +163,24 @@
                SolrDocument doc;
                if (oper == UpdateLog.ADD) {
                  doc = toSolrDoc((SolrInputDocument)entry.get(entry.size()-1), core.getLatestSchema());
+                 // toSolrDoc filtered copy-field targets already
+                 if (transformer!=null) {
+                   transformer.transform(doc, -1); // unknown docID
+                 }
                } else if (oper == UpdateLog.UPDATE_INPLACE) {
                  assert entry.size() == 5;
                  // For in-place update case, we have obtained the partial document till now. We need to
                  // resolve it to a full document to be returned to the user.
-                 doc = resolveFullDocument(core, idBytes.get(), rsp.getReturnFields(), (SolrInputDocument)entry.get(entry.size()-1), entry, null);
+                 // resolveFullDocument applies the transformer, if present.
+                 doc = resolveFullDocument(core, idBytes.get(), rsp.getReturnFields(), (SolrInputDocument)entry.get(entry.size()-1), entry);
                  if (doc == null) {
                    break; // document has been deleted as the resolve was going on
                  }
+                 doc.visitSelfAndNestedDocs((label, d) -> removeCopyFieldTargets(d, req.getSchema()));
                } else {
                  throw new SolrException(ErrorCode.INVALID_STATE, "Expected ADD or UPDATE_INPLACE. Got: " + oper);
                }
-               if (transformer!=null) {
-                 transformer.transform(doc, -1); // unknown docID
-               }
+
               docList.add(doc);
               break;
              case UpdateLog.DELETE:
@@ -213,12 +226,12 @@
          if (null == resultContext) {
            // either first pass, or we've re-opened searcher - either way now we setContext
            resultContext = new RTGResultContext(rsp.getReturnFields(), searcherInfo.getSearcher(), req);
-           transformer.setContext(resultContext);
+           transformer.setContext(resultContext); // we avoid calling setContext unless searcher is new/changed
          }
          transformer.transform(doc, docid);
        }
        docList.add(doc);
-     }
+     } // loop on ids
 
    } finally {
      searcherInfo.clear();

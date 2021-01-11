@@ -1,0 +1,52 @@
+  /**
+   * Either an array of metrics that can be parallelized and rolled up or empty.
+   *
+   * @param metrics The list of metrics that we want to parallelize.
+   * @return Either an array of metrics that can be parallelized and rolled up or empty.
+   */
+  default Optional<Metric[]> getRollupMetrics(Metric[] metrics) {
+    Metric[] rollup = new Metric[metrics.length];
+    CountMetric count = null;
+    for (int m = 0; m < rollup.length; m++) {
+      Metric nextRollup;
+      Metric next = metrics[m];
+      if (next instanceof SumMetric) {
+        // sum of sums
+        nextRollup = new SumMetric(next.getIdentifier());
+      } else if (next instanceof MinMetric) {
+        // min of mins
+        nextRollup = new MinMetric(next.getIdentifier());
+      } else if (next instanceof MaxMetric) {
+        // max of max
+        nextRollup = new MaxMetric(next.getIdentifier());
+      } else if (next instanceof CountMetric) {
+        // sum of counts
+        nextRollup = new SumMetric(next.getIdentifier());
+        count = (CountMetric) next;
+      } else if (next instanceof MeanMetric) {
+        // WeightedSumMetric must have a count to compute the weighted avg. rollup from ...
+        // if the user is not requesting count, then we can't parallelize
+        if (count == null) {
+          // just look past the current position
+          for (int n = m + 1; n < metrics.length; n++) {
+            if (metrics[n] instanceof CountMetric) {
+              count = (CountMetric) metrics[n];
+              break;
+            }
+          }
+        }
+        if (count != null) {
+          nextRollup = new WeightedSumMetric(next.getIdentifier(), count.getIdentifier());
+        } else {
+          return Optional.empty(); // can't properly rollup mean metrics w/o a count (reqd by WeightedSumMetric)
+        }
+      } else {
+        return Optional.empty(); // can't parallelize this expr!
+      }
+
+      rollup[m] = nextRollup;
+    }
+
+    return Optional.of(rollup);
+  }
+

@@ -21,9 +21,9 @@
     try (ByteSequencesWriter writer = new ByteSequencesWriter(unsorted)) {
       for (InputStream dictionary : dictionaries) {
         BufferedReader lines = new BufferedReader(new InputStreamReader(dictionary, decoder));
-        String line =
-            lines.readLine(); // first line is number of entries (approximately, sometimes)
+        lines.readLine(); // first line is number of entries (approximately, sometimes)
 
+        String line;
         while ((line = lines.readLine()) != null) {
           // wild and unpredictable code comment rules
           if (line.isEmpty()
@@ -34,7 +34,7 @@
           }
           line = unescapeEntry(line);
           // if we havent seen any stem exceptions, try to parse one
-          if (hasStemExceptions == false) {
+          if (!hasStemExceptions) {
             int morphStart = line.indexOf(MORPH_SEPARATOR);
             if (morphStart >= 0 && morphStart < line.length()) {
               hasStemExceptions = parseStemException(line.substring(morphStart + 1)) != null;
@@ -70,35 +70,28 @@
         new OfflineSorter(
             tempDir,
             tempFileNamePrefix,
-            new Comparator<BytesRef>() {
-              BytesRef scratch1 = new BytesRef();
-              BytesRef scratch2 = new BytesRef();
+            new Comparator<>() {
+              final BytesRef scratch1 = new BytesRef();
+              final BytesRef scratch2 = new BytesRef();
+
+              private void initScratch(BytesRef o, BytesRef scratch) {
+                scratch.bytes = o.bytes;
+                scratch.offset = o.offset;
+                scratch.length = o.length;
+
+                for (int i = scratch.length - 1; i >= 0; i--) {
+                  if (scratch.bytes[scratch.offset + i] == FLAG_SEPARATOR
+                      || scratch.bytes[scratch.offset + i] == MORPH_SEPARATOR) {
+                    scratch.length = i;
+                    break;
+                  }
+                }
+              }
 
               @Override
               public int compare(BytesRef o1, BytesRef o2) {
-                scratch1.bytes = o1.bytes;
-                scratch1.offset = o1.offset;
-                scratch1.length = o1.length;
-
-                for (int i = scratch1.length - 1; i >= 0; i--) {
-                  if (scratch1.bytes[scratch1.offset + i] == FLAG_SEPARATOR
-                      || scratch1.bytes[scratch1.offset + i] == MORPH_SEPARATOR) {
-                    scratch1.length = i;
-                    break;
-                  }
-                }
-
-                scratch2.bytes = o2.bytes;
-                scratch2.offset = o2.offset;
-                scratch2.length = o2.length;
-
-                for (int i = scratch2.length - 1; i >= 0; i--) {
-                  if (scratch2.bytes[scratch2.offset + i] == FLAG_SEPARATOR
-                      || scratch2.bytes[scratch2.offset + i] == MORPH_SEPARATOR) {
-                    scratch2.length = i;
-                    break;
-                  }
-                }
+                initScratch(o1, scratch1);
+                initScratch(o2, scratch2);
 
                 int cmp = scratch1.compareTo(scratch2);
                 if (cmp == 0) {
@@ -142,7 +135,7 @@
 
         String line = scratch.utf8ToString();
         String entry;
-        char wordForm[];
+        char[] wordForm;
         int end;
 
         int flagSep = line.indexOf(FLAG_SEPARATOR);
@@ -189,7 +182,7 @@
             words.add(scratchInts.get(), currentOrds.get());
           }
           // swap current
-          if (cmp > 0 || currentEntry == null) {
+          if (cmp > 0) {
             currentEntry = entry;
             currentOrds = new IntsRefBuilder(); // must be this way
           }
@@ -203,6 +196,7 @@
       }
 
       // finalize last entry
+      assert currentEntry != null;
       Util.toUTF32(currentEntry, scratchInts);
       words.add(scratchInts.get(), currentOrds.get());
       success2 = true;

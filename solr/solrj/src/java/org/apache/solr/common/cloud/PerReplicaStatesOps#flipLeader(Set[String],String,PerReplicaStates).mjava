@@ -1,0 +1,43 @@
+    /**
+     * Flip the leader replica to a new one
+     *
+     * @param allReplicas allReplicas of the shard
+     * @param next        next leader
+     */
+    public static PerReplicaStatesOps flipLeader(Set<String> allReplicas, String next, PerReplicaStates rs) {
+        return new PerReplicaStatesOps(prs -> {
+            List<PerReplicaStates.Operation> ops = new ArrayList<>();
+            if (next != null) {
+                PerReplicaStates.State st = rs.get(next);
+                if (st != null) {
+                    if (!st.isLeader) {
+                        ops.add(new PerReplicaStates.Operation(PerReplicaStates.Operation.Type.ADD, new PerReplicaStates.State(st.replica, Replica.State.ACTIVE, Boolean.TRUE, st.version + 1)));
+                        ops.add(new PerReplicaStates.Operation(PerReplicaStates.Operation.Type.DELETE, st));
+                    }
+                    //else do not do anything , that node is the leader
+                } else {
+                    //there is no entry for the new leader.
+                    //create one
+                    ops.add(new PerReplicaStates.Operation(PerReplicaStates.Operation.Type.ADD, new PerReplicaStates.State(next, Replica.State.ACTIVE, Boolean.TRUE, 0)));
+                }
+            }
+
+            //now go through all other replicas and unset previous leader
+            for (String r : allReplicas) {
+                PerReplicaStates.State st = rs.get(r);
+                if (st == null) continue;//unlikely
+                if (!Objects.equals(r, next)) {
+                    if (st.isLeader) {
+                        //some other replica is the leader now. unset
+                        ops.add(new PerReplicaStates.Operation(PerReplicaStates.Operation.Type.ADD, new PerReplicaStates.State(st.replica, st.state, Boolean.FALSE, st.version + 1)));
+                        ops.add(new PerReplicaStates.Operation(PerReplicaStates.Operation.Type.DELETE, st));
+                    }
+                }
+            }
+            if (log.isDebugEnabled()) {
+                log.debug("flipLeader on:{}, {} -> {}, ops: {}", rs.path, allReplicas, next, ops);
+            }
+            return ops;
+        }).init(rs);
+    }
+

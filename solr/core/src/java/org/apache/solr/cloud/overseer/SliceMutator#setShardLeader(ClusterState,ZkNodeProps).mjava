@@ -13,6 +13,7 @@
     Slice slice = slices.get(sliceName);
 
     Replica oldLeader = slice.getLeader();
+    Replica newLeader = null;
     final Map<String, Replica> newReplicas = new LinkedHashMap<>();
     for (Replica replica : slice.getReplicas()) {
       // TODO: this should only be calculated once and cached somewhere?
@@ -21,7 +22,7 @@
       if (replica == oldLeader && !coreURL.equals(leaderUrl)) {
         replica = new ReplicaMutator(cloudManager).unsetLeader(replica);
       } else if (coreURL.equals(leaderUrl)) {
-        replica = new ReplicaMutator(cloudManager).setLeader(replica);
+        newLeader = replica = new ReplicaMutator(cloudManager).setLeader(replica);
       }
 
       newReplicas.put(replica.getName(), replica);
@@ -30,6 +31,15 @@
     Map<String, Object> newSliceProps = slice.shallowCopy();
     newSliceProps.put(Slice.REPLICAS, newReplicas);
     slice = new Slice(slice.getName(), newReplicas, slice.getProperties(), collectionName);
-    return new ZkWriteCommand(collectionName, CollectionMutator.updateSlice(collectionName, coll, slice));
+    if (coll.isPerReplicaState()) {
+      PerReplicaStates prs = PerReplicaStates.fetch(coll.getZNode(), zkClient, coll.getPerReplicaStates());
+      return new ZkWriteCommand(collectionName, CollectionMutator.updateSlice(collectionName, coll, slice),
+          PerReplicaStatesOps.flipLeader(
+              slice.getReplicaNames(),
+              newLeader == null ? null : newLeader.getName(),
+              prs), false);
+    } else {
+      return new ZkWriteCommand(collectionName, CollectionMutator.updateSlice(collectionName, coll, slice));
+    }
   }
 

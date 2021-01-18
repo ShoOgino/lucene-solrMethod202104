@@ -27,15 +27,47 @@
     if (cmds.isEmpty()) return prevState;
     if (isNoOps(cmds)) return prevState;
 
+    boolean forceFlush = false;
+    if (cmds.size() == 1) {
+      //most messages result in only one command. let's deal with it right away
+      ZkWriteCommand cmd = cmds.get(0);
+      if (cmd.collection != null && cmd.collection.isPerReplicaState()) {
+        //we do not wish to batch any updates for collections with per-replica state because
+        // these changes go to individual ZK nodes and there is zero advantage to batching
+        //now check if there are any updates for the same collection already present
+        if (updates.containsKey(cmd.name)) {
+          //this should not happen
+          // but let's get those updates out anyway
+          writeUpdate(updates.remove(cmd.name));
+        }
+        //now let's write the current message
+        try {
+          return writeUpdate(cmd);
+        } finally {
+          if (callback !=null) callback.onWrite();
+        }
+      }
+    } else {
+      //there are more than one commands created as a result of this message
+      for (ZkWriteCommand cmd : cmds) {
+        if (cmd.collection != null && cmd.collection.isPerReplicaState()) {
+          // we don't try to optimize for this case. let's flush out all after this
+          forceFlush = true;
+          break;
+        }
+      }
+    }
+
+
     for (ZkWriteCommand cmd : cmds) {
       if (cmd == NO_OP) continue;
       prevState = prevState.copyWith(cmd.name, cmd.collection);
-      updates.put(cmd.name, cmd.collection);
+      updates.put(cmd.name, cmd);
       numUpdates++;
     }
     clusterState = prevState;
 
-    if (maybeFlushAfter()) {
+    if (forceFlush || maybeFlushAfter()) {
       ClusterState state = writePendingUpdates();
       if (callback != null) {
         callback.onWrite();

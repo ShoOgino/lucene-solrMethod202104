@@ -12,10 +12,23 @@
       DocValuesProducer docValuesProducer = null;
       FunctionQuery funcQuery = null;
 
+      // block collapsing logic is much simpler and uses less memory, but is only viable in specific situations
+      final boolean blockCollapse = (("_root_".equals(collapseField) || HINT_BLOCK.equals(hint))
+                                     // because we currently handle all min/max cases using
+                                     // AbstractBlockSortSpecCollector, we can't handle functions wrapping cscore()
+                                     // (for the same reason cscore() isn't supported in 'sort' local param)
+                                     && ( ! CollapseScore.wantsCScore(groupHeadSelector.selectorText) )
+                                     //
+                                     && NullPolicy.COLLAPSE.getCode() != nullPolicy);
+      if (HINT_BLOCK.equals(hint) && ! blockCollapse) {
+        log.debug("Query specifies hint={} but other local params prevent the use block based collapse", HINT_BLOCK);
+      }
+      
       FieldType collapseFieldType = searcher.getSchema().getField(collapseField).getType();
 
       if(collapseFieldType instanceof StrField) {
-        if(HINT_TOP_FC.equals(hint)) {
+        // if we are using blockCollapse, then there is no need to bother with TOP_FC
+        if(HINT_TOP_FC.equals(hint) && ! blockCollapse) {
           @SuppressWarnings("resource")
           final LeafReader uninvertingReader = getTopFieldCacheReader(searcher, collapseField);
 
@@ -62,11 +75,16 @@
       if (GroupHeadSelectorType.SCORE.equals(groupHeadSelector.type)) {
 
         if (collapseFieldType instanceof StrField) {
-
+          if (blockCollapse) {
+            return new BlockOrdScoreCollector(collapseField, nullPolicy, boostDocs);
+          }
           return new OrdScoreCollector(maxDoc, leafCount, docValuesProducer, nullPolicy, boostDocs, searcher);
 
         } else if (isNumericCollapsible(collapseFieldType)) {
-          
+          if (blockCollapse) {
+            return new BlockIntScoreCollector(collapseField, nullPolicy, boostDocs);
+          }
+
           return new IntScoreCollector(maxDoc, leafCount, nullPolicy, size, collapseField, boostDocs, searcher);
 
         } else {
@@ -77,6 +95,14 @@
       } else { // min, max, sort, etc.. something other then just "score"
 
         if (collapseFieldType instanceof StrField) {
+          if (blockCollapse) {
+            // NOTE: for now we don't worry about wether this is a sortSpec of min/max groupHeadSelector,
+            // we use a "sort spec' based block collector unless/until there is some (performance?) reason to specialize
+            return new BlockOrdSortSpecCollector(collapseField, nullPolicy, boostDocs,
+                                                 BlockOrdSortSpecCollector.getSort(groupHeadSelector,
+                                                                                   sortSpec, funcQuery, searcher),
+                                                 needsScores || needsScores4Collapsing);
+          }
 
           return new OrdFieldValueCollector(maxDoc,
                                             leafCount,
@@ -92,6 +118,15 @@
                                             searcher);
 
         } else if (isNumericCollapsible(collapseFieldType)) {
+
+          if (blockCollapse) {
+            // NOTE: for now we don't worry about wether this is a sortSpec of min/max groupHeadSelector,
+            // we use a "sort spec' based block collector unless/until there is some (performance?) reason to specialize
+            return new BlockIntSortSpecCollector(collapseField, nullPolicy, boostDocs,
+                                                 BlockOrdSortSpecCollector.getSort(groupHeadSelector,
+                                                                                   sortSpec, funcQuery, searcher),
+                                                 needsScores || needsScores4Collapsing);
+          }
 
           return new IntFieldValueCollector(maxDoc,
                                             size,

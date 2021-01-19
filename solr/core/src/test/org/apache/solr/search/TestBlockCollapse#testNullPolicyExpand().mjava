@@ -1,0 +1,312 @@
+  public void testNullPolicyExpand() throws Exception {
+    
+    { // convert our docs + some docs w/o collapse fields, along with some commits, to update commands
+      // in a shuffled order and process all of them...
+      final List<String> updates = Stream.concat(Stream.of(commit(), commit()),
+                                                 Stream.concat(makeBlockDocs().stream(),
+                                                               sdocs(dupFields(sdoc("id","z1",   "num_i", 1)),
+                                                                     dupFields(sdoc("id","z2",   "num_i", 2)),
+                                                                     dupFields(sdoc("id","z3",   "num_i", 3)),
+                                                                     dupFields(sdoc("id","z100", "num_i", 100))).stream()
+                                                               ).map(doc -> adoc(doc))).collect(Collectors.toList());
+      Collections.shuffle(updates, random());
+      for (String u : updates) {
+        assertU(u);
+      }
+      assertU(commit());
+    }
+    
+    // NOTE: we don't try to collapse on '_root_' in this test, because then we'll get different results
+    // compared to our other collapse fields (because every doc has a _root_ field)
+    for (String opt : Arrays.asList(// no block collapse logic used (sanity checks)
+                                    "field=block_s1",            
+                                    "field=block_i",             
+                                    // block collapse used explicitly (ord)
+                                    "field=block_s1 hint=block",
+                                    // block collapse used explicitly (int)
+                                    "field=block_i  hint=block"  
+                                    )) {
+      
+      { // score based group head selection (default)
+        assertQ(req("q", "*:* txt_t:XX",
+                    "fq", "{!collapse " + opt + " nullPolicy=expand}",
+                    "sort", "score desc, num_i asc")
+                , "*[count(//doc)=7]"
+                , "//result/doc[1]/str[@name='id'][.='p2s4']"
+                , "//result/doc[2]/str[@name='id'][.='p3s1']"
+                , "//result/doc[3]/str[@name='id'][.='p1s3']"
+                , "//result/doc[4]/str[@name='id'][.='z1']"
+                , "//result/doc[5]/str[@name='id'][.='z2']"
+                , "//result/doc[6]/str[@name='id'][.='z3']"
+                , "//result/doc[7]/str[@name='id'][.='z100']"
+                );
+        // same query, but boosting docs to change group heads (and result order)
+        assertQ(req("q", "*:* txt_t:XX",
+                    "qt", "/elevate",
+                    "elevateIds", "z2,p3s3",
+                    "fq", "{!collapse " + opt + " nullPolicy=expand}",
+                    "sort", "score desc, num_i asc")
+                , "*[count(//doc)=7]"
+                , "//result/doc[1]/str[@name='id'][.='z2']"
+                , "//result/doc[2]/str[@name='id'][.='p3s3']"
+                , "//result/doc[3]/str[@name='id'][.='p2s4']"
+                , "//result/doc[4]/str[@name='id'][.='p1s3']"
+                , "//result/doc[5]/str[@name='id'][.='z1']"
+                , "//result/doc[6]/str[@name='id'][.='z3']"
+                , "//result/doc[7]/str[@name='id'][.='z100']"
+                );
+
+        // use func query to assert expected scores
+        assertQ(req("q", "{!func}sum(42, num_i)",
+                    "fq", "{!collapse " + opt + " nullPolicy=expand}",
+                    "fl","score,id",
+                    "sort", "score desc, num_i asc")
+                , "*[count(//doc)=7]"
+                , "//result/doc[1][str[@name='id'][.='p3s3'] and float[@name='score'][.=1276.0]]"
+                , "//result/doc[2][str[@name='id'][.='p1s3'] and float[@name='score'][.=819.0]]"
+                , "//result/doc[3][str[@name='id'][.='z100'] and float[@name='score'][.=142.0]]"
+                , "//result/doc[4][str[@name='id'][.='p2s3'] and float[@name='score'][.=141.0]]"
+                , "//result/doc[5][str[@name='id'][.='z3']   and float[@name='score'][.=45.0]]"
+                , "//result/doc[6][str[@name='id'][.='z2']   and float[@name='score'][.=44.0]]"
+                , "//result/doc[7][str[@name='id'][.='z1']   and float[@name='score'][.=43.0]]"
+                );
+        // same query, but boosting docs to change group heads (and result order)
+        assertQ(req("q", "{!func}sum(42, num_i)",
+                    "qt", "/elevate",
+                    "elevateIds", "p2s4,z2,p2s1",
+                    "fq", "{!collapse " + opt + " nullPolicy=expand}",
+                    "fl","score,id",
+                    "sort", "score desc, num_i asc")
+                , "*[count(//doc)=8]"
+                , "//result/doc[1][str[@name='id'][.='p2s4'] and float[@name='score'][.=55.0]]"
+                , "//result/doc[2][str[@name='id'][.='z2']   and float[@name='score'][.=44.0]]"
+                , "//result/doc[3][str[@name='id'][.='p2s1'] and float[@name='score'][.=97.0]]"
+                , "//result/doc[4][str[@name='id'][.='p3s3'] and float[@name='score'][.=1276.0]]"
+                , "//result/doc[5][str[@name='id'][.='p1s3'] and float[@name='score'][.=819.0]]"
+                , "//result/doc[6][str[@name='id'][.='z100'] and float[@name='score'][.=142.0]]"
+                , "//result/doc[7][str[@name='id'][.='z3']   and float[@name='score'][.=45.0]]"
+                , "//result/doc[8][str[@name='id'][.='z1']   and float[@name='score'][.=43.0]]"
+                );
+        
+      } // score 
+      
+      // sort and min/max based group head selection
+      for (String suffix : SELECTOR_FIELD_SUFFIXES) {
+        
+        // queries that are relevancy based...
+        for (String selector : Arrays.asList(" sort='asc" + suffix + " asc'",
+                                             " sort='sum(asc" + suffix + ",42) asc'",
+                                             " min=asc" + suffix,
+                                             " max=desc" + suffix,
+                                             " min='sum(asc" + suffix + ", 42)'",
+                                             " max='sum(desc" + suffix + ", 42)'")) {
+          
+          if (selector.endsWith("_l") && opt.endsWith("_i")) {
+            // NOTE: this limitation doesn't apply to block collapse on int,
+            // so we only check 'opt.endsWith' (if ends with block hint we're ok)
+            assertQEx("expected known limitation of using long for min/max selector when doing numeric collapse",
+                      "min/max must be Int or Float",
+                      req("q", "*:*",
+                          "fq", "{!collapse " + opt + selector + " nullPolicy=expand}"),
+                      SolrException.ErrorCode.BAD_REQUEST);
+            continue;
+          }
+          
+          assertQ(req("q","num_i:* txt_t:* txt_t:XX",
+                      "fq", "{!collapse " + opt + selector + " nullPolicy=expand}",
+                      "sort", "score desc, num_i asc")
+                  , "*[count(//doc)=7]"
+                  , "//result/doc[1]/str[@name='id'][.='p3s4']"
+                  , "//result/doc[2]/str[@name='id'][.='p1s4']"
+                  , "//result/doc[3]/str[@name='id'][.='p2s2']"
+                  , "//result/doc[4]/str[@name='id'][.='z1']"
+                  , "//result/doc[5]/str[@name='id'][.='z2']"
+                  , "//result/doc[6]/str[@name='id'][.='z3']"
+                  , "//result/doc[7]/str[@name='id'][.='z100']"
+                  );
+          assertQ(req("q","num_i:* txt_t:XX",
+                      "fq", "{!collapse " + opt + selector + " nullPolicy=expand}",
+                      "sort", "num_i asc")
+                  , "*[count(//doc)=7]"
+                  , "//result/doc[1]/str[@name='id'][.='z1']"
+                  , "//result/doc[2]/str[@name='id'][.='z2']"
+                  , "//result/doc[3]/str[@name='id'][.='z3']"
+                  , "//result/doc[4]/str[@name='id'][.='p3s4']"
+                  , "//result/doc[5]/str[@name='id'][.='p1s4']"
+                  , "//result/doc[6]/str[@name='id'][.='p2s2']"
+                  , "//result/doc[7]/str[@name='id'][.='z100']"
+                  );
+          // same query, but boosting multiple docs
+          // NOTE: this causes each boosted doc to be returned, but top level sort is not score, so QEC doesn't hijak order
+          assertQ(req("q","num_i:* txt_t:XX",
+                      "qt", "/elevate",
+                      "elevateIds", "p3s3,z3,p3s1",
+                      "fq", "{!collapse " + opt + selector + " nullPolicy=expand}",
+                      "sort", "num_i asc")
+                  , "*[count(//doc)=8]"
+                  , "//result/doc[1]/str[@name='id'][.='z1']"
+                  , "//result/doc[2]/str[@name='id'][.='z2']"
+                  , "//result/doc[3]/str[@name='id'][.='z3']"
+                  , "//result/doc[4]/str[@name='id'][.='p1s4']"
+                  , "//result/doc[5]/str[@name='id'][.='p2s2']"
+                  , "//result/doc[6]/str[@name='id'][.='p3s1']"
+                  , "//result/doc[7]/str[@name='id'][.='z100']"
+                  , "//result/doc[8]/str[@name='id'][.='p3s3']"
+                  );
+          // same query, w/forceElevation to change top level order
+          assertQ(req("q","num_i:* txt_t:XX",
+                      "qt", "/elevate",
+                      "elevateIds", "p3s3,z3,p3s1",
+                      "forceElevation", "true",
+                      "fq", "{!collapse " + opt + selector + " nullPolicy=expand}",
+                      "sort", "num_i asc")
+                  , "*[count(//doc)=8]"
+                  , "//result/doc[1]/str[@name='id'][.='p3s3']"
+                  , "//result/doc[2]/str[@name='id'][.='z3']"
+                  , "//result/doc[3]/str[@name='id'][.='p3s1']"
+                  , "//result/doc[4]/str[@name='id'][.='z1']"
+                  , "//result/doc[5]/str[@name='id'][.='z2']"
+                  , "//result/doc[6]/str[@name='id'][.='p1s4']"
+                  , "//result/doc[7]/str[@name='id'][.='p2s2']"
+                  , "//result/doc[8]/str[@name='id'][.='z100']"
+                  );
+
+        }
+
+        // query uses {!func} so we can assert expected scores
+        for (String selector : Arrays.asList(" sort='asc" + suffix + " desc'",
+                                             " sort='sum(asc" + suffix + ",42) desc'",
+                                             " min=desc" + suffix,
+                                             " max=asc" + suffix,
+                                             " min='sum(desc" + suffix + ", 42)'",
+                                             " max='sum(asc" + suffix + ", 42)'")) {
+
+          if (selector.endsWith("_l") && opt.endsWith("_i")) {
+            // NOTE: this limitation doesn't apply to block collapse on int,
+            // so we only check 'opt.endsWith' (if ends with block hint we're ok)
+            assertQEx("expected known limitation of using long for min/max selector when doing numeric collapse",
+                      "min/max must be Int or Float",
+                      req("q", "*:*",
+                          "fq", "{!collapse " + opt + selector + " nullPolicy=expand}"),
+                      SolrException.ErrorCode.BAD_REQUEST);
+            continue;
+          }
+          
+          assertQ(req("q", "{!func}sum(42, num_i)",
+                      "fq", "{!collapse " + opt + selector + " nullPolicy=expand}",
+                      "fl","score,id",
+                      "sort", "num_i asc")
+                  , "*[count(//doc)=7]"
+                  , "//result/doc[1][str[@name='id'][.='z1']   and float[@name='score'][.=43.0]]"
+                  , "//result/doc[2][str[@name='id'][.='z2']   and float[@name='score'][.=44.0]]"
+                  , "//result/doc[3][str[@name='id'][.='z3']   and float[@name='score'][.=45.0]]"
+                  , "//result/doc[4][str[@name='id'][.='p2s3'] and float[@name='score'][.=141.0]]"
+                  , "//result/doc[5][str[@name='id'][.='z100'] and float[@name='score'][.=142.0]]"
+                  , "//result/doc[6][str[@name='id'][.='p1s3'] and float[@name='score'][.=819.0]]"
+                  , "//result/doc[7][str[@name='id'][.='p3s3'] and float[@name='score'][.=1276.0]]"
+                  );
+          // same query, but boosting multiple docs
+          // NOTE: this causes each boosted doc to be returned, but top level sort is not score, so QEC doesn't hijak order
+          assertQ(req("q", "{!func}sum(42, num_i)",
+                      "qt", "/elevate",
+                      "elevateIds", "p3s1,z3,p3s4",
+                      "fq", "{!collapse " + opt + selector + " nullPolicy=expand}",
+                      "fl","score,id",
+                      "sort", "num_i asc")
+                  , "*[count(//doc)=8]"
+                  , "//result/doc[1][str[@name='id'][.='z1']   and float[@name='score'][.=43.0]]"
+                  , "//result/doc[2][str[@name='id'][.='z2']   and float[@name='score'][.=44.0]]"
+                  , "//result/doc[3][str[@name='id'][.='z3']   and float[@name='score'][.=45.0]]"
+                  , "//result/doc[4][str[@name='id'][.='p3s4'] and float[@name='score'][.=46.0]]"
+                  , "//result/doc[5][str[@name='id'][.='p3s1'] and float[@name='score'][.=57.0]]"
+                  , "//result/doc[6][str[@name='id'][.='p2s3'] and float[@name='score'][.=141.0]]"
+                  , "//result/doc[7][str[@name='id'][.='z100'] and float[@name='score'][.=142.0]]"
+                  , "//result/doc[8][str[@name='id'][.='p1s3'] and float[@name='score'][.=819.0]]"
+                  );
+          // same query, w/forceElevation to change top level order
+          assertQ(req("q", "{!func}sum(42, num_i)",
+                      "qt", "/elevate",
+                      "elevateIds", "p3s1,z3,p3s4",
+                      "forceElevation", "true",
+                      "fq", "{!collapse " + opt + selector + " nullPolicy=expand}",
+                      "fl","score,id",
+                      "sort", "num_i asc")
+                  , "*[count(//doc)=8]"
+                  , "//result/doc[1][str[@name='id'][.='p3s1'] and float[@name='score'][.=57.0]]"
+                  , "//result/doc[2][str[@name='id'][.='z3']   and float[@name='score'][.=45.0]]"
+                  , "//result/doc[3][str[@name='id'][.='p3s4'] and float[@name='score'][.=46.0]]"
+                  , "//result/doc[4][str[@name='id'][.='z1']   and float[@name='score'][.=43.0]]"
+                  , "//result/doc[5][str[@name='id'][.='z2']   and float[@name='score'][.=44.0]]"
+                  , "//result/doc[6][str[@name='id'][.='p2s3'] and float[@name='score'][.=141.0]]"
+                  , "//result/doc[7][str[@name='id'][.='z100'] and float[@name='score'][.=142.0]]"
+                  , "//result/doc[8][str[@name='id'][.='p1s3'] and float[@name='score'][.=819.0]]"
+                  );
+          
+        }
+        
+        // queries are relevancy based, and score is used in collapse local param sort -- but not in top fl/sort
+        // (ie: help prove we setup 'needScores' correctly for collapse, even though top level query doesn't care)
+        for (String selector : Arrays.asList("", // implicit score ranking as sanity check
+                                             " sort='score desc'",
+                                             // unused tie breaker after score
+                                             " sort='score desc, sum(num_i,42) desc'",
+                                             // force score to be a tie breaker
+                                             " sort='sum(1.5,2.5) asc, score desc'")) {
+          
+          assertQ(req("q", "*:* txt_t:XX",
+                      "fq", "{!collapse " + opt + selector + " nullPolicy=expand}",
+                      "fl", "id",
+                      "sort", "num_i asc")
+                  , "*[count(//doc)=7]"
+                  , "//result/doc[1][str[@name='id'][.='z1']]"
+                  , "//result/doc[2][str[@name='id'][.='z2']]"
+                  , "//result/doc[3][str[@name='id'][.='z3']]"
+                  , "//result/doc[4][str[@name='id'][.='p2s4']]" // 13
+                  , "//result/doc[5][str[@name='id'][.='p3s1']]" // 15
+                  , "//result/doc[6][str[@name='id'][.='z100']]"
+                  , "//result/doc[7][str[@name='id'][.='p1s3']]" // 777
+                  );
+          // same query, but boosting multiple docs
+          // NOTE: this causes each boosted doc to be returned, but top level sort is not score, so QEC doesn't hijak order
+          assertQ(req("q", "*:* txt_t:XX",
+                      "qt", "/elevate",
+                      "elevateIds", "p3s3,z3,p3s4",
+                      "fq", "{!collapse " + opt + selector + " nullPolicy=expand}",
+                      "fl", "id",
+                      "sort", "num_i asc")
+                  , "*[count(//doc)=8]"
+                  , "//result/doc[1][str[@name='id'][.='z1']]"
+                  , "//result/doc[2][str[@name='id'][.='z2']]"
+                  , "//result/doc[3][str[@name='id'][.='z3']]"
+                  , "//result/doc[4][str[@name='id'][.='p3s4']]" // 4
+                  , "//result/doc[5][str[@name='id'][.='p2s4']]" // 13
+                  , "//result/doc[6][str[@name='id'][.='z100']]"
+                  , "//result/doc[7][str[@name='id'][.='p1s3']]" // 777
+                  , "//result/doc[8][str[@name='id'][.='p3s3']]" // 1234
+                  );
+          // same query, w/forceElevation to change top level order
+          assertQ(req("q", "*:* txt_t:XX",
+                      "qt", "/elevate",
+                      "elevateIds", "p3s3,z3,p3s4",
+                      "forceElevation", "true",
+                      "fq", "{!collapse " + opt + selector + " nullPolicy=expand}",
+                      "fl", "id",
+                      "sort", "num_i asc")
+                  , "*[count(//doc)=8]"
+                  , "//result/doc[1][str[@name='id'][.='p3s3']]" // 1234
+                  , "//result/doc[2][str[@name='id'][.='z3']]"
+                  , "//result/doc[3][str[@name='id'][.='p3s4']]" // 4
+                  , "//result/doc[4][str[@name='id'][.='z1']]"
+                  , "//result/doc[5][str[@name='id'][.='z2']]"
+                  , "//result/doc[6][str[@name='id'][.='p2s4']]" // 13
+                  , "//result/doc[7][str[@name='id'][.='z100']]"
+                  , "//result/doc[8][str[@name='id'][.='p1s3']]" // 777
+                  );
+
+
+        }
+        
+      } // sort
+    }
+  }
+

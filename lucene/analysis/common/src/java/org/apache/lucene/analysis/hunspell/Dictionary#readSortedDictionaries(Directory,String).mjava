@@ -1,0 +1,66 @@
+  private FST<IntsRef> readSortedDictionaries(Directory tempDir, String sorted) throws IOException {
+    boolean success = false;
+
+    EntryGrouper grouper = new EntryGrouper();
+
+    try (ByteSequencesReader reader =
+        new ByteSequencesReader(tempDir.openChecksumInput(sorted, IOContext.READONCE), sorted)) {
+
+      // TODO: the flags themselves can be double-chars (long) or also numeric
+      // either way the trick is to encode them as char... but they must be parsed differently
+
+      while (true) {
+        BytesRef scratch = reader.next();
+        if (scratch == null) {
+          break;
+        }
+
+        String line = scratch.utf8ToString();
+        String entry;
+        char[] wordForm;
+        int end;
+
+        int flagSep = line.indexOf(FLAG_SEPARATOR);
+        if (flagSep == -1) {
+          wordForm = NOFLAGS;
+          end = line.indexOf(MORPH_SEPARATOR);
+          entry = line.substring(0, end);
+        } else {
+          end = line.indexOf(MORPH_SEPARATOR);
+          String flagPart = line.substring(flagSep + 1, end);
+          if (aliasCount > 0) {
+            flagPart = getAliasValue(Integer.parseInt(flagPart));
+          }
+
+          wordForm = flagParsingStrategy.parseFlags(flagPart);
+          Arrays.sort(wordForm);
+          entry = line.substring(0, flagSep);
+        }
+        // we possibly have morphological data
+        int stemExceptionID = 0;
+        if (hasStemExceptions && end + 1 < line.length()) {
+          String stemException = parseStemException(line.substring(end + 1));
+          if (stemException != null) {
+            stemExceptions = ArrayUtil.grow(stemExceptions, stemExceptionCount + 1);
+            stemExceptionID =
+                stemExceptionCount + 1; // we use '0' to indicate no exception for the form
+            stemExceptions[stemExceptionCount++] = stemException;
+          }
+        }
+
+        grouper.add(entry, wordForm, stemExceptionID);
+      }
+
+      // finalize last entry
+      grouper.flushGroup();
+      success = true;
+      return grouper.words.compile();
+    } finally {
+      if (success) {
+        tempDir.deleteFile(sorted);
+      } else {
+        IOUtils.deleteFilesIgnoringExceptions(tempDir, sorted);
+      }
+    }
+  }
+

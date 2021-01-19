@@ -1,6 +1,6 @@
   ExportBuffers(ExportWriter exportWriter, List<LeafReaderContext> leaves, SolrIndexSearcher searcher,
                 OutputStream os, IteratorWriter.ItemWriter rawWriter, Sort sort, int queueSize, int totalHits,
-                Timer writeOutputBufferTimer, Timer fillerWaitTimer, Timer writerWaitTimer) throws IOException {
+                FixedBitSet[] sets) throws IOException {
     this.exportWriter = exportWriter;
     this.leaves = leaves;
     this.os = os;
@@ -13,55 +13,62 @@
         return this;
       }
     };
-    this.writeOutputBufferTimer = writeOutputBufferTimer;
-    this.fillerWaitTimer = fillerWaitTimer;
-    this.writerWaitTimer = writerWaitTimer;
+
     this.bufferOne = new Buffer(queueSize);
     this.bufferTwo = new Buffer(queueSize);
     this.totalHits = totalHits;
     fillBuffer = bufferOne;
     outputBuffer = bufferTwo;
     SortDoc writerSortDoc = exportWriter.getSortDoc(searcher, sort.getSort());
+
+    MergeIterator mergeIterator = exportWriter.getMergeIterator(leaves, sets, writerSortDoc);
+
     bufferOne.initialize(writerSortDoc);
     bufferTwo.initialize(writerSortDoc);
     barrier = new CyclicBarrier(2, () -> swapBuffers());
     filler = () -> {
       try {
         // log.debug("--- filler start {}", Thread.currentThread());
-        SortDoc sortDoc = exportWriter.getSortDoc(searcher, sort.getSort());
         Buffer buffer = getFillBuffer();
-        SortQueue queue = new SortQueue(queueSize, sortDoc);
         long lastOutputCounter = 0;
         for (int count = 0; count < totalHits; ) {
           // log.debug("--- filler fillOutDocs in {}", fillBuffer);
-          exportWriter.fillOutDocs(leaves, sortDoc, queue, buffer);
+          exportWriter.fillOutDocs(mergeIterator, buffer);
           count += (buffer.outDocsIndex + 1);
           // log.debug("--- filler count={}, exchange buffer from {}", count, buffer);
-          Timer.Context timerContext = getFillerWaitTimer().time();
           try {
+            long startBufferWait = System.nanoTime();
             exchangeBuffers();
+            long endBufferWait = System.nanoTime();
+            if(log.isDebugEnabled()) {
+              log.debug("Waited for writer thread:{}", Long.toString(((endBufferWait - startBufferWait) / 1000000)));
+            }
           } finally {
-            timerContext.stop();
+
           }
+
           buffer = getFillBuffer();
           if (outputCounter.longValue() > lastOutputCounter) {
             lastOutputCounter = outputCounter.longValue();
             flushOutput();
           }
-          // log.debug("--- filler got empty buffer {}", buffer);
         }
         buffer.outDocsIndex = Buffer.NO_MORE_DOCS;
-        // log.debug("--- filler final exchange buffer from {}", buffer);
-        Timer.Context timerContext = getFillerWaitTimer().time();
         try {
           exchangeBuffers();
         } finally {
-          timerContext.stop();
+
         }
         buffer = getFillBuffer();
         // log.debug("--- filler final got buffer {}", buffer);
       } catch (Throwable e) {
-        log.error("filler", e);
+        if(!(e instanceof InterruptedException) && !(e instanceof BrokenBarrierException)) {
+          /*
+          Don't log the interrupt or BrokenBarrierException as it creates noise during early client disconnects and
+          doesn't log anything particularly useful in other situations.
+           */
+          log.error("filler", e);
+        }
         error(e);
         if (e instanceof InterruptedException) {
           Thread.currentThread().interrupt();

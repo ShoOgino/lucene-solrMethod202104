@@ -1,0 +1,54 @@
+  WANDScorer(Weight weight, Collection<Scorer> scorers, int minShouldMatch, ScoreMode scoreMode)
+      throws IOException {
+    super(weight);
+
+    if (minShouldMatch >= scorers.size()) {
+      throw new IllegalArgumentException("minShouldMatch should be < the number of scorers");
+    }
+
+    this.minCompetitiveScore = 0;
+
+    assert minShouldMatch >= 0 : "minShouldMatch should not be negative, but got " + minShouldMatch;
+    this.minShouldMatch = minShouldMatch;
+
+    this.doc = -1;
+    this.upTo = -1; // will be computed on the first call to nextDoc/advance
+
+    this.scoreMode = scoreMode;
+
+    head = new DisiPriorityQueue(scorers.size());
+    // there can be at most num_scorers - 1 scorers beyond the current position
+    tail = new DisiWrapper[scorers.size()];
+
+    if (this.scoreMode == ScoreMode.TOP_SCORES) {
+      OptionalInt scalingFactor = OptionalInt.empty();
+      for (Scorer scorer : scorers) {
+        scorer.advanceShallow(0);
+        float maxScore = scorer.getMaxScore(DocIdSetIterator.NO_MORE_DOCS);
+        if (maxScore != 0 && Float.isFinite(maxScore)) {
+          // 0 and +Infty should not impact the scale
+          scalingFactor =
+              OptionalInt.of(
+                  Math.min(scalingFactor.orElse(Integer.MAX_VALUE), scalingFactor(maxScore)));
+        }
+      }
+
+      // Use a scaling factor of 0 if all max scores are either 0 or +Infty
+      this.scalingFactor = scalingFactor.orElse(0);
+      this.maxScorePropagator = new MaxScoreSumPropagator(scorers);
+    } else {
+      this.scalingFactor = 0;
+      this.maxScorePropagator = null;
+    }
+
+    for (Scorer scorer : scorers) {
+      addLead(new DisiWrapper(scorer));
+    }
+
+    this.cost =
+        costWithMinShouldMatch(
+            scorers.stream().map(Scorer::iterator).mapToLong(DocIdSetIterator::cost),
+            scorers.size(),
+            minShouldMatch);
+  }
+

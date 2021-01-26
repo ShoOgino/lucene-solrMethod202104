@@ -1,0 +1,42 @@
+  @Test
+  public void testWithCollectionPlacement() throws Exception {
+    int NUM_NODES = 3;
+    Builders.ClusterBuilder clusterBuilder = Builders.newClusterBuilder().initializeLiveNodes(NUM_NODES);
+    Builders.CollectionBuilder collectionBuilder = Builders.newCollectionBuilder(secondaryCollectionName);
+    collectionBuilder.initializeShardsReplicas(1, 2, 0, 0, clusterBuilder.getLiveNodeBuilders());
+    clusterBuilder.addCollection(collectionBuilder);
+
+    collectionBuilder = Builders.newCollectionBuilder(primaryCollectionName);
+    collectionBuilder.initializeShardsReplicas(0, 0, 0, 0, clusterBuilder.getLiveNodeBuilders());
+    clusterBuilder.addCollection(collectionBuilder);
+
+    PlacementContext placementContext = clusterBuilder.buildPlacementContext();
+    Cluster cluster = placementContext.getCluster();
+
+    SolrCollection secondaryCollection = cluster.getCollection(secondaryCollectionName);
+    SolrCollection primaryCollection = cluster.getCollection(primaryCollectionName);
+
+    Set<Node> secondaryNodes = new HashSet<>();
+    secondaryCollection.shards().forEach(s -> s.replicas().forEach(r -> secondaryNodes.add(r.getNode())));
+
+    PlacementRequestImpl placementRequest = new PlacementRequestImpl(primaryCollection,
+      Set.of("shard1", "shard2"), cluster.getLiveNodes(), 1, 0, 0);
+
+
+    PlacementPlan pp = plugin.computePlacement(placementRequest, placementContext);
+    assertEquals(2, pp.getReplicaPlacements().size());
+    // verify that all placements are on nodes with the secondary replica
+    pp.getReplicaPlacements().forEach(placement ->
+        assertTrue("placement node " + placement.getNode() + " not in secondary=" + secondaryNodes,
+            secondaryNodes.contains(placement.getNode())));
+
+    placementRequest = new PlacementRequestImpl(primaryCollection,
+        Set.of("shard1"), cluster.getLiveNodes(), 3, 0, 0);
+    try {
+      pp = plugin.computePlacement(placementRequest, placementContext);
+      fail("should generate 'Not enough eligible nodes' failure here");
+    } catch (PlacementException pe) {
+      assertTrue(pe.toString().contains("Not enough eligible nodes"));
+    }
+  }
+

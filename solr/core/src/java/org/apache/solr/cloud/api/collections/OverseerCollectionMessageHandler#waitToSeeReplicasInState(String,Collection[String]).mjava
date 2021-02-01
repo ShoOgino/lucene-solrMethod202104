@@ -1,31 +1,27 @@
   Map<String, Replica> waitToSeeReplicasInState(String collectionName, Collection<String> coreNames) throws InterruptedException {
     assert coreNames.size() > 0;
-    Map<String, Replica> result = new HashMap<>();
-    TimeOut timeout = new TimeOut(Integer.getInteger("solr.waitToSeeReplicasInStateTimeoutSeconds", 120), TimeUnit.SECONDS, timeSource); // could be a big cluster
-    while (true) {
-      DocCollection coll = zkStateReader.getClusterState().getCollection(collectionName);
-      for (String coreName : coreNames) {
-        if (result.containsKey(coreName)) continue;
-        for (Slice slice : coll.getSlices()) {
-          for (Replica replica : slice.getReplicas()) {
-            if (coreName.equals(replica.getStr(ZkStateReader.CORE_NAME_PROP))) {
-              result.put(coreName, replica);
-              break;
-            }
-          }
-        }
-      }
+    Map<String, Replica> results = new HashMap<>();
+    AtomicReference<DocCollection> lastState = new AtomicReference<>();
 
-      if (result.size() == coreNames.size()) {
-        return result;
-      } else {
-        log.debug("Expecting {} cores but found {}", coreNames, result);
-      }
-      if (timeout.hasTimedOut()) {
-        throw new SolrException(ErrorCode.SERVER_ERROR, "Timed out waiting to see all replicas: " + coreNames + " in cluster state. Last state: " + coll);
-      }
+    long maxWait = Long.getLong("solr.waitToSeeReplicasInStateTimeoutSeconds", 120); // could be a big cluster
+    try {
+      zkStateReader.waitForState(collectionName, maxWait, TimeUnit.SECONDS, c -> {
+        if (c == null) return false;
 
-      Thread.sleep(100);
+        c.getSlices().stream().flatMap(slice -> slice.getReplicas().stream())
+            .filter(r -> coreNames.contains(r.getCoreName()))   // Only the elements that were asked for...
+            .filter(r -> !results.containsKey(r.getCoreName())) // ...but not the ones we've seen already...
+            .forEach(r -> results.put(r.getCoreName(), r));     // ...get added to the map
+
+        lastState.set(c);
+        log.debug("Expecting {} cores, found {}", coreNames, results);
+        return results.size() == coreNames.size();
+      });
+    } catch (TimeoutException e) {
+      String error = "Timed out waiting to see all replicas: " + coreNames + " in cluster state. Last state: " + lastState.get();
+      throw new SolrException(ErrorCode.SERVER_ERROR, error);
     }
+
+    return results;
   }
 

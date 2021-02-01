@@ -1,35 +1,16 @@
   private void waitForCoreNodeName(CoreDescriptor descriptor) {
-    int retryCount = 320;
-    log.debug("look for our core node name");
-    while (retryCount-- > 0) {
-      final DocCollection docCollection = zkStateReader.getClusterState()
-          .getCollectionOrNull(descriptor.getCloudDescriptor().getCollectionName());
-      if (docCollection != null && docCollection.getSlicesMap() != null) {
-        final Map<String, Slice> slicesMap = docCollection.getSlicesMap();
-        for (Slice slice : slicesMap.values()) {
-          for (Replica replica : slice.getReplicas()) {
-            // TODO: for really large clusters, we could 'index' on this
-
-            String nodeName = replica.getStr(ZkStateReader.NODE_NAME_PROP);
-            String core = replica.getStr(ZkStateReader.CORE_NAME_PROP);
-
-            String msgNodeName = getNodeName();
-            String msgCore = descriptor.getName();
-
-            if (msgNodeName.equals(nodeName) && core.equals(msgCore)) {
-              descriptor.getCloudDescriptor()
-                  .setCoreNodeName(replica.getName());
-              getCoreContainer().getCoresLocator().persist(getCoreContainer(), descriptor);
-              return;
-            }
-          }
-        }
-      }
-      try {
-        Thread.sleep(1000);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
+    log.debug("waitForCoreNodeName >>> look for our core node name");
+    try {
+      zkStateReader.waitForState(descriptor.getCollectionName(), 320L, TimeUnit.SECONDS, c -> {
+        String name = ClusterStateMutator.getAssignedCoreNodeName(c, getNodeName(), descriptor.getName());
+        if (name == null) return false;
+        descriptor.getCloudDescriptor().setCoreNodeName(name);
+        return true;
+      });
+    } catch (TimeoutException | InterruptedException e) {
+      SolrZkClient.checkInterrupted(e);
+      throw new SolrException(ErrorCode.SERVER_ERROR, "Failed waiting for collection state", e);
     }
+    getCoreContainer().getCoresLocator().persist(getCoreContainer(), descriptor);
   }
 

@@ -15,33 +15,31 @@
 
     overseer.offerStateUpdate(Utils.toJSON(message));
 
-    TimeOut timeout = new TimeOut(30, TimeUnit.SECONDS, timeSource);
-    boolean areChangesVisible = true;
-    while (!timeout.hasTimedOut()) {
-      DocCollection collection = cloudManager.getClusterStateProvider().getClusterState().getCollection(collectionName);
-      areChangesVisible = true;
-      for (Map.Entry<String,Object> updateEntry : message.getProperties().entrySet()) {
-        String updateKey = updateEntry.getKey();
+    try {
+      zkStateReader.waitForState(collectionName, 30, TimeUnit.SECONDS, c -> {
+        if (c == null) return false;
 
-        if (!updateKey.equals(ZkStateReader.COLLECTION_PROP)
-            && !updateKey.equals(Overseer.QUEUE_OPERATION)
-            && updateEntry.getValue() != null // handled below in a separate conditional
-            && !updateEntry.getValue().equals(collection.get(updateKey))) {
-          areChangesVisible = false;
-          break;
+        for (Map.Entry<String,Object> updateEntry : message.getProperties().entrySet()) {
+          String updateKey = updateEntry.getKey();
+
+          if (!updateKey.equals(ZkStateReader.COLLECTION_PROP)
+                  && !updateKey.equals(Overseer.QUEUE_OPERATION)
+                  && updateEntry.getValue() != null // handled below in a separate conditional
+                  && !updateEntry.getValue().equals(c.get(updateKey))) {
+            return false;
+          }
+          if (updateEntry.getValue() == null && c.containsKey(updateKey)) {
+            return false;
+          }
         }
 
-        if (updateEntry.getValue() == null && collection.containsKey(updateKey)) {
-          areChangesVisible = false;
-          break;
-        }
-      }
-      if (areChangesVisible) break;
-      timeout.sleep(100);
+        return true;
+      });
+    } catch (TimeoutException | InterruptedException e) {
+      SolrZkClient.checkInterrupted(e);
+      log.debug("modifyCollection(ClusterState={}, ZkNodeProps={}, NamedList={})", clusterState, message, results, e);
+      throw new SolrException(ErrorCode.SERVER_ERROR, "Failed to modify collection", e);
     }
-
-    if (!areChangesVisible)
-      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Could not modify collection " + message);
 
     // if switching to/from read-only mode reload the collection
     if (message.keySet().contains(ZkStateReader.READ_ONLY)) {

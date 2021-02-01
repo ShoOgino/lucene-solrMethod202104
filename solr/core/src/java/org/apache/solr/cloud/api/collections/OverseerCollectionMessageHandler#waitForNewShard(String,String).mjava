@@ -1,28 +1,13 @@
   ClusterState waitForNewShard(String collectionName, String sliceName) throws KeeperException, InterruptedException {
     log.debug("Waiting for slice {} of collection {} to be available", sliceName, collectionName);
-    RTimer timer = new RTimer();
-    int retryCount = 320;
-    while (retryCount-- > 0) {
-      ClusterState clusterState = zkStateReader.getClusterState();
-      DocCollection collection = clusterState.getCollection(collectionName);
-
-      if (collection == null) {
-        throw new SolrException(ErrorCode.SERVER_ERROR,
-            "Unable to find collection: " + collectionName + " in clusterstate");
-      }
-      Slice slice = collection.getSlice(sliceName);
-      if (slice != null) {
-        if (log.isDebugEnabled()) {
-          log.debug("Waited for {}ms for slice {} of collection {} to be available",
-              timer.getTime(), sliceName, collectionName);
-        }
-        return clusterState;
-      }
-      Thread.sleep(1000);
+    try {
+      zkStateReader.waitForState(collectionName, 320, TimeUnit.SECONDS, c -> {
+        return c != null && c.getSlice(sliceName) != null;
+      });
+    } catch (TimeoutException | InterruptedException e) {
+      SolrZkClient.checkInterrupted(e);
+      throw new SolrException(ErrorCode.SERVER_ERROR, "Failed waiting for new slice", e);
     }
-    throw new SolrException(ErrorCode.SERVER_ERROR,
-        "Could not find new slice " + sliceName + " in collection " + collectionName
-            + " even after waiting for " + timer.getTime() + "ms"
-    );
+    return zkStateReader.getClusterState();
   }
 

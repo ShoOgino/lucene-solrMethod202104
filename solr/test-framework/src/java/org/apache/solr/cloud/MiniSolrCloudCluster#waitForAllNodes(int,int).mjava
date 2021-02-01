@@ -1,33 +1,24 @@
   private void waitForAllNodes(int numServers, int timeoutSeconds) throws IOException, InterruptedException, TimeoutException {
     log.info("waitForAllNodes: numServers={}", numServers);
     
-    int numRunning = 0;
+    int numRunning;
 
     if (timeoutSeconds == 0) {
       timeoutSeconds = DEFAULT_TIMEOUT;
     }
     TimeOut timeout = new TimeOut(timeoutSeconds, TimeUnit.SECONDS, TimeSource.NANO_TIME);
-    
-    while (true) {
-      if (timeout.hasTimedOut()) {
-        throw new IllegalStateException("giving up waiting for all jetty instances to be running. numServers=" + numServers
-            + " numRunning=" + numRunning);
-      }
-      numRunning = 0;
-      for (JettySolrRunner jetty : getJettySolrRunners()) {
-        if (jetty.isRunning()) {
-          numRunning++;
+
+    synchronized (startupWait) {
+      while (numServers != (numRunning = numRunningJetty(getJettySolrRunners()))) {
+        if (timeout.hasTimedOut()) {
+          throw new IllegalStateException("giving up waiting for all jetty instances to be running. numServers=" + numServers
+              + " numRunning=" + numRunning);
         }
+        startupWait.wait(500);
       }
-      if (numServers == numRunning) {
-        break;
-      }
-      Thread.sleep(100);
     }
-    
-    ZkStateReader reader = getSolrClient().getZkStateReader();
-    for (JettySolrRunner jetty : getJettySolrRunners()) {
-      reader.waitForLiveNodes(30, TimeUnit.SECONDS, (o, n) -> n.contains(jetty.getNodeName()));
+    for (JettySolrRunner runner : getJettySolrRunners()) {
+      waitForNode(runner, (int) timeout.timeLeft(TimeUnit.SECONDS));
     }
   }
 

@@ -1,11 +1,11 @@
     public LeafCollector getLeafCollector(LeafReaderContext context) throws IOException {
       final int docBase = context.docBase;
 
-      if(ordinalMap != null) {
-        this.segmentValues = this.multiSortedDocValues.values[context.ord];
-        this.segmentOrdinalMap = ordinalMap.getGlobalOrds(context.ord);
-      }
+      final boolean useOrdinalMapping = (null != ordinalMap);
+      final SortedDocValues segmentValues = useOrdinalMapping ? this.multiSortedDocValues.values[context.ord] : null;
+      final LongValues segmentOrdinalMap = useOrdinalMapping ? this.ordinalMap.getGlobalOrds(context.ord) : null;
 
+      final LeafCollector leafNullGroupCollector = expandNullGroup ? nullGroupCollector.getLeafCollector(context) : null;
       final LongObjectMap<LeafCollector> leafCollectors = new LongObjectHashMap<>();
       for (LongObjectCursor<Collector> entry : groups) {
         leafCollectors.put(entry.key, entry.value.getLeafCollector(context));
@@ -17,13 +17,21 @@
           for (ObjectCursor<LeafCollector> c : leafCollectors.values()) {
             c.value.setScorer(scorer);
           }
+          if (expandNullGroup) {
+            leafNullGroupCollector.setScorer(scorer);
+          }
         }
 
         @Override
         public void collect(int docId) throws IOException {
           int globalDoc = docId + docBase;
+
+          if (collapsedSet.contains(globalDoc)) {
+            return; // this doc is already a group head
+          }
+          
           int ord = -1;
-          if(ordinalMap != null) {
+          if (useOrdinalMapping) {
             if (docId > segmentValues.docID()) {
               segmentValues.advance(docId);
             }
@@ -39,10 +47,14 @@
               ord = -1;
             }
           }
-
-          if (ord > -1 && groupBits.get(ord) && !collapsedSet.contains(globalDoc)) {
-            LeafCollector c = leafCollectors.get(ord);
-            c.collect(docId);
+          
+          if (ord > -1) {
+            if (groupBits.get(ord)) {
+              LeafCollector c = leafCollectors.get(ord);
+              c.collect(docId);
+            }
+          } else if (expandNullGroup) {
+            leafNullGroupCollector.collect(docId);
           }
         }
       };

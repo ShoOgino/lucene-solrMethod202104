@@ -1,0 +1,134 @@
+    /**
+     * Tests that a softCommit does not affect what data is in a backup
+     */
+    public void testBackupAfterSoftCommit() throws Exception {
+
+        // sanity check empty index...
+        assertQ(req("q", "id:42"), "//result[@numFound='0']");
+        assertQ(req("q", "id:99"), "//result[@numFound='0']");
+        assertQ(req("q", "*:*"), "//result[@numFound='0']");
+
+        // hard commit one doc...
+        assertU(adoc("id", "99"));
+        assertU(commit());
+        assertQ(req("q", "id:99"), "//result[@numFound='1']");
+        assertQ(req("q", "*:*"), "//result[@numFound='1']");
+
+        final IndexCommit oneDocCommit = h.getCore().getDeletionPolicy().getLatestCommit();
+        assertNotNull(oneDocCommit);
+        final String oneDocSegmentFile = oneDocCommit.getSegmentsFileName();
+
+        final CoreContainer cores = h.getCoreContainer();
+        final CoreAdminHandler admin = new CoreAdminHandler(cores);
+        final URI location = createAndBootstrapLocationForBackup();
+
+        final ShardBackupId firstShardBackupId = new ShardBackupId("shard1", BackupId.zero());
+        { // take an initial 'backup1a' containing our 1 document
+            final SolrQueryResponse resp = new SolrQueryResponse();
+            admin.handleRequestBody
+                    (req(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.BACKUPCORE.toString(),
+                            "core", DEFAULT_TEST_COLLECTION_NAME,
+                            "name", "backup1a",
+                            "location", location.getPath(),
+                            CoreAdminParams.SHARD_BACKUP_ID, firstShardBackupId.getIdAsString()),
+                            resp);
+            assertNull("Backup should have succeeded", resp.getException());
+            simpleBackupCheck(location, firstShardBackupId, oneDocSegmentFile);
+        }
+
+        { // and an initial "snapshot1a' that should eventually match
+            SolrQueryResponse resp = new SolrQueryResponse();
+            admin.handleRequestBody
+                    (req(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.CREATESNAPSHOT.toString(),
+                            "core", DEFAULT_TEST_COLLECTION_NAME,
+                            "commitName", "snapshot1a"),
+                            resp);
+            assertNull("Snapshot 1A should have succeeded", resp.getException());
+        }
+
+        // now we add our 2nd doc, and make it searchable, but we do *NOT* hard commit it to the index dir...
+        assertU(adoc("id", "42"));
+        assertU(commit("softCommit", "true", "openSearcher", "true"));
+
+        assertQ(req("q", "id:99"), "//result[@numFound='1']");
+        assertQ(req("q", "id:42"), "//result[@numFound='1']");
+        assertQ(req("q", "*:*"), "//result[@numFound='2']");
+
+
+        final ShardBackupId secondShardBackupId = new ShardBackupId("shard1", new BackupId(1));
+        { // we now have an index with two searchable docs, but a new 'backup1b' should still
+            // be identical to the previous backup...
+            final SolrQueryResponse resp = new SolrQueryResponse();
+            admin.handleRequestBody
+                    (req(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.BACKUPCORE.toString(),
+                            "core", DEFAULT_TEST_COLLECTION_NAME,
+                            "location", location.getPath(),
+                            CoreAdminParams.SHARD_BACKUP_ID, secondShardBackupId.getIdAsString()),
+                            resp);
+            assertNull("Backup should have succeeded", resp.getException());
+            simpleBackupCheck(location, secondShardBackupId, oneDocSegmentFile);
+        }
+
+        { // and a second "snapshot1b' should also still be identical
+            SolrQueryResponse resp = new SolrQueryResponse();
+            admin.handleRequestBody
+                    (req(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.CREATESNAPSHOT.toString(),
+                            "core", DEFAULT_TEST_COLLECTION_NAME,
+                            "commitName", "snapshot1b"),
+                            resp);
+            assertNull("Snapshot 1B should have succeeded", resp.getException());
+        }
+
+        // Hard Committing the 2nd doc now should not affect the existing backups or snapshots...
+        assertU(commit());
+        simpleBackupCheck(location, firstShardBackupId, oneDocSegmentFile); // backup1a
+        simpleBackupCheck(location, secondShardBackupId, oneDocSegmentFile); // backup1b
+
+        final ShardBackupId thirdShardBackupId = new ShardBackupId("shard1", new BackupId(2));
+        { // But we should be able to confirm both docs appear in a new backup (not based on a previous snapshot)
+            final SolrQueryResponse resp = new SolrQueryResponse();
+            admin.handleRequestBody
+                    (req(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.BACKUPCORE.toString(),
+                            "core", DEFAULT_TEST_COLLECTION_NAME,
+                            "location", location.getPath(),
+                            CoreAdminParams.SHARD_BACKUP_ID, thirdShardBackupId.getIdAsString()),
+                            resp);
+            assertNull("Backup should have succeeded", resp.getException());
+            // TODO This doesn't actually check that backup has both docs!  Can we do better than this without doing a full restore?
+            // Maybe validate the new segments_X file at least to show that it's picked up the latest commit?
+            simpleBackupCheck(location, thirdShardBackupId);
+        }
+
+        // if we go back and create backups from our earlier snapshots they should still only
+        // have 1 expected doc...
+        // Make backups from each of the snapshots and check they are still empty as well...
+        final ShardBackupId fourthShardBackupId = new ShardBackupId("shard1", new BackupId(3));
+        {
+            SolrQueryResponse resp = new SolrQueryResponse();
+            admin.handleRequestBody
+                    (req(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.BACKUPCORE.toString(),
+                            "core", DEFAULT_TEST_COLLECTION_NAME,
+                            "commitName", "snapshot1a",
+                            "location", location.getPath(),
+                            CoreAdminParams.SHARD_BACKUP_ID, fourthShardBackupId.getIdAsString()),
+                            resp);
+            assertNull("Backup of snapshot1a should have succeeded", resp.getException());
+            simpleBackupCheck(location, fourthShardBackupId, oneDocSegmentFile);
+        }
+        final ShardBackupId fifthShardBackupId = new ShardBackupId("shard1", new BackupId(4));
+        {
+            SolrQueryResponse resp = new SolrQueryResponse();
+            admin.handleRequestBody
+                    (req(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.BACKUPCORE.toString(),
+                            "core", DEFAULT_TEST_COLLECTION_NAME,
+                            "commitName", "snapshot1b",
+                            "location", location.getPath(),
+                            CoreAdminParams.SHARD_BACKUP_ID, fifthShardBackupId.getIdAsString()),
+                            resp);
+            assertNull("Backup of snapshot1b should have succeeded", resp.getException());
+            simpleBackupCheck(location, fifthShardBackupId, oneDocSegmentFile);
+        }
+
+        admin.close();
+    }
+

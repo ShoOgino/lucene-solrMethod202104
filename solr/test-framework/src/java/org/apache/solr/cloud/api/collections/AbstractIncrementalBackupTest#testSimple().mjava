@@ -1,0 +1,50 @@
+    @Test
+    public void testSimple() throws Exception {
+        final String backupCollectionName = getCollectionName();
+        final String restoreCollectionName = backupCollectionName + "_restore";
+        TrackingBackupRepository.clear();
+
+        setTestSuffix("testbackupincsimple");
+        CloudSolrClient solrClient = cluster.getSolrClient();
+
+        CollectionAdminRequest
+                .createCollection(backupCollectionName, "conf1", NUM_SHARDS, 1)
+                .process(solrClient);
+        int expectedNumDocs = indexDocs(backupCollectionName, true);
+        String backupName = BACKUPNAME_PREFIX + testSuffix;
+        try (BackupRepository repository = cluster.getJettySolrRunner(0).getCoreContainer()
+                .newBackupRepository(BACKUP_REPO_NAME)) {
+            String backupLocation = repository.getBackupLocation(getBackupLocation());
+            long t = System.nanoTime();
+            CollectionAdminRequest.backupCollection(backupCollectionName, backupName)
+                    .setLocation(backupLocation)
+                    .setIncremental(true)
+                    .setRepositoryName(BACKUP_REPO_NAME)
+                    .processAndWait(cluster.getSolrClient(), 100);
+            long timeTaken = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t);
+            log.info("Created backup with {} docs, took {}ms", expectedNumDocs, timeTaken);
+            expectedNumDocs += indexDocs(backupCollectionName, true);
+
+            t = System.nanoTime();
+            CollectionAdminRequest.backupCollection(backupCollectionName, backupName)
+                    .setLocation(backupLocation)
+                    .setIncremental(true)
+                    .setRepositoryName(BACKUP_REPO_NAME)
+                    .processAndWait(cluster.getSolrClient(), 100);
+            timeTaken = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t);
+            long numFound = cluster.getSolrClient().query(backupCollectionName,
+                    new SolrQuery("*:*")).getResults().getNumFound();
+            log.info("Created backup with {} docs, took {}ms", numFound, timeTaken);
+
+            t = System.nanoTime();
+            CollectionAdminRequest.restoreCollection(restoreCollectionName, backupName)
+                    .setBackupId(0)
+                    .setLocation(backupLocation).setRepositoryName(BACKUP_REPO_NAME).processAndWait(solrClient, 500);
+            timeTaken = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t);
+            log.info("Restored from backup, took {}ms", timeTaken);
+            numFound = cluster.getSolrClient().query(restoreCollectionName,
+                    new SolrQuery("*:*")).getResults().getNumFound();
+            assertEquals(expectedNumDocs, numFound);
+        }
+    }
+

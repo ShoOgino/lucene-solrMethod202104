@@ -1,0 +1,128 @@
+  /**
+   * Tests that a softCommit does not affect what data is in a backup
+   */
+  public void testBackupAfterSoftCommit() throws Exception {
+
+    // sanity check empty index...
+    assertQ(req("q", "id:42"), "//result[@numFound='0']");
+    assertQ(req("q", "id:99"), "//result[@numFound='0']");
+    assertQ(req("q", "*:*"), "//result[@numFound='0']");
+
+    // hard commit one doc...
+    assertU(adoc("id", "99"));
+    assertU(commit());
+    assertQ(req("q", "id:99"), "//result[@numFound='1']");
+    assertQ(req("q", "*:*"), "//result[@numFound='1']");
+    
+    final IndexCommit oneDocCommit = h.getCore().getDeletionPolicy().getLatestCommit();
+    assertNotNull(oneDocCommit);
+    final String oneDocSegmentFile = oneDocCommit.getSegmentsFileName();
+  
+    final CoreContainer cores = h.getCoreContainer();
+    final CoreAdminHandler admin = new CoreAdminHandler(cores);
+    
+    final File backupDir = createTempDir().toFile();
+    cores.getAllowPaths().add(backupDir.toPath());
+
+
+    { // take an initial 'backup1a' containing our 1 document
+      final SolrQueryResponse resp = new SolrQueryResponse();
+      admin.handleRequestBody
+        (req(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.BACKUPCORE.toString(),
+             "core", DEFAULT_TEST_COLLECTION_NAME,
+             "name", "backup1a",
+             "location", backupDir.getAbsolutePath(),
+             CoreAdminParams.BACKUP_INCREMENTAL, "false"),
+         resp);
+      assertNull("Backup should have succeeded", resp.getException());
+      simpleBackupCheck(new File(backupDir, "snapshot.backup1a"),
+                        1, oneDocSegmentFile);
+    }
+    
+    { // and an initial "snapshot1a' that should eventually match
+      SolrQueryResponse resp = new SolrQueryResponse();
+      admin.handleRequestBody
+        (req(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.CREATESNAPSHOT.toString(),
+             "core", DEFAULT_TEST_COLLECTION_NAME,
+             "commitName", "snapshot1a"),
+         resp);
+      assertNull("Snapshot 1A should have succeeded", resp.getException());
+    }
+
+    // now we add our 2nd doc, and make it searchable, but we do *NOT* hard commit it to the index dir...
+    assertU(adoc("id", "42"));
+    assertU(commit("softCommit", "true", "openSearcher", "true"));
+    
+    assertQ(req("q", "id:99"), "//result[@numFound='1']");
+    assertQ(req("q", "id:42"), "//result[@numFound='1']");
+    assertQ(req("q", "*:*"), "//result[@numFound='2']");
+
+    
+    { // we now have an index with two searchable docs, but a new 'backup1b' should still
+      // be identical to the previous backup...
+      final SolrQueryResponse resp = new SolrQueryResponse();
+      admin.handleRequestBody
+        (req(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.BACKUPCORE.toString(),
+             "core", DEFAULT_TEST_COLLECTION_NAME,
+             "name", "backup1b",
+             "location", backupDir.getAbsolutePath(),
+             CoreAdminParams.BACKUP_INCREMENTAL, "false"),
+         resp);
+      assertNull("Backup should have succeeded", resp.getException());
+      simpleBackupCheck(new File(backupDir, "snapshot.backup1b"),
+                        1, oneDocSegmentFile);
+    }
+    
+    { // and a second "snapshot1b' should also still be identical
+      SolrQueryResponse resp = new SolrQueryResponse();
+      admin.handleRequestBody
+        (req(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.CREATESNAPSHOT.toString(),
+             "core", DEFAULT_TEST_COLLECTION_NAME,
+             "commitName", "snapshot1b"),
+         resp);
+      assertNull("Snapshot 1B should have succeeded", resp.getException());
+    }
+
+    // Hard Committing the 2nd doc now should not affect the existing backups or snapshots...
+    assertU(commit());
+
+    for (String name : Arrays.asList("backup1a", "backup1b")) {
+      simpleBackupCheck(new File(backupDir, "snapshot." + name ),
+                        1, oneDocSegmentFile);
+    }
+    
+    { // But we should be able to confirm both docs appear in a new backup (not based on a previous snapshot)
+      final SolrQueryResponse resp = new SolrQueryResponse();
+      admin.handleRequestBody
+        (req(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.BACKUPCORE.toString(),
+             "core", DEFAULT_TEST_COLLECTION_NAME,
+             "name", "backup2",
+             "location", backupDir.getAbsolutePath(),
+             CoreAdminParams.BACKUP_INCREMENTAL, "false"),
+         resp);
+      assertNull("Backup should have succeeded", resp.getException());
+      simpleBackupCheck(new File(backupDir, "snapshot.backup2"), 2);
+    }
+
+    // if we go back and create backups from our earlier snapshots they should still only
+    // have 1 expected doc...
+    // Make backups from each of the snapshots and check they are still empty as well...
+    for (String snapName : Arrays.asList("snapshot1a", "snapshot1b")) {
+      String name = "backup_from_" + snapName;
+      SolrQueryResponse resp = new SolrQueryResponse();
+      admin.handleRequestBody
+        (req(CoreAdminParams.ACTION, CoreAdminParams.CoreAdminAction.BACKUPCORE.toString(),
+             "core", DEFAULT_TEST_COLLECTION_NAME,
+             "name", name,
+             "commitName", snapName,
+             "location", backupDir.getAbsolutePath(),
+             CoreAdminParams.BACKUP_INCREMENTAL, "false"),
+         resp);
+      assertNull("Backup "+name+" should have succeeded", resp.getException());
+      simpleBackupCheck(new File(backupDir, "snapshot." + name),
+                        1, oneDocSegmentFile);
+      
+    }
+    admin.close();
+  }
+

@@ -1,0 +1,68 @@
+    @Test
+    @Slow
+    @SuppressWarnings("rawtypes")
+    public void testBackupIncremental() throws Exception {
+        TrackingBackupRepository.clear();
+
+        setTestSuffix("testbackupinc");
+        randomizeReplicaTypes();
+        CloudSolrClient solrClient = cluster.getSolrClient();
+
+        CollectionAdminRequest
+                .createCollection(getCollectionName(), "conf1", NUM_SHARDS, replFactor, numTlogReplicas, numPullReplicas)
+                .process(solrClient);
+
+        indexDocs(getCollectionName(), false);
+
+        String backupName = BACKUPNAME_PREFIX + testSuffix;
+        try (BackupRepository repository = cluster.getJettySolrRunner(0).getCoreContainer()
+                .newBackupRepository(BACKUP_REPO_NAME)) {
+            String backupLocation = repository.getBackupLocation(getBackupLocation());
+            URI uri = repository.resolve(repository.createURI(backupLocation), backupName);
+            BackupFilePaths backupPaths = new BackupFilePaths(repository, uri);
+            IncrementalBackupVerifier verifier = new IncrementalBackupVerifier(repository, backupLocation, backupName, getCollectionName(), 3);
+
+            backupRestoreThenCheck(solrClient, verifier);
+            indexDocs(getCollectionName(), false);
+            backupRestoreThenCheck(solrClient, verifier);
+
+            // adding more commits to trigger merging segments
+            for (int i = 0; i < 15; i++) {
+                indexDocs(getCollectionName(), 5,false);
+            }
+            backupRestoreThenCheck(solrClient, verifier);
+
+            indexDocs(getCollectionName(), false);
+            backupRestoreThenCheck(solrClient, verifier);
+
+            simpleRestoreAndCheckDocCount(solrClient, backupLocation, backupName);
+
+            new UpdateRequest()
+                    .deleteByQuery("*:*")
+                    .commit(cluster.getSolrClient(), getCollectionName());
+            indexDocs(getCollectionName(), false);
+            // corrupt index files
+            corruptIndexFiles();
+            try {
+                log.info("Create backup after corrupt index files");
+                CollectionAdminRequest.Backup backup = CollectionAdminRequest.backupCollection(getCollectionName(), backupName)
+                        .setLocation(backupLocation)
+                        .setIncremental(true)
+                        .setMaxNumberBackupPoints(3)
+                        .setRepositoryName(BACKUP_REPO_NAME);
+                if (random().nextBoolean()) {
+                    RequestStatusState state = backup.processAndWait(cluster.getSolrClient(), 1000);
+                    if (state != RequestStatusState.FAILED) {
+                        fail("This backup should be failed");
+                    }
+                } else {
+                    CollectionAdminResponse rsp = backup.process(cluster.getSolrClient());
+                    fail("This backup should be failed");
+                }
+            } catch (Exception e) {
+                // expected
+                e.printStackTrace();
+            }
+        }
+    }
+

@@ -1,0 +1,32 @@
+    private RestoreContext(ZkNodeProps message, OverseerCollectionMessageHandler ocmh) throws IOException {
+      this.restoreCollectionName = message.getStr(COLLECTION_PROP);
+      this.backupName = message.getStr(NAME); // of backup
+      this.asyncId = message.getStr(ASYNC);
+      this.repo = message.getStr(CoreAdminParams.BACKUP_REPOSITORY);
+      this.backupId = message.getInt(CoreAdminParams.BACKUP_ID, -1);
+
+      this.container = ocmh.overseer.getCoreContainer();
+      this.repository = this.container.newBackupRepository(repo);
+
+      this.location = repository.createURI(message.getStr(CoreAdminParams.BACKUP_LOCATION));
+      final URI backupNameUri = repository.resolve(location, backupName);
+      final String[] entries = repository.listAll(backupNameUri);
+      final boolean incremental = ! Arrays.stream(entries).anyMatch(entry -> entry.equals(BackupManager.TRADITIONAL_BACKUP_PROPS_FILE));
+      this.backupPath = (incremental) ?
+              repository.resolve(backupNameUri, entries[0]) : // incremental backups have an extra path component representing the backed up collection
+              backupNameUri;
+      this.zkStateReader = ocmh.zkStateReader;
+      this.backupManager = backupId == -1 ?
+              BackupManager.forRestore(repository, zkStateReader, backupPath) :
+              BackupManager.forRestore(repository, zkStateReader, backupPath, backupId);
+
+      this.backupProperties = this.backupManager.readBackupProperties();
+      this.backupCollection = this.backupProperties.getCollection();
+      this.restoreConfigName = message.getStr(CollectionAdminParams.COLL_CONF, this.backupProperties.getConfigName());
+      this.backupCollectionState = this.backupManager.readCollectionState(this.backupCollection);
+
+      this.shardHandler = ocmh.shardHandlerFactory.getShardHandler();
+      this.nodeList = Assign.getLiveOrLiveAndCreateNodeSetList(
+              zkStateReader.getClusterState().getLiveNodes(), message, OverseerCollectionMessageHandler.RANDOM);
+    }
+

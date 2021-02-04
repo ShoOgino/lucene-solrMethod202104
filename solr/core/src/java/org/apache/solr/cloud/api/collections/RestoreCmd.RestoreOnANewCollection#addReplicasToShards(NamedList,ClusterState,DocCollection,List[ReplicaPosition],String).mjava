@@ -1,0 +1,67 @@
+    private void addReplicasToShards(@SuppressWarnings({"rawtypes"}) NamedList results,
+                                     ClusterState clusterState,
+                                     DocCollection restoreCollection,
+                                     List<ReplicaPosition> replicaPositions,
+                                     String asyncId) throws Exception {
+      int totalReplicasPerShard = numNrtReplicas + numTlogReplicas + numPullReplicas;
+      if (totalReplicasPerShard > 1) {
+        if (log.isInfoEnabled()) {
+          log.info("Adding replicas to restored collection={}", restoreCollection.getName());
+        }
+        for (Slice slice : restoreCollection.getSlices()) {
+
+          //Add the remaining replicas for each shard, considering it's type
+          int createdNrtReplicas = 0, createdTlogReplicas = 0, createdPullReplicas = 0;
+
+          // We already created either a NRT or an TLOG replica as leader
+          if (numNrtReplicas > 0) {
+            createdNrtReplicas++;
+          } else if (numTlogReplicas > 0) {
+            createdTlogReplicas++;
+          }
+
+          for (int i = 1; i < totalReplicasPerShard; i++) {
+            Replica.Type typeToCreate;
+            if (createdNrtReplicas < numNrtReplicas) {
+              createdNrtReplicas++;
+              typeToCreate = Replica.Type.NRT;
+            } else if (createdTlogReplicas < numTlogReplicas) {
+              createdTlogReplicas++;
+              typeToCreate = Replica.Type.TLOG;
+            } else {
+              createdPullReplicas++;
+              typeToCreate = Replica.Type.PULL;
+              assert createdPullReplicas <= numPullReplicas : "Unexpected number of replicas";
+            }
+
+            if (log.isDebugEnabled()) {
+              log.debug("Adding replica for shard={} collection={} of type {} ", slice.getName(), restoreCollection, typeToCreate);
+            }
+            HashMap<String, Object> propMap = new HashMap<>();
+            propMap.put(COLLECTION_PROP, restoreCollection.getName());
+            propMap.put(SHARD_ID_PROP, slice.getName());
+            propMap.put(REPLICA_TYPE, typeToCreate.name());
+
+            // Get the first node matching the shard to restore in
+            String node;
+            for (ReplicaPosition replicaPosition : replicaPositions) {
+              if (Objects.equals(replicaPosition.shard, slice.getName())) {
+                node = replicaPosition.node;
+                propMap.put(CoreAdminParams.NODE, node);
+                replicaPositions.remove(replicaPosition);
+                break;
+              }
+            }
+
+            // add async param
+            if (asyncId != null) {
+              propMap.put(ASYNC, asyncId);
+            }
+            ocmh.addPropertyParams(message, propMap);
+
+            ocmh.addReplica(clusterState, new ZkNodeProps(propMap), results, null);
+          }
+        }
+      }
+    }
+

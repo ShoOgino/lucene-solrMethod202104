@@ -1,0 +1,59 @@
+        public void verify(List<URI> newFilesCopiedOver) throws IOException {
+            //Verify zk files are reuploaded to a appropriate each time a backup is called
+            //TODO make a little change to zk files and make sure that backed up files match with zk data
+            BackupId prevBackupId = new BackupId(Math.max(0, numBackup - 1));
+
+            URI backupPropertiesFile = repository.resolve(backupURI, "backup_"+numBackup+".properties");
+            URI zkBackupFolder = repository.resolve(backupURI, "zk_backup_"+numBackup);
+            assertTrue(repository.exists(backupPropertiesFile));
+            assertTrue(repository.exists(zkBackupFolder));
+            assertFolderAreSame(repository.resolve(backupURI, BackupFilePaths.getZkStateDir(prevBackupId)), zkBackupFolder);
+
+            // verify indexes file
+            for(Slice slice : getCollectionState(getCollectionName()).getSlices()) {
+                Replica leader = slice.getLeader();
+                final ShardBackupMetadata shardBackupMetadata = getLastShardBackupId(slice.getName());
+
+                try (SolrCore solrCore = cluster.getReplicaJetty(leader).getCoreContainer().getCore(leader.getCoreName())) {
+                    Directory dir = solrCore.getDirectoryFactory().get(solrCore.getIndexDir(), DirectoryFactory.DirContext.DEFAULT, solrCore.getSolrConfig().indexConfig.lockType);
+                    try {
+                        URI indexDir = incBackupFiles.getIndexDir();
+                        IndexCommit lastCommit = solrCore.getDeletionPolicy().getLatestCommit();
+
+                        Collection<String> newBackupFiles = newIndexFilesComparedToLastBackup(slice.getName(), lastCommit).stream()
+                                .map(indexFile -> {
+                                    Optional<ShardBackupMetadata.BackedFile> backedFile = shardBackupMetadata.getFile(indexFile);
+                                    assertTrue(backedFile.isPresent());
+                                    return backedFile.get().uniqueFileName;
+                                })
+                                .collect(Collectors.toList());
+
+                        lastCommit.getFileNames().forEach(
+                                f -> {
+                                    Optional<ShardBackupMetadata.BackedFile> backedFile = shardBackupMetadata.getFile(f);
+                                    assertTrue(backedFile.isPresent());
+                                    String uniqueFileName = backedFile.get().uniqueFileName;
+
+                                    if (newBackupFiles.contains(uniqueFileName)) {
+                                        assertTrue(newFilesCopiedOver.contains(repository.resolve(indexDir, uniqueFileName)));
+                                    }
+
+                                    try {
+                                        Checksum localChecksum = repository.checksum(dir, f);
+                                        Checksum remoteChecksum = backedFile.get().fileChecksum;
+                                        assertEquals(localChecksum.checksum, remoteChecksum.checksum);
+                                        assertEquals(localChecksum.size, remoteChecksum.size);
+                                    } catch (IOException e) {
+                                        throw new AssertionError(e);
+                                    }
+                                }
+                        );
+
+                        assertEquals("Incremental backup stored more files than needed", lastCommit.getFileNames().size(), shardBackupMetadata.listOriginalFileNames().size());
+                    } finally {
+                        solrCore.getDirectoryFactory().release(dir);
+                    }
+                }
+            }
+        }
+

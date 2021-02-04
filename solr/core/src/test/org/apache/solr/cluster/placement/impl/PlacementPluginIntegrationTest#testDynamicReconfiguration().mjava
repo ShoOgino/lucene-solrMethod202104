@@ -1,12 +1,13 @@
   @Test
-  @SuppressWarnings("unchecked")
   public void testDynamicReconfiguration() throws Exception {
     PlacementPluginFactory<? extends PlacementPluginConfig> pluginFactory = cc.getPlacementPluginFactory();
     assertTrue("wrong type " + pluginFactory.getClass().getName(), pluginFactory instanceof DelegatingPlacementPluginFactory);
     DelegatingPlacementPluginFactory wrapper = (DelegatingPlacementPluginFactory) pluginFactory;
+    Phaser phaser = new Phaser();
+    wrapper.setDelegationPhaser(phaser);
 
-    int version = wrapper.getVersion();
-    log.debug("--initial version={}", version);
+    int version = phaser.getPhase();
+    assertTrue("wrong version " + version, version > -1);
 
     PluginMeta plugin = new PluginMeta();
     plugin.name = PlacementPluginFactory.PLUGIN_NAME;
@@ -18,9 +19,7 @@
         .build();
     req.process(cluster.getSolrClient());
 
-    version = waitForVersionChange(version, wrapper, 10);
-
-    assertTrue("wrong version " + version, version > 0);
+    version = phaser.awaitAdvanceInterruptibly(version, 10, TimeUnit.SECONDS);
     PlacementPluginFactory<? extends PlacementPluginConfig> factory = wrapper.getDelegate();
     assertTrue("wrong type " + factory.getClass().getName(), factory instanceof MinimizeCoresPlacementFactory);
 
@@ -34,7 +33,7 @@
         .build();
     req.process(cluster.getSolrClient());
 
-    version = waitForVersionChange(version, wrapper, 10);
+    version = phaser.awaitAdvanceInterruptibly(version, 10, TimeUnit.SECONDS);
 
     factory = wrapper.getDelegate();
     assertTrue("wrong type " + factory.getClass().getName(), factory instanceof AffinityPlacementFactory);
@@ -51,7 +50,7 @@
         .build();
     req.process(cluster.getSolrClient());
 
-    version = waitForVersionChange(version, wrapper, 10);
+    version = phaser.awaitAdvanceInterruptibly(version, 10, TimeUnit.SECONDS);
     factory = wrapper.getDelegate();
     assertTrue("wrong type " + factory.getClass().getName(), factory instanceof AffinityPlacementFactory);
     config = ((AffinityPlacementFactory) factory).getConfig();
@@ -66,14 +65,8 @@
         .withPayload(singletonMap("add", plugin))
         .build();
     req.process(cluster.getSolrClient());
-    try {
-      int newVersion = waitForVersionChange(version, wrapper, 5);
-      if (newVersion != version) {
-        fail("factory configuration updated but plugin name was wrong: " + plugin);
-      }
-    } catch (TimeoutException te) {
-      // expected
-    }
+    final int oldVersion = version;
+    expectThrows(TimeoutException.class, () -> phaser.awaitAdvanceInterruptibly(oldVersion, 5, TimeUnit.SECONDS));
     // remove plugin
     req = new V2Request.Builder("/cluster/plugin")
         .forceV2(true)
@@ -81,7 +74,7 @@
         .withPayload("{remove: '" + PlacementPluginFactory.PLUGIN_NAME + "'}")
         .build();
     req.process(cluster.getSolrClient());
-    waitForVersionChange(version, wrapper, 10);
+    phaser.awaitAdvanceInterruptibly(version, 10, TimeUnit.SECONDS);
     factory = wrapper.getDelegate();
     assertNull("no factory should be present", factory);
   }

@@ -1,14 +1,39 @@
   public void testDictionariesLoadSuccessfully() throws Exception {
-    int failures = 0;
-    for (Path aff : findAllAffixFiles().collect(Collectors.toList())) {
-      try {
-        System.out.println(aff + "\t" + memoryUsage(loadDictionary(aff)));
-      } catch (Throwable e) {
-        failures++;
-        System.err.println("While checking " + aff + ":");
-        e.printStackTrace();
+    int threads = Runtime.getRuntime().availableProcessors();
+    ExecutorService executor =
+        Executors.newFixedThreadPool(threads, new NamedThreadFactory("dictCheck-"));
+    try {
+      List<Path> failures = Collections.synchronizedList(new ArrayList<>());
+      Function<Path, Void> process =
+          (Path aff) -> {
+            try {
+              System.out.println(aff + "\t" + memoryUsage(loadDictionary(aff)));
+            } catch (Throwable e) {
+              failures.add(aff);
+              System.err.println("While checking " + aff + ":");
+              e.printStackTrace();
+            }
+            return null;
+          };
+
+      for (Future<?> future :
+          executor.invokeAll(
+              findAllAffixFiles()
+                  .map(aff -> (Callable<?>) () -> process.apply(aff))
+                  .collect(Collectors.toList()))) {
+        future.get();
       }
+
+      if (!failures.isEmpty()) {
+        throw new AssertionError(
+            "Certain dictionaries failed to parse:\n  - "
+                + failures.stream()
+                    .map(path -> path.toAbsolutePath().toString())
+                    .collect(Collectors.joining("\n  - ")));
+      }
+    } finally {
+      executor.shutdown();
+      executor.awaitTermination(1, TimeUnit.MINUTES);
     }
-    assertEquals(failures + " failures!", 0, failures);
   }
 

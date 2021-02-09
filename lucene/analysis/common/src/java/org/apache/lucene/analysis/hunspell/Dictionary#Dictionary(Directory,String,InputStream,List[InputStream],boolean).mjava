@@ -20,26 +20,37 @@
     this.needsInputCleaning = ignoreCase;
     this.needsOutputCleaning = false; // set if we have an OCONV
 
-    Path tempPath = getDefaultTempDir(); // TODO: make this configurable?
-    Path aff = Files.createTempFile(tempPath, "affix", "aff");
-
-    BufferedInputStream aff1 = null;
-    InputStream aff2 = null;
-    boolean success = false;
-    try {
-      // Copy contents of the affix stream to a temp file.
-      try (OutputStream os = Files.newOutputStream(aff)) {
-        affix.transferTo(os);
+    try (BufferedInputStream affixStream =
+        new BufferedInputStream(affix, MAX_PROLOGUE_SCAN_WINDOW) {
+          @Override
+          public void close() throws IOException {
+            // TODO: maybe we should consume and close it? Why does it need to stay open?
+            // Don't close the affix stream as per javadoc.
+          }
+        }) {
+      // I assume we don't support other BOMs (utf16, etc.)? We trivially could,
+      // by adding maybeConsume() with a proper bom... but I don't see hunspell repo to have
+      // any such exotic examples.
+      Charset streamCharset;
+      if (maybeConsume(affixStream, BOM_UTF8)) {
+        streamCharset = StandardCharsets.UTF_8;
+      } else {
+        streamCharset = DEFAULT_CHARSET;
       }
 
-      // pass 1: get encoding & flag
-      aff1 = new BufferedInputStream(Files.newInputStream(aff));
-      readConfig(aff1);
+      /*
+       * pass 1: look for encoding & flag. This is simple but works. We just prefetch
+       * a large enough chunk of the input and scan through it. The buffered data will
+       * be subsequently reused anyway so nothing is wasted.
+       */
+      affixStream.mark(MAX_PROLOGUE_SCAN_WINDOW);
+      byte[] prologue = affixStream.readNBytes(MAX_PROLOGUE_SCAN_WINDOW - 1);
+      affixStream.reset();
+      readConfig(new ByteArrayInputStream(prologue), streamCharset);
 
       // pass 2: parse affixes
-      aff2 = new BufferedInputStream(Files.newInputStream(aff));
       FlagEnumerator flagEnumerator = new FlagEnumerator();
-      readAffixFile(aff2, decoder, flagEnumerator);
+      readAffixFile(affixStream, decoder, flagEnumerator);
 
       // read dictionary entries
       IndexOutput unsorted = mergeDictionaries(tempDir, tempFileNamePrefix, dictionaries, decoder);
@@ -48,14 +59,6 @@
       flagLookup = flagEnumerator.finish();
       aliases = null; // no longer needed
       morphAliases = null; // no longer needed
-      success = true;
-    } finally {
-      IOUtils.closeWhileHandlingException(aff1, aff2);
-      if (success) {
-        Files.delete(aff);
-      } else {
-        IOUtils.deleteFilesIgnoringExceptions(aff);
-      }
     }
   }
 

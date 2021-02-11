@@ -1,26 +1,31 @@
   public void testDictionariesLoadSuccessfully() throws Exception {
+    AtomicLong totalMemory = new AtomicLong();
+    AtomicLong totalWords = new AtomicLong();
     int threads = Runtime.getRuntime().availableProcessors();
     ExecutorService executor =
         Executors.newFixedThreadPool(threads, new NamedThreadFactory("dictCheck-"));
-    try {
-      List<Path> failures = Collections.synchronizedList(new ArrayList<>());
-      Function<Path, Void> process =
-          (Path aff) -> {
-            try {
-              System.out.println(aff + "\t" + memoryUsage(loadDictionary(aff)));
-            } catch (Throwable e) {
-              failures.add(aff);
-              System.err.println("While checking " + aff + ":");
-              e.printStackTrace();
-            }
-            return null;
-          };
+    List<Path> failures = Collections.synchronizedList(new ArrayList<>());
+    Function<Path, Void> process =
+        (Path aff) -> {
+          try {
+            Dictionary dic = loadDictionary(aff);
+            totalMemory.addAndGet(RamUsageTester.sizeOf(dic));
+            totalWords.addAndGet(RamUsageTester.sizeOf(dic.words));
+            System.out.println(aff + "\t" + memoryUsageSummary(dic));
+          } catch (Throwable e) {
+            failures.add(aff);
+            System.err.println("While checking " + aff + ":");
+            e.printStackTrace();
+          }
+          return null;
+        };
 
-      for (Future<?> future :
-          executor.invokeAll(
-              findAllAffixFiles()
-                  .map(aff -> (Callable<?>) () -> process.apply(aff))
-                  .collect(Collectors.toList()))) {
+    List<Callable<Void>> tasks =
+        findAllAffixFiles()
+            .map(aff -> (Callable<Void>) () -> process.apply(aff))
+            .collect(Collectors.toList());
+    try {
+      for (Future<?> future : executor.invokeAll(tasks)) {
         future.get();
       }
 
@@ -33,7 +38,12 @@
       }
     } finally {
       executor.shutdown();
-      executor.awaitTermination(1, TimeUnit.MINUTES);
+      assertTrue(executor.awaitTermination(1, TimeUnit.MINUTES));
     }
+
+    System.out.println("Total dictionaries loaded: " + tasks.size());
+    System.out.println("Total memory: " + RamUsageEstimator.humanReadableUnits(totalMemory.get()));
+    System.out.println(
+        "Total memory for word storage: " + RamUsageEstimator.humanReadableUnits(totalWords.get()));
   }
 

@@ -1,0 +1,75 @@
+  /**
+   * Index random vectors, sometimes skipping documents, sometimes deleting a document, sometimes
+   * merging, sometimes sorting the index, and verify that the expected values can be read back
+   * consistently.
+   */
+  public void testRandom() throws Exception {
+    IndexWriterConfig iwc = newIndexWriterConfig();
+    if (random().nextBoolean()) {
+      iwc.setIndexSort(new Sort(new SortField("sortkey", SortField.Type.INT)));
+    }
+    String fieldName = "field";
+    try (Directory dir = newDirectory();
+        IndexWriter iw = new IndexWriter(dir, iwc)) {
+      int numDoc = atLeast(100);
+      int dimension = atLeast(10);
+      float[] scratch = new float[dimension];
+      int numValues = 0;
+      float[][] values = new float[numDoc][];
+      for (int i = 0; i < numDoc; i++) {
+        if (random().nextInt(7) != 3) {
+          // usually index a vector value for a doc
+          values[i] = randomVector(dimension);
+          ++numValues;
+        }
+        if (random().nextBoolean() && values[i] != null) {
+          // sometimes use a shared scratch array
+          System.arraycopy(values[i], 0, scratch, 0, scratch.length);
+          add(iw, fieldName, i, scratch, VectorValues.SearchStrategy.NONE);
+        } else {
+          add(iw, fieldName, i, values[i], VectorValues.SearchStrategy.NONE);
+        }
+        if (random().nextInt(10) == 2) {
+          // sometimes delete a random document
+          int idToDelete = random().nextInt(i + 1);
+          iw.deleteDocuments(new Term("id", Integer.toString(idToDelete)));
+          // and remember that it was deleted
+          if (values[idToDelete] != null) {
+            values[idToDelete] = null;
+            --numValues;
+          }
+        }
+        if (random().nextInt(10) == 3) {
+          iw.commit();
+        }
+      }
+      int numDeletes = 0;
+      try (IndexReader reader = iw.getReader()) {
+        int valueCount = 0, totalSize = 0;
+        for (LeafReaderContext ctx : reader.leaves()) {
+          VectorValues vectorValues = ctx.reader().getVectorValues(fieldName);
+          if (vectorValues == null) {
+            continue;
+          }
+          totalSize += vectorValues.size();
+          int docId;
+          while ((docId = vectorValues.nextDoc()) != NO_MORE_DOCS) {
+            float[] v = vectorValues.vectorValue();
+            assertEquals(dimension, v.length);
+            String idString = ctx.reader().document(docId).getField("id").stringValue();
+            int id = Integer.parseInt(idString);
+            if (ctx.reader().getLiveDocs() == null || ctx.reader().getLiveDocs().get(docId)) {
+              assertArrayEquals(idString, values[id], v, 0);
+              ++valueCount;
+            } else {
+              ++numDeletes;
+              assertNull(values[id]);
+            }
+          }
+        }
+        assertEquals(numValues, valueCount);
+        assertEquals(numValues, totalSize - numDeletes);
+      }
+    }
+  }
+

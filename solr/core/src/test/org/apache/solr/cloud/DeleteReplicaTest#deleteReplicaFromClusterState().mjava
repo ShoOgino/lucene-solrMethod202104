@@ -20,7 +20,8 @@
                                          ! r.equals(shard.getLeader())));
     
     JettySolrRunner replicaJetty = cluster.getReplicaJetty(replica);
-    ZkStateReaderAccessor accessor = new ZkStateReaderAccessor(replicaJetty.getCoreContainer().getZkController().getZkStateReader());
+    ZkController replicaZkController = replicaJetty.getCoreContainer().getZkController();
+    ZkStateReaderAccessor accessor = new ZkStateReaderAccessor(replicaZkController.getZkStateReader());
 
     final long preDeleteWatcherCount = countUnloadCoreOnDeletedWatchers
       (accessor.getStateWatchers(collectionName));
@@ -32,7 +33,14 @@
         ZkStateReader.COLLECTION_PROP, collectionName,
         ZkStateReader.CORE_NODE_NAME_PROP, replica.getName());
 
-    cluster.getOpenOverseer().getStateUpdateQueue().offer(Utils.toJSON(m));
+    if (replicaZkController.getDistributedClusterStateUpdater().isDistributedStateUpdate()) {
+      cluster.getOpenOverseer().getDistributedClusterStateUpdater().doSingleStateUpdate(
+          DistributedClusterStateUpdater.MutatingCommand.SliceRemoveReplica, m,
+          cluster.getOpenOverseer().getSolrCloudManager(),
+          cluster.getOpenOverseer().getZkStateReader());
+    } else {
+      cluster.getOpenOverseer().getStateUpdateQueue().offer(Utils.toJSON(m));
+    }
 
     waitForState("Timeout waiting for replica get deleted", collectionName,
         (liveNodes, collectionState) -> collectionState.getSlice("shard1").getReplicas().size() == 2);

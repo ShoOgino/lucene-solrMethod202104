@@ -1,51 +1,19 @@
   public List<ZkWriteCommand> downNode(ClusterState clusterState, ZkNodeProps message) {
-    List<ZkWriteCommand> zkWriteCommands = new ArrayList<>();
     String nodeName = message.getStr(ZkStateReader.NODE_NAME_PROP);
 
     log.debug("DownNode state invoked for node: {}", nodeName);
 
+    List<ZkWriteCommand> zkWriteCommands = new ArrayList<>();
+
     Map<String, DocCollection> collections = clusterState.getCollectionsMap();
     for (Map.Entry<String, DocCollection> entry : collections.entrySet()) {
-       List<String> downedReplicas = new ArrayList<>();
-
-      String collection = entry.getKey();
+      String collectionName = entry.getKey();
       DocCollection docCollection = entry.getValue();
 
-      Map<String,Slice> slicesCopy = new LinkedHashMap<>(docCollection.getSlicesMap());
+      Optional<ZkWriteCommand> zkWriteCommand = computeCollectionUpdate(nodeName, collectionName, docCollection);
 
-      boolean needToUpdateCollection = false;
-      for (Entry<String, Slice> sliceEntry : slicesCopy.entrySet()) {
-        Slice slice = sliceEntry.getValue();
-        Map<String, Replica> newReplicas = slice.getReplicasCopy();
-
-        Collection<Replica> replicas = slice.getReplicas();
-        for (Replica replica : replicas) {
-          String rNodeName = replica.getNodeName();
-          if (rNodeName == null) {
-            throw new RuntimeException("Replica without node name! " + replica);
-          }
-          if (rNodeName.equals(nodeName)) {
-            log.debug("Update replica state for {} to {}", replica, Replica.State.DOWN);
-            Map<String, Object> props = replica.shallowCopy();
-            Replica newReplica = new Replica(replica.getName(), replica.node, replica.collection, slice.getName(), replica.core,
-                Replica.State.DOWN, replica.type, props);
-            newReplicas.put(replica.getName(), newReplica);
-            needToUpdateCollection = true;
-            downedReplicas.add(replica.getName());
-          }
-        }
-
-        Slice newSlice = new Slice(slice.getName(), newReplicas, slice.shallowCopy(),collection);
-        slicesCopy.put(slice.getName(), newSlice);
-      }
-
-      if (needToUpdateCollection) {
-        if (docCollection.isPerReplicaState()) {
-          zkWriteCommands.add(new ZkWriteCommand(collection, docCollection.copyWithSlices(slicesCopy),
-              PerReplicaStatesOps.downReplicas(downedReplicas, docCollection.getPerReplicaStates()), false));
-        } else {
-          zkWriteCommands.add(new ZkWriteCommand(collection, docCollection.copyWithSlices(slicesCopy)));
-        }
+      if (zkWriteCommand.isPresent()) {
+        zkWriteCommands.add(zkWriteCommand.get());
       }
     }
 

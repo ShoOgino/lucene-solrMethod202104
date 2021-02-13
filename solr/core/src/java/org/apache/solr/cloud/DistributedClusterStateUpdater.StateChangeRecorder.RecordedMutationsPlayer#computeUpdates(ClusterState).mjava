@@ -1,0 +1,29 @@
+      @Override
+      public void computeUpdates(ClusterState clusterState) {
+        boolean hasJsonUpdates = false;
+        List<PerReplicaStatesOps> perReplicaStateOps = new LinkedList<>();
+        for (Pair<MutatingCommand, ZkNodeProps> mutation : mutations) {
+          MutatingCommand mutatingCommand = mutation.first();
+          ZkNodeProps message = mutation.second();
+          try {
+            ZkWriteCommand zkcmd = mutatingCommand.buildWriteCommand(scm, clusterState, message);
+            if (zkcmd != ZkStateWriter.NO_OP) {
+              hasJsonUpdates = true;
+              clusterState = clusterState.copyWith(zkcmd.name, zkcmd.collection);
+            }
+            if (zkcmd.ops != null && zkcmd.ops.get() != null) {
+              perReplicaStateOps.add(zkcmd.ops);
+            }
+          } catch (Exception e) {
+            // Seems weird to skip rather than fail, but that's what Overseer is doing (see ClusterStateUpdater.processQueueItem()).
+            // Maybe in the new distributed update world we should make the caller fail? (something Overseer cluster state updater can't do)
+            // To be reconsidered once Collection API commands are distributed because then cluster updates are done synchronously and
+            // have the opportunity to make the Collection API call fail directly.
+            log.error("Distributed cluster state update could not process the current clusterstate state update message, skipping the message: {}", message, e);
+          }
+        }
+
+        computedState = hasJsonUpdates ? clusterState : null;
+        replicaOpsList = perReplicaStateOps.isEmpty() ? null : perReplicaStateOps;
+      }
+

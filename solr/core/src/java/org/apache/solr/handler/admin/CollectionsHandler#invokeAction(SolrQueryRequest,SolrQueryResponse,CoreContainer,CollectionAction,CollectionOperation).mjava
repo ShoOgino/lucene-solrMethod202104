@@ -25,7 +25,8 @@
         rsp.setException(exp);
       }
 
-      //TODO yuck; shouldn't create-collection at the overseer do this?  (conditionally perhaps)
+      // Even if Overseer does wait for the collection to be created, it sees a different cluster state than this node,
+      // so this wait is required to make sure the local node Zookeeper watches fired and now see the collection.
       if (action.equals(CollectionAction.CREATE) && asyncId == null) {
         if (rsp.getException() == null) {
           waitForActiveCollection(zkProps.getStr(NAME), cores, overseerResponse);
@@ -33,8 +34,16 @@
       }
 
     } else {
-      // submits and doesn't wait for anything (no response)
-      coreContainer.getZkController().getOverseer().offerStateUpdate(Utils.toJSON(props));
+      if (distributedClusterStateUpdater.isDistributedStateUpdate()) {
+        DistributedClusterStateUpdater.MutatingCommand command = DistributedClusterStateUpdater.MutatingCommand.getCommandFor(operation.action);
+        ZkNodeProps message = new ZkNodeProps(props);
+        // We do the state change synchronously but do not wait for it to be visible in this node's cluster state updated via ZK watches
+        distributedClusterStateUpdater.doSingleStateUpdate(command, message,
+            coreContainer.getZkController().getSolrCloudManager(), coreContainer.getZkController().getZkStateReader());
+      } else {
+        // submits and doesn't wait for anything (no response)
+        coreContainer.getZkController().getOverseer().offerStateUpdate(Utils.toJSON(props));
+      }
     }
 
   }

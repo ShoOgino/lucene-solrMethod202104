@@ -1,0 +1,52 @@
+    @Override
+    public void load(
+        SolrQueryRequest req,
+        SolrQueryResponse rsp,
+        ContentStream stream,
+        UpdateRequestProcessor processor)
+        throws Exception {
+
+      String tr = req.getParams().get(TR, null);
+      if (tr == null) {
+        super.load(req, rsp, stream, processor); // no XSLT; do standard processing
+        return;
+      }
+
+      if (req.getCore().getCoreDescriptor().isConfigSetTrusted() == false) {
+        throw new SolrException(
+            SolrException.ErrorCode.UNAUTHORIZED,
+            "The configset for this collection was uploaded without any authentication in place,"
+                + " and this operation is not available for collections with untrusted configsets. To use this feature, re-upload the configset"
+                + " after enabling authentication and authorization.");
+      }
+
+      final Transformer t = TransformerProvider.getTransformer(req, tr, xsltCacheLifetimeSeconds);
+      final DOMResult result = new DOMResult();
+
+      // first step: read XML and build DOM using Transformer (this is no overhead, as XSL always
+      // produces
+      // an internal result DOM tree, we just access it directly as input for StAX):
+      try (var is = stream.getStream()) {
+        final XMLReader xmlr = saxFactory.newSAXParser().getXMLReader();
+        xmlr.setErrorHandler(xmllog);
+        xmlr.setEntityResolver(EmptyEntityResolver.SAX_INSTANCE);
+        final InputSource isrc = new InputSource(is);
+        isrc.setEncoding(ContentStreamBase.getCharsetFromContentType(stream.getContentType()));
+        final SAXSource source = new SAXSource(xmlr, isrc);
+        t.transform(source, result);
+      } catch (TransformerException e) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e.toString(), e);
+      }
+
+      // second step: feed the intermediate DOM tree into StAX parser:
+      XMLStreamReader parser = null; // does not implement AutoCloseable!
+      try {
+        parser = inputFactory.createXMLStreamReader(new DOMSource(result.getNode()));
+        this.processUpdate(req, processor, parser);
+      } catch (XMLStreamException e) {
+        throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, e.toString(), e);
+      } finally {
+        if (parser != null) parser.close();
+      }
+    }
+

@@ -1,0 +1,40 @@
+    @Test
+    public void testRestoreToOriginalCollection() throws Exception {
+        setTestSuffix("testbackuprestoretooriginal");
+        final String backupCollectionName = getCollectionName();
+        final String backupName = BACKUPNAME_PREFIX + testSuffix;
+
+        // Bootstrap the backup collection with seed docs
+        CollectionAdminRequest
+                .createCollection(backupCollectionName, "conf1", NUM_SHARDS, REPL_FACTOR)
+                .process(cluster.getSolrClient());
+        final int firstBatchNumDocs = indexDocs(backupCollectionName, true);
+
+        // Backup and immediately add more docs to the collection
+        try (BackupRepository repository = cluster.getJettySolrRunner(0).getCoreContainer()
+                .newBackupRepository(BACKUP_REPO_NAME)) {
+            final String backupLocation = repository.getBackupLocation(getBackupLocation());
+            final RequestStatusState result = CollectionAdminRequest.backupCollection(backupCollectionName, backupName)
+                    .setLocation(backupLocation)
+                    .setRepositoryName(BACKUP_REPO_NAME)
+                    .processAndWait(cluster.getSolrClient(), 10 * 1000);
+            assertEquals(RequestStatusState.COMPLETED, result);
+        }
+        final int secondBatchNumDocs = indexDocs(backupCollectionName, true);
+        final int maxDocs = secondBatchNumDocs + firstBatchNumDocs;
+        assertEquals(maxDocs, getNumDocsInCollection(backupCollectionName));
+
+        // Restore original docs and validate that doc count is correct
+        try (BackupRepository repository = cluster.getJettySolrRunner(0).getCoreContainer()
+                .newBackupRepository(BACKUP_REPO_NAME)) {
+            final String backupLocation = repository.getBackupLocation(getBackupLocation());
+            final RequestStatusState result = CollectionAdminRequest.restoreCollection(backupCollectionName, backupName)
+                    .setLocation(backupLocation)
+                    .setRepositoryName(BACKUP_REPO_NAME)
+                    .processAndWait(cluster.getSolrClient(), 20 * 1000);
+            assertEquals(RequestStatusState.COMPLETED, result);
+        }
+        assertEquals(firstBatchNumDocs, getNumDocsInCollection(backupCollectionName));
+
+    }
+

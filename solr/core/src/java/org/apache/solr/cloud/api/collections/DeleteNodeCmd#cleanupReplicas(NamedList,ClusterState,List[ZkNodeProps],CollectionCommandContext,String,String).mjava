@@ -1,0 +1,40 @@
+  @SuppressWarnings({"unchecked"})
+  static void cleanupReplicas(@SuppressWarnings({"rawtypes"})NamedList results,
+                              ClusterState clusterState,
+                              List<ZkNodeProps> sourceReplicas,
+                              CollectionCommandContext ccc,
+                              String node,
+                              String async) throws IOException, InterruptedException {
+    CountDownLatch cleanupLatch = new CountDownLatch(sourceReplicas.size());
+    for (ZkNodeProps sourceReplica : sourceReplicas) {
+      String coll = sourceReplica.getStr(COLLECTION_PROP);
+      String shard = sourceReplica.getStr(SHARD_ID_PROP);
+      String type = sourceReplica.getStr(ZkStateReader.REPLICA_TYPE);
+      log.info("Deleting replica type={} for collection={} shard={} on node={}", type, coll, shard, node);
+      @SuppressWarnings({"rawtypes"})
+      NamedList deleteResult = new NamedList();
+      try {
+        if (async != null) sourceReplica = sourceReplica.plus(ASYNC, async);
+        new DeleteReplicaCmd(ccc).deleteReplica(clusterState, sourceReplica.plus("parallel", "true"), deleteResult, () -> {
+          cleanupLatch.countDown();
+          if (deleteResult.get("failure") != null) {
+            synchronized (results) {
+
+              results.add("failure", String.format(Locale.ROOT, "Failed to delete replica for collection=%s shard=%s" +
+                  " on node=%s", coll, shard, node));
+            }
+          }
+        });
+      } catch (KeeperException e) {
+        log.warn("Error deleting ", e);
+        cleanupLatch.countDown();
+      } catch (Exception e) {
+        log.warn("Error deleting ", e);
+        cleanupLatch.countDown();
+        throw e;
+      }
+    }
+    log.debug("Waiting for delete node action to complete");
+    cleanupLatch.await(5, TimeUnit.MINUTES);
+  }
+

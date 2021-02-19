@@ -11,7 +11,7 @@
 
     final String collectionName;
     if (followAliases) {
-      collectionName =  ocmh.cloudManager.getClusterStateProvider().resolveSimpleAlias(extCollectionName);
+      collectionName =  ccc.getSolrCloudManager().getClusterStateProvider().resolveSimpleAlias(extCollectionName);
     } else {
       collectionName = extCollectionName;
     }
@@ -58,17 +58,17 @@
       }
     }
 
-    List<CreateReplica> createReplicas = buildReplicaPositions(ocmh.cloudManager, clusterState, collectionName, message, replicaTypesVsCount,
-        ocmh.overseer.getCoreContainer())
-          .stream()
-          .map(replicaPosition -> assignReplicaDetails(ocmh.cloudManager, clusterState, message, replicaPosition))
-          .collect(Collectors.toList());
+    List<CreateReplica> createReplicas = buildReplicaPositions(ccc.getSolrCloudManager(), clusterState, collectionName, message, replicaTypesVsCount,
+        ccc.getCoreContainer())
+        .stream()
+        .map(replicaPosition -> assignReplicaDetails(ccc.getSolrCloudManager(), clusterState, message, replicaPosition))
+        .collect(Collectors.toList());
 
 
-    ShardHandler shardHandler = ocmh.shardHandlerFactory.getShardHandler();
-    ZkStateReader zkStateReader = ocmh.zkStateReader;
+    ShardHandler shardHandler = ccc.getShardHandler();
+    ZkStateReader zkStateReader = ccc.getZkStateReader();
 
-    final ShardRequestTracker shardRequestTracker = ocmh.asyncRequestTracker(asyncId);
+    final ShardRequestTracker shardRequestTracker = CollectionHandlingUtils.asyncRequestTracker(asyncId, ccc);
     for (CreateReplica createReplica : createReplicas) {
       assert createReplica.coreName != null;
       ModifiableSolrParams params = getReplicaParams(clusterState, message, results, collectionName, coll, skipCreateReplicaInClusterState, asyncId, shardHandler, createReplica);
@@ -78,14 +78,14 @@
     Runnable runnable = () -> {
       shardRequestTracker.processResponses(results, shardHandler, true, "ADDREPLICA failed to create replica");
       for (CreateReplica replica : createReplicas) {
-        ocmh.waitForCoreNodeName(collectionName, replica.node, replica.coreName);
+        CollectionHandlingUtils.waitForCoreNodeName(collectionName, replica.node, replica.coreName, ccc.getZkStateReader());
       }
       if (onComplete != null) onComplete.run();
     };
 
     if (!parallel || waitForFinalState) {
       if (waitForFinalState) {
-        SolrCloseableLatch latch = new SolrCloseableLatch(totalReplicas, ocmh);
+        SolrCloseableLatch latch = new SolrCloseableLatch(totalReplicas, ccc.getCloseableToLatchOn());
         ActiveReplicaWatcher watcher = new ActiveReplicaWatcher(collectionName, null,
             createReplicas.stream().map(createReplica -> createReplica.coreName).collect(Collectors.toList()), latch);
         try {
@@ -101,7 +101,7 @@
         runnable.run();
       }
     } else {
-      ocmh.tpe.submit(runnable);
+      ccc.getExecutorService().submit(runnable);
     }
 
     return createReplicas.stream()

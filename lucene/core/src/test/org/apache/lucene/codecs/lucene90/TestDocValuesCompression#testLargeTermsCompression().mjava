@@ -1,0 +1,35 @@
+  public void testLargeTermsCompression() throws IOException {
+    final int CARDINALITY = Lucene90DocValuesFormat.TERMS_DICT_BLOCK_COMPRESSION_THRESHOLD << 1;
+    Set<String> valuesSet = new HashSet<>();
+    for (int i = 0; i < CARDINALITY; ++i) {
+      final int length = TestUtil.nextInt(random(), 512, 1024);
+      valuesSet.add(TestUtil.randomSimpleString(random(), length));
+    }
+    int valuesCount = valuesSet.size();
+    List<String> values = new ArrayList<>(valuesSet);
+
+    try (Directory directory = newDirectory()) {
+      Analyzer analyzer = new StandardAnalyzer();
+      IndexWriterConfig config = new IndexWriterConfig(analyzer);
+      config.setCodec(bestCompression);
+      config.setUseCompoundFile(false);
+      IndexWriter writer = new IndexWriter(directory, config);
+      for (int i = 0; i < 256; i++) {
+        Document doc = new Document();
+        doc.add(new StringField("id", "Doc" + i, Field.Store.NO));
+        doc.add(new SortedDocValuesField("sdv", new BytesRef(values.get(i % valuesCount))));
+        writer.addDocument(doc);
+      }
+      writer.commit();
+      writer.forceMerge(1);
+      DirectoryReader ireader = DirectoryReader.open(writer);
+      writer.close();
+
+      LeafReader reader = getOnlyLeafReader(ireader);
+      // Check values count.
+      SortedDocValues ssdvMulti = reader.getSortedDocValues("sdv");
+      assertEquals(valuesCount, ssdvMulti.getValueCount());
+      ireader.close();
+    }
+  }
+

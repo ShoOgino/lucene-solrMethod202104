@@ -1,0 +1,96 @@
+  /* Decodes only the term bytes of the next term.  If caller then asks for
+  metadata, ie docFreq, totalTermFreq or pulls a D/&PEnum, we then (lazily)
+  decode all metadata up to the current term. */
+  @Override
+  public BytesRef next() throws IOException {
+    if (in == null) {
+      // Fresh TermsEnum; seek to first term:
+      final FST.Arc<BytesRef> arc;
+      if (fr.index != null) {
+        arc = fr.index.getFirstArc(arcs[0]);
+        // Empty string prefix must have an output in the index!
+        assert arc.isFinal();
+      } else {
+        arc = null;
+      }
+      currentFrame = pushFrame(arc, fr.rootCode, 0);
+      currentFrame.loadBlock();
+    }
+
+    targetBeforeCurrentLength = currentFrame.ord;
+
+    assert !eof;
+    // if (DEBUG) {
+    //   System.out.println("\nBTTR.next seg=" + fr.parent.segment + " term=" + brToString(term) + "
+    // termExists?=" + termExists + " field=" + fr.fieldInfo.name + " termBlockOrd=" +
+    // currentFrame.state.termBlockOrd + " validIndexPrefix=" + validIndexPrefix);
+    //   printSeekState(System.out);
+    // }
+
+    if (currentFrame == staticFrame) {
+      // If seek was previously called and the term was
+      // cached, or seek(TermState) was called, usually
+      // caller is just going to pull a D/&PEnum or get
+      // docFreq, etc.  But, if they then call next(),
+      // this method catches up all internal state so next()
+      // works properly:
+      // if (DEBUG) System.out.println("  re-seek to pending term=" + term.utf8ToString() + " " +
+      // term);
+      final boolean result = seekExact(term.get());
+      assert result;
+    }
+
+    // Pop finished blocks
+    while (currentFrame.nextEnt == currentFrame.entCount) {
+      if (!currentFrame.isLastInFloor) {
+        // Advance to next floor block
+        currentFrame.loadNextFloorBlock();
+        break;
+      } else {
+        // if (DEBUG) System.out.println("  pop frame");
+        if (currentFrame.ord == 0) {
+          // if (DEBUG) System.out.println("  return null");
+          assert setEOF();
+          term.clear();
+          validIndexPrefix = 0;
+          currentFrame.rewind();
+          termExists = false;
+          return null;
+        }
+        final long lastFP = currentFrame.fpOrig;
+        currentFrame = stack[currentFrame.ord - 1];
+
+        if (currentFrame.nextEnt == -1 || currentFrame.lastSubFP != lastFP) {
+          // We popped into a frame that's not loaded
+          // yet or not scan'd to the right entry
+          currentFrame.scanToFloorFrame(term.get());
+          currentFrame.loadBlock();
+          currentFrame.scanToSubBlock(lastFP);
+        }
+
+        // Note that the seek state (last seek) has been
+        // invalidated beyond this depth
+        validIndexPrefix = Math.min(validIndexPrefix, currentFrame.prefix);
+        // if (DEBUG) {
+        // System.out.println("  reset validIndexPrefix=" + validIndexPrefix);
+        // }
+      }
+    }
+
+    while (true) {
+      if (currentFrame.next()) {
+        // Push to new block:
+        // if (DEBUG) System.out.println("  push frame");
+        currentFrame = pushFrame(null, currentFrame.lastSubFP, term.length());
+        // This is a "next" frame -- even if it's
+        // floor'd we must pretend it isn't so we don't
+        // try to scan to the right floor frame:
+        currentFrame.loadBlock();
+      } else {
+        // if (DEBUG) System.out.println("  return term=" + brToString(term) + " currentFrame.ord="
+        // + currentFrame.ord);
+        return term.get();
+      }
+    }
+  }
+

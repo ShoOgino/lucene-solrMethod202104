@@ -1,0 +1,65 @@
+  @Override
+  public void startDoc(int docID, int termDocFreq) throws IOException {
+    // Have collected a block of docs, and get a new doc.
+    // Should write skip data as well as postings list for
+    // current block.
+    if (lastBlockDocID != -1 && docBufferUpto == 0) {
+      skipWriter.bufferSkip(
+          lastBlockDocID,
+          competitiveFreqNormAccumulator,
+          docCount,
+          lastBlockPosFP,
+          lastBlockPayFP,
+          lastBlockPosBufferUpto,
+          lastBlockPayloadByteUpto);
+      competitiveFreqNormAccumulator.clear();
+    }
+
+    final int docDelta = docID - lastDocID;
+
+    if (docID < 0 || (docCount > 0 && docDelta <= 0)) {
+      throw new CorruptIndexException(
+          "docs out of order (" + docID + " <= " + lastDocID + " )", docOut);
+    }
+
+    docDeltaBuffer[docBufferUpto] = docDelta;
+    if (writeFreqs) {
+      freqBuffer[docBufferUpto] = termDocFreq;
+    }
+
+    docBufferUpto++;
+    docCount++;
+
+    if (docBufferUpto == BLOCK_SIZE) {
+      forDeltaUtil.encodeDeltas(docDeltaBuffer, docOut);
+      if (writeFreqs) {
+        pforUtil.encode(freqBuffer, docOut);
+      }
+      // NOTE: don't set docBufferUpto back to 0 here;
+      // finishDoc will do so (because it needs to see that
+      // the block was filled so it can save skip data)
+    }
+
+    lastDocID = docID;
+    lastPosition = 0;
+    lastStartOffset = 0;
+
+    long norm;
+    if (fieldHasNorms) {
+      boolean found = norms.advanceExact(docID);
+      if (found == false) {
+        // This can happen if indexing hits a problem after adding a doc to the
+        // postings but before buffering the norm. Such documents are written
+        // deleted and will go away on the first merge.
+        norm = 1L;
+      } else {
+        norm = norms.longValue();
+        assert norm != 0 : docID;
+      }
+    } else {
+      norm = 1L;
+    }
+
+    competitiveFreqNormAccumulator.add(writeFreqs ? termDocFreq : 1, norm);
+  }
+

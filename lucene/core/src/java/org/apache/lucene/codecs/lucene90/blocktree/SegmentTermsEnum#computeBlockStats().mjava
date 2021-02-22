@@ -1,0 +1,88 @@
+  /** Runs next() through the entire terms dict, computing aggregate statistics. */
+  public Stats computeBlockStats() throws IOException {
+
+    Stats stats = new Stats(fr.parent.segment, fr.fieldInfo.name);
+    if (fr.index != null) {
+      stats.indexNumBytes = fr.index.ramBytesUsed();
+    }
+
+    currentFrame = staticFrame;
+    FST.Arc<BytesRef> arc;
+    if (fr.index != null) {
+      arc = fr.index.getFirstArc(arcs[0]);
+      // Empty string prefix must have an output in the index!
+      assert arc.isFinal();
+    } else {
+      arc = null;
+    }
+
+    // Empty string prefix must have an output in the
+    // index!
+    currentFrame = pushFrame(arc, fr.rootCode, 0);
+    currentFrame.fpOrig = currentFrame.fp;
+    currentFrame.loadBlock();
+    validIndexPrefix = 0;
+
+    stats.startBlock(currentFrame, !currentFrame.isLastInFloor);
+
+    allTerms:
+    while (true) {
+
+      // Pop finished blocks
+      while (currentFrame.nextEnt == currentFrame.entCount) {
+        stats.endBlock(currentFrame);
+        if (!currentFrame.isLastInFloor) {
+          // Advance to next floor block
+          currentFrame.loadNextFloorBlock();
+          stats.startBlock(currentFrame, true);
+          break;
+        } else {
+          if (currentFrame.ord == 0) {
+            break allTerms;
+          }
+          final long lastFP = currentFrame.fpOrig;
+          currentFrame = stack[currentFrame.ord - 1];
+          assert lastFP == currentFrame.lastSubFP;
+          // if (DEBUG) {
+          //   System.out.println("  reset validIndexPrefix=" + validIndexPrefix);
+          // }
+        }
+      }
+
+      while (true) {
+        if (currentFrame.next()) {
+          // Push to new block:
+          currentFrame = pushFrame(null, currentFrame.lastSubFP, term.length());
+          currentFrame.fpOrig = currentFrame.fp;
+          // This is a "next" frame -- even if it's
+          // floor'd we must pretend it isn't so we don't
+          // try to scan to the right floor frame:
+          currentFrame.loadBlock();
+          stats.startBlock(currentFrame, !currentFrame.isLastInFloor);
+        } else {
+          stats.term(term.get());
+          break;
+        }
+      }
+    }
+
+    stats.finish();
+
+    // Put root frame back:
+    currentFrame = staticFrame;
+    if (fr.index != null) {
+      arc = fr.index.getFirstArc(arcs[0]);
+      // Empty string prefix must have an output in the index!
+      assert arc.isFinal();
+    } else {
+      arc = null;
+    }
+    currentFrame = pushFrame(arc, fr.rootCode, 0);
+    currentFrame.rewind();
+    currentFrame.loadBlock();
+    validIndexPrefix = 0;
+    term.clear();
+
+    return stats;
+  }
+

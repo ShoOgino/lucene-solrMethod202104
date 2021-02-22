@@ -1,0 +1,59 @@
+  // TODO: in some cases we can filter by length?  eg
+  // regexp foo*bar must be at least length 6 bytes
+  public IntersectTermsEnum(
+      FieldReader fr,
+      Automaton automaton,
+      RunAutomaton runAutomaton,
+      BytesRef commonSuffix,
+      BytesRef startTerm)
+      throws IOException {
+    this.fr = fr;
+
+    assert automaton != null;
+    assert runAutomaton != null;
+
+    this.runAutomaton = runAutomaton;
+    this.automaton = automaton;
+    this.commonSuffix = commonSuffix;
+
+    in = fr.parent.termsIn.clone();
+    stack = new IntersectTermsEnumFrame[5];
+    for (int idx = 0; idx < stack.length; idx++) {
+      stack[idx] = new IntersectTermsEnumFrame(this, idx);
+    }
+    for (int arcIdx = 0; arcIdx < arcs.length; arcIdx++) {
+      arcs[arcIdx] = new FST.Arc<>();
+    }
+
+    fstReader = fr.index.getBytesReader();
+
+    // TODO: if the automaton is "smallish" we really
+    // should use the terms index to seek at least to
+    // the initial term and likely to subsequent terms
+    // (or, maybe just fallback to ATE for such cases).
+    // Else the seek cost of loading the frames will be
+    // too costly.
+
+    final FST.Arc<BytesRef> arc = fr.index.getFirstArc(arcs[0]);
+    // Empty string prefix must have an output in the index!
+    assert arc.isFinal();
+
+    // Special pushFrame since it's the first one:
+    final IntersectTermsEnumFrame f = stack[0];
+    f.fp = f.fpOrig = fr.rootBlockFP;
+    f.prefix = 0;
+    f.setState(0);
+    f.arc = arc;
+    f.outputPrefix = arc.output();
+    f.load(fr.rootCode);
+
+    // for assert:
+    assert setSavedStartTerm(startTerm);
+
+    currentFrame = f;
+    if (startTerm != null) {
+      seekToStartTerm(startTerm);
+    }
+    currentTransition = currentFrame.transition;
+  }
+

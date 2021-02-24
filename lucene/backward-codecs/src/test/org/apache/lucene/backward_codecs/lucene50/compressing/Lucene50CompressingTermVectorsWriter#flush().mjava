@@ -1,0 +1,49 @@
+  private void flush() throws IOException {
+    final int chunkDocs = pendingDocs.size();
+    assert chunkDocs > 0 : chunkDocs;
+
+    // write the index file
+    indexWriter.writeIndex(chunkDocs, vectorsStream.getFilePointer());
+
+    final int docBase = numDocs - chunkDocs;
+    vectorsStream.writeVInt(docBase);
+    vectorsStream.writeVInt(chunkDocs);
+
+    // total number of fields of the chunk
+    final int totalFields = flushNumFields(chunkDocs);
+
+    if (totalFields > 0) {
+      // unique field numbers (sorted)
+      final int[] fieldNums = flushFieldNums();
+      // offsets in the array of unique field numbers
+      flushFields(totalFields, fieldNums);
+      // flags (does the field have positions, offsets, payloads?)
+      flushFlags(totalFields, fieldNums);
+      // number of terms of each field
+      flushNumTerms(totalFields);
+      // prefix and suffix lengths for each field
+      flushTermLengths();
+      // term freqs - 1 (because termFreq is always >=1) for each term
+      flushTermFreqs();
+      // positions for all terms, when enabled
+      flushPositions();
+      // offsets for all terms, when enabled
+      flushOffsets(fieldNums);
+      // payload lengths for all terms, when enabled
+      flushPayloadLengths();
+
+      // compress terms and payloads and write them to the output
+      //
+      // TODO: We could compress in the slices we already have in the buffer (min/max slice
+      // can be set on the buffer itself).
+      byte[] content = termSuffixes.toArrayCopy();
+      compressor.compress(content, 0, content.length, vectorsStream);
+    }
+
+    // reset
+    pendingDocs.clear();
+    curDoc = null;
+    curField = null;
+    termSuffixes.reset();
+  }
+

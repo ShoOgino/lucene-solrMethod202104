@@ -1,0 +1,49 @@
+  /**
+   * Analyzes the given affix kind, strip and condition and returns an object able to efficiently
+   * check that condition.
+   */
+  static AffixCondition compile(AffixKind kind, String strip, String condition, String line) {
+    if (!isRegexp(condition)) {
+      if (kind == SUFFIX && condition.endsWith(strip)) {
+        return substringCondition(
+            kind, condition.substring(0, condition.length() - strip.length()));
+      }
+      if (kind == PREFIX && condition.startsWith(strip)) {
+        return substringCondition(kind, condition.substring(strip.length()));
+      }
+      return ALWAYS_FALSE;
+    }
+
+    int lastBracket = condition.lastIndexOf('[');
+    if (lastBracket >= 0 && condition.indexOf(']', lastBracket + 1) < 0) {
+      // unclosed [ is tolerated by Hunspell and occurs in some dictionaries
+      condition = condition + "]";
+    }
+
+    try {
+      int conditionChars = countCharPatterns(condition);
+      if (conditionChars <= strip.length()) {
+        String regex = kind == PREFIX ? ".*" + condition : condition + ".*";
+        return strip.matches(regex) ? ALWAYS_TRUE : ALWAYS_FALSE;
+      }
+
+      if (kind == PREFIX) {
+        int split = skipCharPatterns(condition, strip.length());
+        if (!strip.matches(condition.substring(0, split))) {
+          return ALWAYS_FALSE;
+        }
+        return regexpCondition(kind, condition.substring(split), conditionChars - strip.length());
+      }
+
+      int split = skipCharPatterns(condition, conditionChars - strip.length());
+      if (!strip.matches(condition.substring(split))) {
+        return ALWAYS_FALSE;
+      }
+      return regexpCondition(kind, condition.substring(0, split), conditionChars - strip.length());
+    } catch (PatternSyntaxException e) {
+      return ALWAYS_FALSE;
+    } catch (Throwable e) {
+      throw new IllegalArgumentException("On line: " + line, e);
+    }
+  }
+

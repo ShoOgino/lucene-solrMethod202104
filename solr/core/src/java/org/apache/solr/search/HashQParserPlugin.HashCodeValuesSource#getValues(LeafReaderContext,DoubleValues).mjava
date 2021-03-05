@@ -1,0 +1,67 @@
+    @Override
+    public LongValues getValues(LeafReaderContext ctx, DoubleValues scores) throws IOException {
+      // produce an array of the LongValues of the hash of each field
+      final LongValues[] resultValues = new LongValues[fields.length];
+      for (int i = 0; i < fields.length; i++) {
+        final String field = fields[i];
+        final NumericDocValues numericDocValues = ctx.reader().getNumericDocValues(field);
+        if (numericDocValues != null) {
+          // Numeric
+          resultValues[i] = new LongValues() {
+            // Even if not a Long field; could be int, double, float and this still works because DocValues numerics
+            //  are based on a Long.
+            final NumericDocValues values = numericDocValues;
+            boolean atDoc = false;
+            @Override
+            public boolean advanceExact(int doc) throws IOException { atDoc = values.advanceExact(doc); return true; }
+            @Override
+            public long longValue() throws IOException { return atDoc ? Long.hashCode(values.longValue()) : 0; }
+          };
+          continue;
+        }
+        final SortedDocValues sortedDocValues = ctx.reader().getSortedDocValues(field);
+        if (sortedDocValues != null) {
+          // String
+          resultValues[i] = new LongValues() {
+            final SortedDocValues values = sortedDocValues;
+            boolean atDoc = false;
+            @Override
+            public boolean advanceExact(int doc) throws IOException { atDoc = values.advanceExact(doc); return true; }
+            @Override
+            public long longValue() throws IOException { return atDoc ? values.binaryValue().hashCode() : 0; }
+          };
+          continue;
+        }
+        // fail if some other DocValuesType is present
+        final FieldInfo fieldInfo = ctx.reader().getFieldInfos().fieldInfo(field);
+        if (fieldInfo != null && fieldInfo.getDocValuesType() != DocValuesType.NONE) {
+          throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, "Can't compute hash on field " + field);
+        }
+        // fall back on zero for empty case
+        resultValues[i] = LongValuesSource.constant(0).getValues(ctx, scores);
+      }
+
+      // produce a hash LongValues of all those in this array
+      if (resultValues.length == 1) {
+        return resultValues[0];
+      } else {
+        // Combine
+        return new LongValues() {
+          private long result;
+          @Override
+          public boolean advanceExact(int doc) throws IOException {
+            // compute the hash here.
+            // algorithm borrowed from Arrays.hashCode(Object[]) but without needing to call hashCode redundantly
+            result = 1;
+            for (LongValues longValues : resultValues) {
+              boolean present = longValues.advanceExact(doc);
+              result = 31 * result + (present == false ? 0 : longValues.longValue());
+            }
+            return true; // we always have a hash value
+          }
+          @Override
+          public long longValue() throws IOException { return result; }
+        };
+      }
+    }
+
